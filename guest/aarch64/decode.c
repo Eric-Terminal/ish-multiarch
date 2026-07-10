@@ -1,10 +1,14 @@
 #include "guest/aarch64/decode.h"
 
-static int64_t sign_extend_branch(dword_t immediate, byte_t bits) {
+static int64_t sign_extend(dword_t immediate, byte_t bits) {
     int64_t value = immediate;
     if (immediate & (UINT32_C(1) << (bits - 1)))
         value -= INT64_C(1) << bits;
-    return value * 4;
+    return value;
+}
+
+static int64_t sign_extend_branch(dword_t immediate, byte_t bits) {
+    return sign_extend(immediate, bits) * 4;
 }
 
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
@@ -186,6 +190,40 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3b200000)) == UINT32_C(0x38000000)) {
+        byte_t operation = (word >> 22) & 3;
+        bool vector = (word >> 26) & 1;
+        byte_t mode = (word >> 10) & 3;
+        if (vector || operation > 1 || mode == 2)
+            return false;
+        byte_t rn = (word >> 5) & 0x1f;
+        byte_t rt = word & 0x1f;
+        // 写回与数据寄存器重叠时，架构不保证可移植的执行结果。
+        if (mode != 0 && rn == rt && rn != 31)
+            return false;
+
+        byte_t size_shift = word >> 30;
+        byte_t size = (byte_t) (1 << size_shift);
+        enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
+        if (mode == 1)
+            address_mode = AARCH64_ADDRESS_POST_INDEX;
+        else if (mode == 3)
+            address_mode = AARCH64_ADDRESS_PRE_INDEX;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = operation == 0 ?
+                    AARCH64_OP_STORE_IMM9 : AARCH64_OP_LOAD_IMM9,
+            .width = (byte_t) (size * 8),
+            .operands.load_store = {
+                .rt = rt,
+                .rn = rn,
+                .size = size,
+                .offset = sign_extend((word >> 12) & UINT32_C(0x1ff), 9),
+                .address_mode = address_mode,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000)) {
         byte_t operation = (word >> 22) & 3;
         bool vector = (word >> 26) & 1;
@@ -203,8 +241,9 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rt = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
                 .size = size,
-                .offset = (qword_t) ((word >> 10) & UINT32_C(0xfff)) <<
-                        size_shift,
+                .offset = (int64_t) ((qword_t) ((word >> 10) &
+                        UINT32_C(0xfff)) << size_shift),
+                .address_mode = AARCH64_ADDRESS_OFFSET,
             },
         };
         return true;

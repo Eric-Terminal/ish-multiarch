@@ -185,6 +185,36 @@ static void test_stores(struct test_memory *memory) {
     assert(memcmp(&memory->data[96], zeros, sizeof(zeros)) == 0);
 }
 
+static void test_unscaled_and_writeback(struct test_memory *memory) {
+    struct cpu_state cpu = {0};
+    put_qword(&memory->data[8], UINT64_C(0x1020304050607080));
+    cpu.x[1] = DATA_PAGE + 16;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf85f8020)), &cpu);
+    assert(cpu.x[0] == UINT64_C(0x1020304050607080));
+    assert(cpu.x[1] == DATA_PAGE + 16);
+
+    cpu.x[2] = UINT64_C(0xffffffff12345678);
+    cpu.x[3] = DATA_PAGE + 32;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb8007062)), &cpu);
+    const byte_t expected_word[] = {0x78, 0x56, 0x34, 0x12};
+    assert(memcmp(&memory->data[39], expected_word,
+            sizeof(expected_word)) == 0);
+
+    put_qword(&memory->data[48], UINT64_C(0x8877665544332211));
+    cpu.x[5] = DATA_PAGE + 48;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf84084a4)), &cpu);
+    assert(cpu.x[4] == UINT64_C(0x8877665544332211));
+    assert(cpu.x[5] == DATA_PAGE + 56);
+
+    cpu.x[6] = UINT64_C(0xffffffff89abcdef);
+    cpu.x[7] = DATA_PAGE + 68;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb81fcce6)), &cpu);
+    const byte_t expected_pre[] = {0xef, 0xcd, 0xab, 0x89};
+    assert(memcmp(&memory->data[64], expected_pre,
+            sizeof(expected_pre)) == 0);
+    assert(cpu.x[7] == DATA_PAGE + 64);
+}
+
 static void test_faults(struct test_memory *memory) {
     struct cpu_state cpu = {
         .cycle = 7,
@@ -197,6 +227,29 @@ static void test_faults(struct test_memory *memory) {
     assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
     assert(result.fault.address == UNMAPPED_PAGE);
     assert(cpu.x[0] == UINT64_C(0x1122334455667788));
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
+
+    cpu.x[4] = UINT64_C(0xabcdef);
+    cpu.x[5] = UNMAPPED_PAGE;
+    result = run_instruction(memory, &cpu, UINT32_C(0xf84084a4));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(cpu.x[4] == UINT64_C(0xabcdef));
+    assert(cpu.x[5] == UNMAPPED_PAGE);
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
+
+    const byte_t pre_store_before[] = {0x31, 0x41, 0x59, 0x26};
+    memcpy(memory->next, pre_store_before, sizeof(pre_store_before));
+    cpu.x[6] = UINT64_C(0x0123456789abcdef);
+    cpu.x[7] = DATA_NEXT + 4;
+    result = run_instruction(memory, &cpu, UINT32_C(0xb81fcce6));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(memcmp(memory->next, pre_store_before,
+            sizeof(pre_store_before)) == 0);
+    assert(cpu.x[7] == DATA_NEXT + 4);
     assert(cpu.pc == CODE_PAGE);
     assert(cpu.cycle == 7);
 
@@ -228,6 +281,7 @@ int main(void) {
     init_test_memory(&memory);
     test_loads(&memory);
     test_stores(&memory);
+    test_unscaled_and_writeback(&memory);
     test_faults(&memory);
     return 0;
 }

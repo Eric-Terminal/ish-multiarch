@@ -218,7 +218,7 @@ static void test_conditional_branches(void) {
 }
 
 static void assert_load_store(dword_t word, enum aarch64_opcode opcode,
-        byte_t size, byte_t rn, byte_t rt, qword_t offset) {
+        byte_t size, byte_t rn, byte_t rt, int64_t offset) {
     struct aarch64_decoded instruction = decode(word);
     assert(instruction.opcode == opcode);
     assert(instruction.operands.load_store.size == size);
@@ -246,6 +246,23 @@ static void test_load_store_decode(void) {
             AARCH64_OP_STORE_UNSIGNED_IMMEDIATE, 2, 7, 6, 6);
     assert_load_store(UINT32_C(0xf9400be9),
             AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 8, 31, 9, 16);
+
+    struct aarch64_decoded instruction = decode(UINT32_C(0xf85f8020));
+    assert(instruction.opcode == AARCH64_OP_LOAD_IMM9);
+    assert(instruction.operands.load_store.offset == -8);
+    assert(instruction.operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    instruction = decode(UINT32_C(0xb8007062));
+    assert(instruction.opcode == AARCH64_OP_STORE_IMM9);
+    assert(instruction.operands.load_store.offset == 7);
+    instruction = decode(UINT32_C(0xf84084a4));
+    assert(instruction.operands.load_store.address_mode ==
+            AARCH64_ADDRESS_POST_INDEX);
+    assert(instruction.operands.load_store.offset == 8);
+    instruction = decode(UINT32_C(0xb81fcce6));
+    assert(instruction.operands.load_store.address_mode ==
+            AARCH64_ADDRESS_PRE_INDEX);
+    assert(instruction.operands.load_store.offset == -4);
 }
 
 static void test_svc_decode(void) {
@@ -282,5 +299,8 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
     assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
     assert(!aarch64_decode(UINT32_C(0x0a058083), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xf85f8820), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
     return 0;
 }

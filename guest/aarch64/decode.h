@@ -33,6 +33,8 @@ enum aarch64_opcode {
     AARCH64_OP_CBNZ,
     AARCH64_OP_TBZ,
     AARCH64_OP_TBNZ,
+    AARCH64_OP_LOAD_IMM9,
+    AARCH64_OP_STORE_IMM9,
 };
 
 enum aarch64_shift_type {
@@ -40,6 +42,12 @@ enum aarch64_shift_type {
     AARCH64_SHIFT_LSR,
     AARCH64_SHIFT_ASR,
     AARCH64_SHIFT_ROR,
+};
+
+enum aarch64_address_mode {
+    AARCH64_ADDRESS_OFFSET,
+    AARCH64_ADDRESS_POST_INDEX,
+    AARCH64_ADDRESS_PRE_INDEX,
 };
 
 struct aarch64_decoded {
@@ -66,7 +74,8 @@ struct aarch64_decoded {
             byte_t rt;
             byte_t rn;
             byte_t size;
-            qword_t offset;
+            int64_t offset;
+            enum aarch64_address_mode address_mode;
         } load_store;
         struct {
             word_t immediate;

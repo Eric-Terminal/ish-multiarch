@@ -203,10 +203,17 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
     byte_t rn = instruction->operands.load_store.rn;
     byte_t size = instruction->operands.load_store.size;
     guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
-    guest_addr_t address = base + instruction->operands.load_store.offset;
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store.address_mode;
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store.offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
     byte_t bytes[8];
 
-    if (instruction->opcode == AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE) {
+    bool load = instruction->opcode == AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE ||
+            instruction->opcode == AARCH64_OP_LOAD_IMM9;
+    if (load) {
         if (!guest_tlb_read(tlb, address, bytes, size,
                 GUEST_MEMORY_READ, fault))
             return false;
@@ -219,6 +226,8 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
         if (!guest_tlb_write(tlb, address, bytes, size, fault))
             return false;
     }
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_register(cpu, rn, 64, true, adjusted);
     cpu->pc += 4;
     return true;
 }
@@ -303,6 +312,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         }
         case AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE:
         case AARCH64_OP_STORE_UNSIGNED_IMMEDIATE:
+        case AARCH64_OP_LOAD_IMM9:
+        case AARCH64_OP_STORE_IMM9:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
