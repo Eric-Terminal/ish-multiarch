@@ -96,6 +96,18 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    dword_t system_register = word & UINT32_C(0xffffffe0);
+    if (system_register == UINT32_C(0xd53bd040) ||
+            system_register == UINT32_C(0xd51bd040)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = system_register == UINT32_C(0xd53bd040) ?
+                    AARCH64_OP_MRS_TPIDR_EL0 : AARCH64_OP_MSR_TPIDR_EL0,
+            .width = 64,
+            .operands.system_register.rt = word & 0x1f,
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000)) {
         bool is_64 = word >> 31;
         bool subtract = (word >> 30) & 1;

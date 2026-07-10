@@ -540,6 +540,17 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_RORV:
             execute_data_processing_2source(cpu, instruction);
             break;
+        case AARCH64_OP_MRS_TPIDR_EL0:
+            write_register(cpu, instruction->operands.system_register.rt,
+                    64, false, cpu->tpidr_el0);
+            cpu->pc += 4;
+            break;
+        case AARCH64_OP_MSR_TPIDR_EL0:
+            cpu->tpidr_el0 = read_register(cpu,
+                    instruction->operands.system_register.rt,
+                    64, false);
+            cpu->pc += 4;
+            break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;
             break;
