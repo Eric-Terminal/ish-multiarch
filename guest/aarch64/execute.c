@@ -278,6 +278,62 @@ static void execute_conditional_select(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static qword_t signed_divide(qword_t dividend, qword_t divisor,
+        byte_t width) {
+    qword_t mask = width_mask(width);
+    qword_t sign = UINT64_C(1) << (width - 1);
+    dividend &= mask;
+    divisor &= mask;
+    bool dividend_negative = (dividend & sign) != 0;
+    bool divisor_negative = (divisor & sign) != 0;
+
+    // 无符号幅值运算避免宿主执行 INT_MIN / -1 时触发未定义行为。
+    qword_t dividend_magnitude = dividend_negative ?
+            (UINT64_C(0) - dividend) & mask : dividend;
+    qword_t divisor_magnitude = divisor_negative ?
+            (UINT64_C(0) - divisor) & mask : divisor;
+    if (divisor_magnitude == 0)
+        return 0;
+    qword_t quotient = dividend_magnitude / divisor_magnitude;
+    if (dividend_negative != divisor_negative)
+        quotient = (UINT64_C(0) - quotient) & mask;
+    return quotient;
+}
+
+static void execute_data_processing_2source(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    byte_t rd = instruction->operands.data_processing_2source.rd;
+    qword_t left = read_register(cpu,
+            instruction->operands.data_processing_2source.rn,
+            width, false);
+    qword_t right = read_register(cpu,
+            instruction->operands.data_processing_2source.rm,
+            width, false);
+    qword_t result;
+
+    if (instruction->opcode == AARCH64_OP_UDIV)
+        result = right == 0 ? 0 : left / right;
+    else if (instruction->opcode == AARCH64_OP_SDIV)
+        result = signed_divide(left, right, width);
+    else {
+        enum aarch64_shift_type shift_type;
+        if (instruction->opcode == AARCH64_OP_LSLV)
+            shift_type = AARCH64_SHIFT_LSL;
+        else if (instruction->opcode == AARCH64_OP_LSRV)
+            shift_type = AARCH64_SHIFT_LSR;
+        else if (instruction->opcode == AARCH64_OP_ASRV)
+            shift_type = AARCH64_SHIFT_ASR;
+        else
+            shift_type = AARCH64_SHIFT_ROR;
+        result = shift_register(left, width, shift_type,
+                (byte_t) (right & (width - 1)));
+    }
+
+    write_register(cpu, rd, width, false, result);
+    cpu->pc += 4;
+}
+
 static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
     qword_t value = 0;
     for (byte_t i = 0; i < size; i++)
@@ -427,6 +483,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_CSINV:
         case AARCH64_OP_CSNEG:
             execute_conditional_select(cpu, instruction);
+            break;
+        case AARCH64_OP_UDIV:
+        case AARCH64_OP_SDIV:
+        case AARCH64_OP_LSLV:
+        case AARCH64_OP_LSRV:
+        case AARCH64_OP_ASRV:
+        case AARCH64_OP_RORV:
+            execute_data_processing_2source(cpu, instruction);
             break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;

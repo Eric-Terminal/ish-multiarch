@@ -50,6 +50,12 @@ enum aarch64_opcode {
     AARCH64_OP_CSINC,
     AARCH64_OP_CSINV,
     AARCH64_OP_CSNEG,
+    AARCH64_OP_UDIV,
+    AARCH64_OP_SDIV,
+    AARCH64_OP_LSLV,
+    AARCH64_OP_LSRV,
+    AARCH64_OP_ASRV,
+    AARCH64_OP_RORV,
 };
 
 enum aarch64_shift_type {
@@ -154,6 +160,11 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t condition;
         } conditional_select;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+        } data_processing_2source;
     } operands;
 };
 

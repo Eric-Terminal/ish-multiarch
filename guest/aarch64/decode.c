@@ -306,6 +306,46 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    dword_t data_processing_2source = word & UINT32_C(0x7fe0fc00);
+    if (data_processing_2source == UINT32_C(0x1ac00800) ||
+            data_processing_2source == UINT32_C(0x1ac00c00) ||
+            data_processing_2source == UINT32_C(0x1ac02000) ||
+            data_processing_2source == UINT32_C(0x1ac02400) ||
+            data_processing_2source == UINT32_C(0x1ac02800) ||
+            data_processing_2source == UINT32_C(0x1ac02c00)) {
+        enum aarch64_opcode opcode;
+        switch ((word >> 10) & UINT32_C(0x3f)) {
+            case 2:
+                opcode = AARCH64_OP_UDIV;
+                break;
+            case 3:
+                opcode = AARCH64_OP_SDIV;
+                break;
+            case 8:
+                opcode = AARCH64_OP_LSLV;
+                break;
+            case 9:
+                opcode = AARCH64_OP_LSRV;
+                break;
+            case 10:
+                opcode = AARCH64_OP_ASRV;
+                break;
+            default:
+                opcode = AARCH64_OP_RORV;
+                break;
+        }
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = (word >> 31) ? 64 : 32,
+            .operands.data_processing_2source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = (word >> 31) ? AARCH64_OP_BL : AARCH64_OP_B,
