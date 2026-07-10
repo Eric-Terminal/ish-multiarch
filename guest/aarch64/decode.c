@@ -11,10 +11,34 @@ static int64_t sign_extend_branch(dword_t immediate, byte_t bits) {
     return sign_extend(immediate, bits) * 4;
 }
 
-static bool decode_logical_immediate_mask(bool n, byte_t imms,
-        byte_t immr, byte_t width, qword_t *mask) {
-    if (width == 32 && n)
-        return false;
+struct aarch64_bit_masks {
+    qword_t write;
+    qword_t top;
+};
+
+static qword_t low_ones(unsigned count) {
+    return count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+}
+
+static qword_t rotate_right(qword_t value, unsigned amount,
+        unsigned width) {
+    qword_t mask = low_ones(width);
+    value &= mask;
+    if (amount == 0)
+        return value;
+    return ((value >> amount) | (value << (width - amount))) & mask;
+}
+
+static qword_t replicate_element(qword_t element, unsigned element_size,
+        byte_t width) {
+    qword_t result = 0;
+    for (unsigned offset = 0; offset < width; offset += element_size)
+        result |= element << offset;
+    return result;
+}
+
+static bool decode_bit_masks(bool n, byte_t imms, byte_t immr,
+        byte_t width, bool immediate, struct aarch64_bit_masks *masks) {
 
     unsigned pattern = ((unsigned) n << 6) |
             ((~(unsigned) imms) & UINT32_C(0x3f));
@@ -29,22 +53,17 @@ static bool decode_logical_immediate_mask(bool n, byte_t imms,
     if (element_size > width)
         return false;
     unsigned levels = element_size - 1;
-    unsigned ones = (unsigned) imms & levels;
-    if (ones == levels)
+    unsigned s = (unsigned) imms & levels;
+    if (immediate && s == levels)
         return false;
-    unsigned rotation = (unsigned) immr & levels;
+    unsigned r = (unsigned) immr & levels;
+    unsigned d = (s - r) & levels;
 
-    qword_t element = (UINT64_C(1) << (ones + 1)) - 1;
-    qword_t element_mask = element_size == 64 ? UINT64_MAX :
-            (UINT64_C(1) << element_size) - 1;
-    if (rotation != 0)
-        element = ((element >> rotation) |
-                (element << (element_size - rotation))) & element_mask;
-
-    qword_t result = 0;
-    for (unsigned offset = 0; offset < width; offset += element_size)
-        result |= element << offset;
-    *mask = result;
+    qword_t write_element = rotate_right(low_ones(s + 1), r,
+            element_size);
+    qword_t top_element = low_ones(d + 1);
+    masks->write = replicate_element(write_element, element_size, width);
+    masks->top = replicate_element(top_element, element_size, width);
     return true;
 }
 
@@ -164,11 +183,11 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x12000000)) {
         bool is_64 = word >> 31;
         byte_t operation = (word >> 29) & 3;
-        qword_t immediate;
-        if (!decode_logical_immediate_mask((word >> 22) & 1,
+        struct aarch64_bit_masks masks;
+        if (!decode_bit_masks((word >> 22) & 1,
                 (word >> 10) & UINT32_C(0x3f),
                 (word >> 16) & UINT32_C(0x3f),
-                is_64 ? 64 : 32, &immediate))
+                is_64 ? 64 : 32, true, &masks))
             return false;
         static const enum aarch64_opcode opcodes[] = {
             AARCH64_OP_AND_IMMEDIATE,
@@ -182,7 +201,41 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .operands.logical_immediate = {
                 .rd = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
-                .immediate = immediate,
+                .immediate = masks.write,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x13000000)) {
+        bool is_64 = word >> 31;
+        bool n = (word >> 22) & 1;
+        byte_t operation = (word >> 29) & 3;
+        byte_t immr = (word >> 16) & UINT32_C(0x3f);
+        byte_t imms = (word >> 10) & UINT32_C(0x3f);
+        if (operation == 3 || n != is_64 ||
+                (!is_64 && ((immr | imms) & UINT32_C(0x20))))
+            return false;
+
+        struct aarch64_bit_masks masks;
+        if (!decode_bit_masks(n, imms, immr, is_64 ? 64 : 32,
+                false, &masks))
+            return false;
+        static const enum aarch64_opcode opcodes[] = {
+            AARCH64_OP_SBFM,
+            AARCH64_OP_BFM,
+            AARCH64_OP_UBFM,
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[operation],
+            .width = is_64 ? 64 : 32,
+            .operands.bitfield_move = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .immr = immr,
+                .imms = imms,
+                .write_mask = masks.write,
+                .top_mask = masks.top,
             },
         };
         return true;

@@ -226,6 +226,197 @@ static void test_logical_immediate_encoding_space(void) {
     assert(valid[1] == 7680);
 }
 
+static void assert_bitfield_move(dword_t word,
+        enum aarch64_opcode opcode, byte_t width, byte_t rd, byte_t rn,
+        byte_t immr, byte_t imms, qword_t write_mask, qword_t top_mask) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.bitfield_move.rd == rd);
+    assert(instruction.operands.bitfield_move.rn == rn);
+    assert(instruction.operands.bitfield_move.immr == immr);
+    assert(instruction.operands.bitfield_move.imms == imms);
+    assert(instruction.operands.bitfield_move.write_mask == write_mask);
+    assert(instruction.operands.bitfield_move.top_mask == top_mask);
+}
+
+static void test_bitfield_move_decode(void) {
+    assert_bitfield_move(UINT32_C(0xd348fc83), AARCH64_OP_UBFM,
+            64, 3, 4, 8, 63, UINT64_MAX,
+            UINT64_C(0x00ffffffffffffff));
+    assert_bitfield_move(UINT32_C(0x13077cc5), AARCH64_OP_SBFM,
+            32, 5, 6, 7, 31, UINT32_MAX, UINT32_C(0x01ffffff));
+    assert_bitfield_move(UINT32_C(0xd373c820), AARCH64_OP_UBFM,
+            64, 0, 1, 51, 50, UINT64_C(0xffffffffffffe000),
+            UINT64_MAX);
+    assert_bitfield_move(UINT32_C(0xb3744dac), AARCH64_OP_BFM,
+            64, 12, 13, 52, 19, UINT64_C(0x00000000fffff000),
+            UINT32_MAX);
+    assert_bitfield_move(UINT32_C(0x33073dee), AARCH64_OP_BFM,
+            32, 14, 15, 7, 15, UINT32_C(0xfe0001ff),
+            UINT32_C(0x000001ff));
+
+    assert_bitfield_move(UINT32_C(0xd340fc20), AARCH64_OP_UBFM,
+            64, 0, 1, 0, 63, UINT64_MAX, UINT64_MAX);
+    assert_bitfield_move(UINT32_C(0xd37ffc20), AARCH64_OP_UBFM,
+            64, 0, 1, 63, 63, UINT64_MAX, 1);
+    assert_bitfield_move(UINT32_C(0xd3483c20), AARCH64_OP_UBFM,
+            64, 0, 1, 8, 15, UINT64_C(0xff000000000000ff),
+            UINT64_C(0xff));
+    assert_bitfield_move(UINT32_C(0xd3781c20), AARCH64_OP_UBFM,
+            64, 0, 1, 56, 7, UINT64_C(0xff00), UINT64_C(0xffff));
+    assert_bitfield_move(UINT32_C(0xd378dc20), AARCH64_OP_UBFM,
+            64, 0, 1, 56, 55, UINT64_C(0xffffffffffffff00),
+            UINT64_MAX);
+}
+
+static qword_t bitfield_mask_oracle(unsigned width, unsigned immr,
+        unsigned imms, bool top) {
+    unsigned levels = width - 1;
+    unsigned d = ((unsigned) imms + width - immr) & levels;
+    qword_t result = 0;
+    for (unsigned bit = 0; bit < width; bit++) {
+        bool set = top ? bit <= d :
+                ((bit + immr) & levels) <= imms;
+        if (set)
+            result |= UINT64_C(1) << bit;
+    }
+    return result;
+}
+
+static void test_bitfield_move_encoding_space(void) {
+    unsigned valid[2][3] = {{0}};
+    static const enum aarch64_opcode opcodes[] = {
+        AARCH64_OP_SBFM,
+        AARCH64_OP_BFM,
+        AARCH64_OP_UBFM,
+    };
+    for (unsigned is_64 = 0; is_64 < 2; is_64++) {
+        for (unsigned n = 0; n < 2; n++) {
+            for (unsigned operation = 0; operation < 4; operation++) {
+                for (unsigned immr = 0; immr < 64; immr++) {
+                    for (unsigned imms = 0; imms < 64; imms++) {
+                        dword_t word = UINT32_C(0x13000000) |
+                                (dword_t) is_64 << 31 |
+                                (dword_t) operation << 29 |
+                                (dword_t) n << 22 |
+                                (dword_t) immr << 16 |
+                                (dword_t) imms << 10;
+                        bool expected = operation < 3 && n == is_64 &&
+                                (is_64 || (immr < 32 && imms < 32));
+                        struct aarch64_decoded instruction;
+                        bool decoded = aarch64_decode(word, &instruction);
+                        assert(decoded == expected);
+                        if (!decoded)
+                            continue;
+
+                        valid[is_64][operation]++;
+                        byte_t width = is_64 ? 64 : 32;
+                        assert(instruction.opcode == opcodes[operation]);
+                        assert(instruction.width == width);
+                        assert(instruction.operands.bitfield_move.write_mask ==
+                                bitfield_mask_oracle(width, immr, imms, false));
+                        assert(instruction.operands.bitfield_move.top_mask ==
+                                bitfield_mask_oracle(width, immr, imms, true));
+                    }
+                }
+            }
+        }
+    }
+    for (unsigned operation = 0; operation < 3; operation++) {
+        assert(valid[0][operation] == 1024);
+        assert(valid[1][operation] == 4096);
+    }
+}
+
+static void test_bitfield_move_execute(void) {
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x2c00),
+        .sp = UINT64_C(0xfedcba9876543210),
+        .nzcv = UINT32_C(0xa0000000),
+    };
+    cpu.x[4] = UINT64_C(0x123456789abcdef0);
+    struct aarch64_decoded instruction = decode(UINT32_C(0xd348fc83));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[3] == UINT64_C(0x00123456789abcde));
+
+    cpu.x[6] = UINT64_C(0xffffffff80000080);
+    instruction = decode(UINT32_C(0x13077cc5));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[5] == UINT32_C(0xff000001));
+
+    cpu.x[1] = UINT64_C(0x123);
+    instruction = decode(UINT32_C(0xd373c820));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == UINT64_C(0x246000));
+
+    cpu.x[3] = UINT64_C(0xffffffffffffffa5);
+    instruction = decode(UINT32_C(0x53001c62));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[2] == UINT64_C(0xa5));
+
+    cpu.x[5] = UINT64_C(0xffffffffffffbeef);
+    instruction = decode(UINT32_C(0x53003ca4));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[4] == UINT64_C(0xbeef));
+
+    cpu.x[7] = UINT64_C(0x80);
+    instruction = decode(UINT32_C(0x93401ce6));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[6] == UINT64_C(0xffffffffffffff80));
+
+    cpu.x[9] = UINT64_C(0xffffffff00008001);
+    instruction = decode(UINT32_C(0x13003d28));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[8] == UINT32_C(0xffff8001));
+
+    cpu.x[11] = UINT64_C(0x80000001);
+    instruction = decode(UINT32_C(0x93407d6a));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[10] == UINT64_C(0xffffffff80000001));
+
+    cpu.x[12] = UINT64_C(0xffff000000000fff);
+    cpu.x[13] = UINT64_C(0xabcde);
+    instruction = decode(UINT32_C(0xb3744dac));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[12] == UINT64_C(0xffff0000abcdefff));
+
+    cpu.x[14] = UINT64_C(0xffffffffaaaaaa00);
+    cpu.x[15] = UINT64_C(0xff80);
+    instruction = decode(UINT32_C(0x33073dee));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[14] == UINT32_C(0xaaaaabff));
+
+    cpu.x[17] = UINT64_C(0x80000200);
+    instruction = decode(UINT32_C(0x93497e30));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[16] == UINT64_C(0xffffffffffc00001));
+
+    cpu.x[19] = UINT64_C(0xffe0);
+    instruction = decode(UINT32_C(0x53053e72));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[18] == UINT64_C(0x7ff));
+
+    cpu.x[12] = UINT64_C(0xffff0000000abcde);
+    instruction = decode(UINT32_C(0xb3744d8c));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[12] == UINT64_C(0xffff0000abcdecde));
+
+    cpu.x[0] = UINT64_MAX;
+    instruction = decode(UINT32_C(0xd340ffe0));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == 0);
+
+    cpu.x[0] = UINT64_C(0x13579bdf2468ace0);
+    cpu.x[1] = UINT64_MAX;
+    instruction = decode(UINT32_C(0xd340fc3f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == UINT64_C(0x13579bdf2468ace0));
+    assert(cpu.sp == UINT64_C(0xfedcba9876543210));
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+    assert(cpu.pc == UINT64_C(0x2c3c));
+}
+
 static void test_move_wide(void) {
     struct cpu_state cpu = {.pc = 0x2000};
     struct aarch64_decoded instruction = decode(UINT32_C(0xd2a24680));
@@ -617,6 +808,9 @@ int main(void) {
     test_logical_shifted();
     test_logical_immediate();
     test_logical_immediate_encoding_space();
+    test_bitfield_move_decode();
+    test_bitfield_move_encoding_space();
+    test_bitfield_move_execute();
     test_move_wide();
     test_pc_relative();
     test_conditional_select();
@@ -648,6 +842,11 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x9200fc20), &invalid));
     assert(!aarch64_decode(UINT32_C(0x12007c20), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9240fc20), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x73000020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x13400020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x93000020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x13200020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x13008020), &invalid));
     assert(!aarch64_decode(UINT32_C(0xba9702d5), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9a970ad5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8410440), &invalid));

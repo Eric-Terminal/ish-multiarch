@@ -194,6 +194,35 @@ static void execute_logical_immediate(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_bitfield(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    byte_t rd = instruction->operands.bitfield_move.rd;
+    qword_t source = read_register(cpu, instruction->operands.bitfield_move.rn,
+            width, false);
+    qword_t rotated = shift_register(source, width, AARCH64_SHIFT_ROR,
+            instruction->operands.bitfield_move.immr);
+    qword_t write_mask = instruction->operands.bitfield_move.write_mask;
+    qword_t top_mask = instruction->operands.bitfield_move.top_mask;
+    qword_t bottom = rotated & write_mask;
+    qword_t result;
+
+    if (instruction->opcode == AARCH64_OP_SBFM) {
+        bool sign = (source >> instruction->operands.bitfield_move.imms) & 1;
+        qword_t top = sign ? width_mask(width) : 0;
+        result = (top & ~top_mask) | (bottom & top_mask);
+    } else if (instruction->opcode == AARCH64_OP_BFM) {
+        qword_t destination = read_register(cpu, rd, width, false);
+        bottom |= destination & ~write_mask;
+        result = (destination & ~top_mask) | (bottom & top_mask);
+    } else {
+        result = bottom & top_mask;
+    }
+
+    write_register(cpu, rd, width, false, result);
+    cpu->pc += 4;
+}
+
 static void execute_move_wide(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.move_wide.rd;
@@ -378,6 +407,11 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_EOR_IMMEDIATE:
         case AARCH64_OP_ANDS_IMMEDIATE:
             execute_logical_immediate(cpu, instruction);
+            break;
+        case AARCH64_OP_SBFM:
+        case AARCH64_OP_BFM:
+        case AARCH64_OP_UBFM:
+            execute_bitfield(cpu, instruction);
             break;
         case AARCH64_OP_MOVN:
         case AARCH64_OP_MOVZ:

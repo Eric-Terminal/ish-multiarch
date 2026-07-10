@@ -32,6 +32,9 @@ enum aarch64_opcode {
     AARCH64_OP_ORR_IMMEDIATE,
     AARCH64_OP_EOR_IMMEDIATE,
     AARCH64_OP_ANDS_IMMEDIATE,
+    AARCH64_OP_SBFM,
+    AARCH64_OP_BFM,
+    AARCH64_OP_UBFM,
     AARCH64_OP_B_CONDITIONAL,
     AARCH64_OP_CBZ,
     AARCH64_OP_CBNZ,
@@ -120,6 +123,14 @@ struct aarch64_decoded {
             byte_t rn;
             qword_t immediate;
         } logical_immediate;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t immr;
+            byte_t imms;
+            qword_t write_mask;
+            qword_t top_mask;
+        } bitfield_move;
         struct {
             int64_t displacement;
             byte_t condition;
