@@ -2,6 +2,7 @@
 
 #include "guest/aarch64/linux-runtime.h"
 #include "guest/linux/errno.h"
+#include "guest/linux/user-memory.h"
 
 #define AARCH64_LINUX_SYS_WRITE 64
 #define AARCH64_LINUX_SYS_EXIT 93
@@ -31,8 +32,8 @@ static qword_t dispatch_write(const struct guest_linux_syscall *syscall,
         byte_t bytes[AARCH64_LINUX_WRITE_CHUNK_SIZE];
         size_t chunk = remaining < sizeof(bytes) ?
                 (size_t) remaining : sizeof(bytes);
-        if (!guest_tlb_read(tlb, address, bytes, chunk,
-                GUEST_MEMORY_READ, fault))
+        if (!guest_linux_copy_from_user(
+                tlb, address, bytes, chunk, fault))
             return completed != 0 ? completed : linux_error(GUEST_LINUX_EFAULT);
         sqword_t written = services->write(
                 services->opaque, fd, bytes, chunk);

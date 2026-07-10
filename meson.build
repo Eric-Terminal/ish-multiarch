@@ -34,6 +34,7 @@ aarch64_core_src = [
     'guest/memory/address-space.c',
     'guest/memory/tlb.c',
     'guest/memory/page-table.c',
+    'guest/linux/user-memory.c',
     'guest/aarch64/decode.c',
     'guest/aarch64/condition.c',
     'guest/aarch64/execute.c',
@@ -278,12 +279,23 @@ if not meson.is_cross_build()
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
             'guest/memory/page-table.c',
+            'guest/linux/user-memory.c',
             'guest/aarch64/linux-syscall.c',
             'guest/aarch64/linux-memory.c',
             'guest/aarch64/linux-runtime.c',
             'guest/aarch64/linux-runtime-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_linux_runtime', aarch64_linux_runtime_test)
+
+    aarch64_linux_user_memory_test = executable(
+        'aarch64_linux_user_memory_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-table.c',
+            'guest/linux/user-memory.c',
+            'guest/linux/user-memory-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_linux_user_memory', aarch64_linux_user_memory_test)
 
     aarch64_linux_memory_test = executable('aarch64_linux_memory_test', [
             'guest/memory/address-space.c',
