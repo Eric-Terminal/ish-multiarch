@@ -11,6 +11,43 @@ static int64_t sign_extend_branch(dword_t immediate, byte_t bits) {
     return sign_extend(immediate, bits) * 4;
 }
 
+static bool decode_logical_immediate_mask(bool n, byte_t imms,
+        byte_t immr, byte_t width, qword_t *mask) {
+    if (width == 32 && n)
+        return false;
+
+    unsigned pattern = ((unsigned) n << 6) |
+            ((~(unsigned) imms) & UINT32_C(0x3f));
+    // Arm 只为 2 到 64 位的元素定义逻辑立即数。
+    if (pattern < 2)
+        return false;
+    unsigned length = 0;
+    for (unsigned value = pattern; value > 1; value >>= 1)
+        length++;
+
+    unsigned element_size = 1U << length;
+    if (element_size > width)
+        return false;
+    unsigned levels = element_size - 1;
+    unsigned ones = (unsigned) imms & levels;
+    if (ones == levels)
+        return false;
+    unsigned rotation = (unsigned) immr & levels;
+
+    qword_t element = (UINT64_C(1) << (ones + 1)) - 1;
+    qword_t element_mask = element_size == 64 ? UINT64_MAX :
+            (UINT64_C(1) << element_size) - 1;
+    if (rotation != 0)
+        element = ((element >> rotation) |
+                (element << (element_size - rotation))) & element_mask;
+
+    qword_t result = 0;
+    for (unsigned offset = 0; offset < width; offset += element_size)
+        result |= element << offset;
+    *mask = result;
+    return true;
+}
+
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     if (word == UINT32_C(0xd503201f)) {
         *decoded = (struct aarch64_decoded) {
@@ -109,6 +146,33 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .shift_type = (enum aarch64_shift_type) shift_type,
                 .shift = shift,
                 .invert = (word >> 21) & 1,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x12000000)) {
+        bool is_64 = word >> 31;
+        byte_t operation = (word >> 29) & 3;
+        qword_t immediate;
+        if (!decode_logical_immediate_mask((word >> 22) & 1,
+                (word >> 10) & UINT32_C(0x3f),
+                (word >> 16) & UINT32_C(0x3f),
+                is_64 ? 64 : 32, &immediate))
+            return false;
+        static const enum aarch64_opcode opcodes[] = {
+            AARCH64_OP_AND_IMMEDIATE,
+            AARCH64_OP_ORR_IMMEDIATE,
+            AARCH64_OP_EOR_IMMEDIATE,
+            AARCH64_OP_ANDS_IMMEDIATE,
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[operation],
+            .width = is_64 ? 64 : 32,
+            .operands.logical_immediate = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .immediate = immediate,
             },
         };
         return true;

@@ -121,6 +121,111 @@ static void test_logical_shifted(void) {
     assert(cpu.x[0] == cpu.x[2]);
 }
 
+static void assert_logical_immediate(dword_t word,
+        enum aarch64_opcode opcode, byte_t width, qword_t immediate) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.logical_immediate.immediate == immediate);
+}
+
+static void test_logical_immediate(void) {
+    assert_logical_immediate(UINT32_C(0x1200f020),
+            AARCH64_OP_AND_IMMEDIATE, 32, UINT32_C(0x55555555));
+    assert_logical_immediate(UINT32_C(0x3201e062),
+            AARCH64_OP_ORR_IMMEDIATE, 32, UINT32_C(0x88888888));
+    assert_logical_immediate(UINT32_C(0xd2003d6a),
+            AARCH64_OP_EOR_IMMEDIATE, 64,
+            UINT64_C(0x0000ffff0000ffff));
+    assert_logical_immediate(UINT32_C(0xf241059f),
+            AARCH64_OP_ANDS_IMMEDIATE, 64,
+            UINT64_C(0x8000000000000001));
+    assert_logical_immediate(UINT32_C(0xf2009cc5),
+            AARCH64_OP_ANDS_IMMEDIATE, 64,
+            UINT64_C(0x00ff00ff00ff00ff));
+    assert_logical_immediate(UINT32_C(0xd201f083),
+            AARCH64_OP_EOR_IMMEDIATE, 64,
+            UINT64_C(0xaaaaaaaaaaaaaaaa));
+    assert_logical_immediate(UINT32_C(0xd23ff083),
+            AARCH64_OP_EOR_IMMEDIATE, 64,
+            UINT64_C(0xaaaaaaaaaaaaaaaa));
+
+    struct cpu_state cpu = {.pc = 0x2400};
+    struct aarch64_decoded instruction = decode(UINT32_C(0xb24003e0));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == 1);
+
+    cpu.x[2] = UINT64_MAX;
+    instruction = decode(UINT32_C(0x92410441));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[1] == UINT64_C(0x8000000000000001));
+
+    cpu.x[4] = 0;
+    instruction = decode(UINT32_C(0xd201f083));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[3] == UINT64_C(0xaaaaaaaaaaaaaaaa));
+
+    cpu.x[7] = UINT64_MAX;
+    instruction = decode(UINT32_C(0x320107e7));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[7] == UINT32_C(0x80000001));
+
+    cpu.x[6] = UINT64_MAX;
+    cpu.nzcv = UINT32_C(0xf0000000);
+    instruction = decode(UINT32_C(0xf2009cc5));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[5] == UINT64_C(0x00ff00ff00ff00ff));
+    assert(cpu.nzcv == 0);
+
+    cpu.sp = UINT64_C(0xabcdef0000000000);
+    cpu.x[15] = UINT64_C(0x1200);
+    instruction = decode(UINT32_C(0xb2401dff));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.sp == UINT64_C(0x12ff));
+
+    cpu.x[16] = UINT64_MAX;
+    instruction = decode(UINT32_C(0x121c6e1f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.sp == UINT32_C(0xfffffff0));
+
+    cpu.sp = UINT64_C(0x123456789abcdef0);
+    cpu.x[12] = UINT64_C(0x8000000000000000);
+    cpu.nzcv = UINT32_C(0xf0000000);
+    instruction = decode(UINT32_C(0xf241059f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.sp == UINT64_C(0x123456789abcdef0));
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+}
+
+static void test_logical_immediate_encoding_space(void) {
+    unsigned valid[2] = {0};
+    for (unsigned is_64 = 0; is_64 < 2; is_64++) {
+        for (unsigned n = 0; n < 2; n++) {
+            for (unsigned rotation = 0; rotation < 64; rotation++) {
+                for (unsigned ones = 0; ones < 64; ones++) {
+                    dword_t word = UINT32_C(0x12000000) |
+                            (dword_t) is_64 << 31 |
+                            (dword_t) n << 22 |
+                            (dword_t) rotation << 16 |
+                            (dword_t) ones << 10;
+                    struct aarch64_decoded instruction;
+                    if (!aarch64_decode(word, &instruction))
+                        continue;
+                    valid[is_64]++;
+                    qword_t immediate =
+                            instruction.operands.logical_immediate.immediate;
+                    assert(immediate != 0);
+                    assert(immediate != (is_64 ? UINT64_MAX : UINT32_MAX));
+                    if (!is_64)
+                        assert((immediate >> 32) == 0);
+                }
+            }
+        }
+    }
+    assert(valid[0] == 3648);
+    assert(valid[1] == 7680);
+}
+
 static void test_move_wide(void) {
     struct cpu_state cpu = {.pc = 0x2000};
     struct aarch64_decoded instruction = decode(UINT32_C(0xd2a24680));
@@ -356,6 +461,8 @@ int main(void) {
     test_add_sub();
     test_add_sub_shifted();
     test_logical_shifted();
+    test_logical_immediate();
+    test_logical_immediate_encoding_space();
     test_move_wide();
     test_pc_relative();
     test_branches();
@@ -376,6 +483,11 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xf85f8820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x12400020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x9200f820), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x9200fc20), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x12007c20), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x9240fc20), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0x69000440), &invalid));
     assert(!aarch64_decode(UINT32_C(0x69410440), &invalid));

@@ -167,6 +167,33 @@ static void execute_logical_shifted(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_logical_immediate(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.logical_immediate.rd;
+    byte_t rn = instruction->operands.logical_immediate.rn;
+    byte_t width = instruction->width;
+    qword_t left = read_register(cpu, rn, width, false);
+    qword_t right = instruction->operands.logical_immediate.immediate;
+    bool set_flags = instruction->opcode == AARCH64_OP_ANDS_IMMEDIATE;
+
+    qword_t result;
+    if (instruction->opcode == AARCH64_OP_AND_IMMEDIATE || set_flags)
+        result = left & right;
+    else if (instruction->opcode == AARCH64_OP_ORR_IMMEDIATE)
+        result = left | right;
+    else
+        result = left ^ right;
+
+    if (set_flags) {
+        qword_t sign = UINT64_C(1) << (width - 1);
+        aarch64_set_nzcv(cpu,
+                (result & sign ? UINT32_C(1) << 31 : 0) |
+                (result == 0 ? UINT32_C(1) << 30 : 0));
+    }
+    write_register(cpu, rd, width, !set_flags, result);
+    cpu->pc += 4;
+}
+
 static void execute_move_wide(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.move_wide.rd;
@@ -314,6 +341,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_EOR_SHIFTED_REGISTER:
         case AARCH64_OP_ANDS_SHIFTED_REGISTER:
             execute_logical_shifted(cpu, instruction);
+            break;
+        case AARCH64_OP_AND_IMMEDIATE:
+        case AARCH64_OP_ORR_IMMEDIATE:
+        case AARCH64_OP_EOR_IMMEDIATE:
+        case AARCH64_OP_ANDS_IMMEDIATE:
+            execute_logical_immediate(cpu, instruction);
             break;
         case AARCH64_OP_MOVN:
         case AARCH64_OP_MOVZ:

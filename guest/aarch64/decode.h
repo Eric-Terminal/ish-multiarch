@@ -28,6 +28,10 @@ enum aarch64_opcode {
     AARCH64_OP_ORR_SHIFTED_REGISTER,
     AARCH64_OP_EOR_SHIFTED_REGISTER,
     AARCH64_OP_ANDS_SHIFTED_REGISTER,
+    AARCH64_OP_AND_IMMEDIATE,
+    AARCH64_OP_ORR_IMMEDIATE,
+    AARCH64_OP_EOR_IMMEDIATE,
+    AARCH64_OP_ANDS_IMMEDIATE,
     AARCH64_OP_B_CONDITIONAL,
     AARCH64_OP_CBZ,
     AARCH64_OP_CBNZ,
@@ -106,6 +110,11 @@ struct aarch64_decoded {
             byte_t shift;
             bool invert;
         } logical_shifted;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            qword_t immediate;
+        } logical_immediate;
         struct {
             int64_t displacement;
             byte_t condition;
