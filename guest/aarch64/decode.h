@@ -17,6 +17,8 @@ enum aarch64_opcode {
     AARCH64_OP_BR,
     AARCH64_OP_BLR,
     AARCH64_OP_RET,
+    AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
+    AARCH64_OP_STORE_UNSIGNED_IMMEDIATE,
 };
 
 struct aarch64_decoded {
@@ -39,6 +41,12 @@ struct aarch64_decoded {
         struct {
             byte_t rn;
         } branch_register;
+        struct {
+            byte_t rt;
+            byte_t rn;
+            byte_t size;
+            qword_t offset;
+        } load_store;
     } operands;
 };
 

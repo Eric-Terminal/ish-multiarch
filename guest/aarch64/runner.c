@@ -42,7 +42,13 @@ struct aarch64_step_result aarch64_run_one(
         return result;
     }
 
-    aarch64_execute(cpu, &decoded);
+    struct aarch64_execute_result execute_result =
+            aarch64_execute(cpu, runner->tlb, &decoded);
+    if (execute_result.stop == AARCH64_EXECUTE_DATA_FAULT) {
+        result.stop = AARCH64_STEP_DATA_FAULT;
+        result.fault = execute_result.fault;
+        return result;
+    }
     cpu->cycle++;
     return result;
 }

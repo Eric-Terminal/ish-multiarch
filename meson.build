@@ -258,7 +258,19 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_runner', aarch64_runner_test)
 
+    aarch64_load_store_test = executable('aarch64_load_store_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/runner.c',
+            'guest/aarch64/load-store-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_load_store', aarch64_load_store_test)
+
     aarch64_instruction_test = executable('aarch64_instruction_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
             'guest/aarch64/decode.c',
             'guest/aarch64/execute.c',
             'guest/aarch64/instruction-test.c',

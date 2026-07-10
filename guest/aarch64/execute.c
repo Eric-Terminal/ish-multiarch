@@ -102,7 +102,52 @@ static void execute_move_wide(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-void aarch64_execute(struct cpu_state *cpu, const struct aarch64_decoded *instruction) {
+static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
+    qword_t value = 0;
+    for (byte_t i = 0; i < size; i++)
+        value |= (qword_t) bytes[i] << (i * 8);
+    return value;
+}
+
+static void store_little_endian(byte_t *bytes, byte_t size, qword_t value) {
+    for (byte_t i = 0; i < size; i++)
+        bytes[i] = (byte_t) (value >> (i * 8));
+}
+
+static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.load_store.rt;
+    byte_t rn = instruction->operands.load_store.rn;
+    byte_t size = instruction->operands.load_store.size;
+    guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
+    guest_addr_t address = base + instruction->operands.load_store.offset;
+    byte_t bytes[8];
+
+    if (instruction->opcode == AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE) {
+        if (!guest_tlb_read(tlb, address, bytes, size,
+                GUEST_MEMORY_READ, fault))
+            return false;
+        qword_t value = load_little_endian(bytes, size);
+        write_register(cpu, rt, size == 8 ? 64 : 32, false, value);
+    } else {
+        qword_t value = read_register(cpu, rt,
+                size == 8 ? 64 : 32, false);
+        store_little_endian(bytes, size, value);
+        if (!guest_tlb_write(tlb, address, bytes, size, fault))
+            return false;
+    }
+    cpu->pc += 4;
+    return true;
+}
+
+struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction) {
+    struct aarch64_execute_result result = {
+        .stop = AARCH64_EXECUTE_RETIRED,
+        .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
+    };
     switch (instruction->opcode) {
         case AARCH64_OP_NOP:
             cpu->pc += 4;
@@ -134,5 +179,11 @@ void aarch64_execute(struct cpu_state *cpu, const struct aarch64_decoded *instru
             cpu->pc = target;
             break;
         }
+        case AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE:
+        case AARCH64_OP_STORE_UNSIGNED_IMMEDIATE:
+            if (!execute_load_store(cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
     }
+    return result;
 }

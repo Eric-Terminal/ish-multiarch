@@ -77,6 +77,30 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000)) {
+        byte_t operation = (word >> 22) & 3;
+        bool vector = (word >> 26) & 1;
+        if (vector || operation > 1)
+            return false;
+
+        byte_t size_shift = word >> 30;
+        byte_t size = (byte_t) (1 << size_shift);
+        *decoded = (struct aarch64_decoded) {
+            .opcode = operation == 0 ?
+                    AARCH64_OP_STORE_UNSIGNED_IMMEDIATE :
+                    AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
+            .width = (byte_t) (size * 8),
+            .operands.load_store = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .size = size,
+                .offset = (qword_t) ((word >> 10) & UINT32_C(0xfff)) <<
+                        size_shift,
+            },
+        };
+        return true;
+    }
+
     dword_t branch_register = word & UINT32_C(0xfffffc1f);
     enum aarch64_opcode opcode;
     if (branch_register == UINT32_C(0xd61f0000))
