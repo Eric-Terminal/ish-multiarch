@@ -12,6 +12,7 @@ enum aarch64_elf64_load_error {
 };
 
 struct aarch64_elf64_load_result {
+    guest_addr_t load_bias;
     guest_addr_t entry;
     guest_addr_t program_headers;
     word_t program_header_count;
@@ -20,7 +21,7 @@ struct aarch64_elf64_load_result {
 
 enum aarch64_elf64_load_error aarch64_elf64_load(
         const struct aarch64_elf64_image *image,
-        struct guest_page_table *table,
+        struct guest_page_table *table, guest_addr_t load_bias,
         struct aarch64_elf64_load_result *result);
 
 #endif

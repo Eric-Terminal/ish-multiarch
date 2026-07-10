@@ -115,7 +115,7 @@ int main(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
     struct aarch64_elf64_load_result loaded;
-    assert(aarch64_elf64_load(&image, &table, &loaded) ==
+    assert(aarch64_elf64_load(&image, &table, 0, &loaded) ==
             AARCH64_ELF64_LOAD_OK);
 
     const char *arguments[] = {"e0"};

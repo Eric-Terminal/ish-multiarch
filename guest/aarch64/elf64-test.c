@@ -63,6 +63,7 @@ int main(void) {
     assert(aarch64_elf64_parse(file, sizeof(file), &image) ==
             AARCH64_ELF64_OK);
     assert(image.entry == TEST_SEGMENT_ADDRESS);
+    assert(!image.position_independent);
     assert(image.program_header_count == 1);
     assert(image.load_segment_count == 1);
 
@@ -86,6 +87,11 @@ int main(void) {
     assert(parse(file) == AARCH64_ELF64_BAD_IDENTIFICATION);
     make_valid_image(file);
     put_u16(file + 16, 3);
+    assert(aarch64_elf64_parse(file, sizeof(file), &image) ==
+            AARCH64_ELF64_OK);
+    assert(image.position_independent);
+    make_valid_image(file);
+    put_u16(file + 16, 1);
     assert(parse(file) == AARCH64_ELF64_UNSUPPORTED_TYPE);
     make_valid_image(file);
     put_u16(file + 18, 62);
@@ -100,6 +106,17 @@ int main(void) {
     make_valid_image(file);
     put_u32(file + AARCH64_ELF64_HEADER_SIZE, 3);
     assert(parse(file) == AARCH64_ELF64_UNSUPPORTED_DYNAMIC_LINKING);
+    make_valid_image(file);
+    put_u16(file + 16, 3);
+    put_u32(file + AARCH64_ELF64_HEADER_SIZE, 3);
+    assert(parse(file) == AARCH64_ELF64_UNSUPPORTED_DYNAMIC_LINKING);
+    make_valid_image(file);
+    put_u16(file + 16, 3);
+    put_u16(file + 56, 2);
+    byte_t *dynamic = file + AARCH64_ELF64_HEADER_SIZE +
+            AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    put_u32(dynamic, 2);
+    assert(parse(file) == AARCH64_ELF64_OK);
     make_valid_image(file);
     put_u64(file + AARCH64_ELF64_HEADER_SIZE + 32, 17);
     assert(parse(file) == AARCH64_ELF64_BAD_SEGMENT);

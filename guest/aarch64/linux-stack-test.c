@@ -7,6 +7,7 @@
 
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define STACK_SIZE (2 * GUEST_MEMORY_PAGE_SIZE)
+#define LOAD_BIAS UINT64_C(0x0000400000000000)
 
 static qword_t read_qword(struct guest_tlb *tlb, guest_addr_t address) {
     byte_t bytes[8];
@@ -41,8 +42,9 @@ int main(void) {
     for (byte_t i = 0; i < sizeof(random); i++)
         random[i] = i;
     struct aarch64_elf64_load_result loaded = {
-        .entry = UINT64_C(0x400100),
-        .program_headers = UINT64_C(0x400040),
+        .load_bias = LOAD_BIAS,
+        .entry = LOAD_BIAS + UINT64_C(0x100),
+        .program_headers = LOAD_BIAS + UINT64_C(0x40),
         .program_header_count = 3,
     };
     struct aarch64_linux_stack_config config = {
@@ -118,6 +120,9 @@ int main(void) {
             assert(value == loaded.program_header_count);
         } else if (type == GUEST_AT_PAGESZ) {
             assert(value == GUEST_MEMORY_PAGE_SIZE);
+        } else if (type == GUEST_AT_BASE) {
+            assert(value == 0);
+            assert(value != loaded.load_bias);
         } else if (type == GUEST_AT_ENTRY) {
             assert(value == loaded.entry);
             saw_entry = true;

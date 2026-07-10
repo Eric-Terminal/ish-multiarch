@@ -8,9 +8,9 @@
 #define ELF_OSABI_SYSTEM_V 0
 #define ELF_OSABI_LINUX 3
 #define ELF_EXECUTABLE 2
+#define ELF_SHARED_OBJECT 3
 #define ELF_MACHINE_AARCH64 183
 #define ELF_PT_LOAD 1
-#define ELF_PT_DYNAMIC 2
 #define ELF_PT_INTERP 3
 #define ELF_PF_EXECUTE UINT32_C(1)
 #define ELF_PF_WRITE UINT32_C(2)
@@ -90,7 +90,7 @@ static enum aarch64_elf64_error validate_segments(
     for (word_t i = 0; i < image->program_header_count; i++) {
         struct aarch64_elf64_program_header header;
         aarch64_elf64_program_header(image, i, &header);
-        if (header.type == ELF_PT_INTERP || header.type == ELF_PT_DYNAMIC)
+        if (header.type == ELF_PT_INTERP)
             return AARCH64_ELF64_UNSUPPORTED_DYNAMIC_LINKING;
         if (header.type != ELF_PT_LOAD)
             continue;
@@ -140,7 +140,8 @@ enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
             (bytes[7] != ELF_OSABI_SYSTEM_V && bytes[7] != ELF_OSABI_LINUX) ||
             bytes[8] != 0)
         return AARCH64_ELF64_BAD_IDENTIFICATION;
-    if (read_u16(bytes + 16) != ELF_EXECUTABLE)
+    word_t type = read_u16(bytes + 16);
+    if (type != ELF_EXECUTABLE && type != ELF_SHARED_OBJECT)
         return AARCH64_ELF64_UNSUPPORTED_TYPE;
     if (read_u16(bytes + 18) != ELF_MACHINE_AARCH64)
         return AARCH64_ELF64_UNSUPPORTED_MACHINE;
@@ -165,6 +166,7 @@ enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
     *image = (struct aarch64_elf64_image) {
         .data = bytes,
         .size = size,
+        .position_independent = type == ELF_SHARED_OBJECT,
         .entry = entry,
         .program_header_offset = program_header_offset,
         .program_header_count = program_header_count,

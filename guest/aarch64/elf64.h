@@ -21,6 +21,7 @@ enum aarch64_elf64_error {
 struct aarch64_elf64_image {
     const byte_t *data;
     size_t size;
+    bool position_independent;
     guest_addr_t entry;
     qword_t program_header_offset;
     word_t program_header_count;
