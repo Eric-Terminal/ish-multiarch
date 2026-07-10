@@ -473,6 +473,35 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3f200c00)) == UINT32_C(0x38200800)) {
+        byte_t operation = (word >> 22) & 3;
+        byte_t size_shift = word >> 30;
+        byte_t size = (byte_t) (1 << size_shift);
+        byte_t extend_type = (word >> 13) & 7;
+        bool load;
+        bool signed_load;
+        byte_t register_width;
+        if ((extend_type & 2) == 0 || !decode_scalar_transfer(
+                size, operation, &load, &signed_load, &register_width))
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_REGISTER_OFFSET :
+                    AARCH64_OP_STORE_REGISTER_OFFSET,
+            .width = register_width,
+            .operands.load_store = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .size = size,
+                .extend_type = (enum aarch64_extend_type) extend_type,
+                .shift = (word >> 12) & 1 ? size_shift : 0,
+                .address_mode = AARCH64_ADDRESS_OFFSET,
+                .signed_load = signed_load,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3b200000)) == UINT32_C(0x38000000)) {
         byte_t operation = (word >> 22) & 3;
         bool vector = (word >> 26) & 1;

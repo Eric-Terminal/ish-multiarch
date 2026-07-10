@@ -343,6 +343,297 @@ static void test_signed_loads(struct test_memory *memory) {
     assert(cpu.sp == DATA_PAGE + 400);
 }
 
+static void assert_register_offset_decode(dword_t word,
+        enum aarch64_opcode opcode, byte_t size, byte_t width,
+        byte_t rt, byte_t rn, byte_t rm,
+        enum aarch64_extend_type extend_type, byte_t shift,
+        bool signed_load) {
+    struct aarch64_decoded instruction;
+    assert(aarch64_decode(word, &instruction));
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.load_store.size == size);
+    assert(instruction.operands.load_store.rt == rt);
+    assert(instruction.operands.load_store.rn == rn);
+    assert(instruction.operands.load_store.rm == rm);
+    assert(instruction.operands.load_store.extend_type == extend_type);
+    assert(instruction.operands.load_store.shift == shift);
+    assert(instruction.operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    assert(instruction.operands.load_store.signed_load == signed_load);
+}
+
+static bool valid_scalar_transfer(unsigned size_shift,
+        unsigned operation) {
+    return (size_shift < 2 && operation < 4) ||
+            (size_shift == 2 && operation < 3) ||
+            (size_shift == 3 && operation < 2);
+}
+
+static void test_register_offset_decode(void) {
+    assert_register_offset_decode(UINT32_C(0x38226820),
+            AARCH64_OP_STORE_REGISTER_OFFSET, 1, 32,
+            0, 1, 2, AARCH64_EXTEND_UXTX, 0, false);
+    assert_register_offset_decode(UINT32_C(0x38644be3),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 1, 32,
+            3, 31, 4, AARCH64_EXTEND_UXTW, 0, false);
+    assert_register_offset_decode(UINT32_C(0x7827d8c5),
+            AARCH64_OP_STORE_REGISTER_OFFSET, 2, 32,
+            5, 6, 7, AARCH64_EXTEND_SXTW, 1, false);
+    assert_register_offset_decode(UINT32_C(0x786a7928),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 2, 32,
+            8, 9, 10, AARCH64_EXTEND_UXTX, 1, false);
+    assert_register_offset_decode(UINT32_C(0xb82d598b),
+            AARCH64_OP_STORE_REGISTER_OFFSET, 4, 32,
+            11, 12, 13, AARCH64_EXTEND_UXTW, 2, false);
+    assert_register_offset_decode(UINT32_C(0xb870f9ee),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 4, 32,
+            14, 15, 16, AARCH64_EXTEND_SXTX, 2, false);
+    assert_register_offset_decode(UINT32_C(0xf8337a51),
+            AARCH64_OP_STORE_REGISTER_OFFSET, 8, 64,
+            17, 18, 19, AARCH64_EXTEND_UXTX, 3, false);
+    assert_register_offset_decode(UINT32_C(0xf876dab4),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 8, 64,
+            20, 21, 22, AARCH64_EXTEND_SXTW, 3, false);
+    assert_register_offset_decode(UINT32_C(0x38f94b17),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 1, 32,
+            23, 24, 25, AARCH64_EXTEND_UXTW, 0, true);
+    assert_register_offset_decode(UINT32_C(0x38bceb7a),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 1, 64,
+            26, 27, 28, AARCH64_EXTEND_SXTX, 0, true);
+    assert_register_offset_decode(UINT32_C(0x78e27820),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 2, 32,
+            0, 1, 2, AARCH64_EXTEND_UXTX, 1, true);
+    assert_register_offset_decode(UINT32_C(0x78a5d883),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 2, 64,
+            3, 4, 5, AARCH64_EXTEND_SXTW, 1, true);
+    assert_register_offset_decode(UINT32_C(0xb8a858e6),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 4, 64,
+            6, 7, 8, AARCH64_EXTEND_UXTW, 2, true);
+    assert_register_offset_decode(UINT32_C(0xb8aafbe9),
+            AARCH64_OP_LOAD_REGISTER_OFFSET, 4, 64,
+            9, 31, 10, AARCH64_EXTEND_SXTX, 2, true);
+
+    unsigned valid = 0;
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        for (unsigned operation = 0; operation < 4; operation++) {
+            for (unsigned option = 0; option < 8; option++) {
+                for (unsigned scaled = 0; scaled < 2; scaled++) {
+                    dword_t word = UINT32_C(0x38200820) |
+                            (dword_t) size_shift << 30 |
+                            (dword_t) operation << 22 |
+                            UINT32_C(2) << 16 |
+                            (dword_t) option << 13 |
+                            (dword_t) scaled << 12;
+                    bool expected = (option & 2) != 0 &&
+                            valid_scalar_transfer(size_shift, operation);
+                    struct aarch64_decoded instruction;
+                    bool decoded = aarch64_decode(word, &instruction);
+                    assert(decoded == expected);
+                    if (!decoded)
+                        continue;
+                    valid++;
+                    byte_t size = (byte_t) (1U << size_shift);
+                    byte_t width = operation == 2 || size == 8 ? 64 : 32;
+                    assert(instruction.width == width);
+                    assert(instruction.operands.load_store.size == size);
+                    assert(instruction.operands.load_store.extend_type ==
+                            (enum aarch64_extend_type) option);
+                    assert(instruction.operands.load_store.shift ==
+                            (scaled ? size_shift : 0));
+                }
+            }
+        }
+    }
+    assert(valid == 104);
+
+    static const dword_t unsupported[] = {
+        UINT32_C(0x38222820), UINT32_C(0xf8a26820),
+        UINT32_C(0xb8e858e6), UINT32_C(0xf8e26820),
+        UINT32_C(0x3ce26820),
+    };
+    for (size_t i = 0; i < array_size(unsupported); i++) {
+        struct aarch64_decoded instruction;
+        assert(!aarch64_decode(unsupported[i], &instruction));
+    }
+}
+
+static void test_register_offsets(struct test_memory *memory) {
+    struct cpu_state cpu = {
+        .nzcv = UINT32_C(0xa0000000),
+        .sp = DATA_PAGE + 510,
+    };
+
+    cpu.x[0] = 0xab;
+    cpu.x[1] = DATA_PAGE + 500;
+    cpu.x[2] = 3;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x38226820)), &cpu);
+    assert(memory->data[503] == 0xab);
+
+    memory->data[512] = 0xcd;
+    cpu.x[3] = UINT64_MAX;
+    cpu.x[4] = UINT64_C(0xffffffff00000002);
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x38644be3)), &cpu);
+    assert(cpu.x[3] == 0xcd);
+
+    cpu.x[5] = UINT64_C(0x1234abcd);
+    cpu.x[6] = DATA_PAGE + 530;
+    cpu.x[7] = UINT32_C(0xfffffffe);
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x7827d8c5)), &cpu);
+    assert(memory->data[526] == 0xcd && memory->data[527] == 0xab);
+
+    memory->data[546] = 0x34;
+    memory->data[547] = 0x12;
+    cpu.x[9] = DATA_PAGE + 540;
+    cpu.x[10] = 3;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x786a7928)), &cpu);
+    assert(cpu.x[8] == UINT16_C(0x1234));
+
+    cpu.x[11] = UINT64_C(0xffffffff89abcdef);
+    cpu.x[12] = DATA_PAGE + 560;
+    cpu.x[13] = 2;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb82d598b)), &cpu);
+    const byte_t expected_word[] = {0xef, 0xcd, 0xab, 0x89};
+    assert(memcmp(&memory->data[568], expected_word,
+            sizeof(expected_word)) == 0);
+
+    memory->data[576] = 0x78;
+    memory->data[577] = 0x56;
+    memory->data[578] = 0x34;
+    memory->data[579] = 0x12;
+    cpu.x[15] = DATA_PAGE + 580;
+    cpu.x[16] = UINT64_MAX;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb870f9ee)), &cpu);
+    assert(cpu.x[14] == UINT32_C(0x12345678));
+
+    cpu.x[17] = UINT64_C(0x8877665544332211);
+    cpu.x[18] = DATA_PAGE + 600;
+    cpu.x[19] = 2;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf8337a51)), &cpu);
+    const byte_t expected_qword[] = {0x11, 0x22, 0x33, 0x44,
+            0x55, 0x66, 0x77, 0x88};
+    assert(memcmp(&memory->data[616], expected_qword,
+            sizeof(expected_qword)) == 0);
+
+    put_qword(&memory->data[632], UINT64_C(0x1020304050607080));
+    cpu.x[21] = DATA_PAGE + 640;
+    cpu.x[22] = UINT32_MAX;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf876dab4)), &cpu);
+    assert(cpu.x[20] == UINT64_C(0x1020304050607080));
+
+    memory->data[650] = 0x80;
+    cpu.x[24] = DATA_PAGE + 648;
+    cpu.x[25] = 2;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x38f94b17)), &cpu);
+    assert(cpu.x[23] == UINT32_C(0xffffff80));
+
+    memory->data[659] = 0x81;
+    cpu.x[27] = DATA_PAGE + 660;
+    cpu.x[28] = UINT64_MAX;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x38bceb7a)), &cpu);
+    assert(cpu.x[26] == UINT64_C(0xffffffffffffff81));
+
+    memory->data[670] = 0x01;
+    memory->data[671] = 0x80;
+    cpu.x[1] = DATA_PAGE + 666;
+    cpu.x[2] = 2;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x78e27820)), &cpu);
+    assert(cpu.x[0] == UINT32_C(0xffff8001));
+
+    memory->data[678] = 0x02;
+    memory->data[679] = 0x80;
+    cpu.x[4] = DATA_PAGE + 680;
+    cpu.x[5] = UINT32_MAX;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x78a5d883)), &cpu);
+    assert(cpu.x[3] == UINT64_C(0xffffffffffff8002));
+
+    memory->data[692] = 0x03;
+    memory->data[693] = 0x00;
+    memory->data[694] = 0x00;
+    memory->data[695] = 0x80;
+    cpu.x[7] = DATA_PAGE + 684;
+    cpu.x[8] = 2;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb8a858e6)), &cpu);
+    assert(cpu.x[6] == UINT64_C(0xffffffff80000003));
+
+    memory->data[704] = 0x04;
+    memory->data[705] = 0x00;
+    memory->data[706] = 0x00;
+    memory->data[707] = 0x80;
+    cpu.sp = DATA_PAGE + 708;
+    cpu.x[10] = UINT64_MAX;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb8aafbe9)), &cpu);
+    assert(cpu.x[9] == UINT64_C(0xffffffff80000004));
+
+    put_qword(&memory->data[720], UINT64_C(0xa1a2a3a4a5a6a7a8));
+    cpu.x[1] = DATA_PAGE + 712;
+    cpu.x[2] = 8;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf8626821)), &cpu);
+    assert(cpu.x[1] == UINT64_C(0xa1a2a3a4a5a6a7a8));
+
+    put_qword(&memory->data[736], UINT64_C(0xb1b2b3b4b5b6b7b8));
+    cpu.x[1] = DATA_PAGE + 728;
+    cpu.x[2] = 8;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf8626822)), &cpu);
+    assert(cpu.x[2] == UINT64_C(0xb1b2b3b4b5b6b7b8));
+
+    qword_t old_x0 = cpu.x[0];
+    cpu.sp = DATA_PAGE + 720;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf87f6bff)), &cpu);
+    assert(cpu.x[0] == old_x0);
+
+    memset(&memory->data[752], 0xff, 8);
+    cpu.x[1] = DATA_PAGE + 752;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xf83f683f)), &cpu);
+    const byte_t zeros[8] = {0};
+    assert(memcmp(&memory->data[752], zeros, sizeof(zeros)) == 0);
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+}
+
+static void test_register_offset_faults(struct test_memory *memory) {
+    struct cpu_state cpu = {
+        .cycle = 11,
+        .x[0] = UINT64_C(0x1122334455667788),
+        .x[1] = UNMAPPED_PAGE,
+        .x[2] = 0,
+        .sp = UINT64_C(0x123456789abcdef0),
+        .nzcv = UINT32_C(0x90000000),
+    };
+    struct aarch64_step_result result = run_instruction(
+            memory, &cpu, UINT32_C(0xf8627820));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[0] == UINT64_C(0x1122334455667788));
+    assert(cpu.x[1] == UNMAPPED_PAGE && cpu.x[2] == 0);
+    assert(cpu.sp == UINT64_C(0x123456789abcdef0));
+    assert(cpu.nzcv == UINT32_C(0x90000000));
+    assert(cpu.pc == CODE_PAGE && cpu.cycle == 11);
+
+    const byte_t first_before[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    const byte_t second_before[] = {0x11, 0x22, 0x33, 0x44};
+    memcpy(&memory->data[GUEST_MEMORY_PAGE_SIZE - 4],
+            first_before, sizeof(first_before));
+    memcpy(memory->next, second_before, sizeof(second_before));
+    cpu.x[0] = UINT64_C(0x8877665544332211);
+    cpu.x[1] = DATA_NEXT - 4;
+    cpu.x[2] = 0;
+    result = run_instruction(memory, &cpu, UINT32_C(0xf8227820));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(memcmp(&memory->data[GUEST_MEMORY_PAGE_SIZE - 4],
+            first_before, sizeof(first_before)) == 0);
+    assert(memcmp(memory->next, second_before, sizeof(second_before)) == 0);
+    assert(cpu.x[0] == UINT64_C(0x8877665544332211));
+    assert(cpu.x[1] == DATA_NEXT - 4 && cpu.x[2] == 0);
+    assert(cpu.sp == UINT64_C(0x123456789abcdef0));
+    assert(cpu.nzcv == UINT32_C(0x90000000));
+    assert(cpu.pc == CODE_PAGE && cpu.cycle == 11);
+}
+
 static void test_faults(struct test_memory *memory) {
     struct cpu_state cpu = {
         .cycle = 7,
@@ -476,6 +767,9 @@ int main(void) {
     test_unscaled_and_writeback(&memory);
     test_pairs(&memory);
     test_signed_loads(&memory);
+    test_register_offset_decode();
+    test_register_offsets(&memory);
+    test_register_offset_faults(&memory);
     test_faults(&memory);
     return 0;
 }

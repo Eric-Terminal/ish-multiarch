@@ -46,6 +46,8 @@ enum aarch64_opcode {
     AARCH64_OP_TBNZ,
     AARCH64_OP_LOAD_IMM9,
     AARCH64_OP_STORE_IMM9,
+    AARCH64_OP_LOAD_REGISTER_OFFSET,
+    AARCH64_OP_STORE_REGISTER_OFFSET,
     AARCH64_OP_LOAD_PAIR,
     AARCH64_OP_STORE_PAIR,
     AARCH64_OP_ADR,
@@ -111,7 +113,10 @@ struct aarch64_decoded {
         struct {
             byte_t rt;
             byte_t rn;
+            byte_t rm;
             byte_t size;
+            enum aarch64_extend_type extend_type;
+            byte_t shift;
             int64_t offset;
             enum aarch64_address_mode address_mode;
             bool signed_load;

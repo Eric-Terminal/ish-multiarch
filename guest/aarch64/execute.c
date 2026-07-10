@@ -404,14 +404,23 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
     guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
     enum aarch64_address_mode address_mode =
             instruction->operands.load_store.address_mode;
-    guest_addr_t adjusted = base +
-            (qword_t) instruction->operands.load_store.offset;
+    qword_t offset = (qword_t) instruction->operands.load_store.offset;
+    if (instruction->opcode == AARCH64_OP_LOAD_REGISTER_OFFSET ||
+            instruction->opcode == AARCH64_OP_STORE_REGISTER_OFFSET) {
+        qword_t index = read_register(cpu,
+                instruction->operands.load_store.rm, 64, false);
+        offset = extend_register(index, 64,
+                instruction->operands.load_store.extend_type,
+                instruction->operands.load_store.shift);
+    }
+    guest_addr_t adjusted = base + offset;
     guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
             base : adjusted;
     byte_t bytes[8];
 
     bool load = instruction->opcode == AARCH64_OP_LOAD_IMM12 ||
-            instruction->opcode == AARCH64_OP_LOAD_IMM9;
+            instruction->opcode == AARCH64_OP_LOAD_IMM9 ||
+            instruction->opcode == AARCH64_OP_LOAD_REGISTER_OFFSET;
     if (load) {
         if (!guest_tlb_read(tlb, address, bytes, size,
                 GUEST_MEMORY_READ, fault))
@@ -600,6 +609,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_STORE_IMM12:
         case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_STORE_IMM9:
+        case AARCH64_OP_LOAD_REGISTER_OFFSET:
+        case AARCH64_OP_STORE_REGISTER_OFFSET:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
