@@ -29,7 +29,7 @@ static_assert(sizeof(union mm_reg) == 8, "mm_reg size");
 
 struct cpu_state {
     struct mmu *mmu;
-    long cycle;
+    uint64_t cycle;
 
     // general registers
     // assumes little endian (as does literally everything)

@@ -226,7 +226,8 @@ static int cpu_step_to_interrupt(struct cpu_state *cpu, struct tlb *tlb) {
         // block may be jetsam, but that's ok, because it can't be freed until
         // every thread on this asbestos is not executing anything
 
-        TRACE("%d %08x --- cycle %ld\n", current_pid(), ip, frame->cpu.cycle);
+        TRACE("%d %08x --- cycle %llu\n", current_pid(), ip,
+                (unsigned long long) frame->cpu.cycle);
 
         interrupt = fiber_enter(block, frame, tlb);
         if (interrupt == INT_NONE && __atomic_exchange_n(cpu->poked_ptr, false, __ATOMIC_SEQ_CST))
