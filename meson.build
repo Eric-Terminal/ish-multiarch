@@ -429,6 +429,16 @@ if not meson.is_cross_build()
             'guest/aarch64/system-register-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_system_register', aarch64_system_register_test)
+
+    aarch64_multiply_add_test = executable('aarch64_multiply_add_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/multiply-add-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_multiply_add', aarch64_multiply_add_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')

@@ -376,6 +376,35 @@ static void execute_data_processing_2source(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_multiply_add(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.data_processing_3source.rd;
+    byte_t rn = instruction->operands.data_processing_3source.rn;
+    byte_t rm = instruction->operands.data_processing_3source.rm;
+    byte_t ra = instruction->operands.data_processing_3source.ra;
+    bool basic = instruction->opcode == AARCH64_OP_MADD ||
+            instruction->opcode == AARCH64_OP_MSUB;
+    byte_t source_width = basic ? instruction->width : 32;
+    qword_t left = read_register(cpu, rn, source_width, false);
+    qword_t right = read_register(cpu, rm, source_width, false);
+    qword_t accumulator = read_register(cpu, ra,
+            instruction->width, false);
+
+    bool signed_long = instruction->opcode == AARCH64_OP_SMADDL ||
+            instruction->opcode == AARCH64_OP_SMSUBL;
+    if (signed_long) {
+        left = (left ^ UINT32_C(0x80000000)) - UINT32_C(0x80000000);
+        right = (right ^ UINT32_C(0x80000000)) - UINT32_C(0x80000000);
+    }
+    qword_t product = left * right;
+    bool subtract = instruction->opcode == AARCH64_OP_MSUB ||
+            instruction->opcode == AARCH64_OP_SMSUBL ||
+            instruction->opcode == AARCH64_OP_UMSUBL;
+    qword_t result = subtract ? accumulator - product : accumulator + product;
+    write_register(cpu, rd, instruction->width, false, result);
+    cpu->pc += 4;
+}
+
 static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
     qword_t value = 0;
     for (byte_t i = 0; i < size; i++)
@@ -559,6 +588,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     instruction->operands.system_register.rt,
                     64, false);
             cpu->pc += 4;
+            break;
+        case AARCH64_OP_MADD:
+        case AARCH64_OP_MSUB:
+        case AARCH64_OP_SMADDL:
+        case AARCH64_OP_SMSUBL:
+        case AARCH64_OP_UMADDL:
+        case AARCH64_OP_UMSUBL:
+            execute_multiply_add(cpu, instruction);
             break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;

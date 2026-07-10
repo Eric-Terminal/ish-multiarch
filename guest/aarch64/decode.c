@@ -384,6 +384,41 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x7fe00000)) == UINT32_C(0x1b000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = (word >> 15) & 1 ? AARCH64_OP_MSUB : AARCH64_OP_MADD,
+            .width = (word >> 31) ? 64 : 32,
+            .operands.data_processing_3source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .ra = (word >> 10) & 0x1f,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xff600000)) == UINT32_C(0x9b200000)) {
+        bool unsigned_multiply = (word >> 23) & 1;
+        bool subtract = (word >> 15) & 1;
+        enum aarch64_opcode opcode;
+        if (unsigned_multiply)
+            opcode = subtract ? AARCH64_OP_UMSUBL : AARCH64_OP_UMADDL;
+        else
+            opcode = subtract ? AARCH64_OP_SMSUBL : AARCH64_OP_SMADDL;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = 64,
+            .operands.data_processing_3source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .ra = (word >> 10) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = (word >> 31) ? AARCH64_OP_BL : AARCH64_OP_B,

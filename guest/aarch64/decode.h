@@ -64,6 +64,12 @@ enum aarch64_opcode {
     AARCH64_OP_RORV,
     AARCH64_OP_MRS_TPIDR_EL0,
     AARCH64_OP_MSR_TPIDR_EL0,
+    AARCH64_OP_MADD,
+    AARCH64_OP_MSUB,
+    AARCH64_OP_SMADDL,
+    AARCH64_OP_SMSUBL,
+    AARCH64_OP_UMADDL,
+    AARCH64_OP_UMSUBL,
 };
 
 enum aarch64_shift_type {
@@ -197,6 +203,12 @@ struct aarch64_decoded {
         struct {
             byte_t rt;
         } system_register;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            byte_t ra;
+        } data_processing_3source;
     } operands;
 };
 
