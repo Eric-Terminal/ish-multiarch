@@ -24,6 +24,10 @@ enum aarch64_opcode {
     AARCH64_OP_ADDS_SHIFTED_REGISTER,
     AARCH64_OP_SUB_SHIFTED_REGISTER,
     AARCH64_OP_SUBS_SHIFTED_REGISTER,
+    AARCH64_OP_ADD_EXTENDED_REGISTER,
+    AARCH64_OP_ADDS_EXTENDED_REGISTER,
+    AARCH64_OP_SUB_EXTENDED_REGISTER,
+    AARCH64_OP_SUBS_EXTENDED_REGISTER,
     AARCH64_OP_AND_SHIFTED_REGISTER,
     AARCH64_OP_ORR_SHIFTED_REGISTER,
     AARCH64_OP_EOR_SHIFTED_REGISTER,
@@ -63,6 +67,17 @@ enum aarch64_shift_type {
     AARCH64_SHIFT_LSR,
     AARCH64_SHIFT_ASR,
     AARCH64_SHIFT_ROR,
+};
+
+enum aarch64_extend_type {
+    AARCH64_EXTEND_UXTB,
+    AARCH64_EXTEND_UXTH,
+    AARCH64_EXTEND_UXTW,
+    AARCH64_EXTEND_UXTX,
+    AARCH64_EXTEND_SXTB,
+    AARCH64_EXTEND_SXTH,
+    AARCH64_EXTEND_SXTW,
+    AARCH64_EXTEND_SXTX,
 };
 
 enum aarch64_address_mode {
@@ -116,6 +131,13 @@ struct aarch64_decoded {
             enum aarch64_shift_type shift_type;
             byte_t shift;
         } add_sub_shifted;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            enum aarch64_extend_type extend_type;
+            byte_t shift;
+        } add_sub_extended;
         struct {
             byte_t rd;
             byte_t rn;

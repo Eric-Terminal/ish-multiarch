@@ -152,6 +152,32 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x1fe00000)) == UINT32_C(0x0b200000)) {
+        byte_t operation = (word >> 29) & 3;
+        byte_t shift = (word >> 10) & 7;
+        if (shift > 4)
+            return false;
+        static const enum aarch64_opcode opcodes[] = {
+            AARCH64_OP_ADD_EXTENDED_REGISTER,
+            AARCH64_OP_ADDS_EXTENDED_REGISTER,
+            AARCH64_OP_SUB_EXTENDED_REGISTER,
+            AARCH64_OP_SUBS_EXTENDED_REGISTER,
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[operation],
+            .width = (word >> 31) ? 64 : 32,
+            .operands.add_sub_extended = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .extend_type = (enum aarch64_extend_type)
+                        ((word >> 13) & 7),
+                .shift = shift,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x0a000000)) {
         bool is_64 = word >> 31;
         byte_t operation = (word >> 29) & 3;

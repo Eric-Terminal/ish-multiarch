@@ -133,6 +133,48 @@ static void execute_add_sub_shifted(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static qword_t extend_register(qword_t value, byte_t width,
+        enum aarch64_extend_type extend_type, byte_t shift) {
+    unsigned source_width = 8U << (extend_type & 3);
+    if (source_width > width)
+        source_width = width;
+    qword_t source_mask = source_width == 64 ? UINT64_MAX :
+            (UINT64_C(1) << source_width) - 1;
+    value &= source_mask;
+    if (extend_type >= AARCH64_EXTEND_SXTB &&
+            (value & (UINT64_C(1) << (source_width - 1))))
+        value |= width_mask(width) & ~source_mask;
+    return (value << shift) & width_mask(width);
+}
+
+static void execute_add_sub_extended(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    byte_t rd = instruction->operands.add_sub_extended.rd;
+    qword_t left = read_register(cpu,
+            instruction->operands.add_sub_extended.rn, width, true);
+    qword_t right = read_register(cpu,
+            instruction->operands.add_sub_extended.rm, width, false);
+    right = extend_register(right, width,
+            instruction->operands.add_sub_extended.extend_type,
+            instruction->operands.add_sub_extended.shift);
+    bool subtract = instruction->opcode == AARCH64_OP_SUB_EXTENDED_REGISTER ||
+            instruction->opcode == AARCH64_OP_SUBS_EXTENDED_REGISTER;
+    bool set_flags = instruction->opcode == AARCH64_OP_ADDS_EXTENDED_REGISTER ||
+            instruction->opcode == AARCH64_OP_SUBS_EXTENDED_REGISTER;
+    qword_t result = subtract ? left - right : left + right;
+    result &= width_mask(width);
+
+    if (set_flags) {
+        if (subtract)
+            set_sub_flags(cpu, left, right, result, width);
+        else
+            set_add_flags(cpu, left, right, result, width);
+    }
+    write_register(cpu, rd, width, !set_flags, result);
+    cpu->pc += 4;
+}
+
 static void execute_logical_shifted(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.logical_shifted.rd;
@@ -451,6 +493,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:
             execute_add_sub_shifted(cpu, instruction);
+            break;
+        case AARCH64_OP_ADD_EXTENDED_REGISTER:
+        case AARCH64_OP_ADDS_EXTENDED_REGISTER:
+        case AARCH64_OP_SUB_EXTENDED_REGISTER:
+        case AARCH64_OP_SUBS_EXTENDED_REGISTER:
+            execute_add_sub_extended(cpu, instruction);
             break;
         case AARCH64_OP_AND_SHIFTED_REGISTER:
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
