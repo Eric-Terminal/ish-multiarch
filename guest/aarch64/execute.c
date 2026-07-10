@@ -1,4 +1,5 @@
 #include "guest/aarch64/execute.h"
+#include "guest/aarch64/condition.h"
 
 static qword_t width_mask(byte_t width) {
     return width == 32 ? UINT32_MAX : UINT64_MAX;
@@ -269,6 +270,35 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             if (instruction->opcode == AARCH64_OP_BLR)
                 cpu->x[30] = cpu->pc + 4;
             cpu->pc = target;
+            break;
+        }
+        case AARCH64_OP_B_CONDITIONAL:
+            if (aarch64_condition_holds(cpu->nzcv,
+                    instruction->operands.conditional_branch.condition))
+                cpu->pc += (qword_t)
+                        instruction->operands.conditional_branch.displacement;
+            else
+                cpu->pc += 4;
+            break;
+        case AARCH64_OP_CBZ:
+        case AARCH64_OP_CBNZ: {
+            qword_t value = read_register(cpu,
+                    instruction->operands.compare_branch.rt,
+                    instruction->width, false);
+            bool branch = instruction->opcode == AARCH64_OP_CBZ ?
+                    value == 0 : value != 0;
+            cpu->pc += branch ?
+                    (qword_t) instruction->operands.compare_branch.displacement : 4;
+            break;
+        }
+        case AARCH64_OP_TBZ:
+        case AARCH64_OP_TBNZ: {
+            qword_t value = read_register(cpu,
+                    instruction->operands.test_branch.rt, 64, false);
+            bool set = ((value >> instruction->operands.test_branch.bit) & 1) != 0;
+            bool branch = instruction->opcode == AARCH64_OP_TBZ ? !set : set;
+            cpu->pc += branch ?
+                    (qword_t) instruction->operands.test_branch.displacement : 4;
             break;
         }
         case AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE:

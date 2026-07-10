@@ -28,6 +28,11 @@ enum aarch64_opcode {
     AARCH64_OP_ORR_SHIFTED_REGISTER,
     AARCH64_OP_EOR_SHIFTED_REGISTER,
     AARCH64_OP_ANDS_SHIFTED_REGISTER,
+    AARCH64_OP_B_CONDITIONAL,
+    AARCH64_OP_CBZ,
+    AARCH64_OP_CBNZ,
+    AARCH64_OP_TBZ,
+    AARCH64_OP_TBNZ,
 };
 
 enum aarch64_shift_type {
@@ -81,6 +86,19 @@ struct aarch64_decoded {
             byte_t shift;
             bool invert;
         } logical_shifted;
+        struct {
+            int64_t displacement;
+            byte_t condition;
+        } conditional_branch;
+        struct {
+            byte_t rt;
+            int64_t displacement;
+        } compare_branch;
+        struct {
+            byte_t rt;
+            byte_t bit;
+            int64_t displacement;
+        } test_branch;
     } operands;
 };
 

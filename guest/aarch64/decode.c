@@ -1,9 +1,9 @@
 #include "guest/aarch64/decode.h"
 
-static int64_t sign_extend_branch(dword_t immediate) {
+static int64_t sign_extend_branch(dword_t immediate, byte_t bits) {
     int64_t value = immediate;
-    if (immediate & (UINT32_C(1) << 25))
-        value -= INT64_C(1) << 26;
+    if (immediate & (UINT32_C(1) << (bits - 1)))
+        value -= INT64_C(1) << bits;
     return value * 4;
 }
 
@@ -140,7 +140,48 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .opcode = (word >> 31) ? AARCH64_OP_BL : AARCH64_OP_B,
             .width = 64,
             .operands.branch_immediate.displacement =
-                sign_extend_branch(word & UINT32_C(0x03ffffff)),
+                sign_extend_branch(word & UINT32_C(0x03ffffff), 26),
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xff000010)) == UINT32_C(0x54000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_B_CONDITIONAL,
+            .width = 64,
+            .operands.conditional_branch = {
+                .displacement = sign_extend_branch(
+                        (word >> 5) & UINT32_C(0x7ffff), 19),
+                .condition = word & 0xf,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x7e000000)) == UINT32_C(0x34000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = (word >> 24) & 1 ? AARCH64_OP_CBNZ : AARCH64_OP_CBZ,
+            .width = (word >> 31) ? 64 : 32,
+            .operands.compare_branch = {
+                .rt = word & 0x1f,
+                .displacement = sign_extend_branch(
+                        (word >> 5) & UINT32_C(0x7ffff), 19),
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x7e000000)) == UINT32_C(0x36000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = (word >> 24) & 1 ? AARCH64_OP_TBNZ : AARCH64_OP_TBZ,
+            .width = (word >> 31) ? 64 : 32,
+            .operands.test_branch = {
+                .rt = word & 0x1f,
+                .bit = (byte_t) (((word >> 31) << 5) |
+                        ((word >> 19) & 0x1f)),
+                .displacement = sign_extend_branch(
+                        (word >> 5) & UINT32_C(0x3fff), 14),
+            },
         };
         return true;
     }

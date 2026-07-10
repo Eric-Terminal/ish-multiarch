@@ -171,6 +171,52 @@ static void test_branches(void) {
     assert(cpu.pc == 0x6000);
 }
 
+static void test_conditional_branches(void) {
+    struct cpu_state cpu = {.pc = 0x7000, .nzcv = UINT32_C(0x40000000)};
+    struct aarch64_decoded instruction = decode(UINT32_C(0x540000c0));
+    assert(instruction.opcode == AARCH64_OP_B_CONDITIONAL);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7018);
+
+    cpu.pc = 0x7000;
+    cpu.nzcv = 0;
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7004);
+
+    cpu.pc = 0x7100;
+    cpu.nzcv = UINT32_C(0x40000000);
+    instruction = decode(UINT32_C(0x54ffff80));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x70f0);
+
+    cpu.pc = 0x7200;
+    cpu.x[3] = UINT64_C(0xffffffff00000000);
+    instruction = decode(UINT32_C(0x34000083));
+    assert(instruction.width == 32);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7210);
+
+    cpu.pc = 0x7300;
+    cpu.x[4] = 1;
+    instruction = decode(UINT32_C(0xb5000084));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7310);
+
+    cpu.pc = 0x7400;
+    cpu.x[5] = 0;
+    instruction = decode(UINT32_C(0x36380045));
+    assert(instruction.operands.test_branch.bit == 7);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7408);
+
+    cpu.pc = 0x7500;
+    cpu.x[6] = UINT64_C(1) << 42;
+    instruction = decode(UINT32_C(0xb7500046));
+    assert(instruction.operands.test_branch.bit == 42);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == 0x7508);
+}
+
 static void assert_load_store(dword_t word, enum aarch64_opcode opcode,
         byte_t size, byte_t rn, byte_t rt, qword_t offset) {
     struct aarch64_decoded instruction = decode(word);
@@ -223,6 +269,7 @@ int main(void) {
     test_logical_shifted();
     test_move_wide();
     test_branches();
+    test_conditional_branches();
     test_load_store_decode();
     test_svc_decode();
 
