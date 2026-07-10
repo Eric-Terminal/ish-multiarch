@@ -405,6 +405,25 @@ static void execute_multiply_add(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_multiply_high(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    qword_t left = read_register(cpu,
+            instruction->operands.data_processing_3source.rn, 64, false);
+    qword_t right = read_register(cpu,
+            instruction->operands.data_processing_3source.rm, 64, false);
+    qword_t high = (qword_t) (((__uint128_t) left * right) >> 64);
+    if (instruction->opcode == AARCH64_OP_SMULH) {
+        // 从无符号高半修正符号项，避免依赖宿主有符号转换与算术语义。
+        if (left >> 63)
+            high -= right;
+        if (right >> 63)
+            high -= left;
+    }
+    write_register(cpu, instruction->operands.data_processing_3source.rd,
+            64, false, high);
+    cpu->pc += 4;
+}
+
 static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
     qword_t value = 0;
     for (byte_t i = 0; i < size; i++)
@@ -596,6 +615,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_UMADDL:
         case AARCH64_OP_UMSUBL:
             execute_multiply_add(cpu, instruction);
+            break;
+        case AARCH64_OP_SMULH:
+        case AARCH64_OP_UMULH:
+            execute_multiply_high(cpu, instruction);
             break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;

@@ -54,12 +54,23 @@ static void test_decode(void) {
             64, 22, 23, 24, 31);
     assert_decode(UINT32_C(0x9ba2fc20), AARCH64_OP_UMSUBL,
             64, 0, 1, 2, 31);
+    assert_decode(UINT32_C(0x9b4a7d28), AARCH64_OP_SMULH,
+            64, 8, 9, 10, 31);
+    assert_decode(UINT32_C(0x9bcd7d8b), AARCH64_OP_UMULH,
+            64, 11, 12, 13, 31);
 }
 
 static bool expected_encoding(unsigned sf, unsigned op54,
-        unsigned op31) {
-    return op54 == 0 && (op31 == 0 ||
-            (sf == 1 && (op31 == 1 || op31 == 5)));
+        unsigned op31, unsigned subtract, unsigned ra) {
+    if (op54 != 0)
+        return false;
+    if (op31 == 0)
+        return true;
+    if (sf != 1)
+        return false;
+    if (op31 == 1 || op31 == 5)
+        return true;
+    return (op31 == 2 || op31 == 6) && subtract == 0 && ra == 31;
 }
 
 static void test_encoding_space(void) {
@@ -77,7 +88,8 @@ static void test_encoding_space(void) {
                                 (dword_t) ra << 10;
                         struct aarch64_decoded instruction;
                         bool decoded = aarch64_decode(word, &instruction);
-                        bool expected = expected_encoding(sf, op54, op31);
+                        bool expected = expected_encoding(
+                                sf, op54, op31, subtract, ra);
                         assert(decoded == expected);
                         if (decoded)
                             valid++;
@@ -86,7 +98,7 @@ static void test_encoding_space(void) {
             }
         }
     }
-    assert(valid == 256);
+    assert(valid == 258);
 }
 
 static void test_basic_multiply_add(void) {
@@ -182,10 +194,82 @@ static void test_long_multiply_add(void) {
     assert(cpu.nzcv == UINT32_C(0x60000000));
 }
 
+static void test_multiply_high(void) {
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x2000),
+        .sp = UINT64_C(0xfedcba9876543210),
+        .nzcv = UINT32_C(0x90000000),
+    };
+
+    cpu.x[1] = UINT64_MAX;
+    cpu.x[2] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9bc27c20));
+    assert(cpu.x[0] == UINT64_C(0xfffffffffffffffe));
+
+    cpu.x[1] = UINT64_C(0x8000000000000000);
+    cpu.x[2] = 2;
+    execute_instruction(&cpu, UINT32_C(0x9bc27c20));
+    assert(cpu.x[0] == 1);
+
+    cpu.x[1] = UINT64_C(0x123456789abcdef0);
+    cpu.x[2] = UINT64_C(0xfedcba9876543210);
+    execute_instruction(&cpu, UINT32_C(0x9bc27c20));
+    assert(cpu.x[0] == UINT64_C(0x121fa00ad77d7422));
+
+    cpu.x[1] = UINT64_MAX;
+    cpu.x[2] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == 0);
+
+    cpu.x[1] = UINT64_C(0x8000000000000000);
+    cpu.x[2] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == 0);
+
+    cpu.x[1] = UINT64_C(0x8000000000000000);
+    cpu.x[2] = 2;
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == UINT64_MAX);
+
+    cpu.x[1] = UINT64_C(0x8000000000000000);
+    cpu.x[2] = UINT64_C(0x8000000000000000);
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == UINT64_C(0x4000000000000000));
+
+    cpu.x[1] = UINT64_C(0x7fffffffffffffff);
+    cpu.x[2] = UINT64_C(0x7fffffffffffffff);
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == UINT64_C(0x3fffffffffffffff));
+
+    cpu.x[1] = UINT64_C(0x923456789abcdef0);
+    cpu.x[2] = UINT64_C(0x7edcba9876543210);
+    execute_instruction(&cpu, UINT32_C(0x9b427c20));
+    assert(cpu.x[0] == UINT64_C(0xc99717824ef4eba2));
+
+    cpu.x[1] = UINT64_MAX;
+    cpu.x[2] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9b427c21));
+    assert(cpu.x[1] == 0);
+
+    cpu.x[0] = UINT64_MAX;
+    cpu.x[16] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9bdf7e00));
+    assert(cpu.x[0] == 0);
+
+    cpu.x[0] = UINT64_C(0x13579bdf2468ace0);
+    cpu.x[16] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0x9bdf7e1f));
+    assert(cpu.x[0] == UINT64_C(0x13579bdf2468ace0));
+    assert(cpu.pc == UINT64_C(0x2030));
+    assert(cpu.sp == UINT64_C(0xfedcba9876543210));
+    assert(cpu.nzcv == UINT32_C(0x90000000));
+}
+
 int main(void) {
     test_decode();
     test_encoding_space();
     test_basic_multiply_add();
     test_long_multiply_add();
+    test_multiply_high();
     return 0;
 }

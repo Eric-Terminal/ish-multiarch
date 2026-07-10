@@ -70,6 +70,8 @@ enum aarch64_opcode {
     AARCH64_OP_SMSUBL,
     AARCH64_OP_UMADDL,
     AARCH64_OP_UMSUBL,
+    AARCH64_OP_SMULH,
+    AARCH64_OP_UMULH,
 };
 
 enum aarch64_shift_type {
