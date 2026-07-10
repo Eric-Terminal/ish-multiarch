@@ -97,6 +97,27 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    dword_t barrier = word & UINT32_C(0xfffff0ff);
+    if (barrier == UINT32_C(0xd503305f) ||
+            barrier == UINT32_C(0xd503309f) ||
+            barrier == UINT32_C(0xd50330bf) ||
+            barrier == UINT32_C(0xd50330df)) {
+        enum aarch64_opcode opcode;
+        if (barrier == UINT32_C(0xd503305f))
+            opcode = AARCH64_OP_CLREX;
+        else if (barrier == UINT32_C(0xd503309f))
+            opcode = AARCH64_OP_DSB;
+        else if (barrier == UINT32_C(0xd50330bf))
+            opcode = AARCH64_OP_DMB;
+        else
+            opcode = AARCH64_OP_ISB;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = 64,
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xffe0001f)) == UINT32_C(0xd4000001)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = AARCH64_OP_SVC,
@@ -603,6 +624,47 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                         ((word >> 19) & 0x1f)),
                 .displacement = sign_extend_branch(
                         (word >> 5) & UINT32_C(0x3fff), 14),
+            },
+        };
+        return true;
+    }
+
+    dword_t exclusive_load = word & UINT32_C(0x3ffffc00);
+    if (exclusive_load == UINT32_C(0x085f7c00) ||
+            exclusive_load == UINT32_C(0x085ffc00)) {
+        byte_t size_shift = word >> 30;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = exclusive_load == UINT32_C(0x085ffc00) ?
+                    AARCH64_OP_LDAXR : AARCH64_OP_LDXR,
+            .width = size_shift == 3 ? 64 : 32,
+            .operands.exclusive = {
+                .rs = 31,
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .size = (byte_t) (1U << size_shift),
+            },
+        };
+        return true;
+    }
+
+    dword_t exclusive_store = word & UINT32_C(0x3fe0fc00);
+    if (exclusive_store == UINT32_C(0x08007c00) ||
+            exclusive_store == UINT32_C(0x0800fc00)) {
+        byte_t rs = (word >> 16) & 0x1f;
+        byte_t rt = word & 0x1f;
+        byte_t rn = (word >> 5) & 0x1f;
+        if (rs == rt || (rn != 31 && rs == rn))
+            return false;
+        byte_t size_shift = word >> 30;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = exclusive_store == UINT32_C(0x0800fc00) ?
+                    AARCH64_OP_STLXR : AARCH64_OP_STXR,
+            .width = size_shift == 3 ? 64 : 32,
+            .operands.exclusive = {
+                .rs = rs,
+                .rt = rt,
+                .rn = rn,
+                .size = (byte_t) (1U << size_shift),
             },
         };
         return true;

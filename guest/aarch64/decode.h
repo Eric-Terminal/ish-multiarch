@@ -56,6 +56,14 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_SIMD_IMM12,
     AARCH64_OP_LOAD_SIMD_IMM9,
     AARCH64_OP_STORE_SIMD_IMM9,
+    AARCH64_OP_LDXR,
+    AARCH64_OP_LDAXR,
+    AARCH64_OP_STXR,
+    AARCH64_OP_STLXR,
+    AARCH64_OP_CLREX,
+    AARCH64_OP_DMB,
+    AARCH64_OP_DSB,
+    AARCH64_OP_ISB,
     AARCH64_OP_ADR,
     AARCH64_OP_ADRP,
     AARCH64_OP_CSEL,
@@ -227,6 +235,12 @@ struct aarch64_decoded {
             byte_t rd;
             qword_t immediate;
         } advsimd_immediate;
+        struct {
+            byte_t rs;
+            byte_t rt;
+            byte_t rn;
+            byte_t size;
+        } exclusive;
         struct {
             byte_t rt;
         } system_register;

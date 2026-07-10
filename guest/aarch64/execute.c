@@ -549,6 +549,16 @@ static qword_t sign_extend_load(qword_t value, byte_t size) {
     return (value ^ sign) - sign;
 }
 
+static bool write_guest_memory(struct cpu_state *cpu, struct guest_tlb *tlb,
+        guest_addr_t address, const void *source, size_t size,
+        struct guest_memory_fault *fault) {
+    if (!guest_tlb_write(tlb, address, source, size, fault))
+        return false;
+    // 当前单线程模型允许保守的伪失败，任何普通 guest store 都结束保留。
+    aarch64_clear_exclusive(cpu);
+    return true;
+}
+
 static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -587,7 +597,7 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
     } else {
         qword_t value = read_register(cpu, rt, instruction->width, false);
         store_little_endian(bytes, size, value);
-        if (!guest_tlb_write(tlb, address, bytes, size, fault))
+        if (!write_guest_memory(cpu, tlb, address, bytes, size, fault))
             return false;
     }
     if (address_mode != AARCH64_ADDRESS_OFFSET)
@@ -619,7 +629,8 @@ static bool execute_simd_load_store(struct cpu_state *cpu,
                 GUEST_MEMORY_READ, fault))
             return false;
         cpu->v[rt] = value;
-    } else if (!guest_tlb_write(tlb, address, cpu->v[rt].b, size, fault)) {
+    } else if (!write_guest_memory(
+            cpu, tlb, address, cpu->v[rt].b, size, fault)) {
         return false;
     }
 
@@ -660,7 +671,8 @@ static bool execute_load_store_pair(struct cpu_state *cpu,
         qword_t second = read_register(cpu, rt2, instruction->width, false);
         store_little_endian(bytes, size, first);
         store_little_endian(bytes + size, size, second);
-        if (!guest_tlb_write(tlb, address, bytes, access_size, fault))
+        if (!write_guest_memory(
+                cpu, tlb, address, bytes, access_size, fault))
             return false;
     }
     if (address_mode != AARCH64_ADDRESS_OFFSET)
@@ -701,11 +713,95 @@ static bool execute_simd_load_store_pair(struct cpu_state *cpu,
     } else {
         memcpy(bytes, cpu->v[rt].b, size);
         memcpy(bytes + size, cpu->v[rt2].b, size);
-        if (!guest_tlb_write(tlb, address, bytes, access_size, fault))
+        if (!write_guest_memory(
+                cpu, tlb, address, bytes, access_size, fault))
             return false;
     }
     if (address_mode != AARCH64_ADDRESS_OFFSET)
         write_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool check_exclusive_alignment(guest_addr_t address, byte_t size,
+        enum guest_memory_access access, struct guest_memory_fault *fault) {
+    if ((address & (size - 1)) == 0)
+        return true;
+    *fault = (struct guest_memory_fault) {
+        .address = address,
+        .access = access,
+        .kind = GUEST_MEMORY_FAULT_ALIGNMENT,
+    };
+    return false;
+}
+
+static bool execute_load_exclusive(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t size = instruction->operands.exclusive.size;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    if (!check_exclusive_alignment(
+            address, size, GUEST_MEMORY_READ, fault))
+        return false;
+
+    byte_t bytes[8];
+    if (!guest_tlb_read(tlb, address, bytes, size,
+            GUEST_MEMORY_READ, fault))
+        return false;
+    qword_t value = load_little_endian(bytes, size);
+    aarch64_set_exclusive(cpu, address, size, value, 0,
+            tlb->address_space->generation);
+    write_register(cpu, instruction->operands.exclusive.rt,
+            instruction->width, false, value);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_store_exclusive(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t size = instruction->operands.exclusive.size;
+    byte_t status = instruction->operands.exclusive.rs;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    qword_t value = read_register(cpu, instruction->operands.exclusive.rt,
+            instruction->width, false);
+    if (!check_exclusive_alignment(
+            address, size, GUEST_MEMORY_WRITE, fault))
+        return false;
+
+    qword_t mapping_epoch = tlb->address_space->generation;
+    if (!aarch64_exclusive_matches(cpu, address, size, mapping_epoch)) {
+        aarch64_clear_exclusive(cpu);
+        write_register(cpu, status, 32, false, 1);
+        cpu->pc += 4;
+        return true;
+    }
+
+    byte_t current_bytes[8];
+    if (!guest_tlb_read(tlb, address, current_bytes, size,
+            GUEST_MEMORY_READ, fault)) {
+        aarch64_clear_exclusive(cpu);
+        fault->access = GUEST_MEMORY_WRITE;
+        return false;
+    }
+    qword_t current = load_little_endian(current_bytes, size);
+    if (current != cpu->exclusive.value_low) {
+        aarch64_clear_exclusive(cpu);
+        write_register(cpu, status, 32, false, 1);
+        cpu->pc += 4;
+        return true;
+    }
+
+    byte_t bytes[8];
+    store_little_endian(bytes, size, value);
+    aarch64_clear_exclusive(cpu);
+    if (!guest_tlb_write(tlb, address, bytes, size, fault))
+        return false;
+    write_register(cpu, status, 32, false, 0);
     cpu->pc += 4;
     return true;
 }
@@ -892,10 +988,34 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
+        case AARCH64_OP_LDXR:
+        case AARCH64_OP_LDAXR:
+            if (!execute_load_exclusive(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_STXR:
+        case AARCH64_OP_STLXR:
+            if (!execute_store_exclusive(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_CLREX:
+            aarch64_clear_exclusive(cpu);
+            cpu->pc += 4;
+            break;
+        case AARCH64_OP_DMB:
+        case AARCH64_OP_DSB:
+        case AARCH64_OP_ISB:
+            cpu->pc += 4;
+            break;
         case AARCH64_OP_SVC:
+            aarch64_clear_exclusive(cpu);
             cpu->pc += 4;
             result.stop = AARCH64_EXECUTE_SYSCALL;
             break;
     }
+    if (result.stop == AARCH64_EXECUTE_DATA_FAULT)
+        aarch64_clear_exclusive(cpu);
     return result;
 }

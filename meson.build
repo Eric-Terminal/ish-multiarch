@@ -493,6 +493,26 @@ if not meson.is_cross_build()
             'guest/aarch64/simd-load-store-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_simd_load_store', aarch64_simd_load_store_test)
+
+    aarch64_exclusive_test = executable('aarch64_exclusive_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/exclusive-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_exclusive', aarch64_exclusive_test)
+
+    aarch64_barrier_test = executable('aarch64_barrier_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/barrier-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_barrier', aarch64_barrier_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')

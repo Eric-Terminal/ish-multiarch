@@ -1,0 +1,426 @@
+#include <assert.h>
+#include <string.h>
+
+#include "guest/aarch64/decode.h"
+#include "guest/aarch64/execute.h"
+
+#define DATA_PAGE UINT64_C(0x000056789abcd000)
+#define READONLY_PAGE (DATA_PAGE + GUEST_MEMORY_PAGE_SIZE)
+#define UNMAPPED_PAGE (READONLY_PAGE + GUEST_MEMORY_PAGE_SIZE)
+
+struct test_page {
+    guest_addr_t address;
+    byte_t *host_page;
+    unsigned permissions;
+};
+
+struct test_memory {
+    byte_t data[GUEST_MEMORY_PAGE_SIZE];
+    byte_t readonly[GUEST_MEMORY_PAGE_SIZE];
+    struct test_page pages[2];
+    struct guest_address_space space;
+    struct guest_tlb tlb;
+};
+
+static enum guest_memory_fault_kind resolve_test_page(void *opaque,
+        guest_addr_t page_base, enum guest_memory_access access,
+        struct guest_page_view *view) {
+    struct test_memory *memory = opaque;
+    use(access);
+    for (size_t i = 0; i < array_size(memory->pages); i++) {
+        if (memory->pages[i].address == page_base) {
+            *view = (struct guest_page_view) {
+                .host_page = memory->pages[i].host_page,
+                .permissions = memory->pages[i].permissions,
+            };
+            return GUEST_MEMORY_FAULT_NONE;
+        }
+    }
+    return GUEST_MEMORY_FAULT_UNMAPPED;
+}
+
+static const struct guest_address_space_ops test_ops = {
+    .resolve_page = resolve_test_page,
+};
+
+static void init_test_memory(struct test_memory *memory) {
+    *memory = (struct test_memory) {0};
+    memory->pages[0] = (struct test_page) {
+        .address = DATA_PAGE,
+        .host_page = memory->data,
+        .permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE,
+    };
+    memory->pages[1] = (struct test_page) {
+        .address = READONLY_PAGE,
+        .host_page = memory->readonly,
+        .permissions = GUEST_MEMORY_READ,
+    };
+    guest_address_space_init(&memory->space, &test_ops, memory, 48);
+    guest_tlb_init(&memory->tlb, &memory->space);
+}
+
+static dword_t encode_load(unsigned size_shift, bool acquire,
+        byte_t rt, byte_t rn) {
+    return UINT32_C(0x085f7c00) |
+            (dword_t) size_shift << 30 |
+            (dword_t) acquire << 15 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
+static dword_t encode_store(unsigned size_shift, bool release,
+        byte_t rs, byte_t rt, byte_t rn) {
+    return UINT32_C(0x08007c00) |
+            (dword_t) size_shift << 30 |
+            (dword_t) release << 15 |
+            (dword_t) rs << 16 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
+static struct aarch64_decoded decode(dword_t word) {
+    struct aarch64_decoded instruction;
+    assert(aarch64_decode(word, &instruction));
+    return instruction;
+}
+
+static struct aarch64_execute_result execute_word(struct test_memory *memory,
+        struct cpu_state *cpu, dword_t word) {
+    struct aarch64_decoded instruction = decode(word);
+    return aarch64_execute(cpu, &memory->tlb, &instruction);
+}
+
+static void assert_retired(struct test_memory *memory,
+        struct cpu_state *cpu, dword_t word) {
+    qword_t old_pc = cpu->pc;
+    struct aarch64_execute_result result =
+            execute_word(memory, cpu, word);
+    assert(result.stop == AARCH64_EXECUTE_RETIRED);
+    assert(cpu->pc == old_pc + 4);
+}
+
+static void put_value(byte_t *destination, qword_t value, byte_t size) {
+    for (byte_t byte = 0; byte < size; byte++)
+        destination[byte] = (byte_t) (value >> (byte * 8));
+}
+
+static qword_t get_value(const byte_t *source, byte_t size) {
+    qword_t value = 0;
+    for (byte_t byte = 0; byte < size; byte++)
+        value |= (qword_t) source[byte] << (byte * 8);
+    return value;
+}
+
+static qword_t size_mask(byte_t size) {
+    return size == 8 ? UINT64_MAX :
+            (UINT64_C(1) << (size * 8)) - 1;
+}
+
+static void assert_decode(dword_t word, enum aarch64_opcode opcode,
+        byte_t size, byte_t width, byte_t rs, byte_t rt, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.exclusive.size == size);
+    assert(instruction.operands.exclusive.rs == rs);
+    assert(instruction.operands.exclusive.rt == rt);
+    assert(instruction.operands.exclusive.rn == rn);
+}
+
+static void test_apple_vectors(void) {
+    assert_decode(UINT32_C(0x085f7c20), AARCH64_OP_LDXR,
+            1, 32, 31, 0, 1);
+    assert_decode(UINT32_C(0x485f7c62), AARCH64_OP_LDXR,
+            2, 32, 31, 2, 3);
+    assert_decode(UINT32_C(0x885f7ca4), AARCH64_OP_LDXR,
+            4, 32, 31, 4, 5);
+    assert_decode(UINT32_C(0xc85f7ce6), AARCH64_OP_LDXR,
+            8, 64, 31, 6, 7);
+    assert_decode(UINT32_C(0x085ffd28), AARCH64_OP_LDAXR,
+            1, 32, 31, 8, 9);
+    assert_decode(UINT32_C(0x485ffd6a), AARCH64_OP_LDAXR,
+            2, 32, 31, 10, 11);
+    assert_decode(UINT32_C(0x885ffdac), AARCH64_OP_LDAXR,
+            4, 32, 31, 12, 13);
+    assert_decode(UINT32_C(0xc85ffdee), AARCH64_OP_LDAXR,
+            8, 64, 31, 14, 15);
+    assert_decode(UINT32_C(0x08107e51), AARCH64_OP_STXR,
+            1, 32, 16, 17, 18);
+    assert_decode(UINT32_C(0x48137eb4), AARCH64_OP_STXR,
+            2, 32, 19, 20, 21);
+    assert_decode(UINT32_C(0x88167f17), AARCH64_OP_STXR,
+            4, 32, 22, 23, 24);
+    assert_decode(UINT32_C(0xc8197f7a), AARCH64_OP_STXR,
+            8, 64, 25, 26, 27);
+    assert_decode(UINT32_C(0x0800fc41), AARCH64_OP_STLXR,
+            1, 32, 0, 1, 2);
+    assert_decode(UINT32_C(0x4803fca4), AARCH64_OP_STLXR,
+            2, 32, 3, 4, 5);
+    assert_decode(UINT32_C(0x8806fd07), AARCH64_OP_STLXR,
+            4, 32, 6, 7, 8);
+    assert_decode(UINT32_C(0xc809fd6a), AARCH64_OP_STLXR,
+            8, 64, 9, 10, 11);
+    assert_decode(UINT32_C(0xc85fffff), AARCH64_OP_LDAXR,
+            8, 64, 31, 31, 31);
+    assert_decode(UINT32_C(0xc800ffff), AARCH64_OP_STLXR,
+            8, 64, 0, 31, 31);
+}
+
+static void test_encoding_space(void) {
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        for (unsigned acquire = 0; acquire < 2; acquire++) {
+            struct aarch64_decoded instruction = decode(encode_load(
+                    size_shift, acquire, 0, 1));
+            assert(instruction.opcode == (acquire ?
+                    AARCH64_OP_LDAXR : AARCH64_OP_LDXR));
+            assert(instruction.operands.exclusive.size ==
+                    (1U << size_shift));
+            assert(instruction.width == (size_shift == 3 ? 64 : 32));
+        }
+    }
+
+    unsigned valid = 0;
+    for (unsigned rs = 0; rs < 32; rs++) {
+        for (unsigned rt = 0; rt < 32; rt++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                struct aarch64_decoded instruction;
+                bool decoded = aarch64_decode(encode_store(2, true,
+                        (byte_t) rs, (byte_t) rt, (byte_t) rn),
+                        &instruction);
+                bool expected = rs != rt && (rn == 31 || rs != rn);
+                assert(decoded == expected);
+                if (decoded)
+                    valid++;
+            }
+        }
+    }
+    assert(valid == 30783);
+
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        for (unsigned release = 0; release < 2; release++) {
+            struct aarch64_decoded instruction = decode(encode_store(
+                    size_shift, release, 0, 1, 2));
+            assert(instruction.opcode == (release ?
+                    AARCH64_OP_STLXR : AARCH64_OP_STXR));
+            assert(instruction.operands.exclusive.size ==
+                    (1U << size_shift));
+        }
+    }
+}
+
+static void test_all_sizes(struct test_memory *memory) {
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        byte_t size = (byte_t) (1U << size_shift);
+        size_t offset = 128 + size_shift * 32;
+        qword_t original = UINT64_C(0xfedcba9876543210) & size_mask(size);
+        qword_t replacement = UINT64_C(0x0123456789abcdef) & size_mask(size);
+        put_value(memory->data + offset, original, size);
+
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x1000),
+            .sp = UINT64_C(0x1122334455667788),
+            .nzcv = UINT32_C(0xa0000000),
+        };
+        cpu.x[1] = DATA_PAGE + offset;
+        cpu.x[2] = UINT64_MAX;
+        assert_retired(memory, &cpu,
+                encode_load(size_shift, size_shift & 1, 2, 1));
+        assert(cpu.x[2] == original);
+        assert(cpu.exclusive.valid);
+        assert(cpu.exclusive.address == DATA_PAGE + offset);
+        assert(cpu.exclusive.size == size);
+        assert(cpu.exclusive.value_low == original);
+        assert(cpu.exclusive.mapping_epoch == memory->space.generation);
+
+        cpu.x[3] = replacement;
+        cpu.x[4] = UINT64_MAX;
+        assert_retired(memory, &cpu,
+                encode_store(size_shift, size_shift & 1, 4, 3, 1));
+        assert(cpu.x[4] == 0);
+        assert(get_value(memory->data + offset, size) == replacement);
+        assert(!cpu.exclusive.valid);
+
+        cpu.x[3] = original;
+        cpu.x[4] = UINT64_MAX;
+        assert_retired(memory, &cpu,
+                encode_store(size_shift, false, 4, 3, 1));
+        assert(cpu.x[4] == 1);
+        assert(get_value(memory->data + offset, size) == replacement);
+        assert(cpu.sp == UINT64_C(0x1122334455667788));
+        assert(cpu.nzcv == UINT32_C(0xa0000000));
+    }
+}
+
+static void test_zero_register_and_sp(struct test_memory *memory) {
+    size_t offset = 384;
+    put_value(memory->data + offset,
+            UINT64_C(0x8877665544332211), 8);
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x1800),
+        .sp = DATA_PAGE + offset,
+    };
+    assert_retired(memory, &cpu, UINT32_C(0xc85fffff));
+    assert(cpu.exclusive.valid);
+    assert_retired(memory, &cpu, UINT32_C(0xc800ffff));
+    assert(cpu.x[0] == 0);
+    assert(get_value(memory->data + offset, 8) == 0);
+
+    put_value(memory->data + offset, UINT32_C(0x12345678), 4);
+    assert_retired(memory, &cpu, encode_load(2, false, 31, 31));
+    cpu.x[1] = UINT32_C(0xaabbccdd);
+    assert_retired(memory, &cpu, encode_store(2, false, 31, 1, 31));
+    assert(get_value(memory->data + offset, 4) == UINT32_C(0xaabbccdd));
+}
+
+static void test_monitor_failures(struct test_memory *memory) {
+    size_t offset = 512;
+    put_value(memory->data + offset, UINT32_C(0x12345678), 4);
+    struct cpu_state cpu = {.pc = UINT64_C(0x2000)};
+    cpu.x[1] = DATA_PAGE + offset;
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+
+    cpu.x[0] = UINT32_C(0x12345678);
+    assert_retired(memory, &cpu, UINT32_C(0xb9000020));
+    assert(!cpu.exclusive.valid);
+    cpu.x[3] = UINT32_C(0x87654321);
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    byte_t external[4];
+    put_value(external, UINT32_C(0xabcdef01), sizeof(external));
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset,
+            external, sizeof(external), &fault));
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+    assert(get_value(memory->data + offset, 4) == UINT32_C(0xabcdef01));
+
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    guest_address_space_changed(&memory->space);
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    cpu.x[1] += 4;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+    cpu.x[1] -= 4;
+
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    assert_retired(memory, &cpu, encode_store(1, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+
+    aarch64_clear_exclusive(&cpu);
+    cpu.x[1] = UNMAPPED_PAGE;
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+}
+
+static void test_barrier_and_clrex(struct test_memory *memory) {
+    size_t offset = 640;
+    put_value(memory->data + offset, 0, 4);
+    struct cpu_state cpu = {.pc = UINT64_C(0x2800)};
+    cpu.x[1] = DATA_PAGE + offset;
+    cpu.x[2] = UINT32_C(0x11223344);
+    assert_retired(memory, &cpu, encode_load(2, true, 3, 1));
+    assert_retired(memory, &cpu, UINT32_C(0xd5033bbf));
+    assert(cpu.exclusive.valid);
+    assert_retired(memory, &cpu, encode_store(2, true, 4, 2, 1));
+    assert(cpu.x[4] == 0);
+
+    assert_retired(memory, &cpu, encode_load(2, false, 3, 1));
+    assert_retired(memory, &cpu, UINT32_C(0xd5033f5f));
+    assert(!cpu.exclusive.valid);
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 2, 1));
+    assert(cpu.x[4] == 1);
+}
+
+static void test_faults(struct test_memory *memory) {
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x3000),
+        .x[1] = UNMAPPED_PAGE,
+        .x[2] = UINT64_C(0x1122334455667788),
+    };
+    struct aarch64_execute_result result = execute_word(
+            memory, &cpu, encode_load(2, false, 2, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[2] == UINT64_C(0x1122334455667788));
+    assert(cpu.pc == UINT64_C(0x3000));
+
+    cpu.x[1] = DATA_PAGE + 3;
+    result = execute_word(memory, &cpu, encode_load(2, false, 2, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_ALIGNMENT);
+    assert(result.fault.address == DATA_PAGE + 3);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+
+    cpu.x[1] = DATA_PAGE + 3;
+    cpu.x[3] = UINT32_C(0xaabbccdd);
+    cpu.x[4] = UINT64_C(0x8877665544332211);
+    result = execute_word(memory, &cpu,
+            encode_store(2, false, 4, 3, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_ALIGNMENT);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(cpu.x[4] == UINT64_C(0x8877665544332211));
+
+    size_t offset = 128;
+    put_value(memory->readonly + offset, UINT32_C(0x12345678), 4);
+    cpu.x[1] = READONLY_PAGE + offset;
+    assert_retired(memory, &cpu, encode_load(2, true, 2, 1));
+    cpu.x[3] = UINT32_C(0x87654321);
+    cpu.x[4] = UINT64_C(0xaaaaaaaa55555555);
+    qword_t store_pc = cpu.pc;
+    result = execute_word(memory, &cpu,
+            encode_store(2, true, 4, 3, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == READONLY_PAGE + offset);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(cpu.x[4] == UINT64_C(0xaaaaaaaa55555555));
+    assert(cpu.pc == store_pc);
+    assert(!cpu.exclusive.valid);
+    assert(get_value(memory->readonly + offset, 4) == UINT32_C(0x12345678));
+
+    cpu.x[1] = UINT64_C(1) << 48;
+    result = execute_word(memory, &cpu, encode_load(3, false, 2, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE);
+}
+
+static void test_musl_lock_sequence(struct test_memory *memory) {
+    size_t offset = 896;
+    put_value(memory->data + offset, 0, 4);
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x3800),
+        .x[8] = 1,
+        .x[9] = DATA_PAGE + offset,
+    };
+    assert_retired(memory, &cpu, UINT32_C(0x885ffd2a));
+    assert(cpu.x[10] == 0);
+    assert_retired(memory, &cpu, UINT32_C(0x880afd28));
+    assert(cpu.x[10] == 0);
+    assert(get_value(memory->data + offset, 4) == 1);
+    assert_retired(memory, &cpu, UINT32_C(0xd5033bbf));
+}
+
+int main(void) {
+    test_apple_vectors();
+    test_encoding_space();
+
+    struct test_memory memory;
+    init_test_memory(&memory);
+    test_all_sizes(&memory);
+    test_zero_register_and_sp(&memory);
+    test_monitor_failures(&memory);
+    test_barrier_and_clrex(&memory);
+    test_faults(&memory);
+    test_musl_lock_sequence(&memory);
+    return 0;
+}
