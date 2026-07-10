@@ -451,6 +451,8 @@ static void test_signed_load_decode(void) {
             4, 64, 5, 4, 4, AARCH64_ADDRESS_POST_INDEX);
     assert_signed_load(UINT32_C(0x38dfece6), AARCH64_OP_LOAD_IMM9,
             1, 32, 7, 6, -2, AARCH64_ADDRESS_PRE_INDEX);
+    assert_signed_load(UINT32_C(0x389fffff), AARCH64_OP_LOAD_IMM9,
+            1, 64, 31, 31, -1, AARCH64_ADDRESS_PRE_INDEX);
 }
 
 static void assert_load_store_pair(dword_t word, enum aarch64_opcode opcode,
@@ -521,6 +523,7 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
     assert(!aarch64_decode(UINT32_C(0x38dfece7), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x389ff820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb9c00020), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf9800400), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf89f8000), &invalid));

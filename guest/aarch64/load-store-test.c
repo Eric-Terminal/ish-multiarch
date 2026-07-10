@@ -334,6 +334,13 @@ static void test_signed_loads(struct test_memory *memory) {
     cpu.x[14] = DATA_PAGE + 384;
     assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb98009cd)), &cpu);
     assert(cpu.x[13] == UINT32_C(0x7fffffff));
+
+    memory->data[400] = 0x80;
+    cpu.x[0] = UINT64_C(0x0123456789abcdef);
+    cpu.sp = DATA_PAGE + 401;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x389fffff)), &cpu);
+    assert(cpu.x[0] == UINT64_C(0x0123456789abcdef));
+    assert(cpu.sp == DATA_PAGE + 400);
 }
 
 static void test_faults(struct test_memory *memory) {
