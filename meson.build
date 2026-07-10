@@ -357,6 +357,13 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_program', aarch64_program_test)
 
+    aarch64_e0_test = executable('aarch64_e0_test',
+        'guest/aarch64/e0-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: libish_aarch64_core)
+    test('aarch64_e0', aarch64_e0_test)
+
     aarch64_instruction_test = executable('aarch64_instruction_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
