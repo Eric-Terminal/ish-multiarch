@@ -358,6 +358,68 @@ static qword_t signed_divide(qword_t dividend, qword_t divisor,
     return quotient;
 }
 
+static qword_t reverse_bits(qword_t value, byte_t width) {
+    qword_t result = 0;
+    for (byte_t bit = 0; bit < width; bit++)
+        result |= ((value >> bit) & 1) << (width - 1 - bit);
+    return result;
+}
+
+static qword_t reverse_bytes_in_elements(qword_t value, byte_t width,
+        byte_t element_width) {
+    qword_t result = 0;
+    byte_t bytes_per_element = (byte_t) (element_width / 8);
+    byte_t byte_count = (byte_t) (width / 8);
+    for (byte_t byte = 0; byte < byte_count; byte++) {
+        byte_t element_start = (byte_t)
+                (byte / bytes_per_element * bytes_per_element);
+        byte_t destination = (byte_t) (element_start +
+                bytes_per_element - 1 - byte % bytes_per_element);
+        result |= ((value >> (byte * 8)) & UINT64_C(0xff)) <<
+                (destination * 8);
+    }
+    return result;
+}
+
+static byte_t count_leading_zeros(qword_t value, byte_t width) {
+    byte_t count = 0;
+    while (count < width &&
+            ((value >> (width - 1 - count)) & 1) == 0)
+        count++;
+    return count;
+}
+
+static void execute_data_processing_1source(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    qword_t value = read_register(cpu,
+            instruction->operands.data_processing_1source.rn,
+            width, false);
+    qword_t result;
+
+    if (instruction->opcode == AARCH64_OP_RBIT) {
+        result = reverse_bits(value, width);
+    } else if (instruction->opcode == AARCH64_OP_REV16) {
+        result = reverse_bytes_in_elements(value, width, 16);
+    } else if (instruction->opcode == AARCH64_OP_REV32) {
+        result = reverse_bytes_in_elements(value, width, 32);
+    } else if (instruction->opcode == AARCH64_OP_REV64) {
+        result = reverse_bytes_in_elements(value, width, 64);
+    } else if (instruction->opcode == AARCH64_OP_CLZ) {
+        result = count_leading_zeros(value, width);
+    } else {
+        qword_t sign = UINT64_C(1) << (width - 1);
+        qword_t normalized = value & sign ?
+                (~value & width_mask(width)) : value;
+        // 归一化后最高位恒为零，减一排除原始符号位。
+        result = count_leading_zeros(normalized, width) - 1;
+    }
+
+    write_register(cpu, instruction->operands.data_processing_1source.rd,
+            width, false, result);
+    cpu->pc += 4;
+}
+
 static void execute_data_processing_2source(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
@@ -607,6 +669,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_CSINV:
         case AARCH64_OP_CSNEG:
             execute_conditional_select(cpu, instruction);
+            break;
+        case AARCH64_OP_RBIT:
+        case AARCH64_OP_REV16:
+        case AARCH64_OP_REV32:
+        case AARCH64_OP_REV64:
+        case AARCH64_OP_CLZ:
+        case AARCH64_OP_CLS:
+            execute_data_processing_1source(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:

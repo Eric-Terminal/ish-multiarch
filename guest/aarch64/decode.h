@@ -73,6 +73,12 @@ enum aarch64_opcode {
     AARCH64_OP_SMULH,
     AARCH64_OP_UMULH,
     AARCH64_OP_EXTR,
+    AARCH64_OP_RBIT,
+    AARCH64_OP_REV16,
+    AARCH64_OP_REV32,
+    AARCH64_OP_REV64,
+    AARCH64_OP_CLZ,
+    AARCH64_OP_CLS,
 };
 
 enum aarch64_shift_type {
@@ -203,6 +209,10 @@ struct aarch64_decoded {
             byte_t rn;
             byte_t rm;
         } data_processing_2source;
+        struct {
+            byte_t rd;
+            byte_t rn;
+        } data_processing_1source;
         struct {
             byte_t rt;
         } system_register;

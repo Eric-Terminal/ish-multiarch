@@ -449,6 +449,18 @@ if not meson.is_cross_build()
             'guest/aarch64/extract-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_extract', aarch64_extract_test)
+
+    aarch64_data_processing_1source_test = executable(
+        'aarch64_data_processing_1source_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/data-processing-1source-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_data_processing_1source',
+        aarch64_data_processing_1source_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')
