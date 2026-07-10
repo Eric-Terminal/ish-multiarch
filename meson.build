@@ -241,6 +241,12 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_linux_syscall', aarch64_linux_syscall_test)
 
+    aarch64_elf64_test = executable('aarch64_elf64_test', [
+            'guest/aarch64/elf64.c',
+            'guest/aarch64/elf64-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_elf64', aarch64_elf64_test)
+
     aarch64_address_space_test = executable('aarch64_address_space_test', [
             'guest/memory/address-space.c',
             'guest/memory/address-space-test.c',
