@@ -230,6 +230,13 @@ if not meson.is_cross_build()
     aarch64_cpu_test = executable('aarch64_cpu_test', 'guest/aarch64/cpu-test.c',
         include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_cpu', aarch64_cpu_test)
+
+    aarch64_instruction_test = executable('aarch64_instruction_test', [
+            'guest/aarch64/decode.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/instruction-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_instruction', aarch64_instruction_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')
