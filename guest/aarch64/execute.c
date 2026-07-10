@@ -596,6 +596,39 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
     return true;
 }
 
+static bool execute_simd_load_store(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.load_store.rt;
+    byte_t rn = instruction->operands.load_store.rn;
+    byte_t size = instruction->operands.load_store.size;
+    guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store.address_mode;
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store.offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+
+    bool load = instruction->opcode == AARCH64_OP_LOAD_SIMD_IMM12 ||
+            instruction->opcode == AARCH64_OP_LOAD_SIMD_IMM9;
+    if (load) {
+        union aarch64_vector_reg value = {0};
+        if (!guest_tlb_read(tlb, address, value.b, size,
+                GUEST_MEMORY_READ, fault))
+            return false;
+        cpu->v[rt] = value;
+    } else if (!guest_tlb_write(tlb, address, cpu->v[rt].b, size, fault)) {
+        return false;
+    }
+
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+    return true;
+}
+
 static bool execute_load_store_pair(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -837,6 +870,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_LOAD_REGISTER_OFFSET:
         case AARCH64_OP_STORE_REGISTER_OFFSET:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LOAD_SIMD_IMM12:
+        case AARCH64_OP_STORE_SIMD_IMM12:
+        case AARCH64_OP_LOAD_SIMD_IMM9:
+        case AARCH64_OP_STORE_SIMD_IMM9:
+            if (!execute_simd_load_store(
+                    cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
         case AARCH64_OP_LOAD_PAIR:

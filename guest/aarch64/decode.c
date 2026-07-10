@@ -77,6 +77,17 @@ static bool decode_scalar_transfer(byte_t size, byte_t operation,
     return true;
 }
 
+static bool decode_simd_transfer(byte_t size_field, byte_t operation,
+        bool *load, byte_t *size) {
+    bool quadword = (operation & 2) != 0;
+    if (quadword && size_field != 0)
+        return false;
+    byte_t scale = quadword ? 4 : size_field;
+    *load = (operation & 1) != 0;
+    *size = (byte_t) (1U << scale);
+    return true;
+}
+
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     if (word == UINT32_C(0xd503201f)) {
         *decoded = (struct aarch64_decoded) {
@@ -663,6 +674,60 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .offset = sign_extend((word >> 15) &
                         UINT32_C(0x7f), 7) * (int64_t) size,
                 .address_mode = address_mode,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x3f200000)) == UINT32_C(0x3c000000)) {
+        byte_t size_field = word >> 30;
+        byte_t operation = (word >> 22) & 3;
+        byte_t mode = (word >> 10) & 3;
+        bool load;
+        byte_t size;
+        if (mode == 2 || !decode_simd_transfer(
+                size_field, operation, &load, &size))
+            return false;
+
+        enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
+        if (mode == 1)
+            address_mode = AARCH64_ADDRESS_POST_INDEX;
+        else if (mode == 3)
+            address_mode = AARCH64_ADDRESS_PRE_INDEX;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_SIMD_IMM9 :
+                    AARCH64_OP_STORE_SIMD_IMM9,
+            .width = (byte_t) (size * 8),
+            .operands.load_store = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .size = size,
+                .offset = sign_extend((word >> 12) &
+                        UINT32_C(0x1ff), 9),
+                .address_mode = address_mode,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0x3f000000)) == UINT32_C(0x3d000000)) {
+        byte_t size_field = word >> 30;
+        byte_t operation = (word >> 22) & 3;
+        bool load;
+        byte_t size;
+        if (!decode_simd_transfer(size_field, operation, &load, &size))
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_SIMD_IMM12 :
+                    AARCH64_OP_STORE_SIMD_IMM12,
+            .width = (byte_t) (size * 8),
+            .operands.load_store = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .size = size,
+                .offset = (int64_t) (((word >> 10) &
+                        UINT32_C(0xfff)) * (dword_t) size),
+                .address_mode = AARCH64_ADDRESS_OFFSET,
             },
         };
         return true;

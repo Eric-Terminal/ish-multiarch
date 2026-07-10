@@ -482,6 +482,17 @@ if not meson.is_cross_build()
             'guest/aarch64/simd-pair-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_simd_pair', aarch64_simd_pair_test)
+
+    aarch64_simd_load_store_test = executable(
+        'aarch64_simd_load_store_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/simd-load-store-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_simd_load_store', aarch64_simd_load_store_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')

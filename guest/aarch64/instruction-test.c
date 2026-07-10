@@ -824,7 +824,7 @@ int main(void) {
     struct aarch64_decoded invalid;
     assert(!aarch64_decode(UINT32_C(0x32800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd61f03e0), &invalid));
-    assert(!aarch64_decode(UINT32_C(0x3d400000), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x7d800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd4000002), &invalid));
     assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
     assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
