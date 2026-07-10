@@ -18,6 +18,8 @@ enum guest_memory_access {
     GUEST_MEMORY_WRITE = 1 << 1,
     GUEST_MEMORY_EXECUTE = 1 << 2,
 };
+#define GUEST_MEMORY_PERMISSION_MASK ((unsigned) (GUEST_MEMORY_READ | \
+        GUEST_MEMORY_WRITE | GUEST_MEMORY_EXECUTE))
 
 enum guest_memory_fault_kind {
     GUEST_MEMORY_FAULT_NONE,
