@@ -935,6 +935,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     64, false);
             cpu->pc += 4;
             break;
+        case AARCH64_OP_MRS_DCZID_EL0:
+            // 尚未实现 DC ZVA，因此通过 DZP 明确要求 guest 使用普通清零路径。
+            write_register(cpu, instruction->operands.system_register.rt,
+                    64, false, UINT64_C(0x10));
+            cpu->pc += 4;
+            break;
         case AARCH64_OP_MADD:
         case AARCH64_OP_MSUB:
         case AARCH64_OP_SMADDL:

@@ -20,6 +20,15 @@ static void execute_instruction(struct cpu_state *cpu, dword_t word) {
 static void test_decode(void) {
     for (unsigned rt = 0; rt < 32; rt++) {
         struct aarch64_decoded instruction =
+                decode(UINT32_C(0xd53b00e0) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MRS_DCZID_EL0);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
+
+        assert(!aarch64_decode(UINT32_C(0xd51b00e0) | (dword_t) rt,
+                &instruction));
+
+        instruction =
                 decode(UINT32_C(0xd53bd040) | (dword_t) rt);
         assert(instruction.opcode == AARCH64_OP_MRS_TPIDR_EL0);
         assert(instruction.width == 64);
@@ -32,6 +41,9 @@ static void test_decode(void) {
     }
 
     static const dword_t unsupported[] = {
+        UINT32_C(0xd53b00c0), UINT32_C(0xd53b01e0),
+        UINT32_C(0xd53b10e0), UINT32_C(0xd53a00e0),
+        UINT32_C(0xd53300e0),
         UINT32_C(0xd53bd060), UINT32_C(0xd51bd060),
         UINT32_C(0xd53bd0a0), UINT32_C(0xd51bd0a0),
         UINT32_C(0xd53bd140), UINT32_C(0xd53bc040),
@@ -50,6 +62,15 @@ static void test_execute(void) {
         .nzcv = UINT32_C(0xb0000000),
         .tpidr_el0 = UINT64_C(0x123456789abcdef0),
     };
+    cpu.x[2] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0xd53b00e2));
+    assert(cpu.x[2] == UINT64_C(0x10));
+    assert(cpu.tpidr_el0 == UINT64_C(0x123456789abcdef0));
+
+    cpu.x[30] = UINT64_C(0x7766554433221100);
+    execute_instruction(&cpu, UINT32_C(0xd53b00ff));
+    assert(cpu.x[30] == UINT64_C(0x7766554433221100));
+
     execute_instruction(&cpu, UINT32_C(0xd53bd040));
     assert(cpu.x[0] == UINT64_C(0x123456789abcdef0));
 
@@ -68,7 +89,7 @@ static void test_execute(void) {
 
     execute_instruction(&cpu, UINT32_C(0xd51bd05f));
     assert(cpu.tpidr_el0 == 0);
-    assert(cpu.pc == UINT64_C(0x1014));
+    assert(cpu.pc == UINT64_C(0x101c));
     assert(cpu.sp == UINT64_C(0xfedcba9876543210));
     assert(cpu.nzcv == UINT32_C(0xb0000000));
 }

@@ -129,6 +129,14 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     }
 
     dword_t system_register = word & UINT32_C(0xffffffe0);
+    if (system_register == UINT32_C(0xd53b00e0)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_MRS_DCZID_EL0,
+            .width = 64,
+            .operands.system_register.rt = word & 0x1f,
+        };
+        return true;
+    }
     if (system_register == UINT32_C(0xd53bd040) ||
             system_register == UINT32_C(0xd51bd040)) {
         *decoded = (struct aarch64_decoded) {
