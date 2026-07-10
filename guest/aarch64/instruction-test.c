@@ -265,6 +265,32 @@ static void test_load_store_decode(void) {
     assert(instruction.operands.load_store.offset == -4);
 }
 
+static void assert_load_store_pair(dword_t word, enum aarch64_opcode opcode,
+        byte_t size, byte_t rn, byte_t rt, byte_t rt2, int64_t offset,
+        enum aarch64_address_mode address_mode) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == size * 8);
+    assert(instruction.operands.load_store_pair.rn == rn);
+    assert(instruction.operands.load_store_pair.rt == rt);
+    assert(instruction.operands.load_store_pair.rt2 == rt2);
+    assert(instruction.operands.load_store_pair.offset == offset);
+    assert(instruction.operands.load_store_pair.address_mode == address_mode);
+}
+
+static void test_load_store_pair_decode(void) {
+    assert_load_store_pair(UINT32_C(0xa9bf7bfd), AARCH64_OP_STORE_PAIR,
+            8, 31, 29, 30, -16, AARCH64_ADDRESS_PRE_INDEX);
+    assert_load_store_pair(UINT32_C(0xa8c17bfd), AARCH64_OP_LOAD_PAIR,
+            8, 31, 29, 30, 16, AARCH64_ADDRESS_POST_INDEX);
+    assert_load_store_pair(UINT32_C(0x29010440), AARCH64_OP_STORE_PAIR,
+            4, 2, 0, 1, 8, AARCH64_ADDRESS_OFFSET);
+    assert_load_store_pair(UINT32_C(0xa94190a3), AARCH64_OP_LOAD_PAIR,
+            8, 5, 3, 4, 24, AARCH64_ADDRESS_OFFSET);
+    assert_load_store_pair(UINT32_C(0xa9400400), AARCH64_OP_LOAD_PAIR,
+            8, 0, 0, 1, 0, AARCH64_ADDRESS_OFFSET);
+}
+
 static void test_svc_decode(void) {
     struct aarch64_decoded instruction = decode(UINT32_C(0xd4000001));
     assert(instruction.opcode == AARCH64_OP_SVC);
@@ -288,6 +314,7 @@ int main(void) {
     test_branches();
     test_conditional_branches();
     test_load_store_decode();
+    test_load_store_pair_decode();
     test_svc_decode();
 
     struct aarch64_decoded invalid;
@@ -302,5 +329,14 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xf85f8820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xa8410440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x69000440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x69410440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xe9000440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xe9400440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xad410440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xa8c10400), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xa9400040), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xa8810400), &invalid));
     return 0;
 }

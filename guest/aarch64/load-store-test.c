@@ -215,6 +215,58 @@ static void test_unscaled_and_writeback(struct test_memory *memory) {
     assert(cpu.x[7] == DATA_PAGE + 64);
 }
 
+static void test_pairs(struct test_memory *memory) {
+    struct cpu_state cpu = {
+        .x[29] = UINT64_C(0x0123456789abcdef),
+        .x[30] = UINT64_C(0xfedcba9876543210),
+        .sp = DATA_PAGE + 160,
+    };
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xa9bf7bfd)), &cpu);
+    assert(cpu.sp == DATA_PAGE + 144);
+    byte_t expected[16];
+    put_qword(expected, UINT64_C(0x0123456789abcdef));
+    put_qword(expected + 8, UINT64_C(0xfedcba9876543210));
+    assert(memcmp(&memory->data[144], expected, sizeof(expected)) == 0);
+
+    cpu.x[29] = 0;
+    cpu.x[30] = 0;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xa8c17bfd)), &cpu);
+    assert(cpu.x[29] == UINT64_C(0x0123456789abcdef));
+    assert(cpu.x[30] == UINT64_C(0xfedcba9876543210));
+    assert(cpu.sp == DATA_PAGE + 160);
+
+    cpu.x[0] = UINT64_C(0xffffffff89abcdef);
+    cpu.x[1] = UINT64_C(0xffffffff01234567);
+    cpu.x[2] = DATA_PAGE + 184;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x29010440)), &cpu);
+    const byte_t expected_words[] = {0xef, 0xcd, 0xab, 0x89,
+            0x67, 0x45, 0x23, 0x01};
+    assert(memcmp(&memory->data[192], expected_words,
+            sizeof(expected_words)) == 0);
+    assert(cpu.x[2] == DATA_PAGE + 184);
+
+    cpu.x[6] = UINT64_MAX;
+    cpu.x[7] = UINT64_MAX;
+    cpu.x[8] = DATA_PAGE + 184;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x29411d06)), &cpu);
+    assert(cpu.x[6] == UINT32_C(0x89abcdef));
+    assert(cpu.x[7] == UINT32_C(0x01234567));
+
+    memset(&memory->data[208], 0xff, 16);
+    cpu.x[9] = DATA_PAGE + 208;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xa9007d3f)), &cpu);
+    const byte_t zeros[16] = {0};
+    assert(memcmp(&memory->data[208], zeros, sizeof(zeros)) == 0);
+
+    put_qword(&memory->data[224], UINT64_C(0x1122334455667788));
+    put_qword(&memory->data[232], UINT64_C(0x99aabbccddeeff00));
+    cpu.x[5] = DATA_PAGE + 200;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xa94190a3)), &cpu);
+    assert(cpu.x[3] == UINT64_C(0x1122334455667788));
+    assert(cpu.x[4] == UINT64_C(0x99aabbccddeeff00));
+    assert(cpu.x[5] == DATA_PAGE + 200);
+}
+
 static void test_faults(struct test_memory *memory) {
     struct cpu_state cpu = {
         .cycle = 7,
@@ -274,6 +326,47 @@ static void test_faults(struct test_memory *memory) {
     assert(memcmp(memory->next, next_before, sizeof(next_before)) == 0);
     assert(cpu.pc == CODE_PAGE);
     assert(cpu.cycle == 7);
+
+    const byte_t pair_first_before[] = {0x10, 0x20, 0x30, 0x40,
+            0x50, 0x60, 0x70, 0x80};
+    const byte_t pair_second_before[] = {0x91, 0x82, 0x73, 0x64,
+            0x55, 0x46, 0x37, 0x28};
+    memcpy(&memory->data[GUEST_MEMORY_PAGE_SIZE - 8], pair_first_before,
+            sizeof(pair_first_before));
+    memcpy(memory->next, pair_second_before, sizeof(pair_second_before));
+    cpu.x[0] = UINT64_C(0x0123456789abcdef);
+    cpu.x[1] = UINT64_C(0xfedcba9876543210);
+    cpu.x[2] = DATA_NEXT + 8;
+    result = run_instruction(memory, &cpu, UINT32_C(0xa9bf0440));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(memcmp(&memory->data[GUEST_MEMORY_PAGE_SIZE - 8],
+            pair_first_before, sizeof(pair_first_before)) == 0);
+    assert(memcmp(memory->next, pair_second_before,
+            sizeof(pair_second_before)) == 0);
+    assert(cpu.x[0] == UINT64_C(0x0123456789abcdef));
+    assert(cpu.x[1] == UINT64_C(0xfedcba9876543210));
+    assert(cpu.x[2] == DATA_NEXT + 8);
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
+
+    put_qword(&memory->next[GUEST_MEMORY_PAGE_SIZE - 8],
+            UINT64_C(0x8877665544332211));
+    cpu.x[3] = UINT64_C(0x1111111111111111);
+    cpu.x[4] = UINT64_C(0x2222222222222222);
+    cpu.x[5] = UNMAPPED_PAGE - 8;
+    result = run_instruction(memory, &cpu, UINT32_C(0xa8c110a3));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[3] == UINT64_C(0x1111111111111111));
+    assert(cpu.x[4] == UINT64_C(0x2222222222222222));
+    assert(cpu.x[5] == UNMAPPED_PAGE - 8);
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
 }
 
 int main(void) {
@@ -282,6 +375,7 @@ int main(void) {
     test_loads(&memory);
     test_stores(&memory);
     test_unscaled_and_writeback(&memory);
+    test_pairs(&memory);
     test_faults(&memory);
     return 0;
 }

@@ -1,6 +1,9 @@
 #include "guest/aarch64/execute.h"
 #include "guest/aarch64/condition.h"
 
+_Static_assert(GUEST_TLB_MAX_ACCESS_SIZE >= 2 * sizeof(qword_t),
+        "AArch64 寄存器对访存要求一次覆盖 16 字节");
+
 static qword_t width_mask(byte_t width) {
     return width == 32 ? UINT32_MAX : UINT64_MAX;
 }
@@ -232,6 +235,46 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
     return true;
 }
 
+static bool execute_load_store_pair(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.load_store_pair.rt;
+    byte_t rt2 = instruction->operands.load_store_pair.rt2;
+    byte_t rn = instruction->operands.load_store_pair.rn;
+    byte_t size = (byte_t) (instruction->width / 8);
+    guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store_pair.address_mode;
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store_pair.offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+    byte_t bytes[16];
+    size_t access_size = (size_t) size * 2;
+
+    if (instruction->opcode == AARCH64_OP_LOAD_PAIR) {
+        if (!guest_tlb_read(tlb, address, bytes, access_size,
+                GUEST_MEMORY_READ, fault))
+            return false;
+        qword_t first = load_little_endian(bytes, size);
+        qword_t second = load_little_endian(bytes + size, size);
+        write_register(cpu, rt, instruction->width, false, first);
+        write_register(cpu, rt2, instruction->width, false, second);
+    } else {
+        qword_t first = read_register(cpu, rt, instruction->width, false);
+        qword_t second = read_register(cpu, rt2, instruction->width, false);
+        store_little_endian(bytes, size, first);
+        store_little_endian(bytes + size, size, second);
+        if (!guest_tlb_write(tlb, address, bytes, access_size, fault))
+            return false;
+    }
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+    return true;
+}
+
 struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction) {
     struct aarch64_execute_result result = {
@@ -315,6 +358,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_STORE_IMM9:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LOAD_PAIR:
+        case AARCH64_OP_STORE_PAIR:
+            if (!execute_load_store_pair(cpu, tlb, instruction,
+                    &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
         case AARCH64_OP_SVC:

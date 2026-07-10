@@ -35,6 +35,8 @@ enum aarch64_opcode {
     AARCH64_OP_TBNZ,
     AARCH64_OP_LOAD_IMM9,
     AARCH64_OP_STORE_IMM9,
+    AARCH64_OP_LOAD_PAIR,
+    AARCH64_OP_STORE_PAIR,
 };
 
 enum aarch64_shift_type {
@@ -77,6 +79,13 @@ struct aarch64_decoded {
             int64_t offset;
             enum aarch64_address_mode address_mode;
         } load_store;
+        struct {
+            byte_t rt;
+            byte_t rt2;
+            byte_t rn;
+            int64_t offset;
+            enum aarch64_address_mode address_mode;
+        } load_store_pair;
         struct {
             word_t immediate;
         } exception;

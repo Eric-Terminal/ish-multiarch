@@ -190,6 +190,44 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000)) {
+        byte_t operation = word >> 30;
+        bool vector = (word >> 26) & 1;
+        byte_t mode = (word >> 23) & 3;
+        bool load = (word >> 22) & 1;
+        if (vector || (operation != 0 && operation != 2) || mode == 0)
+            return false;
+
+        byte_t rt = word & 0x1f;
+        byte_t rt2 = (word >> 10) & 0x1f;
+        byte_t rn = (word >> 5) & 0x1f;
+        bool writeback = mode != 2;
+        // 这些重叠形式由架构留给实现选择，本解释器统一拒绝。
+        if ((load && rt == rt2) || (writeback && rn != 31 &&
+                (rn == rt || rn == rt2)))
+            return false;
+
+        byte_t size = operation == 0 ? 4 : 8;
+        enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
+        if (mode == 1)
+            address_mode = AARCH64_ADDRESS_POST_INDEX;
+        else if (mode == 3)
+            address_mode = AARCH64_ADDRESS_PRE_INDEX;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_PAIR : AARCH64_OP_STORE_PAIR,
+            .width = (byte_t) (size * 8),
+            .operands.load_store_pair = {
+                .rt = rt,
+                .rt2 = rt2,
+                .rn = rn,
+                .offset = sign_extend((word >> 15) &
+                        UINT32_C(0x7f), 7) * (int64_t) size,
+                .address_mode = address_mode,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3b200000)) == UINT32_C(0x38000000)) {
         byte_t operation = (word >> 22) & 3;
         bool vector = (word >> 26) & 1;
