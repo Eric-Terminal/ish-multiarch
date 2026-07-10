@@ -1,0 +1,8 @@
+#ifndef GUEST_LINUX_ERRNO_H
+#define GUEST_LINUX_ERRNO_H
+
+#define GUEST_LINUX_EIO 5
+#define GUEST_LINUX_EFAULT 14
+#define GUEST_LINUX_ENOSYS 38
+
+#endif

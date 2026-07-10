@@ -38,6 +38,7 @@ aarch64_core_src = [
     'guest/aarch64/execute.c',
     'guest/aarch64/runner.c',
     'guest/aarch64/linux-syscall.c',
+    'guest/aarch64/linux-runtime.c',
     'guest/aarch64/elf64.c',
     'guest/aarch64/elf64-loader.c',
     'guest/aarch64/linux-stack.c',
@@ -264,6 +265,16 @@ if not meson.is_cross_build()
             'guest/aarch64/linux-syscall-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_linux_syscall', aarch64_linux_syscall_test)
+
+    aarch64_linux_runtime_test = executable('aarch64_linux_runtime_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-table.c',
+            'guest/aarch64/linux-syscall.c',
+            'guest/aarch64/linux-runtime.c',
+            'guest/aarch64/linux-runtime-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_linux_runtime', aarch64_linux_runtime_test)
 
     aarch64_elf64_test = executable('aarch64_elf64_test', [
             'guest/aarch64/elf64.c',
