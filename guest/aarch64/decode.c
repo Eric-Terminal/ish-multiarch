@@ -108,6 +108,60 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x9ff80c00)) == UINT32_C(0x0f000400)) {
+        bool op = (word >> 29) & 1;
+        byte_t cmode = (word >> 12) & UINT32_C(0xf);
+        if (cmode == 15)
+            return false;
+        byte_t imm8 = (byte_t) ((((word >> 16) & 7) << 5) |
+                ((word >> 5) & UINT32_C(0x1f)));
+        qword_t immediate;
+
+        if (cmode < 8) {
+            dword_t element = (dword_t) imm8 << ((cmode >> 1) * 8);
+            immediate = replicate_element(element, 32, 64);
+        } else if (cmode < 12) {
+            word_t element = (word_t) ((dword_t) imm8 <<
+                    (((cmode >> 1) & 1) * 8));
+            immediate = replicate_element(element, 16, 64);
+        } else if (cmode == 12) {
+            dword_t element = ((dword_t) imm8 << 8) | UINT32_C(0xff);
+            immediate = replicate_element(element, 32, 64);
+        } else if (cmode == 13) {
+            dword_t element = ((dword_t) imm8 << 16) | UINT32_C(0xffff);
+            immediate = replicate_element(element, 32, 64);
+        } else if (!op) {
+            immediate = replicate_element(imm8, 8, 64);
+        } else {
+            immediate = 0;
+            for (byte_t byte = 0; byte < 8; byte++) {
+                if (imm8 & (UINT32_C(1) << byte))
+                    immediate |= UINT64_C(0xff) << (byte * 8);
+            }
+        }
+
+        enum aarch64_opcode opcode;
+        // 1110/op=1 是字节掩码 MOVI，1101 则仍属于 MSL MOVI/MVNI。
+        if (cmode == 14) {
+            opcode = AARCH64_OP_ADVSIMD_MOVI;
+        } else if ((cmode & 1) == 0 || cmode == 13) {
+            opcode = op ? AARCH64_OP_ADVSIMD_MVNI :
+                    AARCH64_OP_ADVSIMD_MOVI;
+        } else {
+            opcode = op ? AARCH64_OP_ADVSIMD_BIC_IMMEDIATE :
+                    AARCH64_OP_ADVSIMD_ORR_IMMEDIATE;
+        }
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = (word >> 30) & 1 ? 128 : 64,
+            .operands.advsimd_immediate = {
+                .rd = word & 0x1f,
+                .immediate = immediate,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000)) {
         bool is_64 = word >> 31;
         bool subtract = (word >> 30) & 1;

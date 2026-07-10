@@ -79,6 +79,10 @@ enum aarch64_opcode {
     AARCH64_OP_REV64,
     AARCH64_OP_CLZ,
     AARCH64_OP_CLS,
+    AARCH64_OP_ADVSIMD_MOVI,
+    AARCH64_OP_ADVSIMD_MVNI,
+    AARCH64_OP_ADVSIMD_ORR_IMMEDIATE,
+    AARCH64_OP_ADVSIMD_BIC_IMMEDIATE,
 };
 
 enum aarch64_shift_type {
@@ -213,6 +217,10 @@ struct aarch64_decoded {
             byte_t rd;
             byte_t rn;
         } data_processing_1source;
+        struct {
+            byte_t rd;
+            qword_t immediate;
+        } advsimd_immediate;
         struct {
             byte_t rt;
         } system_register;

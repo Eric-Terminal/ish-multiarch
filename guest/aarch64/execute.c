@@ -420,6 +420,32 @@ static void execute_data_processing_1source(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_immediate(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_immediate.rd;
+    qword_t immediate = instruction->operands.advsimd_immediate.immediate;
+    qword_t low;
+    qword_t high;
+
+    if (instruction->opcode == AARCH64_OP_ADVSIMD_MOVI) {
+        low = immediate;
+        high = immediate;
+    } else if (instruction->opcode == AARCH64_OP_ADVSIMD_MVNI) {
+        low = ~immediate;
+        high = ~immediate;
+    } else if (instruction->opcode == AARCH64_OP_ADVSIMD_ORR_IMMEDIATE) {
+        low = cpu->v[rd].d[0] | immediate;
+        high = cpu->v[rd].d[1] | immediate;
+    } else {
+        low = cpu->v[rd].d[0] & ~immediate;
+        high = cpu->v[rd].d[1] & ~immediate;
+    }
+
+    cpu->v[rd].d[0] = low;
+    cpu->v[rd].d[1] = instruction->width == 128 ? high : 0;
+    cpu->pc += 4;
+}
+
 static void execute_data_processing_2source(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
@@ -677,6 +703,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_CLZ:
         case AARCH64_OP_CLS:
             execute_data_processing_1source(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_MOVI:
+        case AARCH64_OP_ADVSIMD_MVNI:
+        case AARCH64_OP_ADVSIMD_ORR_IMMEDIATE:
+        case AARCH64_OP_ADVSIMD_BIC_IMMEDIATE:
+            execute_advsimd_immediate(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
