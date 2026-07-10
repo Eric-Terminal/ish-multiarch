@@ -241,6 +241,13 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_address_space', aarch64_address_space_test)
 
+    aarch64_tlb_test = executable('aarch64_tlb_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/tlb-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_tlb', aarch64_tlb_test)
+
     aarch64_instruction_test = executable('aarch64_instruction_test', [
             'guest/aarch64/decode.c',
             'guest/aarch64/execute.c',
