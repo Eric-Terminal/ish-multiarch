@@ -16,6 +16,11 @@ struct test_sink {
     sqword_t next_result;
 };
 
+struct syscall_probe {
+    void *expected_task;
+    unsigned calls;
+};
+
 static sqword_t write_sink(void *opaque, qword_t fd,
         const byte_t *data, size_t size) {
     struct test_sink *sink = opaque;
@@ -36,6 +41,28 @@ static sqword_t write_sink(void *opaque, qword_t fd,
 
 static qword_t encoded_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
+}
+
+static qword_t dispatch_probe(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_memory_fault *fault) {
+    struct syscall_probe *probe = context->runtime_opaque;
+    assert(context->task_opaque == probe->expected_task);
+    assert(syscall->number == 56);
+    for (unsigned i = 0; i < GUEST_LINUX_SYSCALL_ARGUMENT_COUNT; i++)
+        assert(syscall->arguments[i] ==
+                UINT64_C(0x1234567800000000) + i);
+
+    byte_t value;
+    assert(context->user.read(context->user.opaque,
+            DATA_PAGE + 8, &value, sizeof(value), fault));
+    assert(value == 0x5a);
+    value = 0xc3;
+    assert(context->user.write(context->user.opaque,
+            DATA_PAGE + 9, &value, sizeof(value), fault));
+    probe->calls++;
+    return encoded_error(GUEST_LINUX_EIO);
 }
 
 int main(void) {
@@ -60,8 +87,9 @@ int main(void) {
     struct aarch64_linux_runtime runtime;
     aarch64_linux_runtime_init(&runtime, &table,
             BRK_BASE, BRK_LIMIT, &services);
+    int host_task;
     struct aarch64_linux_task task;
-    aarch64_linux_task_init(&task, 1234);
+    aarch64_linux_task_init(&task, 1234, &host_task);
     struct cpu_state cpu = {0};
     cpu.x[8] = 64;
     cpu.x[0] = 1;
@@ -147,7 +175,7 @@ int main(void) {
     assert(task.clear_child_tid == 0);
 
     struct aarch64_linux_task second_task;
-    aarch64_linux_task_init(&second_task, 5678);
+    aarch64_linux_task_init(&second_task, 5678, NULL);
     cpu.x[8] = 96;
     cpu.x[0] = READONLY_PAGE;
     result = aarch64_linux_dispatch_syscall(
@@ -177,6 +205,36 @@ int main(void) {
             &cpu, &tlb, &runtime, &task);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
     runtime.services = &services;
+
+    struct syscall_probe probe = {
+        .expected_task = &host_task,
+    };
+    const struct guest_linux_syscall_service syscall_service = {
+        .runtime_opaque = &probe,
+        .dispatch = dispatch_probe,
+    };
+    const struct aarch64_linux_services bridged_services = {
+        .opaque = &sink,
+        .write = write_sink,
+        .syscalls = &syscall_service,
+    };
+    runtime.services = &bridged_services;
+    cpu.x[8] = 178;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 1234);
+    assert(probe.calls == 0);
+
+    cpu.x[8] = 56;
+    for (unsigned i = 0; i < GUEST_LINUX_SYSCALL_ARGUMENT_COUNT; i++)
+        cpu.x[i] = UINT64_C(0x1234567800000000) + i;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EIO));
+    assert(probe.calls == 1);
+    assert(data_page[9] == 0xc3);
 
     cpu.x[8] = 214;
     cpu.x[0] = 0;

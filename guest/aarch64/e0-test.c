@@ -147,7 +147,7 @@ int main(void) {
     aarch64_linux_runtime_init(&runtime, &table, loaded.brk_end,
             loaded.brk_end + 16 * GUEST_MEMORY_PAGE_SIZE, &services);
     struct aarch64_linux_task task;
-    aarch64_linux_task_init(&task, 1);
+    aarch64_linux_task_init(&task, 1, NULL);
 
     struct aarch64_linux_syscall_result syscall =
             run_to_syscall(&runner, &cpu, &tlb, &runtime, &task);

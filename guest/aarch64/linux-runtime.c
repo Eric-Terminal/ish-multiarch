@@ -49,6 +49,36 @@ static qword_t dispatch_write(const struct guest_linux_syscall *syscall,
     return completed;
 }
 
+static bool service_read_user(void *opaque, qword_t address,
+        void *destination, size_t size, struct guest_memory_fault *fault) {
+    return guest_linux_copy_from_user(opaque,
+            address, destination, size, fault);
+}
+
+static bool service_write_user(void *opaque, qword_t address,
+        const void *source, size_t size, struct guest_memory_fault *fault) {
+    return guest_linux_copy_to_user(opaque, address, source, size, fault);
+}
+
+static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
+        struct guest_tlb *tlb, const struct aarch64_linux_services *services,
+        const struct aarch64_linux_task *task,
+        struct guest_memory_fault *fault) {
+    if (services == NULL || services->syscalls == NULL ||
+            services->syscalls->dispatch == NULL)
+        return linux_error(GUEST_LINUX_ENOSYS);
+    const struct guest_linux_syscall_context context = {
+        .runtime_opaque = services->syscalls->runtime_opaque,
+        .task_opaque = task->service_opaque,
+        .user = {
+            .opaque = tlb,
+            .read = service_read_user,
+            .write = service_write_user,
+        },
+    };
+    return services->syscalls->dispatch(&context, syscall, fault);
+}
+
 void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit,
@@ -58,9 +88,13 @@ void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
     runtime->services = services;
 }
 
-void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid) {
+void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid,
+        void *service_opaque) {
     assert(tid > 0 && tid <= AARCH64_LINUX_MAX_TID);
-    *task = (struct aarch64_linux_task) {.tid = tid};
+    *task = (struct aarch64_linux_task) {
+        .tid = tid,
+        .service_opaque = service_opaque,
+    };
 }
 
 struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
@@ -96,7 +130,8 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = aarch64_linux_brk(
                 &runtime->memory, syscall.arguments[0]);
     } else {
-        result.return_value = linux_error(GUEST_LINUX_ENOSYS);
+        result.return_value = dispatch_service(
+                &syscall, tlb, runtime->services, task, &result.fault);
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
     return result;
