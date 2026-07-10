@@ -216,6 +216,9 @@ if not meson.is_cross_build()
 
     fiber_cell_test = executable('fiber_cell_test', 'asbestos/cell-test.c', include_directories: includes)
     test('fiber_cell', fiber_cell_test)
+
+    i386_cpu_test = executable('i386_cpu_test', 'guest/i386/cpu-test.c', include_directories: includes)
+    test('i386_cpu', i386_cpu_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')
