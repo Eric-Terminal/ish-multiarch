@@ -43,6 +43,10 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_PAIR,
     AARCH64_OP_ADR,
     AARCH64_OP_ADRP,
+    AARCH64_OP_CSEL,
+    AARCH64_OP_CSINC,
+    AARCH64_OP_CSINV,
+    AARCH64_OP_CSNEG,
 };
 
 enum aarch64_shift_type {
@@ -133,6 +137,12 @@ struct aarch64_decoded {
             byte_t rd;
             int64_t displacement;
         } pc_relative;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            byte_t condition;
+        } conditional_select;
     } operands;
 };
 

@@ -225,6 +225,30 @@ static void execute_pc_relative(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_conditional_select(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    qword_t result;
+    if (aarch64_condition_holds(cpu->nzcv,
+            instruction->operands.conditional_select.condition)) {
+        result = read_register(cpu,
+                instruction->operands.conditional_select.rn, width, false);
+    } else {
+        result = read_register(cpu,
+                instruction->operands.conditional_select.rm, width, false);
+        if (instruction->opcode == AARCH64_OP_CSINC)
+            result++;
+        else if (instruction->opcode == AARCH64_OP_CSINV)
+            result = ~result;
+        else if (instruction->opcode == AARCH64_OP_CSNEG)
+            result = UINT64_C(0) - result;
+        result &= width_mask(width);
+    }
+    write_register(cpu, instruction->operands.conditional_select.rd,
+            width, false, result);
+    cpu->pc += 4;
+}
+
 static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
     qword_t value = 0;
     for (byte_t i = 0; i < size; i++)
@@ -363,6 +387,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADR:
         case AARCH64_OP_ADRP:
             execute_pc_relative(cpu, instruction);
+            break;
+        case AARCH64_OP_CSEL:
+        case AARCH64_OP_CSINC:
+        case AARCH64_OP_CSINV:
+        case AARCH64_OP_CSNEG:
+            execute_conditional_select(cpu, instruction);
             break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;

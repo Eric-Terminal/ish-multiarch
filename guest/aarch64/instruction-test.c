@@ -287,6 +287,121 @@ static void test_pc_relative(void) {
     assert(cpu.x[0] == UINT64_C(0xfffffffffffff000));
 }
 
+static void assert_conditional_select(dword_t word,
+        enum aarch64_opcode opcode, byte_t width, byte_t rd, byte_t rn,
+        byte_t rm, byte_t condition) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.conditional_select.rd == rd);
+    assert(instruction.operands.conditional_select.rn == rn);
+    assert(instruction.operands.conditional_select.rm == rm);
+    assert(instruction.operands.conditional_select.condition == condition);
+}
+
+static void test_conditional_select(void) {
+    assert_conditional_select(UINT32_C(0x9a9702d5), AARCH64_OP_CSEL,
+            64, 21, 22, 23, 0);
+    assert_conditional_select(UINT32_C(0x1a9a1738), AARCH64_OP_CSINC,
+            32, 24, 25, 26, 1);
+    assert_conditional_select(UINT32_C(0xda9da39b), AARCH64_OP_CSINV,
+            64, 27, 28, 29, 10);
+    assert_conditional_select(UINT32_C(0xda82b420), AARCH64_OP_CSNEG,
+            64, 0, 1, 2, 11);
+
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x2800),
+        .nzcv = UINT32_C(0x40000000),
+        .x[22] = 10,
+        .x[23] = 20,
+    };
+    struct aarch64_decoded instruction = decode(UINT32_C(0x9a9702d5));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[21] == 10);
+    assert(cpu.nzcv == UINT32_C(0x40000000));
+    cpu.nzcv = 0;
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[21] == 20);
+    assert(cpu.nzcv == 0);
+
+    cpu.nzcv = UINT32_C(0x40000000);
+    cpu.x[26] = UINT32_MAX;
+    instruction = decode(UINT32_C(0x1a9a1738));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[24] == 0);
+    assert(cpu.nzcv == UINT32_C(0x40000000));
+
+    cpu.nzcv = UINT32_C(0xf0000000);
+    cpu.x[25] = UINT64_C(0xffffffff12345678);
+    instruction = decode(UINT32_C(0x1a9ae738));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[24] == UINT32_C(0x12345678));
+    assert(cpu.nzcv == UINT32_C(0xf0000000));
+
+    cpu.nzcv = 0;
+    cpu.x[8] = UINT64_MAX;
+    instruction = decode(UINT32_C(0x9a8824e6));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[6] == 0);
+    assert(cpu.nzcv == 0);
+
+    cpu.nzcv = UINT32_C(0x80000000);
+    cpu.x[29] = UINT64_C(0x00ff00ff00ff00ff);
+    instruction = decode(UINT32_C(0xda9da39b));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[27] == UINT64_C(0xff00ff00ff00ff00));
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+
+    cpu.nzcv = 0;
+    cpu.x[28] = 42;
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[27] == 42);
+
+    cpu.nzcv = UINT32_C(0x80000000);
+    cpu.x[15] = UINT64_MAX;
+    cpu.x[17] = UINT64_C(0xffffffff00000000);
+    instruction = decode(UINT32_C(0x5a91520f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[15] == UINT32_MAX);
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+
+    cpu.nzcv = 0;
+    cpu.x[2] = UINT64_C(0x8000000000000000);
+    instruction = decode(UINT32_C(0xda82b420));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == UINT64_C(0x8000000000000000));
+    assert(cpu.nzcv == 0);
+
+    cpu.nzcv = UINT32_C(0x50000000);
+    cpu.x[1] = UINT64_C(0x123456789abcdef0);
+    cpu.x[2] = 5;
+    instruction = decode(UINT32_C(0xda82f420));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == UINT64_C(0x123456789abcdef0));
+    assert(cpu.nzcv == UINT32_C(0x50000000));
+
+    cpu.nzcv = UINT32_C(0x10000000);
+    cpu.x[23] = UINT64_C(0xffffffff80000000);
+    instruction = decode(UINT32_C(0x5a9776d5));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[21] == UINT32_C(0x80000000));
+    assert(cpu.nzcv == UINT32_C(0x10000000));
+
+    cpu.nzcv = UINT32_C(0x40000000);
+    cpu.sp = UINT64_C(0xfedcba9876543210);
+    instruction = decode(UINT32_C(0x1a9f17e3));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[3] == 1);
+    assert(cpu.sp == UINT64_C(0xfedcba9876543210));
+    assert(cpu.nzcv == UINT32_C(0x40000000));
+
+    qword_t old_x0 = cpu.x[0];
+    instruction = decode(UINT32_C(0x9a82003f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == old_x0);
+    assert(cpu.sp == UINT64_C(0xfedcba9876543210));
+}
+
 static void test_branches(void) {
     struct cpu_state cpu = {.pc = 0x3000};
     struct aarch64_decoded instruction = decode(UINT32_C(0x14000002));
@@ -504,6 +619,7 @@ int main(void) {
     test_logical_immediate_encoding_space();
     test_move_wide();
     test_pc_relative();
+    test_conditional_select();
     test_branches();
     test_conditional_branches();
     test_load_store_decode();
@@ -532,6 +648,8 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x9200fc20), &invalid));
     assert(!aarch64_decode(UINT32_C(0x12007c20), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9240fc20), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xba9702d5), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x9a970ad5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0x69000440), &invalid));
     assert(!aarch64_decode(UINT32_C(0x69410440), &invalid));
