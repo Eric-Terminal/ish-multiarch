@@ -213,7 +213,7 @@ static int cpu_step_to_interrupt(struct cpu_state *cpu, struct tlb *tlb) {
                 for (int i = 0; i <= 1; i++) {
                     if (last_block->jump_ip[i] != NULL &&
                             (*last_block->jump_ip[i] & 0xffffffff) == block->addr) {
-                        *last_block->jump_ip[i] = (unsigned long) block->code;
+                        *last_block->jump_ip[i] = (fiber_cell_t) block->code;
                         list_add(&block->jumps_from[i], &last_block->jumps_from_links[i]);
                     }
                 }

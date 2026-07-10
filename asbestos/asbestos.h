@@ -9,6 +9,10 @@
 #define FIBER_CACHE_SIZE (1 << 10)
 #define FIBER_PAGE_HASH_SIZE (1 << 10)
 
+// 代码流同时保存宿主地址和 guest 操作数，宽度不能跟随宿主的 long 或指针变化。
+typedef uint64_t fiber_cell_t;
+static_assert(sizeof(fiber_cell_t) == 8, "fiber 代码流单元必须为 64 位");
+
 struct asbestos {
     // there is one asbestos per address space
     struct mmu *mmu;
@@ -41,9 +45,9 @@ struct fiber_block {
     size_t used;
 
     // pointers to the ip values in the last gadget
-    unsigned long *jump_ip[2];
+    fiber_cell_t *jump_ip[2];
     // original values of *jump_ip[]
-    unsigned long old_jump_ip[2];
+    fiber_cell_t old_jump_ip[2];
     // blocks that jump to this block
     struct list jumps_from[2];
 
@@ -57,7 +61,7 @@ struct fiber_block {
     struct list jetsam;
     bool is_jetsam;
 
-    unsigned long code[];
+    fiber_cell_t code[];
 };
 
 // Create a new asbestos

@@ -11,5 +11,5 @@ struct fiber_frame {
     addr_t value_addr;
     uint64_t value[2]; // buffer for crosspage crap
     struct fiber_block *last_block;
-    long ret_cache[FIBER_RETURN_CACHE_SIZE]; // a map of ip to pointer-to-call-gadget-arguments
+    fiber_cell_t ret_cache[FIBER_RETURN_CACHE_SIZE]; // a map of ip to pointer-to-call-gadget-arguments
 };
