@@ -1,0 +1,24 @@
+#ifndef GUEST_LINUX_AUXV_H
+#define GUEST_LINUX_AUXV_H
+
+#define GUEST_AT_NULL 0
+#define GUEST_AT_PHDR 3
+#define GUEST_AT_PHENT 4
+#define GUEST_AT_PHNUM 5
+#define GUEST_AT_PAGESZ 6
+#define GUEST_AT_BASE 7
+#define GUEST_AT_FLAGS 8
+#define GUEST_AT_ENTRY 9
+#define GUEST_AT_UID 11
+#define GUEST_AT_EUID 12
+#define GUEST_AT_GID 13
+#define GUEST_AT_EGID 14
+#define GUEST_AT_PLATFORM 15
+#define GUEST_AT_HWCAP 16
+#define GUEST_AT_CLKTCK 17
+#define GUEST_AT_SECURE 23
+#define GUEST_AT_RANDOM 25
+#define GUEST_AT_HWCAP2 26
+#define GUEST_AT_EXECFN 31
+
+#endif
