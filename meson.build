@@ -219,6 +219,13 @@ if not meson.is_cross_build()
 
     i386_cpu_test = executable('i386_cpu_test', 'guest/i386/cpu-test.c', include_directories: includes)
     test('i386_cpu', i386_cpu_test)
+
+    i386_types_test = executable('i386_types_test', 'guest/target-types-test.c', include_directories: includes)
+    test('i386_types', i386_types_test)
+
+    aarch64_types_test = executable('aarch64_types_test', 'guest/target-types-test.c',
+        include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_types', aarch64_types_test)
 endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')

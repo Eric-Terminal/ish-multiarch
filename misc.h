@@ -110,16 +110,18 @@ typedef int32_t sdword_t;
 typedef uint16_t word_t;
 typedef uint8_t byte_t;
 
-typedef dword_t addr_t;
-typedef dword_t uint_t;
-typedef sdword_t int_t;
+#include "guest/target-types.h"
+
+typedef guest_addr_t addr_t;
+typedef guest_ulong_t uint_t;
+typedef guest_long_t int_t;
 
 typedef sdword_t pid_t_;
 typedef dword_t uid_t_;
 typedef word_t mode_t_;
 typedef sqword_t off_t_;
-typedef dword_t time_t_;
-typedef dword_t clock_t_;
+typedef guest_time_t time_t_;
+typedef guest_clock_t clock_t_;
 
 #define uint(size) glue3(uint,size,_t)
 #define sint(size) glue3(int,size,_t)
