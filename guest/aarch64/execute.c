@@ -119,11 +119,11 @@ void aarch64_execute(struct cpu_state *cpu, const struct aarch64_decoded *instru
             execute_move_wide(cpu, instruction);
             break;
         case AARCH64_OP_B:
-            cpu->pc += instruction->operands.branch_immediate.displacement;
+            cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;
             break;
         case AARCH64_OP_BL:
             cpu->x[30] = cpu->pc + 4;
-            cpu->pc += instruction->operands.branch_immediate.displacement;
+            cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;
             break;
         case AARCH64_OP_BR:
         case AARCH64_OP_BLR:
