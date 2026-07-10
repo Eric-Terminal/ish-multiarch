@@ -27,6 +27,8 @@ _Static_assert((GUEST_TLB_SIZE & (GUEST_TLB_SIZE - 1)) == 0,
 
 void guest_tlb_init(struct guest_tlb *tlb,
         struct guest_address_space *address_space);
+void guest_tlb_bind(struct guest_tlb *tlb,
+        struct guest_address_space *address_space);
 void guest_tlb_flush(struct guest_tlb *tlb);
 bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         void *destination, size_t size, enum guest_memory_access access,

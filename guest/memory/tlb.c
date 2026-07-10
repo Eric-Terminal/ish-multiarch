@@ -13,13 +13,20 @@ _Static_assert(GUEST_TLB_MAX_ACCESS_SIZE <= GUEST_MEMORY_PAGE_SIZE,
 
 void guest_tlb_init(struct guest_tlb *tlb,
         struct guest_address_space *address_space) {
-    *tlb = (struct guest_tlb) {
-        .address_space = address_space,
-        .observed_generation = address_space->generation,
-    };
+    *tlb = (struct guest_tlb) {0};
+    guest_tlb_bind(tlb, address_space);
+}
+
+void guest_tlb_bind(struct guest_tlb *tlb,
+        struct guest_address_space *address_space) {
+    assert(address_space != NULL);
+    memset(tlb->entries, 0, sizeof(tlb->entries));
+    tlb->address_space = address_space;
+    tlb->observed_generation = address_space->generation;
 }
 
 void guest_tlb_flush(struct guest_tlb *tlb) {
+    assert(tlb->address_space != NULL);
     memset(tlb->entries, 0, sizeof(tlb->entries));
     tlb->observed_generation = tlb->address_space->generation;
 }

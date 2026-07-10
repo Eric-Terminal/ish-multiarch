@@ -69,6 +69,31 @@ int main(void) {
     assert(guest_tlb_read(&tlb, PAGE_A, &value, 1,
             GUEST_MEMORY_READ, &fault));
     assert(value == 0x11);
+
+    struct test_memory other_memory = {
+        .pages = {
+            {PAGE_A, NULL, GUEST_MEMORY_READ},
+        },
+    };
+    other_memory.pages[0].host_page = other_memory.first;
+    other_memory.first[0] = 0x44;
+    struct guest_address_space other_space;
+    guest_address_space_init(&other_space, &test_ops, &other_memory, 48);
+    assert(space.generation == other_space.generation);
+    guest_tlb_bind(&tlb, &other_space);
+    assert(guest_tlb_read(&tlb, PAGE_A, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(value == 0x44);
+    guest_tlb_bind(&tlb, &space);
+    assert(guest_tlb_read(&tlb, PAGE_A, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(value == 0x11);
+
+    unsigned resolutions = memory.resolutions;
+    guest_tlb_bind(&tlb, &space);
+    assert(guest_tlb_read(&tlb, PAGE_A, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(memory.resolutions == resolutions + 1);
     assert(guest_tlb_read(&tlb, PAGE_A, &value, 1,
             GUEST_MEMORY_EXECUTE, &fault));
     assert(value == 0x11);
