@@ -30,6 +30,30 @@ add_project_arguments('-Wno-switch', language: 'c')
 
 includes = [include_directories('.')]
 
+aarch64_core_src = [
+    'guest/memory/address-space.c',
+    'guest/memory/tlb.c',
+    'guest/memory/page-table.c',
+    'guest/aarch64/decode.c',
+    'guest/aarch64/execute.c',
+    'guest/aarch64/runner.c',
+    'guest/aarch64/linux-syscall.c',
+    'guest/aarch64/elf64.c',
+    'guest/aarch64/elf64-loader.c',
+    'guest/aarch64/linux-stack.c',
+]
+libish_aarch64_core = static_library('ish_aarch64_core', aarch64_core_src,
+    include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+aarch64_core_link_smoke = executable('aarch64_core_link_smoke',
+    'guest/aarch64/core-link-smoke.c',
+    include_directories: includes,
+    c_args: ['-DISH_GUEST_AARCH64=1'],
+    link_whole: libish_aarch64_core)
+if not meson.is_cross_build()
+    test('aarch64_core_link', aarch64_core_link_smoke)
+endif
+
+if not get_option('core_only')
 threads = dependency('threads')
 librt = cc.find_library('rt', required: false)
 libm = cc.find_library('m', required: false)
@@ -334,3 +358,4 @@ endif
 
 e2e_test = find_program('tests/e2e/e2e.bash')
 test('e2e', e2e_test, args: ['-y'], timeout: 180)
+endif
