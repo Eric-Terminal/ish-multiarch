@@ -64,4 +64,8 @@ void cpu(void) {
     OFFSET(TLB_ENTRY, tlb_entry, page);
     OFFSET(TLB_ENTRY, tlb_entry, page_if_writable);
     OFFSET(TLB_ENTRY, tlb_entry, data_minus_addr);
+    DEFINE(TLB_ENTRY_size, sizeof(struct tlb_entry));
+    MACRO(PAGE_BITS);
+    MACRO(TLB_BITS);
+    MACRO(TLB_SIZE);
 }

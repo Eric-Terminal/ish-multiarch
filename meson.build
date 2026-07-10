@@ -220,6 +220,10 @@ if not meson.is_cross_build()
     i386_cpu_test = executable('i386_cpu_test', 'guest/i386/cpu-test.c', include_directories: includes)
     test('i386_cpu', i386_cpu_test)
 
+    i386_tlb_test = executable('i386_tlb_test', ['emu/tlb.c', 'emu/tlb-test.c'],
+        include_directories: includes)
+    test('i386_tlb', i386_tlb_test)
+
     i386_types_test = executable('i386_types_test', 'guest/target-types-test.c', include_directories: includes)
     test('i386_types', i386_types_test)
 

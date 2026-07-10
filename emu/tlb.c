@@ -65,6 +65,6 @@ __no_instrument void *tlb_handle_miss(struct tlb *tlb, addr_t addr, int type) {
     else
         // 1 is not a valid page so this won't look like a hit
         tlb_ent->page_if_writable = TLB_PAGE_EMPTY;
-    tlb_ent->data_minus_addr = (uintptr_t) ptr - TLB_PAGE(addr);
-    return (void *) (tlb_ent->data_minus_addr + addr);
+    tlb_ent->data_minus_addr = (uint64_t) (uintptr_t) ptr - (uint64_t) TLB_PAGE(addr);
+    return tlb_host_pointer(tlb_ent->data_minus_addr, addr);
 }

@@ -1,5 +1,15 @@
 #include "cpu-offsets.h"
 
+.if TLB_ENTRY_size != 16
+    .error "TLB 缓存项宽度与 gadget 步长不一致"
+.endif
+.if PAGE_BITS != 12
+    .error "宿主 gadget 仅支持 4 KiB guest 页"
+.endif
+.if TLB_BITS != 10
+    .error "宿主 gadget 要求 10 位 TLB 索引"
+.endif
+
 #define ifin(thing, ...) _ifin(thing, __COUNTER__, __VA_ARGS__)
 #define _ifin(thing, line, ...) __ifin(thing, line, __VA_ARGS__)
 #define __ifin(thing, line, ...) irp da_op##line, __VA_ARGS__ N .ifc thing,\da_op##line
