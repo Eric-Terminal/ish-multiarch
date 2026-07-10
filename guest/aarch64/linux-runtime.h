@@ -16,6 +16,11 @@ struct aarch64_linux_runtime {
     const struct aarch64_linux_services *services;
 };
 
+struct aarch64_linux_task {
+    pid_t_ tid;
+    guest_addr_t clear_child_tid;
+};
+
 enum aarch64_linux_syscall_action {
     AARCH64_LINUX_SYSCALL_RESUME,
     AARCH64_LINUX_SYSCALL_EXIT,
@@ -33,9 +38,11 @@ void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit,
         const struct aarch64_linux_services *services);
+void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid);
 
 struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         struct cpu_state *cpu, struct guest_tlb *tlb,
-        struct aarch64_linux_runtime *runtime);
+        struct aarch64_linux_runtime *runtime,
+        struct aarch64_linux_task *task);
 
 #endif

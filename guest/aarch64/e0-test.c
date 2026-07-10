@@ -95,13 +95,14 @@ static sqword_t write_sink(void *opaque, qword_t fd,
 
 static struct aarch64_linux_syscall_result run_to_syscall(
         struct aarch64_runner *runner, struct cpu_state *cpu,
-        struct guest_tlb *tlb, struct aarch64_linux_runtime *runtime) {
+        struct guest_tlb *tlb, struct aarch64_linux_runtime *runtime,
+        struct aarch64_linux_task *task) {
     while (true) {
         struct aarch64_step_result step = aarch64_run_one(runner, cpu);
         if (step.stop == AARCH64_STEP_RETIRED)
             continue;
         assert(step.stop == AARCH64_STEP_SYSCALL);
-        return aarch64_linux_dispatch_syscall(cpu, tlb, runtime);
+        return aarch64_linux_dispatch_syscall(cpu, tlb, runtime, task);
     }
 }
 
@@ -145,15 +146,17 @@ int main(void) {
     struct aarch64_linux_runtime runtime;
     aarch64_linux_runtime_init(&runtime, &table, loaded.brk_end,
             loaded.brk_end + 16 * GUEST_MEMORY_PAGE_SIZE, &services);
+    struct aarch64_linux_task task;
+    aarch64_linux_task_init(&task, 1);
 
     struct aarch64_linux_syscall_result syscall =
-            run_to_syscall(&runner, &cpu, &tlb, &runtime);
+            run_to_syscall(&runner, &cpu, &tlb, &runtime, &task);
     assert(syscall.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == 3);
     assert(sink.size == 3);
     assert(memcmp(sink.data, "hi\n", 3) == 0);
 
-    syscall = run_to_syscall(&runner, &cpu, &tlb, &runtime);
+    syscall = run_to_syscall(&runner, &cpu, &tlb, &runtime, &task);
     assert(syscall.action == AARCH64_LINUX_SYSCALL_EXIT);
     assert(syscall.exit_status == 42);
     assert(cpu.cycle == 9);

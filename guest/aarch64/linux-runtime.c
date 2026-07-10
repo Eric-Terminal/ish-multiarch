@@ -6,8 +6,11 @@
 #define AARCH64_LINUX_SYS_WRITE 64
 #define AARCH64_LINUX_SYS_EXIT 93
 #define AARCH64_LINUX_SYS_EXIT_GROUP 94
+#define AARCH64_LINUX_SYS_SET_TID_ADDRESS 96
+#define AARCH64_LINUX_SYS_GETTID 178
 #define AARCH64_LINUX_SYS_BRK 214
 #define AARCH64_LINUX_WRITE_CHUNK_SIZE 16
+#define AARCH64_LINUX_MAX_TID INT32_C(0x3fffffff)
 
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
@@ -54,10 +57,16 @@ void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
     runtime->services = services;
 }
 
+void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid) {
+    assert(tid > 0 && tid <= AARCH64_LINUX_MAX_TID);
+    *task = (struct aarch64_linux_task) {.tid = tid};
+}
+
 struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         struct cpu_state *cpu, struct guest_tlb *tlb,
-        struct aarch64_linux_runtime *runtime) {
-    assert(runtime != NULL);
+        struct aarch64_linux_runtime *runtime,
+        struct aarch64_linux_task *task) {
+    assert(runtime != NULL && task != NULL);
     struct guest_linux_syscall syscall;
     aarch64_linux_read_syscall(cpu, &syscall);
     struct aarch64_linux_syscall_result result = {
@@ -77,11 +86,17 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
     if (syscall.number == AARCH64_LINUX_SYS_WRITE)
         result.return_value = dispatch_write(
                 &syscall, tlb, runtime->services, &result.fault);
-    else if (syscall.number == AARCH64_LINUX_SYS_BRK)
+    else if (syscall.number == AARCH64_LINUX_SYS_SET_TID_ADDRESS) {
+        task->clear_child_tid = syscall.arguments[0];
+        result.return_value = (qword_t) task->tid;
+    } else if (syscall.number == AARCH64_LINUX_SYS_GETTID) {
+        result.return_value = (qword_t) task->tid;
+    } else if (syscall.number == AARCH64_LINUX_SYS_BRK) {
         result.return_value = aarch64_linux_brk(
                 &runtime->memory, syscall.arguments[0]);
-    else
+    } else {
         result.return_value = linux_error(GUEST_LINUX_ENOSYS);
+    }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
     return result;
 }
