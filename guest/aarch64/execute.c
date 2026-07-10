@@ -55,6 +55,25 @@ static void set_sub_flags(struct cpu_state *cpu, qword_t left,
     aarch64_set_nzcv(cpu, nzcv);
 }
 
+static qword_t shift_register(qword_t value, byte_t width,
+        enum aarch64_shift_type type, byte_t amount) {
+    qword_t mask = width_mask(width);
+    value &= mask;
+    if (amount == 0)
+        return value;
+    if (type == AARCH64_SHIFT_LSL)
+        return (value << amount) & mask;
+    if (type == AARCH64_SHIFT_LSR)
+        return value >> amount;
+    if (type == AARCH64_SHIFT_ASR) {
+        qword_t shifted = value >> amount;
+        if (value & (UINT64_C(1) << (width - 1)))
+            shifted |= mask << (width - amount);
+        return shifted & mask;
+    }
+    return ((value >> amount) | (value << (width - amount))) & mask;
+}
+
 static void execute_add_sub_immediate(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.add_sub_immediate.rd;
@@ -80,6 +99,33 @@ static void execute_add_sub_immediate(struct cpu_state *cpu,
             set_add_flags(cpu, left, immediate, result, width);
     }
     write_register(cpu, rd, width, !set_flags, result);
+    cpu->pc += 4;
+}
+
+static void execute_add_sub_shifted(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.add_sub_shifted.rd;
+    byte_t rn = instruction->operands.add_sub_shifted.rn;
+    byte_t rm = instruction->operands.add_sub_shifted.rm;
+    byte_t width = instruction->width;
+    qword_t left = read_register(cpu, rn, width, false);
+    qword_t right = shift_register(read_register(cpu, rm, width, false),
+            width, instruction->operands.add_sub_shifted.shift_type,
+            instruction->operands.add_sub_shifted.shift);
+    bool subtract = instruction->opcode == AARCH64_OP_SUB_SHIFTED_REGISTER ||
+            instruction->opcode == AARCH64_OP_SUBS_SHIFTED_REGISTER;
+    bool set_flags = instruction->opcode == AARCH64_OP_ADDS_SHIFTED_REGISTER ||
+            instruction->opcode == AARCH64_OP_SUBS_SHIFTED_REGISTER;
+    qword_t result = subtract ? left - right : left + right;
+    result &= width_mask(width);
+
+    if (set_flags) {
+        if (subtract)
+            set_sub_flags(cpu, left, right, result, width);
+        else
+            set_add_flags(cpu, left, right, result, width);
+    }
+    write_register(cpu, rd, width, false, result);
     cpu->pc += 4;
 }
 
@@ -157,6 +203,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_SUB_IMMEDIATE:
         case AARCH64_OP_SUBS_IMMEDIATE:
             execute_add_sub_immediate(cpu, instruction);
+            break;
+        case AARCH64_OP_ADD_SHIFTED_REGISTER:
+        case AARCH64_OP_ADDS_SHIFTED_REGISTER:
+        case AARCH64_OP_SUB_SHIFTED_REGISTER:
+        case AARCH64_OP_SUBS_SHIFTED_REGISTER:
+            execute_add_sub_shifted(cpu, instruction);
             break;
         case AARCH64_OP_MOVN:
         case AARCH64_OP_MOVZ:

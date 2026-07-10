@@ -48,6 +48,37 @@ static void test_add_sub(void) {
     assert(cpu.sp == 0x8020);
 }
 
+static void test_add_sub_shifted(void) {
+    struct cpu_state cpu = {.pc = 0x1800};
+    cpu.x[1] = 10;
+    cpu.x[2] = 20;
+    struct aarch64_decoded instruction = decode(UINT32_C(0x8b020020));
+    assert(instruction.opcode == AARCH64_OP_ADD_SHIFTED_REGISTER);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == 30);
+
+    cpu.x[3] = UINT64_MAX;
+    cpu.x[4] = 1;
+    cpu.x[5] = 2;
+    instruction = decode(UINT32_C(0x0b051c83));
+    assert(instruction.operands.add_sub_shifted.shift == 7);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[3] == 257);
+
+    cpu.x[6] = 5;
+    cpu.x[7] = 7;
+    instruction = decode(UINT32_C(0xeb0700df));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+
+    cpu.x[9] = UINT32_C(0x80000000);
+    instruction = decode(UINT32_C(0x4b897fe8));
+    assert(instruction.operands.add_sub_shifted.shift_type ==
+            AARCH64_SHIFT_ASR);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[8] == 1);
+}
+
 static void test_move_wide(void) {
     struct cpu_state cpu = {.pc = 0x2000};
     struct aarch64_decoded instruction = decode(UINT32_C(0xd2a24680));
@@ -146,6 +177,7 @@ int main(void) {
     assert(cpu.pc == 0x1004);
 
     test_add_sub();
+    test_add_sub_shifted();
     test_move_wide();
     test_branches();
     test_load_store_decode();
@@ -157,5 +189,7 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x3d400000), &invalid));
     assert(!aarch64_decode(UINT32_C(0x39800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd4000002), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
     return 0;
 }

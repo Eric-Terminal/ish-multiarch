@@ -20,6 +20,17 @@ enum aarch64_opcode {
     AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
     AARCH64_OP_STORE_UNSIGNED_IMMEDIATE,
     AARCH64_OP_SVC,
+    AARCH64_OP_ADD_SHIFTED_REGISTER,
+    AARCH64_OP_ADDS_SHIFTED_REGISTER,
+    AARCH64_OP_SUB_SHIFTED_REGISTER,
+    AARCH64_OP_SUBS_SHIFTED_REGISTER,
+};
+
+enum aarch64_shift_type {
+    AARCH64_SHIFT_LSL,
+    AARCH64_SHIFT_LSR,
+    AARCH64_SHIFT_ASR,
+    AARCH64_SHIFT_ROR,
 };
 
 struct aarch64_decoded {
@@ -51,6 +62,13 @@ struct aarch64_decoded {
         struct {
             word_t immediate;
         } exception;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            enum aarch64_shift_type shift_type;
+            byte_t shift;
+        } add_sub_shifted;
     } operands;
 };
 

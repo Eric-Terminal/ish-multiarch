@@ -52,6 +52,36 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x1f200000)) == UINT32_C(0x0b000000)) {
+        bool is_64 = word >> 31;
+        bool subtract = (word >> 30) & 1;
+        bool set_flags = (word >> 29) & 1;
+        byte_t shift_type = (word >> 22) & 3;
+        byte_t shift = (word >> 10) & UINT32_C(0x3f);
+        if (shift_type == AARCH64_SHIFT_ROR || (!is_64 && shift >= 32))
+            return false;
+
+        enum aarch64_opcode opcode;
+        if (subtract)
+            opcode = set_flags ? AARCH64_OP_SUBS_SHIFTED_REGISTER :
+                    AARCH64_OP_SUB_SHIFTED_REGISTER;
+        else
+            opcode = set_flags ? AARCH64_OP_ADDS_SHIFTED_REGISTER :
+                    AARCH64_OP_ADD_SHIFTED_REGISTER;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = is_64 ? 64 : 32,
+            .operands.add_sub_shifted = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .shift_type = (enum aarch64_shift_type) shift_type,
+                .shift = shift,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x12800000)) {
         bool is_64 = word >> 31;
         byte_t operation = (word >> 29) & 3;
