@@ -16,6 +16,16 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xffe0001f)) == UINT32_C(0xd4000001)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_SVC,
+            .width = 64,
+            .operands.exception.immediate =
+                    (word >> 5) & UINT32_C(0xffff),
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000)) {
         bool is_64 = word >> 31;
         bool subtract = (word >> 30) & 1;

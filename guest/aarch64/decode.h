@@ -19,6 +19,7 @@ enum aarch64_opcode {
     AARCH64_OP_RET,
     AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
     AARCH64_OP_STORE_UNSIGNED_IMMEDIATE,
+    AARCH64_OP_SVC,
 };
 
 struct aarch64_decoded {
@@ -47,6 +48,9 @@ struct aarch64_decoded {
             byte_t size;
             qword_t offset;
         } load_store;
+        struct {
+            word_t immediate;
+        } exception;
     } operands;
 };
 

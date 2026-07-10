@@ -184,6 +184,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
+        case AARCH64_OP_SVC:
+            cpu->pc += 4;
+            result.stop = AARCH64_EXECUTE_SYSCALL;
+            break;
     }
     return result;
 }

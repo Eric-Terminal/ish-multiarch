@@ -50,5 +50,7 @@ struct aarch64_step_result aarch64_run_one(
         return result;
     }
     cpu->cycle++;
+    if (execute_result.stop == AARCH64_EXECUTE_SYSCALL)
+        result.stop = AARCH64_STEP_SYSCALL;
     return result;
 }

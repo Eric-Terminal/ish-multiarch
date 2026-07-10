@@ -129,6 +129,16 @@ static void test_load_store_decode(void) {
             AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 8, 31, 9, 16);
 }
 
+static void test_svc_decode(void) {
+    struct aarch64_decoded instruction = decode(UINT32_C(0xd4000001));
+    assert(instruction.opcode == AARCH64_OP_SVC);
+    assert(instruction.operands.exception.immediate == 0);
+
+    instruction = decode(UINT32_C(0xd4000541));
+    assert(instruction.opcode == AARCH64_OP_SVC);
+    assert(instruction.operands.exception.immediate == 42);
+}
+
 int main(void) {
     struct cpu_state cpu = {.pc = 0x1000};
     struct aarch64_decoded nop = decode(UINT32_C(0xd503201f));
@@ -139,11 +149,13 @@ int main(void) {
     test_move_wide();
     test_branches();
     test_load_store_decode();
+    test_svc_decode();
 
     struct aarch64_decoded invalid;
     assert(!aarch64_decode(UINT32_C(0x32800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd61f03e0), &invalid));
     assert(!aarch64_decode(UINT32_C(0x3d400000), &invalid));
     assert(!aarch64_decode(UINT32_C(0x39800000), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xd4000002), &invalid));
     return 0;
 }

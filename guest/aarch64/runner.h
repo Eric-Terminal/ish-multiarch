@@ -9,6 +9,7 @@ enum aarch64_step_stop {
     AARCH64_STEP_FETCH_FAULT,
     AARCH64_STEP_DATA_FAULT,
     AARCH64_STEP_UNDEFINED,
+    AARCH64_STEP_SYSCALL,
 };
 
 struct aarch64_step_result {

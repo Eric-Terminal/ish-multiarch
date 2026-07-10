@@ -49,6 +49,7 @@ int main(void) {
     put_instruction(&memory.code[0], UINT32_C(0xd503201f));
     put_instruction(&memory.code[4], UINT32_C(0x91000400));
     put_instruction(&memory.code[8], 0);
+    put_instruction(&memory.code[12], UINT32_C(0xd4000541));
     put_instruction(&memory.code[GUEST_MEMORY_PAGE_SIZE - 4],
             UINT32_C(0xd503201f));
 
@@ -77,6 +78,13 @@ int main(void) {
     assert(result.instruction == 0);
     assert(cpu.pc == CODE_PAGE + 8);
     assert(cpu.cycle == 2);
+
+    cpu.pc = CODE_PAGE + 12;
+    result = aarch64_run_one(&runner, &cpu);
+    assert(result.stop == AARCH64_STEP_SYSCALL);
+    assert(result.instruction == UINT32_C(0xd4000541));
+    assert(cpu.pc == CODE_PAGE + 16);
+    assert(cpu.cycle == 3);
 
     cpu.pc = CODE_PAGE + GUEST_MEMORY_PAGE_SIZE - 4;
     result = aarch64_run_one(&runner, &cpu);

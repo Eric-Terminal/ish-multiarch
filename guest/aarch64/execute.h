@@ -8,6 +8,7 @@
 enum aarch64_execute_stop {
     AARCH64_EXECUTE_RETIRED,
     AARCH64_EXECUTE_DATA_FAULT,
+    AARCH64_EXECUTE_SYSCALL,
 };
 
 struct aarch64_execute_result {
