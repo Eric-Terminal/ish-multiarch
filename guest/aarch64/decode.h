@@ -24,6 +24,10 @@ enum aarch64_opcode {
     AARCH64_OP_ADDS_SHIFTED_REGISTER,
     AARCH64_OP_SUB_SHIFTED_REGISTER,
     AARCH64_OP_SUBS_SHIFTED_REGISTER,
+    AARCH64_OP_AND_SHIFTED_REGISTER,
+    AARCH64_OP_ORR_SHIFTED_REGISTER,
+    AARCH64_OP_EOR_SHIFTED_REGISTER,
+    AARCH64_OP_ANDS_SHIFTED_REGISTER,
 };
 
 enum aarch64_shift_type {
@@ -69,6 +73,14 @@ struct aarch64_decoded {
             enum aarch64_shift_type shift_type;
             byte_t shift;
         } add_sub_shifted;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            enum aarch64_shift_type shift_type;
+            byte_t shift;
+            bool invert;
+        } logical_shifted;
     } operands;
 };
 

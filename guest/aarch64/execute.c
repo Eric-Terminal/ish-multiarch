@@ -129,6 +129,40 @@ static void execute_add_sub_shifted(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_logical_shifted(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.logical_shifted.rd;
+    byte_t rn = instruction->operands.logical_shifted.rn;
+    byte_t rm = instruction->operands.logical_shifted.rm;
+    byte_t width = instruction->width;
+    qword_t mask = width_mask(width);
+    qword_t left = read_register(cpu, rn, width, false);
+    qword_t right = shift_register(read_register(cpu, rm, width, false),
+            width, instruction->operands.logical_shifted.shift_type,
+            instruction->operands.logical_shifted.shift);
+    if (instruction->operands.logical_shifted.invert)
+        right = ~right & mask;
+
+    qword_t result;
+    if (instruction->opcode == AARCH64_OP_AND_SHIFTED_REGISTER ||
+            instruction->opcode == AARCH64_OP_ANDS_SHIFTED_REGISTER)
+        result = left & right;
+    else if (instruction->opcode == AARCH64_OP_ORR_SHIFTED_REGISTER)
+        result = left | right;
+    else
+        result = left ^ right;
+    result &= mask;
+
+    if (instruction->opcode == AARCH64_OP_ANDS_SHIFTED_REGISTER) {
+        qword_t sign = UINT64_C(1) << (width - 1);
+        aarch64_set_nzcv(cpu,
+                (result & sign ? UINT32_C(1) << 31 : 0) |
+                (result == 0 ? UINT32_C(1) << 30 : 0));
+    }
+    write_register(cpu, rd, width, false, result);
+    cpu->pc += 4;
+}
+
 static void execute_move_wide(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.move_wide.rd;
@@ -209,6 +243,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:
             execute_add_sub_shifted(cpu, instruction);
+            break;
+        case AARCH64_OP_AND_SHIFTED_REGISTER:
+        case AARCH64_OP_ORR_SHIFTED_REGISTER:
+        case AARCH64_OP_EOR_SHIFTED_REGISTER:
+        case AARCH64_OP_ANDS_SHIFTED_REGISTER:
+            execute_logical_shifted(cpu, instruction);
             break;
         case AARCH64_OP_MOVN:
         case AARCH64_OP_MOVZ:

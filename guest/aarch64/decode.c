@@ -82,6 +82,34 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x0a000000)) {
+        bool is_64 = word >> 31;
+        byte_t operation = (word >> 29) & 3;
+        byte_t shift_type = (word >> 22) & 3;
+        byte_t shift = (word >> 10) & UINT32_C(0x3f);
+        if (!is_64 && shift >= 32)
+            return false;
+        static const enum aarch64_opcode opcodes[] = {
+            AARCH64_OP_AND_SHIFTED_REGISTER,
+            AARCH64_OP_ORR_SHIFTED_REGISTER,
+            AARCH64_OP_EOR_SHIFTED_REGISTER,
+            AARCH64_OP_ANDS_SHIFTED_REGISTER,
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[operation],
+            .width = is_64 ? 64 : 32,
+            .operands.logical_shifted = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .shift_type = (enum aarch64_shift_type) shift_type,
+                .shift = shift,
+                .invert = (word >> 21) & 1,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f800000)) == UINT32_C(0x12800000)) {
         bool is_64 = word >> 31;
         byte_t operation = (word >> 29) & 3;

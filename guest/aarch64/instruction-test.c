@@ -79,6 +79,48 @@ static void test_add_sub_shifted(void) {
     assert(cpu.x[8] == 1);
 }
 
+static void test_logical_shifted(void) {
+    struct cpu_state cpu = {.pc = 0x1c00};
+    cpu.x[11] = UINT64_C(0xffff);
+    cpu.x[12] = 3;
+    struct aarch64_decoded instruction = decode(UINT32_C(0x8a0c156a));
+    assert(instruction.opcode == AARCH64_OP_AND_SHIFTED_REGISTER);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[10] == 0x60);
+
+    cpu.x[14] = UINT64_C(0x123456789abcdef0);
+    instruction = decode(UINT32_C(0xaa0e03ed));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[13] == cpu.x[14]);
+
+    cpu.x[15] = UINT64_MAX;
+    cpu.x[16] = 0;
+    cpu.x[17] = 1;
+    instruction = decode(UINT32_C(0x4ad12e0f));
+    assert(instruction.operands.logical_shifted.shift_type ==
+            AARCH64_SHIFT_ROR);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[15] == UINT32_C(0x00200000));
+
+    cpu.x[18] = UINT64_C(0x8000000000000000);
+    cpu.x[19] = UINT64_C(0x8000000000000000);
+    instruction = decode(UINT32_C(0xea13025f));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+
+    cpu.x[21] = UINT64_C(0xffff);
+    cpu.x[22] = 8;
+    instruction = decode(UINT32_C(0x8a760eb4));
+    assert(instruction.operands.logical_shifted.invert);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[20] == UINT64_C(0xfffe));
+
+    cpu.x[2] = UINT64_C(0xfedcba9876543210);
+    instruction = decode(UINT32_C(0xaac203e0));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == cpu.x[2]);
+}
+
 static void test_move_wide(void) {
     struct cpu_state cpu = {.pc = 0x2000};
     struct aarch64_decoded instruction = decode(UINT32_C(0xd2a24680));
@@ -178,6 +220,7 @@ int main(void) {
 
     test_add_sub();
     test_add_sub_shifted();
+    test_logical_shifted();
     test_move_wide();
     test_branches();
     test_load_store_decode();
@@ -191,5 +234,6 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xd4000002), &invalid));
     assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
     assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x0a058083), &invalid));
     return 0;
 }
