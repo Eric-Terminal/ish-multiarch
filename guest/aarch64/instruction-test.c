@@ -854,7 +854,7 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x69410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xe9000440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xe9400440), &invalid));
-    assert(!aarch64_decode(UINT32_C(0xad410440), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xed410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8c10400), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa9400040), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8810400), &invalid));

@@ -8,6 +8,9 @@ struct guest_tlb_access_chunk {
     size_t size;
 };
 
+_Static_assert(GUEST_TLB_MAX_ACCESS_SIZE <= GUEST_MEMORY_PAGE_SIZE,
+        "guest TLB 的单次访问最多只能跨越两个页面");
+
 void guest_tlb_init(struct guest_tlb *tlb,
         struct guest_address_space *address_space) {
     *tlb = (struct guest_tlb) {

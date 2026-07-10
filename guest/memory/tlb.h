@@ -5,7 +5,7 @@
 
 #define GUEST_TLB_BITS 8
 #define GUEST_TLB_SIZE (1 << GUEST_TLB_BITS)
-#define GUEST_TLB_MAX_ACCESS_SIZE 16
+#define GUEST_TLB_MAX_ACCESS_SIZE 32
 
 struct guest_tlb_entry {
     guest_addr_t guest_page;

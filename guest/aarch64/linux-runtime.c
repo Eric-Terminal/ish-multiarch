@@ -7,6 +7,7 @@
 #define AARCH64_LINUX_SYS_EXIT 93
 #define AARCH64_LINUX_SYS_EXIT_GROUP 94
 #define AARCH64_LINUX_SYS_BRK 214
+#define AARCH64_LINUX_WRITE_CHUNK_SIZE 16
 
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
@@ -23,7 +24,8 @@ static qword_t dispatch_write(const struct guest_linux_syscall *syscall,
     qword_t remaining = syscall->arguments[2];
     qword_t completed = 0;
     while (remaining != 0) {
-        byte_t bytes[GUEST_TLB_MAX_ACCESS_SIZE];
+        // write 的部分完成边界不能随底层 TLB 最大访问宽度改变。
+        byte_t bytes[AARCH64_LINUX_WRITE_CHUNK_SIZE];
         size_t chunk = remaining < sizeof(bytes) ?
                 (size_t) remaining : sizeof(bytes);
         if (!guest_tlb_read(tlb, address, bytes, chunk,

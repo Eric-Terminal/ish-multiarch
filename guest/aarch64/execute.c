@@ -1,8 +1,11 @@
+#include <string.h>
+
 #include "guest/aarch64/execute.h"
 #include "guest/aarch64/condition.h"
 
-_Static_assert(GUEST_TLB_MAX_ACCESS_SIZE >= 2 * sizeof(qword_t),
-        "AArch64 寄存器对访存要求一次覆盖 16 字节");
+_Static_assert(GUEST_TLB_MAX_ACCESS_SIZE >=
+        2 * sizeof(union aarch64_vector_reg),
+        "AArch64 SIMD 寄存器对访存要求一次覆盖 32 字节");
 
 static qword_t width_mask(byte_t width) {
     return width == 32 ? UINT32_MAX : UINT64_MAX;
@@ -633,6 +636,47 @@ static bool execute_load_store_pair(struct cpu_state *cpu,
     return true;
 }
 
+static bool execute_simd_load_store_pair(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.load_store_pair.rt;
+    byte_t rt2 = instruction->operands.load_store_pair.rt2;
+    byte_t rn = instruction->operands.load_store_pair.rn;
+    byte_t size = (byte_t) (instruction->width / 8);
+    guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store_pair.address_mode;
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store_pair.offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+    byte_t bytes[2 * sizeof(union aarch64_vector_reg)];
+    size_t access_size = (size_t) size * 2;
+
+    if (instruction->opcode == AARCH64_OP_LOAD_SIMD_PAIR) {
+        if (!guest_tlb_read(tlb, address, bytes, access_size,
+                GUEST_MEMORY_READ, fault))
+            return false;
+        // 临时寄存器保证访存失败不改目标，并自然清零 S/D 的高位。
+        union aarch64_vector_reg first = {0};
+        union aarch64_vector_reg second = {0};
+        memcpy(first.b, bytes, size);
+        memcpy(second.b, bytes + size, size);
+        cpu->v[rt] = first;
+        cpu->v[rt2] = second;
+    } else {
+        memcpy(bytes, cpu->v[rt].b, size);
+        memcpy(bytes + size, cpu->v[rt2].b, size);
+        if (!guest_tlb_write(tlb, address, bytes, access_size, fault))
+            return false;
+    }
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+    return true;
+}
+
 struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction) {
     struct aarch64_execute_result result = {
@@ -798,6 +842,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_LOAD_PAIR:
         case AARCH64_OP_STORE_PAIR:
             if (!execute_load_store_pair(cpu, tlb, instruction,
+                    &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LOAD_SIMD_PAIR:
+        case AARCH64_OP_STORE_SIMD_PAIR:
+            if (!execute_simd_load_store_pair(cpu, tlb, instruction,
                     &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

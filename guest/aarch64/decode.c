@@ -597,6 +597,39 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3e000000)) == UINT32_C(0x2c000000)) {
+        byte_t operation = word >> 30;
+        if (operation == 3)
+            return false;
+        byte_t mode = (word >> 23) & 3;
+        bool load = (word >> 22) & 1;
+        byte_t rt = word & 0x1f;
+        byte_t rt2 = (word >> 10) & 0x1f;
+        if (load && rt == rt2)
+            return false;
+
+        byte_t size = (byte_t) (1U << (operation + 2));
+        enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
+        if (mode == 1)
+            address_mode = AARCH64_ADDRESS_POST_INDEX;
+        else if (mode == 3)
+            address_mode = AARCH64_ADDRESS_PRE_INDEX;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_SIMD_PAIR :
+                    AARCH64_OP_STORE_SIMD_PAIR,
+            .width = (byte_t) (size * 8),
+            .operands.load_store_pair = {
+                .rt = rt,
+                .rt2 = rt2,
+                .rn = (word >> 5) & 0x1f,
+                .offset = sign_extend((word >> 15) &
+                        UINT32_C(0x7f), 7) * (int64_t) size,
+                .address_mode = address_mode,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000)) {
         byte_t operation = word >> 30;
         bool vector = (word >> 26) & 1;
