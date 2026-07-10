@@ -372,31 +372,33 @@ static void assert_load_store(dword_t word, enum aarch64_opcode opcode,
         byte_t size, byte_t rn, byte_t rt, int64_t offset) {
     struct aarch64_decoded instruction = decode(word);
     assert(instruction.opcode == opcode);
+    assert(instruction.width == (size == 8 ? 64 : 32));
     assert(instruction.operands.load_store.size == size);
     assert(instruction.operands.load_store.rn == rn);
     assert(instruction.operands.load_store.rt == rt);
     assert(instruction.operands.load_store.offset == offset);
+    assert(!instruction.operands.load_store.signed_load);
 }
 
 static void test_load_store_decode(void) {
     assert_load_store(UINT32_C(0xf9400020),
-            AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 8, 1, 0, 0);
+            AARCH64_OP_LOAD_IMM12, 8, 1, 0, 0);
     assert_load_store(UINT32_C(0xf9000020),
-            AARCH64_OP_STORE_UNSIGNED_IMMEDIATE, 8, 1, 0, 0);
+            AARCH64_OP_STORE_IMM12, 8, 1, 0, 0);
     assert_load_store(UINT32_C(0xb9400c62),
-            AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 4, 3, 2, 12);
+            AARCH64_OP_LOAD_IMM12, 4, 3, 2, 12);
     assert_load_store(UINT32_C(0xb9000c62),
-            AARCH64_OP_STORE_UNSIGNED_IMMEDIATE, 4, 3, 2, 12);
+            AARCH64_OP_STORE_IMM12, 4, 3, 2, 12);
     assert_load_store(UINT32_C(0x39401ca4),
-            AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 1, 5, 4, 7);
+            AARCH64_OP_LOAD_IMM12, 1, 5, 4, 7);
     assert_load_store(UINT32_C(0x39001ca4),
-            AARCH64_OP_STORE_UNSIGNED_IMMEDIATE, 1, 5, 4, 7);
+            AARCH64_OP_STORE_IMM12, 1, 5, 4, 7);
     assert_load_store(UINT32_C(0x79400ce6),
-            AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 2, 7, 6, 6);
+            AARCH64_OP_LOAD_IMM12, 2, 7, 6, 6);
     assert_load_store(UINT32_C(0x79000ce6),
-            AARCH64_OP_STORE_UNSIGNED_IMMEDIATE, 2, 7, 6, 6);
+            AARCH64_OP_STORE_IMM12, 2, 7, 6, 6);
     assert_load_store(UINT32_C(0xf9400be9),
-            AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE, 8, 31, 9, 16);
+            AARCH64_OP_LOAD_IMM12, 8, 31, 9, 16);
 
     struct aarch64_decoded instruction = decode(UINT32_C(0xf85f8020));
     assert(instruction.opcode == AARCH64_OP_LOAD_IMM9);
@@ -414,6 +416,41 @@ static void test_load_store_decode(void) {
     assert(instruction.operands.load_store.address_mode ==
             AARCH64_ADDRESS_PRE_INDEX);
     assert(instruction.operands.load_store.offset == -4);
+}
+
+static void assert_signed_load(dword_t word, enum aarch64_opcode opcode,
+        byte_t size, byte_t width, byte_t rn, byte_t rt, int64_t offset,
+        enum aarch64_address_mode address_mode) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == opcode);
+    assert(instruction.width == width);
+    assert(instruction.operands.load_store.size == size);
+    assert(instruction.operands.load_store.rn == rn);
+    assert(instruction.operands.load_store.rt == rt);
+    assert(instruction.operands.load_store.offset == offset);
+    assert(instruction.operands.load_store.address_mode == address_mode);
+    assert(instruction.operands.load_store.signed_load);
+}
+
+static void test_signed_load_decode(void) {
+    assert_signed_load(UINT32_C(0x39800d49), AARCH64_OP_LOAD_IMM12,
+            1, 64, 10, 9, 3, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0x39c0156a), AARCH64_OP_LOAD_IMM12,
+            1, 32, 11, 10, 5, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0x79c0098b), AARCH64_OP_LOAD_IMM12,
+            2, 32, 12, 11, 4, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0x79800dac), AARCH64_OP_LOAD_IMM12,
+            2, 64, 13, 12, 6, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0xb98009cd), AARCH64_OP_LOAD_IMM12,
+            4, 64, 14, 13, 8, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0x389ff020), AARCH64_OP_LOAD_IMM9,
+            1, 64, 1, 0, -1, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0x78c03062), AARCH64_OP_LOAD_IMM9,
+            2, 32, 3, 2, 3, AARCH64_ADDRESS_OFFSET);
+    assert_signed_load(UINT32_C(0xb88044a4), AARCH64_OP_LOAD_IMM9,
+            4, 64, 5, 4, 4, AARCH64_ADDRESS_POST_INDEX);
+    assert_signed_load(UINT32_C(0x38dfece6), AARCH64_OP_LOAD_IMM9,
+            1, 32, 7, 6, -2, AARCH64_ADDRESS_PRE_INDEX);
 }
 
 static void assert_load_store_pair(dword_t word, enum aarch64_opcode opcode,
@@ -468,6 +505,7 @@ int main(void) {
     test_branches();
     test_conditional_branches();
     test_load_store_decode();
+    test_signed_load_decode();
     test_load_store_pair_decode();
     test_svc_decode();
 
@@ -475,7 +513,6 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x32800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd61f03e0), &invalid));
     assert(!aarch64_decode(UINT32_C(0x3d400000), &invalid));
-    assert(!aarch64_decode(UINT32_C(0x39800000), &invalid));
     assert(!aarch64_decode(UINT32_C(0xd4000002), &invalid));
     assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
     assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
@@ -483,6 +520,10 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xf85f8820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
+    assert(!aarch64_decode(UINT32_C(0x38dfece7), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xb9c00020), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xf9800400), &invalid));
+    assert(!aarch64_decode(UINT32_C(0xf89f8000), &invalid));
     assert(!aarch64_decode(UINT32_C(0x12400020), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9200f820), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9200fc20), &invalid));

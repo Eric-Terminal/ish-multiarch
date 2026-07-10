@@ -48,6 +48,16 @@ static bool decode_logical_immediate_mask(bool n, byte_t imms,
     return true;
 }
 
+static bool decode_scalar_transfer(byte_t size, byte_t operation,
+        bool *load, bool *signed_load, byte_t *register_width) {
+    if (operation >= 2 && (size == 8 || (size == 4 && operation == 3)))
+        return false;
+    *load = operation != 0;
+    *signed_load = operation >= 2;
+    *register_width = operation == 2 || size == 8 ? 64 : 32;
+    return true;
+}
+
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     if (word == UINT32_C(0xd503201f)) {
         *decoded = (struct aarch64_decoded) {
@@ -314,7 +324,13 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         byte_t operation = (word >> 22) & 3;
         bool vector = (word >> 26) & 1;
         byte_t mode = (word >> 10) & 3;
-        if (vector || operation > 1 || mode == 2)
+        byte_t size_shift = word >> 30;
+        byte_t size = (byte_t) (1 << size_shift);
+        bool load;
+        bool signed_load;
+        byte_t register_width;
+        if (vector || mode == 2 || !decode_scalar_transfer(size, operation,
+                &load, &signed_load, &register_width))
             return false;
         byte_t rn = (word >> 5) & 0x1f;
         byte_t rt = word & 0x1f;
@@ -322,23 +338,21 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         if (mode != 0 && rn == rt && rn != 31)
             return false;
 
-        byte_t size_shift = word >> 30;
-        byte_t size = (byte_t) (1 << size_shift);
         enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
         if (mode == 1)
             address_mode = AARCH64_ADDRESS_POST_INDEX;
         else if (mode == 3)
             address_mode = AARCH64_ADDRESS_PRE_INDEX;
         *decoded = (struct aarch64_decoded) {
-            .opcode = operation == 0 ?
-                    AARCH64_OP_STORE_IMM9 : AARCH64_OP_LOAD_IMM9,
-            .width = (byte_t) (size * 8),
+            .opcode = load ? AARCH64_OP_LOAD_IMM9 : AARCH64_OP_STORE_IMM9,
+            .width = register_width,
             .operands.load_store = {
                 .rt = rt,
                 .rn = rn,
                 .size = size,
                 .offset = sign_extend((word >> 12) & UINT32_C(0x1ff), 9),
                 .address_mode = address_mode,
+                .signed_load = signed_load,
             },
         };
         return true;
@@ -347,16 +361,17 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000)) {
         byte_t operation = (word >> 22) & 3;
         bool vector = (word >> 26) & 1;
-        if (vector || operation > 1)
-            return false;
-
         byte_t size_shift = word >> 30;
         byte_t size = (byte_t) (1 << size_shift);
+        bool load;
+        bool signed_load;
+        byte_t register_width;
+        if (vector || !decode_scalar_transfer(size, operation,
+                &load, &signed_load, &register_width))
+            return false;
         *decoded = (struct aarch64_decoded) {
-            .opcode = operation == 0 ?
-                    AARCH64_OP_STORE_UNSIGNED_IMMEDIATE :
-                    AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
-            .width = (byte_t) (size * 8),
+            .opcode = load ? AARCH64_OP_LOAD_IMM12 : AARCH64_OP_STORE_IMM12,
+            .width = register_width,
             .operands.load_store = {
                 .rt = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
@@ -364,6 +379,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .offset = (int64_t) ((qword_t) ((word >> 10) &
                         UINT32_C(0xfff)) << size_shift),
                 .address_mode = AARCH64_ADDRESS_OFFSET,
+                .signed_load = signed_load,
             },
         };
         return true;

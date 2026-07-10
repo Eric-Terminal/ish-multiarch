@@ -237,6 +237,12 @@ static void store_little_endian(byte_t *bytes, byte_t size, qword_t value) {
         bytes[i] = (byte_t) (value >> (i * 8));
 }
 
+static qword_t sign_extend_load(qword_t value, byte_t size) {
+    byte_t bits = (byte_t) (size * 8);
+    qword_t sign = UINT64_C(1) << (bits - 1);
+    return (value ^ sign) - sign;
+}
+
 static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -253,17 +259,18 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
             base : adjusted;
     byte_t bytes[8];
 
-    bool load = instruction->opcode == AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE ||
+    bool load = instruction->opcode == AARCH64_OP_LOAD_IMM12 ||
             instruction->opcode == AARCH64_OP_LOAD_IMM9;
     if (load) {
         if (!guest_tlb_read(tlb, address, bytes, size,
                 GUEST_MEMORY_READ, fault))
             return false;
         qword_t value = load_little_endian(bytes, size);
-        write_register(cpu, rt, size == 8 ? 64 : 32, false, value);
+        if (instruction->operands.load_store.signed_load)
+            value = sign_extend_load(value, size);
+        write_register(cpu, rt, instruction->width, false, value);
     } else {
-        qword_t value = read_register(cpu, rt,
-                size == 8 ? 64 : 32, false);
+        qword_t value = read_register(cpu, rt, instruction->width, false);
         store_little_endian(bytes, size, value);
         if (!guest_tlb_write(tlb, address, bytes, size, fault))
             return false;
@@ -402,8 +409,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     (qword_t) instruction->operands.test_branch.displacement : 4;
             break;
         }
-        case AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE:
-        case AARCH64_OP_STORE_UNSIGNED_IMMEDIATE:
+        case AARCH64_OP_LOAD_IMM12:
+        case AARCH64_OP_STORE_IMM12:
         case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_STORE_IMM9:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))

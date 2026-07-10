@@ -17,8 +17,8 @@ enum aarch64_opcode {
     AARCH64_OP_BR,
     AARCH64_OP_BLR,
     AARCH64_OP_RET,
-    AARCH64_OP_LOAD_UNSIGNED_IMMEDIATE,
-    AARCH64_OP_STORE_UNSIGNED_IMMEDIATE,
+    AARCH64_OP_LOAD_IMM12,
+    AARCH64_OP_STORE_IMM12,
     AARCH64_OP_SVC,
     AARCH64_OP_ADD_SHIFTED_REGISTER,
     AARCH64_OP_ADDS_SHIFTED_REGISTER,
@@ -84,6 +84,7 @@ struct aarch64_decoded {
             byte_t size;
             int64_t offset;
             enum aarch64_address_mode address_mode;
+            bool signed_load;
         } load_store;
         struct {
             byte_t rt;

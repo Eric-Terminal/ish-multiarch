@@ -267,6 +267,75 @@ static void test_pairs(struct test_memory *memory) {
     assert(cpu.x[5] == DATA_PAGE + 200);
 }
 
+static void test_signed_loads(struct test_memory *memory) {
+    struct cpu_state cpu = {0};
+
+    memory->data[287] = 0x80;
+    cpu.x[1] = DATA_PAGE + 288;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x389ff020)), &cpu);
+    assert(cpu.x[0] == UINT64_C(0xffffffffffffff80));
+    assert(cpu.x[1] == DATA_PAGE + 288);
+
+    memory->data[293] = 0x81;
+    cpu.x[11] = DATA_PAGE + 288;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x39c0156a)), &cpu);
+    assert(cpu.x[10] == UINT32_C(0xffffff81));
+
+    memory->data[308] = 0x01;
+    memory->data[309] = 0x80;
+    cpu.x[12] = DATA_PAGE + 304;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x79c0098b)), &cpu);
+    assert(cpu.x[11] == UINT32_C(0xffff8001));
+
+    memory->data[310] = 0x02;
+    memory->data[311] = 0x80;
+    cpu.x[13] = DATA_PAGE + 304;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x79800dac)), &cpu);
+    assert(cpu.x[12] == UINT64_C(0xffffffffffff8002));
+
+    memory->data[320] = 0x03;
+    memory->data[321] = 0x00;
+    memory->data[322] = 0x00;
+    memory->data[323] = 0x80;
+    cpu.x[14] = DATA_PAGE + 312;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb98009cd)), &cpu);
+    assert(cpu.x[13] == UINT64_C(0xffffffff80000003));
+
+    memory->data[336] = 0x04;
+    memory->data[337] = 0x00;
+    memory->data[338] = 0x00;
+    memory->data[339] = 0x80;
+    cpu.x[5] = DATA_PAGE + 336;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb88044a4)), &cpu);
+    assert(cpu.x[4] == UINT64_C(0xffffffff80000004));
+    assert(cpu.x[5] == DATA_PAGE + 340);
+
+    memory->data[350] = 0xff;
+    cpu.x[7] = DATA_PAGE + 352;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x38dfece6)), &cpu);
+    assert(cpu.x[6] == UINT32_MAX);
+    assert(cpu.x[7] == DATA_PAGE + 350);
+
+    memory->data[363] = 0x7f;
+    cpu.x[10] = DATA_PAGE + 360;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x39800d49)), &cpu);
+    assert(cpu.x[9] == 0x7f);
+
+    memory->data[374] = 0xff;
+    memory->data[375] = 0x7f;
+    cpu.x[13] = DATA_PAGE + 368;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0x79800dac)), &cpu);
+    assert(cpu.x[12] == UINT16_C(0x7fff));
+
+    memory->data[392] = 0xff;
+    memory->data[393] = 0xff;
+    memory->data[394] = 0xff;
+    memory->data[395] = 0x7f;
+    cpu.x[14] = DATA_PAGE + 384;
+    assert_retired(run_instruction(memory, &cpu, UINT32_C(0xb98009cd)), &cpu);
+    assert(cpu.x[13] == UINT32_C(0x7fffffff));
+}
+
 static void test_faults(struct test_memory *memory) {
     struct cpu_state cpu = {
         .cycle = 7,
@@ -288,6 +357,29 @@ static void test_faults(struct test_memory *memory) {
     assert(result.stop == AARCH64_STEP_DATA_FAULT);
     assert(cpu.x[4] == UINT64_C(0xabcdef));
     assert(cpu.x[5] == UNMAPPED_PAGE);
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
+
+    cpu.x[6] = UINT64_C(0x12345678);
+    cpu.x[7] = UNMAPPED_PAGE + 2;
+    result = run_instruction(memory, &cpu, UINT32_C(0x38dfece6));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(cpu.x[6] == UINT64_C(0x12345678));
+    assert(cpu.x[7] == UNMAPPED_PAGE + 2);
+    assert(cpu.pc == CODE_PAGE);
+    assert(cpu.cycle == 7);
+
+    cpu.x[4] = UINT64_C(0x87654321);
+    cpu.x[5] = UNMAPPED_PAGE - 2;
+    result = run_instruction(memory, &cpu, UINT32_C(0xb88044a4));
+    assert(result.stop == AARCH64_STEP_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[4] == UINT64_C(0x87654321));
+    assert(cpu.x[5] == UNMAPPED_PAGE - 2);
     assert(cpu.pc == CODE_PAGE);
     assert(cpu.cycle == 7);
 
@@ -376,6 +468,7 @@ int main(void) {
     test_stores(&memory);
     test_unscaled_and_writeback(&memory);
     test_pairs(&memory);
+    test_signed_loads(&memory);
     test_faults(&memory);
     return 0;
 }
