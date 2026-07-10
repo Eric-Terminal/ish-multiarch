@@ -136,6 +136,52 @@ static void test_move_wide(void) {
     assert(cpu.x[1] == UINT32_MAX);
 }
 
+static void test_pc_relative(void) {
+    struct cpu_state cpu = {.pc = 0x44};
+    struct aarch64_decoded instruction = decode(UINT32_C(0x10000047));
+    assert(instruction.opcode == AARCH64_OP_ADR);
+    assert(instruction.operands.pc_relative.displacement == 8);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[7] == 0x4c);
+
+    cpu.pc = UINT64_C(0x10123);
+    instruction = decode(UINT32_C(0x90000028));
+    assert(instruction.opcode == AARCH64_OP_ADRP);
+    assert(instruction.operands.pc_relative.displacement == 4 * 4096);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[8] == UINT64_C(0x14000));
+
+    cpu.pc = UINT64_C(0x12345);
+    instruction = decode(UINT32_C(0xd0ffffe9));
+    assert(instruction.operands.pc_relative.displacement == -2 * 4096);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[9] == UINT64_C(0x10000));
+
+    cpu.pc = UINT64_C(0x2000);
+    instruction = decode(UINT32_C(0x10ffffea));
+    assert(instruction.operands.pc_relative.displacement == -4);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[10] == UINT64_C(0x1ffc));
+
+    qword_t old_x0 = cpu.x[0];
+    instruction = decode(UINT32_C(0x1000005f));
+    assert(instruction.operands.pc_relative.rd == 31);
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == old_x0);
+    assert(cpu.pc == UINT64_C(0x2008));
+
+    cpu.pc = UINT64_MAX - 3;
+    instruction = decode(UINT32_C(0x10000047));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[7] == 4);
+    assert(cpu.pc == 0);
+
+    cpu.pc = UINT64_C(0x123);
+    instruction = decode(UINT32_C(0xf0ffffe0));
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.x[0] == UINT64_C(0xfffffffffffff000));
+}
+
 static void test_branches(void) {
     struct cpu_state cpu = {.pc = 0x3000};
     struct aarch64_decoded instruction = decode(UINT32_C(0x14000002));
@@ -311,6 +357,7 @@ int main(void) {
     test_add_sub_shifted();
     test_logical_shifted();
     test_move_wide();
+    test_pc_relative();
     test_branches();
     test_conditional_branches();
     test_load_store_decode();

@@ -37,6 +37,8 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_IMM9,
     AARCH64_OP_LOAD_PAIR,
     AARCH64_OP_STORE_PAIR,
+    AARCH64_OP_ADR,
+    AARCH64_OP_ADRP,
 };
 
 enum aarch64_shift_type {
@@ -117,6 +119,10 @@ struct aarch64_decoded {
             byte_t bit;
             int64_t displacement;
         } test_branch;
+        struct {
+            byte_t rd;
+            int64_t displacement;
+        } pc_relative;
     } operands;
 };
 

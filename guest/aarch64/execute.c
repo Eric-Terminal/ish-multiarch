@@ -186,6 +186,18 @@ static void execute_move_wide(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_pc_relative(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    qword_t displacement =
+            (qword_t) instruction->operands.pc_relative.displacement;
+    qword_t base = instruction->opcode == AARCH64_OP_ADRP ?
+            cpu->pc & ~UINT64_C(0xfff) : cpu->pc;
+    qword_t value = base + displacement;
+    write_register(cpu, instruction->operands.pc_relative.rd,
+            64, false, value);
+    cpu->pc += 4;
+}
+
 static qword_t load_little_endian(const byte_t *bytes, byte_t size) {
     qword_t value = 0;
     for (byte_t i = 0; i < size; i++)
@@ -307,6 +319,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_MOVZ:
         case AARCH64_OP_MOVK:
             execute_move_wide(cpu, instruction);
+            break;
+        case AARCH64_OP_ADR:
+        case AARCH64_OP_ADRP:
+            execute_pc_relative(cpu, instruction);
             break;
         case AARCH64_OP_B:
             cpu->pc += (qword_t) instruction->operands.branch_immediate.displacement;

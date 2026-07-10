@@ -139,6 +139,24 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x10000000)) {
+        dword_t immediate = (((word >> 5) & UINT32_C(0x7ffff)) << 2) |
+                ((word >> 29) & 3);
+        bool page_relative = word >> 31;
+        int64_t displacement = sign_extend(immediate, 21);
+        if (page_relative)
+            displacement *= INT64_C(4096);
+        *decoded = (struct aarch64_decoded) {
+            .opcode = page_relative ? AARCH64_OP_ADRP : AARCH64_OP_ADR,
+            .width = 64,
+            .operands.pc_relative = {
+                .rd = word & 0x1f,
+                .displacement = displacement,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = (word >> 31) ? AARCH64_OP_BL : AARCH64_OP_B,
