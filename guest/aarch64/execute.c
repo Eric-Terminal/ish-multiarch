@@ -339,6 +339,35 @@ static void execute_conditional_select(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_conditional_compare(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    const byte_t width = instruction->width;
+    const byte_t condition =
+            instruction->operands.conditional_compare.condition;
+    if (aarch64_condition_holds(cpu->nzcv, condition)) {
+        qword_t left = read_register(cpu,
+                instruction->operands.conditional_compare.rn,
+                width, false);
+        qword_t right = instruction->operands.conditional_compare.immediate ?
+                instruction->operands.conditional_compare.operand :
+                read_register(cpu,
+                        instruction->operands.conditional_compare.operand,
+                        width, false);
+        qword_t result;
+        if (instruction->opcode == AARCH64_OP_CCMP) {
+            result = (left - right) & width_mask(width);
+            set_sub_flags(cpu, left, right, result, width);
+        } else {
+            result = (left + right) & width_mask(width);
+            set_add_flags(cpu, left, right, result, width);
+        }
+    } else {
+        aarch64_set_nzcv(cpu,
+                (dword_t) instruction->operands.conditional_compare.nzcv << 28);
+    }
+    cpu->pc += 4;
+}
+
 static qword_t signed_divide(qword_t dividend, qword_t divisor,
         byte_t width) {
     qword_t mask = width_mask(width);
@@ -868,6 +897,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_CSINV:
         case AARCH64_OP_CSNEG:
             execute_conditional_select(cpu, instruction);
+            break;
+        case AARCH64_OP_CCMP:
+        case AARCH64_OP_CCMN:
+            execute_conditional_compare(cpu, instruction);
             break;
         case AARCH64_OP_RBIT:
         case AARCH64_OP_REV16:

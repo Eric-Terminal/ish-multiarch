@@ -70,6 +70,8 @@ enum aarch64_opcode {
     AARCH64_OP_CSINC,
     AARCH64_OP_CSINV,
     AARCH64_OP_CSNEG,
+    AARCH64_OP_CCMP,
+    AARCH64_OP_CCMN,
     AARCH64_OP_UDIV,
     AARCH64_OP_SDIV,
     AARCH64_OP_LSLV,
@@ -222,6 +224,13 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t condition;
         } conditional_select;
+        struct {
+            byte_t rn;
+            byte_t operand;
+            byte_t condition;
+            byte_t nzcv;
+            bool immediate;
+        } conditional_compare;
         struct {
             byte_t rd;
             byte_t rn;

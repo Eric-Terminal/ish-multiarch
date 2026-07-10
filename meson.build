@@ -269,6 +269,17 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_condition', aarch64_condition_test)
 
+    aarch64_conditional_compare_test = executable(
+        'aarch64_conditional_compare_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/conditional-compare-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_conditional_compare', aarch64_conditional_compare_test)
+
     aarch64_linux_syscall_test = executable('aarch64_linux_syscall_test', [
             'guest/aarch64/linux-syscall.c',
             'guest/aarch64/linux-syscall-test.c',

@@ -427,6 +427,22 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3fe00410)) == UINT32_C(0x3a400000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = (word >> 30) & 1 ?
+                    AARCH64_OP_CCMP : AARCH64_OP_CCMN,
+            .width = (word >> 31) ? 64 : 32,
+            .operands.conditional_compare = {
+                .rn = (word >> 5) & 0x1f,
+                .operand = (word >> 16) & 0x1f,
+                .condition = (word >> 12) & 0xf,
+                .nzcv = word & 0xf,
+                .immediate = ((word >> 11) & 1) != 0,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3fe00800)) == UINT32_C(0x1a800000)) {
         byte_t operation = (byte_t) ((((word >> 30) & 1) << 1) |
                 ((word >> 10) & 1));
