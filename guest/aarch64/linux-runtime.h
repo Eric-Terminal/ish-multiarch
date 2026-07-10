@@ -1,6 +1,7 @@
 #ifndef GUEST_AARCH64_LINUX_RUNTIME_H
 #define GUEST_AARCH64_LINUX_RUNTIME_H
 
+#include "guest/aarch64/linux-memory.h"
 #include "guest/aarch64/linux-syscall.h"
 #include "guest/memory/tlb.h"
 
@@ -8,6 +9,11 @@ struct aarch64_linux_services {
     void *opaque;
     sqword_t (*write)(void *opaque, qword_t fd,
             const byte_t *data, size_t size);
+};
+
+struct aarch64_linux_runtime {
+    struct aarch64_linux_mm memory;
+    const struct aarch64_linux_services *services;
 };
 
 enum aarch64_linux_syscall_action {
@@ -23,8 +29,13 @@ struct aarch64_linux_syscall_result {
     struct guest_memory_fault fault;
 };
 
+void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
+        struct guest_page_table *page_table, guest_addr_t start_brk,
+        guest_addr_t brk_limit,
+        const struct aarch64_linux_services *services);
+
 struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         struct cpu_state *cpu, struct guest_tlb *tlb,
-        const struct aarch64_linux_services *services);
+        struct aarch64_linux_runtime *runtime);
 
 #endif

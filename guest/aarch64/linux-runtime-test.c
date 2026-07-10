@@ -6,6 +6,8 @@
 #include "guest/memory/page-table.h"
 
 #define DATA_PAGE UINT64_C(0x000056789abcd000)
+#define BRK_BASE UINT64_C(0x0000600000000000)
+#define BRK_LIMIT (BRK_BASE + 4 * GUEST_MEMORY_PAGE_SIZE)
 
 struct test_sink {
     byte_t data[64];
@@ -51,13 +53,16 @@ int main(void) {
         .opaque = &sink,
         .write = write_sink,
     };
+    struct aarch64_linux_runtime runtime;
+    aarch64_linux_runtime_init(&runtime, &table,
+            BRK_BASE, BRK_LIMIT, &services);
     struct cpu_state cpu = {0};
     cpu.x[8] = 64;
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + 32;
     cpu.x[2] = sizeof(message) - 1;
     struct aarch64_linux_syscall_result result =
-            aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+            aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == sizeof(message) - 1);
     assert(sink.size == sizeof(message) - 1);
@@ -69,7 +74,7 @@ int main(void) {
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + GUEST_MEMORY_PAGE_SIZE - 20;
     cpu.x[2] = 40;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(cpu.x[0] == 16);
     assert(sink.size == 16);
     assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
@@ -80,7 +85,7 @@ int main(void) {
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + 32;
     cpu.x[2] = sizeof(message) - 1;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == 3);
     assert(sink.size == 3);
@@ -90,37 +95,49 @@ int main(void) {
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + 32;
     cpu.x[2] = 4;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_EIO));
 
     cpu.x[8] = 64;
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + GUEST_MEMORY_PAGE_SIZE;
     cpu.x[2] = 1;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_EFAULT));
     assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
 
     cpu.x[8] = 999;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
 
     cpu.x[8] = 64;
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE;
     cpu.x[2] = 1;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, NULL);
+    runtime.services = NULL;
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
+    runtime.services = &services;
+
+    cpu.x[8] = 214;
+    cpu.x[0] = 0;
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
+    assert(cpu.x[0] == BRK_BASE);
+    cpu.x[0] = BRK_BASE + 1;
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
+    assert(cpu.x[0] == BRK_BASE + 1);
 
     cpu.x[8] = 93;
     cpu.x[0] = UINT64_C(0x1234);
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(result.action == AARCH64_LINUX_SYSCALL_EXIT);
     assert(result.exit_status == 0x34);
 
     cpu.x[8] = 94;
     cpu.x[0] = 42;
-    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &services);
+    result = aarch64_linux_dispatch_syscall(&cpu, &tlb, &runtime);
     assert(result.action == AARCH64_LINUX_SYSCALL_EXIT_GROUP);
     assert(result.exit_status == 42);
     guest_page_table_destroy(&table);
