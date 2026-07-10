@@ -265,6 +265,22 @@ static void execute_bitfield(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_extract(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    qword_t high = read_register(cpu, instruction->operands.extract.rn,
+            width, false);
+    qword_t low = read_register(cpu, instruction->operands.extract.rm,
+            width, false);
+    byte_t lsb = instruction->operands.extract.lsb;
+    qword_t result = low;
+    if (lsb != 0)
+        result = (low >> lsb) | (high << (width - lsb));
+    write_register(cpu, instruction->operands.extract.rd,
+            width, false, result);
+    cpu->pc += 4;
+}
+
 static void execute_move_wide(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.move_wide.rd;
@@ -573,6 +589,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_BFM:
         case AARCH64_OP_UBFM:
             execute_bitfield(cpu, instruction);
+            break;
+        case AARCH64_OP_EXTR:
+            execute_extract(cpu, instruction);
             break;
         case AARCH64_OP_MOVN:
         case AARCH64_OP_MOVZ:

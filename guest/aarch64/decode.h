@@ -72,6 +72,7 @@ enum aarch64_opcode {
     AARCH64_OP_UMSUBL,
     AARCH64_OP_SMULH,
     AARCH64_OP_UMULH,
+    AARCH64_OP_EXTR,
 };
 
 enum aarch64_shift_type {
@@ -211,6 +212,12 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t ra;
         } data_processing_3source;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            byte_t lsb;
+        } extract;
     } operands;
 };
 
