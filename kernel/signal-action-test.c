@@ -1,3 +1,5 @@
+#include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,15 +35,58 @@ static byte_t load_user_byte(addr_t address) {
     return value;
 }
 
+static void clear_pending_signals(struct task *task) {
+    struct sigqueue *queued, *queued_tmp;
+    list_for_each_entry_safe(&task->queue, queued, queued_tmp, queue) {
+        list_remove(&queued->queue);
+        free(queued);
+    }
+    task->pending = 0;
+}
+
+struct async_signal_sender {
+    struct task *task;
+    sigset_t_ waiting;
+    int sig;
+    struct siginfo_ info;
+    atomic_bool cancel;
+    atomic_bool sent;
+};
+
+static void *send_signal_when_waiting(void *opaque) {
+    struct async_signal_sender *sender = opaque;
+    while (!atomic_load(&sender->cancel)) {
+        lock(&sender->task->sighand->lock);
+        bool ready = sender->task->waiting == sender->waiting;
+        unlock(&sender->task->sighand->lock);
+        if (ready) {
+            atomic_store(&sender->sent, true);
+            send_signal(sender->task, sender->sig, sender->info);
+            return NULL;
+        }
+        sched_yield();
+    }
+    return NULL;
+}
+
 int main(void) {
     struct task task = {0};
     struct sighand sighand = {0};
     lock_init(&sighand.lock);
     task.sighand = &sighand;
     list_init(&task.queue);
+    cond_init(&task.pause);
+    lock_init(&task.waiting_cond_lock);
+    task_thread_store(&task, pthread_self());
     task_set_mm(&task, mm_new());
     CHECK(task.mm != NULL, "创建 i386 用户地址空间");
     current = &task;
+
+    struct sigaction host_ignore = {.sa_handler = SIG_IGN};
+    struct sigaction old_host_action;
+    sigemptyset(&host_ignore.sa_mask);
+    CHECK(sigaction(SIGUSR1, &host_ignore, &old_host_action) == 0,
+            "忽略测试期间的 host 唤醒信号");
 
     write_wrlock(&task.mem->lock);
     int map_error = pt_map_nothing(
@@ -149,40 +194,232 @@ int main(void) {
 
     const addr_t wait_set_address = USER_PAGE + 128;
     const addr_t wait_info_address = USER_PAGE + 160;
+    const addr_t wait_timeout_address = USER_PAGE + 224;
     const sigset_t_ wait_set = sig_mask(SIGALRM_);
-    CHECK(user_put(wait_set_address, wait_set) == 0,
-            "写入 sigtimedwait 等待集合");
-    deliver_signal(&task, SIGALRM_, (struct siginfo_) {.code = SI_USER_});
+    const sigset_t_ ordered_wait_set = wait_set | sig_mask(SIGTERM_);
+    CHECK(user_put(wait_set_address, ordered_wait_set) == 0,
+            "写入多信号 sigtimedwait 等待集合");
+    const struct siginfo_ pending_info = {
+        .code = SI_USER_,
+        .kill = {.pid = 1234, .uid = 5678},
+    };
+    task.blocked = ordered_wait_set;
+    deliver_signal(&task, SIGTERM_, (struct siginfo_) {.code = SI_USER_});
     deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
-    CHECK(sigset_has(task.pending, SIGALRM_) &&
+    deliver_signal(&task, SIGALRM_, pending_info);
+    CHECK(sigset_has(task.pending, SIGTERM_) &&
+            sigset_has(task.pending, SIGALRM_) &&
             sigset_has(task.pending, SIGUSR1_) &&
-            list_size(&task.queue) == 2,
-            "预排等待目标与无关信号");
+            list_size(&task.queue) == 3,
+            "按高号、无关、低号顺序预排信号");
 
     result = sys_rt_sigtimedwait(wait_set_address,
             wait_info_address, 0, sizeof(sigset_t_));
     struct siginfo_ waited_info;
     CHECK(result == SIGALRM_ &&
             user_get(wait_info_address, waited_info) == 0 &&
-            waited_info.sig == SIGALRM_ && task.waiting == 0 &&
+            waited_info.sig == SIGALRM_ &&
+            waited_info.code == pending_info.code &&
+            waited_info.kill.pid == pending_info.kill.pid &&
+            waited_info.kill.uid == pending_info.kill.uid &&
+            task.waiting == 0 && task.waiting_cond == NULL &&
             !sigset_has(task.pending, SIGALRM_) &&
+            sigset_has(task.pending, SIGTERM_) &&
             sigset_has(task.pending, SIGUSR1_) &&
-            list_size(&task.queue) == 1,
-            "sigtimedwait 消费目标节点并只清对应 pending 位");
-
-    deliver_signal(&task, SIGALRM_, (struct siginfo_) {.code = SI_USER_});
-    CHECK(sigset_has(task.pending, SIGALRM_) &&
             list_size(&task.queue) == 2,
-            "被等待消费的同号信号可以再次入队");
+            "sigtimedwait 优先消费最低编号目标并保留其他节点");
 
-    struct sigqueue *queued, *queued_tmp;
-    list_for_each_entry_safe(&task.queue, queued, queued_tmp, queue) {
-        list_remove(&queued->queue);
-        free(queued);
-    }
-    task.pending = 0;
+    clear_pending_signals(&task);
+    const sigset_t_ synchronous_wait_set =
+            sig_mask(SIGUSR1_) | sig_mask(SIGSEGV_);
+    task.blocked = synchronous_wait_set;
+    CHECK(user_put(wait_set_address, synchronous_wait_set) == 0,
+            "写入同步信号优先级等待集合");
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
+    deliver_signal(&task, SIGSEGV_, (struct siginfo_) {.code = SI_USER_});
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, 0, sizeof(sigset_t_));
+    CHECK(result == SIGSEGV_ && sigset_has(task.pending, SIGUSR1_) &&
+            !sigset_has(task.pending, SIGSEGV_) &&
+            list_size(&task.queue) == 1,
+            "同步故障信号优先于编号更低的普通信号");
+
+    clear_pending_signals(&task);
+    task.blocked = wait_set;
+    CHECK(user_put(wait_set_address, wait_set) == 0,
+            "切换为单信号异步等待集合");
+    const struct timespec_ one_second = {.sec = 1};
+    CHECK(user_put(wait_timeout_address, one_second) == 0,
+            "写入异步等待超时");
+    struct async_signal_sender target_sender = {
+        .task = &task,
+        .waiting = wait_set,
+        .sig = SIGALRM_,
+        .info = {
+            .code = SI_USER_,
+            .kill = {.pid = 2468, .uid = 1357},
+        },
+    };
+    pthread_t sender_thread;
+    CHECK(pthread_create(&sender_thread, NULL,
+                    send_signal_when_waiting, &target_sender) == 0,
+            "创建异步目标信号线程");
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, wait_timeout_address, sizeof(sigset_t_));
+    atomic_store(&target_sender.cancel, true);
+    CHECK(pthread_join(sender_thread, NULL) == 0,
+            "回收异步目标信号线程");
+    CHECK(atomic_load(&target_sender.sent) && result == SIGALRM_ &&
+            user_get(wait_info_address, waited_info) == 0 &&
+            waited_info.sig == SIGALRM_ &&
+            waited_info.code == target_sender.info.code &&
+            waited_info.kill.pid == target_sender.info.kill.pid &&
+            waited_info.kill.uid == target_sender.info.kill.uid &&
+            task.pending == 0 && list_empty(&task.queue) &&
+            task.waiting == 0 && task.waiting_cond == NULL,
+            "等待期间到达的被阻塞目标会唤醒并被完整消费");
+
+    struct siginfo_ info_sentinel;
+    memset(&info_sentinel, 0x5c, sizeof(info_sentinel));
+    CHECK(user_put(wait_info_address, info_sentinel) == 0,
+            "写入 EINTR 输出哨兵");
+    struct async_signal_sender interrupt_sender = {
+        .task = &task,
+        .waiting = wait_set,
+        .sig = SIGUSR1_,
+        .info = {
+            .code = SI_USER_,
+            .kill = {.pid = 9753, .uid = 8642},
+        },
+    };
+    CHECK(pthread_create(&sender_thread, NULL,
+                    send_signal_when_waiting, &interrupt_sender) == 0,
+            "创建异步中断信号线程");
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, wait_timeout_address, sizeof(sigset_t_));
+    atomic_store(&interrupt_sender.cancel, true);
+    CHECK(pthread_join(sender_thread, NULL) == 0,
+            "回收异步中断信号线程");
+    CHECK(user_get(wait_info_address, waited_info) == 0,
+            "读取 EINTR 输出哨兵");
+    CHECK(atomic_load(&interrupt_sender.sent) &&
+            result == (dword_t) _EINTR &&
+            memcmp(&waited_info, &info_sentinel, sizeof(waited_info)) == 0 &&
+            sigset_has(task.pending, SIGUSR1_) &&
+            list_size(&task.queue) == 1 &&
+            task.waiting == 0 && task.waiting_cond == NULL,
+            "无关未阻塞信号中断等待且不写输出或消费节点");
+
+    clear_pending_signals(&task);
+    const struct timespec_ zero_timeout = {0};
+    CHECK(user_put(wait_timeout_address, zero_timeout) == 0 &&
+            user_put(wait_info_address, info_sentinel) == 0,
+            "写入零超时与输出哨兵");
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, wait_timeout_address, sizeof(sigset_t_));
+    CHECK(user_get(wait_info_address, waited_info) == 0 &&
+            result == (dword_t) _EAGAIN &&
+            memcmp(&waited_info, &info_sentinel, sizeof(waited_info)) == 0 &&
+            task.pending == 0 && list_empty(&task.queue) &&
+            task.waiting == 0 && task.waiting_cond == NULL,
+            "零超时轮询空集合立即返回且不改写输出");
+
+    const struct timespec_ short_timeout = {
+        .nsec = UINT32_C(20000000),
+    };
+    CHECK(user_put(wait_timeout_address, short_timeout) == 0,
+            "写入非零有限超时");
+    struct timespec timeout_start = timespec_now(CLOCK_MONOTONIC);
+    result = sys_rt_sigtimedwait(wait_set_address, wait_info_address,
+            wait_timeout_address, sizeof(sigset_t_));
+    struct timespec timeout_elapsed = timespec_subtract(
+            timespec_now(CLOCK_MONOTONIC), timeout_start);
+    CHECK(result == (dword_t) _EAGAIN &&
+            (timeout_elapsed.tv_sec > 0 ||
+             timeout_elapsed.tv_nsec >= 10000000) &&
+            task.pending == 0 && list_empty(&task.queue) &&
+            task.waiting == 0 && task.waiting_cond == NULL,
+            "非零有限等待通过条件变量超时并清理等待状态");
+
+    const struct timespec_ negative_timeout = {.sec = UINT32_MAX};
+    const struct timespec_ invalid_nsec = {.nsec = UINT32_C(1000000000)};
+    CHECK(user_put(wait_timeout_address, negative_timeout) == 0 &&
+            sys_rt_sigtimedwait(wait_set_address, wait_info_address,
+                    wait_timeout_address, sizeof(sigset_t_)) == _EINVAL &&
+            user_put(wait_timeout_address, invalid_nsec) == 0 &&
+            sys_rt_sigtimedwait(wait_set_address, wait_info_address,
+                    wait_timeout_address, sizeof(sigset_t_)) == _EINVAL,
+            "拒绝负超时和越界纳秒");
+
+    CHECK(user_put(wait_timeout_address, zero_timeout) == 0,
+            "恢复零超时以测试 siginfo 写回故障");
+    deliver_signal(&task, SIGALRM_, pending_info);
+    result = sys_rt_sigtimedwait(wait_set_address,
+            crossing_address, wait_timeout_address, sizeof(sigset_t_));
+    CHECK(result == (dword_t) _EFAULT && task.pending == 0 &&
+            list_empty(&task.queue),
+            "siginfo 写回故障仍消费已经选中的信号");
+
+    const sigset_t_ unblockable_set =
+            sig_mask(SIGKILL_) | sig_mask(SIGSTOP_);
+    CHECK(user_put(wait_set_address, unblockable_set) == 0 &&
+            user_put(wait_timeout_address, zero_timeout) == 0,
+            "写入不可等待信号集合");
+    deliver_signal(&task, SIGKILL_, SIGINFO_NIL);
+    deliver_signal(&task, SIGSTOP_, SIGINFO_NIL);
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, wait_timeout_address, sizeof(sigset_t_));
+    CHECK(result == (dword_t) _EAGAIN &&
+            sigset_has(task.pending, SIGKILL_) &&
+            sigset_has(task.pending, SIGSTOP_) &&
+            list_size(&task.queue) == 2,
+            "sigtimedwait 静默排除且不消费 SIGKILL 与 SIGSTOP");
+
+    clear_pending_signals(&task);
+    const sigset_t_ ignored_set = sig_mask(SIGUSR2_);
+    CHECK(user_put(wait_set_address, ignored_set) == 0,
+            "写入显式忽略信号集合");
+    sighand.action[SIGUSR2_].handler = SIG_IGN_;
+    task.blocked = 0;
+    send_signal(&task, SIGUSR2_, (struct siginfo_) {.code = SI_USER_});
+    CHECK(task.pending == 0 && list_empty(&task.queue),
+            "未阻塞的显式忽略信号在生成阶段丢弃");
+    task.blocked = ignored_set;
+    send_signal(&task, SIGUSR2_, (struct siginfo_) {
+        .code = SI_USER_, .kill = {.pid = 111, .uid = 222},
+    });
+    CHECK(sigset_has(task.pending, SIGUSR2_) &&
+            list_size(&task.queue) == 1 &&
+            sys_rt_sigtimedwait(wait_set_address, wait_info_address,
+                    wait_timeout_address, sizeof(sigset_t_)) == SIGUSR2_ &&
+            task.pending == 0 && list_empty(&task.queue),
+            "被阻塞的显式忽略信号仍可排队并被等待消费");
+
+    const sigset_t_ default_ignored_set = sig_mask(SIGCHLD_);
+    CHECK(user_put(wait_set_address, default_ignored_set) == 0,
+            "写入默认忽略信号集合");
+    task.blocked = 0;
+    send_signal(&task, SIGCHLD_, (struct siginfo_) {.code = SI_USER_});
+    CHECK(task.pending == 0 && list_empty(&task.queue),
+            "未阻塞的默认忽略信号在生成阶段丢弃");
+    task.blocked = default_ignored_set;
+    send_signal(&task, SIGCHLD_, (struct siginfo_) {
+        .code = SI_USER_, .kill = {.pid = 333, .uid = 444},
+    });
+    CHECK(sigset_has(task.pending, SIGCHLD_) &&
+            list_size(&task.queue) == 1 &&
+            sys_rt_sigtimedwait(wait_set_address, wait_info_address,
+                    wait_timeout_address, sizeof(sigset_t_)) == SIGCHLD_ &&
+            task.pending == 0 && list_empty(&task.queue),
+            "被阻塞的默认忽略信号仍可排队并被等待消费");
+
+    task.blocked = 0;
+    clear_pending_signals(&task);
+    CHECK(sigaction(SIGUSR1, &old_host_action, NULL) == 0,
+            "恢复 host 唤醒信号动作");
 
     current = NULL;
+    cond_destroy(&task.pause);
     mm_release(task.mm);
     return 0;
 }

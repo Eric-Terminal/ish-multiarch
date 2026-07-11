@@ -6,6 +6,7 @@
 #include "kernel/task.h"
 #include "kernel/vdso.h"
 #include "emu/interrupt.h"
+#include "util/timer.h"
 
 #if is_gcc(9)
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
@@ -22,6 +23,9 @@ static int signal_is_blockable(int sig) {
 }
 
 #define UNBLOCKABLE_MASK (sig_mask(SIGKILL_) | sig_mask(SIGSTOP_))
+#define SYNCHRONOUS_MASK (sig_mask(SIGSEGV_) | sig_mask(SIGBUS_) | \
+        sig_mask(SIGILL_) | sig_mask(SIGTRAP_) | sig_mask(SIGFPE_) | \
+        sig_mask(SIGSYS_))
 
 #define SIGNAL_IGNORE 0
 #define SIGNAL_KILL 1
@@ -109,7 +113,8 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
 
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
-    if (signal_action(sighand, sig) != SIGNAL_IGNORE) {
+    if (signal_action(sighand, sig) != SIGNAL_IGNORE ||
+            sigset_has(task->blocked, sig)) {
         deliver_signal_unlocked(task, sig, info);
     }
     unlock(&sighand->lock);
@@ -743,51 +748,140 @@ int_t sys_pause(void) {
     return _EINTR;
 }
 
+static bool dequeue_waited_signal(
+        struct task *task, sigset_t_ set, struct siginfo_ *info) {
+    sigset_t_ available = task->pending & set;
+    if (available == 0)
+        return false;
+    sigset_t_ synchronous = available & SYNCHRONOUS_MASK;
+    if (synchronous != 0)
+        available = synchronous;
+    int selected = __builtin_ctzll(available) + 1;
+
+    struct sigqueue *sigqueue;
+    list_for_each_entry(&task->queue, sigqueue, queue) {
+        if (sigqueue->info.sig != selected)
+            continue;
+        list_remove(&sigqueue->queue);
+        sigset_del(&task->pending, sigqueue->info.sig);
+        *info = sigqueue->info;
+        free(sigqueue);
+        return true;
+    }
+    assert(false && "pending 位必须有对应的信号队列节点");
+    return false;
+}
+
+struct sigtimedwait_deadline {
+    int64_t sec;
+    int64_t nsec;
+};
+
+static struct sigtimedwait_deadline make_sigtimedwait_deadline(
+        struct timespec timeout) {
+    struct timespec now = timespec_now(CLOCK_MONOTONIC);
+    struct sigtimedwait_deadline deadline = {
+        .sec = (int64_t) now.tv_sec + timeout.tv_sec,
+        .nsec = (int64_t) now.tv_nsec + timeout.tv_nsec,
+    };
+    if (deadline.nsec >= INT64_C(1000000000)) {
+        deadline.sec++;
+        deadline.nsec -= INT64_C(1000000000);
+    }
+    return deadline;
+}
+
+static bool sigtimedwait_remaining(
+        struct sigtimedwait_deadline deadline,
+        struct timespec *remaining) {
+    struct timespec now = timespec_now(CLOCK_MONOTONIC);
+    int64_t sec = deadline.sec - (int64_t) now.tv_sec;
+    int64_t nsec = deadline.nsec - (int64_t) now.tv_nsec;
+    if (nsec < 0) {
+        sec--;
+        nsec += INT64_C(1000000000);
+    }
+    if (sec < 0 || (sec == 0 && nsec == 0))
+        return false;
+
+    // watchOS arm64_32 的 time_t 为 32 位，绝对截止值必须始终留在 64 位域。
+    assert(sec <= INT32_MAX);
+    remaining->tv_sec = (time_t) sec;
+    remaining->tv_nsec = (long) nsec;
+    return true;
+}
+
 int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr, uint_t set_size) {
     if (set_size != sizeof(sigset_t_))
         return _EINVAL;
     sigset_t_ set;
     if (user_get(set_addr, set))
         return _EFAULT;
-    struct timespec timeout;
+    bool has_timeout = timeout_addr != 0;
+    struct timespec timeout = {0};
     if (timeout_addr != 0) {
         struct timespec_ fake_timeout;
         if (user_get(timeout_addr, fake_timeout))
             return _EFAULT;
-        timeout.tv_sec = fake_timeout.sec;
-        timeout.tv_nsec = fake_timeout.nsec;
+        if ((sdword_t) fake_timeout.sec < 0 ||
+                (sdword_t) fake_timeout.nsec < 0 ||
+                fake_timeout.nsec >= UINT32_C(1000000000))
+            return _EINVAL;
+        timeout = convert_timespec(fake_timeout);
     }
     STRACE("sigtimedwait(%#llx, %#x, %#x) = ...\n", (long long) set, info_addr, timeout_addr);
 
+    set &= ~UNBLOCKABLE_MASK;
+    bool zero_timeout = has_timeout && timespec_is_zero(timeout);
+    struct sigtimedwait_deadline deadline = {0};
+    if (has_timeout && !zero_timeout)
+        deadline = make_sigtimedwait_deadline(timeout);
+
     lock(&current->sighand->lock);
     assert(current->waiting == 0);
-    current->waiting = set;
-    int err;
-    do {
-        err = wait_for(&current->pause, &current->sighand->lock, timeout_addr == 0 ? NULL : &timeout);
-    } while (err == 0);
-    current->waiting = 0;
-    if (err == _ETIMEDOUT) {
+    struct siginfo_ info;
+    if (dequeue_waited_signal(current, set, &info)) {
         unlock(&current->sighand->lock);
-        STRACE("sigtimedwait timed out\n");
+        goto copy_info;
+    }
+    if (zero_timeout) {
+        unlock(&current->sighand->lock);
         return _EAGAIN;
     }
 
-    struct sigqueue *sigqueue;
-    bool found = false;
-    list_for_each_entry(&current->queue, sigqueue, queue) {
-        if (sigset_has(set, sigqueue->info.sig)) {
-            found = true;
-            list_remove(&sigqueue->queue);
-            sigset_del(&current->pending, sigqueue->info.sig);
+    current->waiting = set;
+    int err = 0;
+    while (true) {
+        if (current->pending & ~current->blocked & ~set) {
+            err = _EINTR;
+            break;
+        }
+
+        struct timespec remaining;
+        struct timespec *wait_timeout = NULL;
+        if (has_timeout) {
+            if (!sigtimedwait_remaining(deadline, &remaining)) {
+                err = _EAGAIN;
+                break;
+            }
+            wait_timeout = &remaining;
+        }
+
+        int wait_err = wait_for_ignore_signals(
+                &current->pause, &current->sighand->lock, wait_timeout);
+        if (dequeue_waited_signal(current, set, &info))
+            break;
+        if (wait_err == _ETIMEDOUT) {
+            err = _EAGAIN;
             break;
         }
     }
+    current->waiting = 0;
     unlock(&current->sighand->lock);
-    if (!found)
-        return _EINTR;
-    struct siginfo_ info = sigqueue->info;
-    free(sigqueue);
+    if (err < 0)
+        return err;
+
+copy_info:
     if (info_addr != 0)
         if (user_put(info_addr, info))
             return _EFAULT;
