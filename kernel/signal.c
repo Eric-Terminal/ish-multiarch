@@ -30,7 +30,7 @@ static int signal_is_blockable(int sig) {
 
 static int signal_action(struct sighand *sighand, int sig) {
     if (signal_is_blockable(sig)) {
-        struct sigaction_ *action = &sighand->action[sig];
+        struct signal_action *action = &sighand->action[sig];
         if (action->handler == SIG_IGN_)
             return SIGNAL_IGNORE;
         if (action->handler != SIG_DFL_)
@@ -235,7 +235,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
             do_exit_group(sig);
     }
 
-    struct sigaction_ *action = &sighand->action[info->sig];
+    struct signal_action *action = &sighand->action[info->sig];
     bool need_siginfo = action->flags & SA_SIGINFO_;
 
     // setup the frame
@@ -254,7 +254,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
 
     // set up registers for signal handler
     current->cpu.eax = info->sig;
-    current->cpu.eip = sighand->action[info->sig].handler;
+    current->cpu.eip = (dword_t) action->handler;
 
     dword_t sp = current->cpu.esp;
     if (sighand->altstack && !is_on_altstack(sp, sighand)) {
@@ -294,7 +294,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     }
 
     if (action->flags & SA_RESETHAND_)
-        *action = (struct sigaction_) {.handler = SIG_DFL_};
+        *action = (struct signal_action) {.handler = SIG_DFL_};
 }
 
 void signal_delivery_stop(int sig, struct siginfo_ *info) {
@@ -460,13 +460,22 @@ void sighand_release(struct sighand *sighand) {
     }
 }
 
-static int do_sigaction(int sig, const struct sigaction_ *action, struct sigaction_ *oldaction) {
-    if (sig >= NUM_SIGS)
+int task_sigaction(struct task *task, int sig,
+        const struct signal_action *action,
+        struct signal_action *oldaction) {
+    if (sig < 1 || sig > NUM_SIGS)
         return _EINVAL;
-    if (!signal_is_blockable(sig))
+    if (action != NULL && !signal_is_blockable(sig))
         return _EINVAL;
 
-    struct sighand *sighand = current->sighand;
+    struct signal_action normalized;
+    if (action != NULL) {
+        normalized = *action;
+        normalized.mask &= ~UNBLOCKABLE_MASK;
+        action = &normalized;
+    }
+
+    struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
     if (oldaction)
         *oldaction = sighand->action[sig];
@@ -476,26 +485,70 @@ static int do_sigaction(int sig, const struct sigaction_ *action, struct sigacti
     return 0;
 }
 
+void task_signal_exec_reset(struct task *task) {
+    struct sighand *sighand = task->sighand;
+    lock(&sighand->lock);
+    for (int sig = 1; sig <= NUM_SIGS; sig++) {
+        qword_t handler = sighand->action[sig].handler;
+        sighand->action[sig] = (struct signal_action) {
+            .handler = handler == SIG_IGN_ ? SIG_IGN_ : SIG_DFL_,
+        };
+    }
+    sighand->altstack = 0;
+    sighand->altstack_size = 0;
+    unlock(&sighand->lock);
+}
+
+static struct signal_action unpack_i386_sigaction(
+        const struct i386_sigaction *wire) {
+    return (struct signal_action) {
+        .handler = wire->handler,
+        .flags = wire->flags,
+        .restorer = wire->restorer,
+        .mask = wire->mask,
+    };
+}
+
+static struct i386_sigaction pack_i386_sigaction(
+        const struct signal_action *action) {
+    return (struct i386_sigaction) {
+        .handler = (dword_t) action->handler,
+        .flags = (dword_t) action->flags,
+        .restorer = (dword_t) action->restorer,
+        .mask = action->mask,
+    };
+}
+
 dword_t sys_rt_sigaction(dword_t signum, addr_t action_addr, addr_t oldaction_addr, dword_t sigset_size) {
     if (sigset_size != sizeof(sigset_t_))
         return _EINVAL;
-    struct sigaction_ action, oldaction;
-    if (action_addr != 0)
-        if (user_get(action_addr, action))
+    struct signal_action action = {0}, oldaction;
+    if (action_addr != 0) {
+        struct i386_sigaction wire_action;
+        if (user_get(action_addr, wire_action))
             return _EFAULT;
-    STRACE("rt_sigaction(%d, %#x {handler=%#x, flags=%#x, restorer=%#x, mask=%#llx}, 0x%x, %d)", signum,
-            action_addr, action.handler, action.flags, action.restorer,
-            (unsigned long long) action.mask, oldaction_addr, sigset_size);
+        action = unpack_i386_sigaction(&wire_action);
+    }
+    STRACE("rt_sigaction(%d, %#x {handler=%#llx, flags=%#llx, restorer=%#llx, mask=%#llx}, 0x%x, %d)",
+            (sdword_t) signum,
+            action_addr, (unsigned long long) action.handler,
+            (unsigned long long) action.flags,
+            (unsigned long long) action.restorer,
+            (unsigned long long) action.mask, oldaction_addr,
+            (sdword_t) sigset_size);
 
-    int err = do_sigaction(signum,
+    int err = task_sigaction(current, (sdword_t) signum,
             action_addr ? &action : NULL,
             oldaction_addr ? &oldaction : NULL);
     if (err < 0)
         return err;
 
-    if (oldaction_addr != 0)
-        if (user_put(oldaction_addr, oldaction))
+    if (oldaction_addr != 0) {
+        struct i386_sigaction wire_oldaction =
+                pack_i386_sigaction(&oldaction);
+        if (user_put(oldaction_addr, wire_oldaction))
             return _EFAULT;
+    }
     return err;
 }
 
@@ -751,7 +804,7 @@ static int kill_everything(dword_t sig) {
 
 static int do_kill(pid_t_ pid, dword_t sig, pid_t_ tgid) {
     STRACE("kill(%d, %d)", pid, sig);
-    if (sig >= NUM_SIGS)
+    if (sig > NUM_SIGS)
         return _EINVAL;
     if (pid == 0)
         pid = -current->group->pgid;

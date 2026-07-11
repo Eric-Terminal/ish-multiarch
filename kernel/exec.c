@@ -610,15 +610,7 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
     // consider putting this in fd.c?
     fdtable_do_cloexec(current->files);
 
-    // reset signal handlers
-    lock(&current->sighand->lock);
-    for (int sig = 0; sig < NUM_SIGS; sig++) {
-        struct sigaction_ *action = &current->sighand->action[sig];
-        if (action->handler != SIG_IGN_)
-            action->handler = SIG_DFL_;
-    }
-    current->sighand->altstack = 0;
-    unlock(&current->sighand->lock);
+    task_signal_exec_reset(current);
 
     current->did_exec = true;
     vfork_notify(current);

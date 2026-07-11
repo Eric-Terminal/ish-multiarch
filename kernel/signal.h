@@ -16,12 +16,27 @@ typedef qword_t sigset_t_;
 #define SA_NODEFER_ 0x40000000
 #define SA_RESETHAND_ 0x80000000
 
-struct sigaction_ {
-    addr_t handler;
+struct signal_action {
+    qword_t handler;
+    qword_t flags;
+    qword_t restorer;
+    sigset_t_ mask;
+};
+
+struct i386_sigaction {
+    dword_t handler;
     dword_t flags;
-    addr_t restorer;
+    dword_t restorer;
     sigset_t_ mask;
 } __attribute__((packed));
+_Static_assert(sizeof(struct i386_sigaction) == 20 &&
+        __builtin_offsetof(struct i386_sigaction, handler) == 0 &&
+        __builtin_offsetof(struct i386_sigaction, flags) == 4 &&
+        __builtin_offsetof(struct i386_sigaction, restorer) == 8 &&
+        __builtin_offsetof(struct i386_sigaction, mask) == 12,
+        "i386 rt_sigaction wire 必须固定为 20 字节");
+_Static_assert(sizeof(struct signal_action) == 32,
+        "内部信号动作必须完整保存四个 64 位字段");
 
 #define NUM_SIGS 64
 
@@ -138,7 +153,7 @@ void sigmask_set_temp(sigset_t_ mask);
 
 struct sighand {
     atomic_uint refcount;
-    struct sigaction_ action[NUM_SIGS];
+    struct signal_action action[NUM_SIGS + 1];
     addr_t altstack;
     dword_t altstack_size;
     lock_t lock;
@@ -146,6 +161,10 @@ struct sighand {
 struct sighand *sighand_new(void);
 struct sighand *sighand_copy(struct sighand *sighand);
 void sighand_release(struct sighand *sighand);
+int task_sigaction(struct task *task, int signal,
+        const struct signal_action *action,
+        struct signal_action *oldaction);
+void task_signal_exec_reset(struct task *task);
 
 dword_t sys_rt_sigaction(dword_t signum, addr_t action_addr, addr_t oldaction_addr, dword_t sigset_size);
 dword_t sys_sigaction(dword_t signum, addr_t action_addr, addr_t oldaction_addr);
@@ -155,14 +174,13 @@ dword_t sys_sigreturn(void);
 #define SIG_BLOCK_ 0
 #define SIG_UNBLOCK_ 1
 #define SIG_SETMASK_ 2
-typedef uint64_t sigset_t_;
 int task_sigprocmask(struct task *task, dword_t how,
         const sigset_t_ *set, sigset_t_ *oldset);
 dword_t sys_rt_sigprocmask(dword_t how, addr_t set, addr_t oldset, dword_t size);
 int_t sys_rt_sigpending(addr_t set_addr);
 
 static inline sigset_t_ sig_mask(int sig) {
-    assert(sig >= 1 && sig < NUM_SIGS);
+    assert(sig >= 1 && sig <= NUM_SIGS);
     return UINT64_C(1) << (sig - 1);
 }
 

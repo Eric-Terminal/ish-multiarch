@@ -296,7 +296,7 @@ void step_tracing(struct cpu_state *cpu, struct tlb *tlb, uc_engine *uc) {
                 mem_sync(regs.ebx, sizeof(struct pollfd_) * regs.ecx); break;
             case 174: // rt_sigaction
                 if (regs.edx)
-                    mem_sync(regs.edx, sizeof(struct sigaction_));
+                    mem_sync(regs.edx, sizeof(struct i386_sigaction));
                 break;
             case 183: // getcwd
                 mem_sync(regs.ebx, cpu->eax); break;

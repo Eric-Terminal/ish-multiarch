@@ -218,6 +218,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-process-syscall-test.c',
             dependencies: ish)
         test('aarch64_process_syscall', aarch64_process_syscall_test)
+
+        signal_action_test = executable(
+            'signal_action_test',
+            'kernel/signal-action-test.c',
+            dependencies: ish)
+        test('signal_action', signal_action_test)
     endif
 
 elif get_option('kernel') == 'linux'

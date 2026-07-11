@@ -324,9 +324,10 @@ int main(void) {
 
     const qword_t set_address = USER_BASE + 3;
     const qword_t oldset_address = USER_BASE + 29;
-    const sigset_t_ high_signal_bit = UINT64_C(1) << 63;
+    const sigset_t_ high_signal_bit = sig_mask(NUM_SIGS);
     const sigset_t_ initial_mask = sig_mask(SIGUSR1_) | high_signal_bit;
-    CHECK(sig_mask(63) == (UINT64_C(1) << 62),
+    CHECK(sig_mask(63) == (UINT64_C(1) << 62) &&
+            sig_mask(64) == (UINT64_C(1) << 63),
             "信号位计算在 ILP32 宿主仍保持 64 位");
 
     struct sighand explicit_sighand = {0};
@@ -343,6 +344,70 @@ int main(void) {
             explicit_task.blocked == explicit_set &&
             fixture.task.blocked == 0,
             "掩码 helper 只修改显式目标 task");
+
+    const struct signal_action full_action = {
+        .handler = UINT64_C(0x0000400012345678),
+        .flags = UINT64_C(0xfedcba9876543210),
+        .restorer = UINT64_C(0x0000400087654321),
+        .mask = high_signal_bit |
+                sig_mask(SIGKILL_) | sig_mask(SIGSTOP_),
+    };
+    struct signal_action old_action;
+    CHECK(task_sigaction(&explicit_task, NUM_SIGS,
+            &full_action, &old_action) == 0 &&
+            old_action.handler == SIG_DFL_,
+            "显式动作 helper 接受 Linux 信号 64");
+    struct signal_action queried_action;
+    CHECK(task_sigaction(&explicit_task, NUM_SIGS,
+            NULL, &queried_action) == 0 &&
+            queried_action.handler == full_action.handler &&
+            queried_action.flags == full_action.flags &&
+            queried_action.restorer == full_action.restorer &&
+            queried_action.mask == high_signal_bit,
+            "内部动作完整保存 64 位字段并清除不可阻塞掩码");
+    CHECK(task_sigaction(&explicit_task, SIGKILL_,
+            NULL, &old_action) == 0 &&
+            task_sigaction(&explicit_task, SIGSTOP_,
+                    &full_action, NULL) == _EINVAL &&
+            task_sigaction(&explicit_task, 0,
+                    NULL, &old_action) == _EINVAL &&
+            task_sigaction(&explicit_task, NUM_SIGS + 1,
+                    NULL, &old_action) == _EINVAL,
+            "动作边界允许查询不可捕获信号并拒绝非法安装");
+    CHECK(fixture.sighand.action[NUM_SIGS].handler == SIG_DFL_,
+            "动作 helper 不依赖 TLS current");
+
+    struct sighand *copied_sighand = sighand_copy(&explicit_sighand);
+    CHECK(copied_sighand != NULL &&
+            copied_sighand->action[NUM_SIGS].handler == full_action.handler &&
+            copied_sighand->action[NUM_SIGS].flags == full_action.flags &&
+            copied_sighand->action[NUM_SIGS].restorer == full_action.restorer &&
+            copied_sighand->action[NUM_SIGS].mask == high_signal_bit,
+            "sighand 复制保留扩宽后的完整动作状态");
+    sighand_release(copied_sighand);
+
+    explicit_sighand.action[SIGUSR1_] = full_action;
+    explicit_sighand.action[SIGUSR2_] = (struct signal_action) {
+        .handler = SIG_IGN_,
+        .flags = UINT64_MAX,
+        .restorer = UINT64_MAX,
+        .mask = UINT64_MAX,
+    };
+    explicit_sighand.altstack = UINT32_C(0x12345000);
+    explicit_sighand.altstack_size = UINT32_C(0x8000);
+    task_signal_exec_reset(&explicit_task);
+    CHECK(explicit_sighand.action[SIGUSR1_].handler == SIG_DFL_ &&
+            explicit_sighand.action[SIGUSR1_].flags == 0 &&
+            explicit_sighand.action[SIGUSR1_].restorer == 0 &&
+            explicit_sighand.action[SIGUSR1_].mask == 0 &&
+            explicit_sighand.action[SIGUSR2_].handler == SIG_IGN_ &&
+            explicit_sighand.action[SIGUSR2_].flags == 0 &&
+            explicit_sighand.action[SIGUSR2_].restorer == 0 &&
+            explicit_sighand.action[SIGUSR2_].mask == 0 &&
+            explicit_sighand.action[NUM_SIGS].handler == SIG_DFL_ &&
+            explicit_sighand.altstack == 0 &&
+            explicit_sighand.altstack_size == 0,
+            "exec 重置只保留忽略处置并清除全部附属状态");
 
     fixture.task.blocked = initial_mask;
     reset_user_probe(&probe, 0);
