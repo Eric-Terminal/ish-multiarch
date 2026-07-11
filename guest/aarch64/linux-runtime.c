@@ -9,6 +9,7 @@
 #define AARCH64_LINUX_SYS_EXIT 93
 #define AARCH64_LINUX_SYS_EXIT_GROUP 94
 #define AARCH64_LINUX_SYS_SET_TID_ADDRESS 96
+#define AARCH64_LINUX_SYS_RT_SIGRETURN 139
 #define AARCH64_LINUX_SYS_GETTID 178
 #define AARCH64_LINUX_SYS_BRK 214
 #define AARCH64_LINUX_SYS_MUNMAP 215
@@ -154,6 +155,30 @@ static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
     return result;
 }
 
+static const struct guest_linux_signal_service *runtime_signal_service(
+        const struct aarch64_linux_runtime *runtime) {
+    return runtime->services == NULL ? NULL : runtime->services->signals;
+}
+
+static struct guest_linux_signal_context make_signal_context(
+        const struct guest_linux_signal_service *service,
+        const struct aarch64_linux_task *task) {
+    return (struct guest_linux_signal_context) {
+        .runtime_opaque = service->runtime_opaque,
+        .task_opaque = task->service_opaque,
+    };
+}
+
+static void apply_signal_result(
+        struct aarch64_linux_syscall_result *syscall,
+        struct guest_linux_signal_poll_result signal) {
+    syscall->signal = signal.signal;
+    if (signal.status == GUEST_LINUX_SIGNAL_POLL_STOP)
+        syscall->action = AARCH64_LINUX_SYSCALL_STOP;
+    else if (signal.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE)
+        syscall->action = AARCH64_LINUX_SYSCALL_TERMINATE;
+}
+
 void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit,
@@ -178,7 +203,7 @@ struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
         const struct aarch64_linux_task *task) {
     assert(cpu != NULL && tlb != NULL && runtime != NULL && task != NULL);
     const struct guest_linux_signal_service *service =
-            runtime->services == NULL ? NULL : runtime->services->signals;
+            runtime_signal_service(runtime);
     if (service == NULL || service->poll == NULL) {
         return (struct guest_linux_signal_poll_result) {
             .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
@@ -191,10 +216,8 @@ struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
         .tlb = tlb,
         .signal_trampoline = runtime->services->signal_trampoline,
     };
-    const struct guest_linux_signal_context context = {
-        .runtime_opaque = service->runtime_opaque,
-        .task_opaque = task->service_opaque,
-    };
+    const struct guest_linux_signal_context context =
+            make_signal_context(service, task);
     struct guest_linux_signal_poll_result result = service->poll(
             &context, install_signal_frame, &install);
     assert(result.status <= GUEST_LINUX_SIGNAL_POLL_TERMINATE);
@@ -202,6 +225,52 @@ struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
         assert(install.candidate_valid);
         *cpu = install.candidate;
     }
+    return result;
+}
+
+static struct aarch64_linux_syscall_result dispatch_rt_sigreturn(
+        struct cpu_state *cpu, struct guest_tlb *tlb,
+        const struct aarch64_linux_runtime *runtime,
+        const struct aarch64_linux_task *task,
+        const struct guest_linux_signal_service *service) {
+    struct aarch64_linux_syscall_result result = {
+        .action = AARCH64_LINUX_SYSCALL_RESUME,
+        .return_value = cpu->x[0],
+        .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
+    };
+    guest_addr_t frame_address = cpu->sp;
+    struct aarch64_linux_signal_resume resume;
+    enum aarch64_linux_signal_frame_status status =
+            aarch64_linux_decode_rt_sigreturn(
+                    cpu, tlb, &resume, &result.fault);
+    const struct guest_linux_signal_context context =
+            make_signal_context(service, task);
+    if (status != AARCH64_LINUX_SIGNAL_FRAME_OK) {
+        service->bad_frame(&context, frame_address);
+        // Linux 的坏帧分支返回 0；强制 SIGSEGV 的上下文应观察该返回值。
+        result.return_value = 0;
+        aarch64_linux_write_syscall_result(cpu, result.return_value);
+        struct guest_linux_signal_poll_result signal =
+                aarch64_linux_poll_signals(
+                        cpu, tlb, runtime, task);
+        apply_signal_result(&result, signal);
+        return result;
+    }
+
+    const struct guest_linux_signal_restore_request request = {
+        .stack_pointer = resume.cpu.sp,
+        .blocked_mask = resume.blocked_mask,
+        .altstack = {
+            .base = resume.altstack.sp,
+            .size = resume.altstack.size,
+            .flags = (dword_t) resume.altstack.flags,
+        },
+    };
+    service->restore(&context, &request);
+    *cpu = resume.cpu;
+    result.return_value = cpu->x[0];
+    apply_signal_result(&result,
+            aarch64_linux_poll_signals(cpu, tlb, runtime, task));
     return result;
 }
 
@@ -217,6 +286,18 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
     };
 
+    const struct guest_linux_signal_service *signal_service =
+            runtime_signal_service(runtime);
+    bool can_restore_signal = signal_service != NULL &&
+            signal_service->poll != NULL &&
+            signal_service->restore != NULL &&
+            signal_service->bad_frame != NULL;
+    if (syscall.number == AARCH64_LINUX_SYS_RT_SIGRETURN &&
+            can_restore_signal) {
+        return dispatch_rt_sigreturn(
+                cpu, tlb, runtime, task, signal_service);
+    }
+
     if (syscall.number == AARCH64_LINUX_SYS_EXIT ||
             syscall.number == AARCH64_LINUX_SYS_EXIT_GROUP) {
         result.action = syscall.number == AARCH64_LINUX_SYS_EXIT ?
@@ -226,7 +307,9 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         return result;
     }
 
-    if (syscall.number == AARCH64_LINUX_SYS_SET_TID_ADDRESS) {
+    if (syscall.number == AARCH64_LINUX_SYS_RT_SIGRETURN) {
+        result.return_value = linux_error(GUEST_LINUX_ENOSYS);
+    } else if (syscall.number == AARCH64_LINUX_SYS_SET_TID_ADDRESS) {
         task->clear_child_tid = syscall.arguments[0];
         result.return_value = (qword_t) task->tid;
     } else if (syscall.number == AARCH64_LINUX_SYS_GETTID) {
@@ -252,12 +335,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
                 cpu->sp, &result.fault);
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
-    struct guest_linux_signal_poll_result signal =
-            aarch64_linux_poll_signals(cpu, tlb, runtime, task);
-    result.signal = signal.signal;
-    if (signal.status == GUEST_LINUX_SIGNAL_POLL_STOP)
-        result.action = AARCH64_LINUX_SYSCALL_STOP;
-    else if (signal.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE)
-        result.action = AARCH64_LINUX_SYSCALL_TERMINATE;
+    apply_signal_result(&result,
+            aarch64_linux_poll_signals(cpu, tlb, runtime, task));
     return result;
 }

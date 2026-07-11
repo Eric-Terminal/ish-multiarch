@@ -456,6 +456,15 @@ if not meson.is_cross_build()
     test('aarch64_linux_runtime_signal',
         aarch64_linux_runtime_signal_test)
 
+    aarch64_linux_rt_sigreturn_test = executable(
+        'aarch64_linux_rt_sigreturn_test',
+        'guest/aarch64/linux-rt-sigreturn-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: libish_aarch64_core)
+    test('aarch64_linux_rt_sigreturn',
+        aarch64_linux_rt_sigreturn_test)
+
     aarch64_linux_user_memory_test = executable(
         'aarch64_linux_user_memory_test', [
             'guest/memory/address-space.c',
