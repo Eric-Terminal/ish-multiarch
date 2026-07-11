@@ -167,6 +167,21 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbfe08c00)) == UINT32_C(0x0e000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = (word >> 12) & 1 ?
+                    AARCH64_OP_ADVSIMD_TBX : AARCH64_OP_ADVSIMD_TBL,
+            .width = (word >> 30) & 1 ? 128 : 64,
+            .operands.advsimd_table = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .table_count = (byte_t) (((word >> 13) & 3) + 1),
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x9fe08400)) == UINT32_C(0x0e000400)) {
         bool q = ((word >> 30) & 1) != 0;
         bool op = ((word >> 29) & 1) != 0;

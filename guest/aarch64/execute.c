@@ -519,6 +519,35 @@ static void execute_advsimd_add(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_table(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_table.rd;
+    byte_t rn = instruction->operands.advsimd_table.rn;
+    byte_t rm = instruction->operands.advsimd_table.rm;
+    byte_t table_count = instruction->operands.advsimd_table.table_count;
+    byte_t table[4 * sizeof(union aarch64_vector_reg)];
+    for (byte_t reg = 0; reg < table_count; reg++) {
+        byte_t source = (byte_t) ((rn + reg) & 0x1f);
+        memcpy(&table[reg * sizeof(union aarch64_vector_reg)],
+                cpu->v[source].b, sizeof(union aarch64_vector_reg));
+    }
+
+    union aarch64_vector_reg result = {0};
+    byte_t lanes = instruction->width / 8;
+    byte_t table_size =
+            (byte_t) (table_count * sizeof(union aarch64_vector_reg));
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        byte_t index = cpu->v[rm].b[lane];
+        if (index < table_size)
+            result.b[lane] = table[index];
+        else if (instruction->opcode == AARCH64_OP_ADVSIMD_TBX)
+            result.b[lane] = cpu->v[rd].b[lane];
+    }
+    // 即使 TBX 保留越界 lane，Q=0 也必须清零目标高 64 位。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1013,6 +1042,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADD:
             execute_advsimd_add(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_TBL:
+        case AARCH64_OP_ADVSIMD_TBX:
+            execute_advsimd_table(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:

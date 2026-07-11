@@ -107,6 +107,8 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_SMOV,
     AARCH64_OP_ADVSIMD_UMOV,
     AARCH64_OP_ADVSIMD_ADD,
+    AARCH64_OP_ADVSIMD_TBL,
+    AARCH64_OP_ADVSIMD_TBX,
 };
 
 enum aarch64_shift_type {
@@ -266,6 +268,12 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t element_size;
         } advsimd_three_same;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            byte_t table_count;
+        } advsimd_table;
         struct {
             byte_t rs;
             byte_t rt;
