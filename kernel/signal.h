@@ -2,6 +2,7 @@
 #define SIGNAL_H
 
 #include "misc.h"
+#include "kernel/signal-info.h"
 #include "util/list.h"
 #include "util/sync.h"
 struct task;
@@ -83,45 +84,16 @@ _Static_assert(sizeof(struct signal_action) == 32,
 #define SEGV_ACCERR_ 2
 
 union sigval_ {
-    int_t sv_int;
-    addr_t sv_ptr;
+    sdword_t sv_int;
+    dword_t sv_ptr;
 };
-
-struct siginfo_ {
-    int_t sig;
-    int_t sig_errno;
-    int_t code;
-    union {
-        struct {
-            pid_t_ pid;
-            uid_t_ uid;
-        } kill;
-        struct {
-            pid_t_ pid;
-            uid_t_ uid;
-            int_t status;
-            clock_t_ utime;
-            clock_t_ stime;
-        } child;
-        struct {
-            addr_t addr;
-        } fault;
-        struct {
-            addr_t addr;
-            int_t syscall;
-        } sigsys;
-        struct {
-            int_t timer;
-            int_t overrun;
-            union sigval_ value;
-            int_t _private;
-        } timer;
-    };
-};
+_Static_assert(sizeof(union sigval_) == 4,
+        "i386 sigevent 的 sigval wire 必须固定为 4 字节");
 
 // a reasonable default siginfo
 static const struct siginfo_ SIGINFO_NIL = {
     .code = SI_KERNEL_,
+    .payload_kind = SIGNAL_INFO_PAYLOAD_NONE,
 };
 
 struct sigqueue {
@@ -323,13 +295,15 @@ struct rt_sigframe_ {
     int_t sig;
     addr_t pinfo;
     addr_t puc;
-    union {
-        struct siginfo_ info;
-        char __pad[128];
-    };
+    struct i386_siginfo info;
     struct ucontext_ uc;
     char retcode[8];
 };
+_Static_assert(sizeof(struct rt_sigframe_) == 268 &&
+        __builtin_offsetof(struct rt_sigframe_, info) == 16 &&
+        __builtin_offsetof(struct rt_sigframe_, uc) == 144 &&
+        __builtin_offsetof(struct rt_sigframe_, retcode) == 260,
+        "i386 实时信号帧布局不得随内部信息模型变化");
 
 // On a 64-bit system with 32-bit emulation, the fpu state is stored in extra
 // space at the end of the frame, not in the frame itself. We store the fpu

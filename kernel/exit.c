@@ -113,6 +113,7 @@ noreturn void do_exit(int status) {
             notify(&parent->group->child_exit);
             struct siginfo_ info = {
                 .code = SI_KERNEL_,
+                .payload_kind = SIGNAL_INFO_PAYLOAD_CHILD,
                 .child.pid = current->pid,
                 .child.uid = current->uid,
                 .child.status = current->exit_code,
@@ -275,6 +276,7 @@ static bool reap_if_needed(struct task *task, struct siginfo_ *info_out, struct 
     if ((options & WUNTRACED_ && notify_if_stopped(task, info_out)) ||
         (options & WEXITED_ && reap_if_zombie(task, info_out, rusage_out, options))) {
         info_out->sig = SIGCHLD_;
+        info_out->payload_kind = SIGNAL_INFO_PAYLOAD_CHILD;
         return true;
     }
     lock(&task->ptrace.lock);
@@ -284,6 +286,8 @@ static bool reap_if_needed(struct task *task, struct siginfo_ *info_out, struct 
         // it fixed but until then commenting it out for now.
         info_out->child.status = /* task->ptrace.trap_event << 16 |*/ task->ptrace.signal << 8 | 0x7f;
         task->ptrace.signal = 0;
+        info_out->sig = SIGCHLD_;
+        info_out->payload_kind = SIGNAL_INFO_PAYLOAD_CHILD;
         unlock(&task->ptrace.lock);
         return true;
     }
@@ -355,7 +359,6 @@ retry:
     }
     goto retry;
 
-    info->sig = SIGCHLD_;
 found_something:
     unlock(&pids_lock);
     return 0;
@@ -371,7 +374,7 @@ dword_t sys_waitid(int_t idtype, pid_t_ id, addr_t info_addr, int_t options) {
     int_t res = do_wait(idtype, id, &info, NULL, options);
     if (res < 0 || (res == 0 && info.child.pid == 0))
         return res;
-    if (info_addr != 0 && user_put(info_addr, info))
+    if (info_addr != 0 && write_i386_siginfo(info_addr, &info))
         return _EFAULT;
     return 0;
 }

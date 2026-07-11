@@ -619,6 +619,7 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
         lock(&pids_lock);
         send_signal(current, SIGTRAP_, (struct siginfo_) {
             .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
             .kill.pid = current->pid,
             .kill.uid = current->uid,
         });

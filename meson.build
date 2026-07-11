@@ -131,6 +131,7 @@ if get_option('kernel') == 'ish'
         'kernel/futex.c',
         'kernel/getset.c',
         'kernel/signal.c',
+        'kernel/signal-wire.c',
         'kernel/signal-altstack.c',
         'kernel/resource.c',
         'kernel/random.c',
@@ -226,6 +227,20 @@ if get_option('kernel') == 'ish'
             'kernel/signal-action-test.c',
             dependencies: ish)
         test('signal_action', signal_action_test)
+
+        signal_wire_i386_test = executable('signal_wire_i386_test', [
+                'kernel/signal-wire.c',
+                'kernel/signal-wire-test.c',
+            ], include_directories: includes,
+            c_args: ['-DISH_GUEST_I386=1'])
+        test('signal_wire_i386', signal_wire_i386_test)
+
+        signal_wire_aarch64_test = executable('signal_wire_aarch64_test', [
+                'kernel/signal-wire.c',
+                'kernel/signal-wire-test.c',
+            ], include_directories: includes,
+            c_args: ['-DISH_GUEST_AARCH64=1'])
+        test('signal_wire_aarch64', signal_wire_aarch64_test)
 
         signal_lock_test = executable(
             'signal_lock_test',

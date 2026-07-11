@@ -442,13 +442,14 @@ int main(void) {
 
     const addr_t wait_set_address = USER_PAGE + 128;
     const addr_t wait_info_address = USER_PAGE + 160;
-    const addr_t wait_timeout_address = USER_PAGE + 224;
+    const addr_t wait_timeout_address = USER_PAGE + 288;
     const sigset_t_ wait_set = sig_mask(SIGALRM_);
     const sigset_t_ ordered_wait_set = wait_set | sig_mask(SIGTERM_);
     CHECK(user_put(wait_set_address, ordered_wait_set) == 0,
             "写入多信号 sigtimedwait 等待集合");
     const struct siginfo_ pending_info = {
         .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
         .kill = {.pid = 1234, .uid = 5678},
     };
     task.blocked = ordered_wait_set;
@@ -461,9 +462,14 @@ int main(void) {
             list_size(&task.queue) == 3,
             "按高号、无关、低号顺序预排信号");
 
+    const byte_t info_boundary_sentinel = UINT8_C(0x6d);
+    CHECK(user_put(wait_info_address - 1, info_boundary_sentinel) == 0 &&
+            user_put(wait_info_address + sizeof(struct i386_siginfo),
+                    info_boundary_sentinel) == 0,
+            "写入 siginfo 输出边界哨兵");
     result = sys_rt_sigtimedwait(wait_set_address,
             wait_info_address, 0, sizeof(sigset_t_));
-    struct siginfo_ waited_info;
+    struct i386_siginfo waited_info;
     CHECK(result == SIGALRM_ &&
             user_get(wait_info_address, waited_info) == 0 &&
             waited_info.sig == SIGALRM_ &&
@@ -474,7 +480,11 @@ int main(void) {
             !sigset_has(task.pending, SIGALRM_) &&
             sigset_has(task.pending, SIGTERM_) &&
             sigset_has(task.pending, SIGUSR1_) &&
-            list_size(&task.queue) == 2,
+            list_size(&task.queue) == 2 &&
+            load_user_byte(wait_info_address - 1) ==
+                    info_boundary_sentinel &&
+            load_user_byte(wait_info_address +
+                    sizeof(struct i386_siginfo)) == info_boundary_sentinel,
             "sigtimedwait 优先消费最低编号目标并保留其他节点");
 
     clear_pending_signals(&task);
@@ -505,6 +515,7 @@ int main(void) {
         .sig = SIGALRM_,
         .info = {
             .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
             .kill = {.pid = 2468, .uid = 1357},
         },
     };
@@ -527,7 +538,7 @@ int main(void) {
             task.waiting == 0 && task.waiting_cond == NULL,
             "等待期间到达的被阻塞目标会唤醒并被完整消费");
 
-    struct siginfo_ info_sentinel;
+    struct i386_siginfo info_sentinel;
     memset(&info_sentinel, 0x5c, sizeof(info_sentinel));
     CHECK(user_put(wait_info_address, info_sentinel) == 0,
             "写入 EINTR 输出哨兵");
@@ -537,6 +548,7 @@ int main(void) {
         .sig = SIGUSR1_,
         .info = {
             .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
             .kill = {.pid = 9753, .uid = 8642},
         },
     };
@@ -634,7 +646,9 @@ int main(void) {
             "未阻塞的显式忽略信号在生成阶段丢弃");
     task.blocked = ignored_set;
     send_signal(&task, SIGUSR2_, (struct siginfo_) {
-        .code = SI_USER_, .kill = {.pid = 111, .uid = 222},
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 111, .uid = 222},
     });
     CHECK(sigset_has(task.pending, SIGUSR2_) &&
             list_size(&task.queue) == 1 &&
@@ -652,7 +666,9 @@ int main(void) {
             "未阻塞的默认忽略信号在生成阶段丢弃");
     task.blocked = default_ignored_set;
     send_signal(&task, SIGCHLD_, (struct siginfo_) {
-        .code = SI_USER_, .kill = {.pid = 333, .uid = 444},
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 333, .uid = 444},
     });
     CHECK(sigset_has(task.pending, SIGCHLD_) &&
             list_size(&task.queue) == 1 &&
@@ -697,14 +713,35 @@ int main(void) {
     task.cpu.eip = original_eip;
     task.cpu.eax = original_eax;
     task.blocked = 0;
-    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
+    const struct siginfo_ normal_frame_info = {
+        .code = SEGV_MAPERR_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
+        .fault.addr = UINT64_C(0x12345678abcdef01),
+    };
+    deliver_signal(&task, SIGUSR1_, normal_frame_info);
     receive_signals();
     addr_t normal_frame_address = task.cpu.esp;
     struct rt_sigframe_ delivered_frame;
+    CHECK(user_get(normal_frame_address, delivered_frame) == 0,
+            "读取普通栈实时信号帧");
+    bool frame_info_tail_zero = true;
+    for (size_t index = 1;
+            index < array_size(delivered_frame.info.payload_words); index++) {
+        if (delivered_frame.info.payload_words[index] != 0) {
+            frame_info_tail_zero = false;
+            break;
+        }
+    }
     CHECK(normal_frame_address >= NORMAL_STACK_PAGE &&
             normal_frame_address < normal_stack_top &&
             task.cpu.eip == normal_stack_action.handler &&
-            user_get(normal_frame_address, delivered_frame) == 0 &&
+            task.cpu.edx == normal_frame_address +
+                    offsetof(struct rt_sigframe_, info) &&
+            delivered_frame.pinfo == task.cpu.edx &&
+            delivered_frame.info.sig == SIGUSR1_ &&
+            delivered_frame.info.code == normal_frame_info.code &&
+            delivered_frame.info.fault.addr == UINT32_C(0xabcdef01) &&
+            frame_info_tail_zero &&
             delivered_frame.uc.mcontext.sp == normal_stack_top &&
             delivered_frame.restorer == VDSO_BASE +
                     (addr_t) vdso_symbol("__kernel_rt_sigreturn") &&

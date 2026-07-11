@@ -281,6 +281,7 @@ void handle_interrupt(int interrupt) {
             printk("%d page fault on 0x%x at 0x%x\n", current->pid, cpu->segfault_addr, cpu->eip);
             struct siginfo_ info = {
                 .code = mem_segv_reason(current->mem, cpu->segfault_addr),
+                .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
                 .fault.addr = cpu->segfault_addr,
             };
             dump_stack(8);
@@ -298,6 +299,7 @@ void handle_interrupt(int interrupt) {
         dump_stack(8);
         struct siginfo_ info = {
             .code = SI_KERNEL_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
             .fault.addr = cpu->eip,
         };
         deliver_signal(current, SIGILL_, info);

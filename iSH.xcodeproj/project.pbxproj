@@ -89,6 +89,7 @@
 		497F6D2F254E5EA600C82F46 /* random.c in Sources */ = {isa = PBXBuildFile; fileRef = 497F6C7E254E5C9700C82F46 /* random.c */; };
 		497F6D30254E5EA600C82F46 /* resource.c in Sources */ = {isa = PBXBuildFile; fileRef = 497F6CA0254E5C9800C82F46 /* resource.c */; };
 		497F6D31254E5EA600C82F46 /* signal.c in Sources */ = {isa = PBXBuildFile; fileRef = 497F6C87254E5C9700C82F46 /* signal.c */; };
+		A64A18022607110100000003 /* signal-wire.c in Sources */ = {isa = PBXBuildFile; fileRef = A64A18012607110100000002 /* signal-wire.c */; };
 		A64A17022607110100000002 /* signal-altstack.c in Sources */ = {isa = PBXBuildFile; fileRef = A64A17012607110100000001 /* signal-altstack.c */; };
 		497F6D32254E5EA600C82F46 /* task.c in Sources */ = {isa = PBXBuildFile; fileRef = 497F6C78254E5C9700C82F46 /* task.c */; };
 		497F6D33254E5EA600C82F46 /* time.c in Sources */ = {isa = PBXBuildFile; fileRef = 497F6C89254E5C9700C82F46 /* time.c */; };
@@ -547,6 +548,8 @@
 		497F6C85254E5C9700C82F46 /* misc.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = misc.c; sourceTree = "<group>"; };
 		497F6C86254E5C9700C82F46 /* time.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = time.h; sourceTree = "<group>"; };
 		497F6C87254E5C9700C82F46 /* signal.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = signal.c; sourceTree = "<group>"; };
+		A64A18012607110100000001 /* signal-info.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "signal-info.h"; sourceTree = "<group>"; };
+		A64A18012607110100000002 /* signal-wire.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "signal-wire.c"; sourceTree = "<group>"; };
 		A64A17012607110100000001 /* signal-altstack.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "signal-altstack.c"; sourceTree = "<group>"; };
 		497F6C88254E5C9700C82F46 /* fs.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = fs.h; sourceTree = "<group>"; };
 		497F6C89254E5C9700C82F46 /* time.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = time.c; sourceTree = "<group>"; };
@@ -1152,6 +1155,8 @@
 				497F6CA0254E5C9800C82F46 /* resource.c */,
 				497F6CA1254E5C9800C82F46 /* resource.h */,
 				497F6C87254E5C9700C82F46 /* signal.c */,
+				A64A18012607110100000001 /* signal-info.h */,
+				A64A18012607110100000002 /* signal-wire.c */,
 				A64A17012607110100000001 /* signal-altstack.c */,
 				497F6C7C254E5C9700C82F46 /* signal.h */,
 				497F6C78254E5C9700C82F46 /* task.c */,
@@ -2094,6 +2099,7 @@
 				497F6D2F254E5EA600C82F46 /* random.c in Sources */,
 				497F6D30254E5EA600C82F46 /* resource.c in Sources */,
 				497F6D31254E5EA600C82F46 /* signal.c in Sources */,
+				A64A18022607110100000003 /* signal-wire.c in Sources */,
 				A64A17022607110100000002 /* signal-altstack.c in Sources */,
 				497F6D32254E5EA600C82F46 /* task.c in Sources */,
 				497F6D33254E5EA600C82F46 /* time.c in Sources */,

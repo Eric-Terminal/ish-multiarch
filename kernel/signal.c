@@ -212,7 +212,7 @@ static void setup_sigframe(struct siginfo_ *info, struct sigframe_ *frame) {
 static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame) {
     frame->restorer = sigreturn_trampoline("__kernel_rt_sigreturn");
     frame->sig = info->sig;
-    frame->info = *info;
+    frame->info = pack_i386_siginfo(info);
     frame->uc.flags = 0;
     frame->uc.link = 0;
     // 返回帧保存可恢复的配置标志，而不是动态计算的 ONSTACK 状态。
@@ -893,7 +893,7 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
 
 copy_info:
     if (info_addr != 0)
-        if (user_put(info_addr, info))
+        if (write_i386_siginfo(info_addr, &info))
             return _EFAULT;
     STRACE("done sigtimedwait = %d\n", info.sig);
     return info.sig;
@@ -908,6 +908,7 @@ static int kill_task(struct task *task, dword_t sig) {
         return _EPERM;
     struct siginfo_ info = {
         .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
         .kill.pid = current->pid,
         .kill.uid = current->uid,
     };

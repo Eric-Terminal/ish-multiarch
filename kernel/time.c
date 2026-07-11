@@ -5,6 +5,7 @@
 #include "debug.h"
 #include <time.h>
 #include <signal.h>
+#include <string.h>
 #include <sys/time.h>
 #include "kernel/calls.h"
 #include "kernel/errno.h"
@@ -141,6 +142,7 @@ dword_t sys_clock_settime(dword_t UNUSED(clock), addr_t UNUSED(tp)) {
 static void itimer_notify(struct tgroup *group) {
     struct siginfo_ info = {
         .code = SI_TIMER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_TIMER,
     };
     lock(&pids_lock);
     lock(&group->lock);
@@ -314,11 +316,15 @@ dword_t sys_settimeofday(addr_t UNUSED(tv), addr_t UNUSED(tz)) {
 static void posix_timer_callback(struct posix_timer *timer) {
     if (timer->tgroup == NULL)
         return;
+    dword_t value_bits;
+    memcpy(&value_bits, &timer->sig_value, sizeof(value_bits));
     struct siginfo_ info = {
         .code = SI_TIMER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_TIMER,
         .timer.timer = timer->timer_id,
         .timer.overrun = 0,
-        .timer.value = timer->sig_value,
+        // i386 sigval 的四字节原始位只在内部事件中零扩展。
+        .timer.value = value_bits,
     };
     lock(&pids_lock);
     if (!timer_callback_is_current(timer->timer)) {
