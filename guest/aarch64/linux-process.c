@@ -332,6 +332,31 @@ void aarch64_linux_process_destroy(
     free(process);
 }
 
+bool aarch64_linux_process_uses_services(
+        const struct aarch64_linux_process *process,
+        pid_t_ tid, const void *task_opaque,
+        const struct guest_linux_syscall_service *syscalls,
+        const struct guest_linux_signal_service *signals) {
+    if (process == NULL || syscalls == NULL || signals == NULL ||
+            process->services.syscalls == NULL ||
+            process->services.signals == NULL)
+        return false;
+    const struct guest_linux_syscall_service *owned_syscalls =
+            process->services.syscalls;
+    const struct guest_linux_signal_service *owned_signals =
+            process->services.signals;
+    return process->task.tid == tid &&
+            process->task.service_opaque == task_opaque &&
+            owned_syscalls->runtime_opaque ==
+                    syscalls->runtime_opaque &&
+            owned_syscalls->dispatch == syscalls->dispatch &&
+            owned_signals->runtime_opaque ==
+                    signals->runtime_opaque &&
+            owned_signals->poll == signals->poll &&
+            owned_signals->restore == signals->restore &&
+            owned_signals->bad_frame == signals->bad_frame;
+}
+
 static struct aarch64_linux_process_result process_result(
         enum aarch64_linux_process_status status) {
     return (struct aarch64_linux_process_result) {

@@ -952,6 +952,17 @@ static void test_signal_trampoline_closure(void) {
     struct aarch64_linux_process *process =
             aarch64_linux_process_create(&config, NULL);
     assert(process != NULL);
+    assert(aarch64_linux_process_uses_services(process,
+            config.tid, &task_opaque, &syscalls, &signals));
+    assert(!aarch64_linux_process_uses_services(process,
+            config.tid + 1, &task_opaque, &syscalls, &signals));
+    int wrong_task_opaque = 0;
+    assert(!aarch64_linux_process_uses_services(process,
+            config.tid, &wrong_task_opaque, &syscalls, &signals));
+    struct guest_linux_signal_service wrong_signals = signals;
+    wrong_signals.bad_frame = NULL;
+    assert(!aarch64_linux_process_uses_services(process,
+            config.tid, &task_opaque, &syscalls, &wrong_signals));
 
     struct aarch64_linux_process_result result =
             aarch64_linux_process_poll_signals(process);

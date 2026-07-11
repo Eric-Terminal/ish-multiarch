@@ -119,6 +119,12 @@ struct aarch64_linux_interpreter_path_result
         char *destination, size_t capacity);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
+// 核对 create 时复制的 tid、服务闭包与 task opaque；不比较描述符地址。
+bool aarch64_linux_process_uses_services(
+        const struct aarch64_linux_process *process,
+        pid_t_ tid, const void *task_opaque,
+        const struct guest_linux_syscall_service *syscalls,
+        const struct guest_linux_signal_service *signals);
 // fault/undefined 不推进 PC；undefined 的 fault.address 保存精确 PC。
 // 调用方排入同步信号后应先调用 poll_signals。
 struct aarch64_linux_process_result aarch64_linux_process_run_one(

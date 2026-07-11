@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "guest/aarch64/linux-process.h"
+#include "kernel/aarch64-signal-service.h"
+#include "kernel/aarch64-syscall-service.h"
+#include "kernel/aarch64-task-runner.h"
 #include "kernel/calls.h"
 #include "kernel/task.h"
 #include "kernel/memory.h"
@@ -17,11 +20,17 @@ bool task_has_aarch64_process(const struct task *task) {
     return task->aarch64_process != NULL;
 }
 
-void task_attach_aarch64_process(struct task *task,
+bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process) {
-    assert(task != NULL && process != NULL &&
-            task->aarch64_process == NULL);
+    if (task == NULL || process == NULL ||
+            task->aarch64_process != NULL ||
+            !aarch64_linux_process_uses_services(process,
+                    task->pid, task,
+                    &ish_aarch64_linux_syscall_service,
+                    &ish_aarch64_linux_signal_service))
+        return false;
     task->aarch64_process = process;
+    return true;
 }
 
 struct aarch64_linux_process *task_take_aarch64_process(
@@ -185,7 +194,7 @@ void task_destroy(struct task *task) {
     free(task);
 }
 
-void task_run_current(void) {
+static noreturn void task_run_i386_current(void) {
     struct cpu_state *cpu = &current->cpu;
     struct tlb tlb = {};
     tlb_refresh(&tlb, &current->mem->mmu);
@@ -195,6 +204,12 @@ void task_run_current(void) {
         read_wrunlock(&current->mem->lock);
         handle_interrupt(interrupt);
     }
+}
+
+void task_run_current(void) {
+    if (task_has_aarch64_process(current))
+        aarch64_task_run_current();
+    task_run_i386_current();
 }
 
 static void *task_thread(void *task) {

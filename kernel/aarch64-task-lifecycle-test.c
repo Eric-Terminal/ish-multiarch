@@ -4,6 +4,8 @@
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-signal-service.h"
+#include "kernel/aarch64-syscall-service.h"
 #include "kernel/task.h"
 
 #define CHECK(condition, message) do { \
@@ -79,7 +81,8 @@ static void make_image(byte_t file[IMAGE_SIZE]) {
 }
 
 static struct aarch64_linux_process *make_process(
-        struct task *task, pid_t_ tid) {
+        struct task *task, pid_t_ tid,
+        bool use_kernel_services) {
     byte_t file[IMAGE_SIZE];
     make_image(file);
     const char *arguments[] = {"task-lifecycle"};
@@ -100,16 +103,21 @@ static struct aarch64_linux_process *make_process(
         .random = random,
         .tid = tid,
         .task_opaque = task,
+        .syscalls = use_kernel_services ?
+                &ish_aarch64_linux_syscall_service : NULL,
+        .signals = use_kernel_services ?
+                &ish_aarch64_linux_signal_service : NULL,
     };
     return aarch64_linux_process_create(&config, NULL);
 }
 
 int main(void) {
-    struct task parent = {0};
+    struct task parent = {.pid = 1000};
     struct aarch64_linux_process *first =
-            make_process(&parent, 1000);
+            make_process(&parent, parent.pid, true);
     CHECK(first != NULL, "创建首个 opaque process");
-    task_attach_aarch64_process(&parent, first);
+    CHECK(task_attach_aarch64_process(&parent, first),
+            "attach 接受匹配的生产服务闭包");
     CHECK(task_has_aarch64_process(&parent) &&
             parent.aarch64_process == first,
             "attach 接管唯一所有权");
@@ -118,16 +126,18 @@ int main(void) {
             task_take_aarch64_process(&parent);
     CHECK(taken == first && !task_has_aarch64_process(&parent),
             "take 原样交还所有权并清空 task");
-    task_attach_aarch64_process(&parent, taken);
+    CHECK(task_attach_aarch64_process(&parent, taken),
+            "take 后可重新交还同一 process");
     task_release_aarch64_process(&parent);
     CHECK(!task_has_aarch64_process(&parent),
             "release 销毁并清空 opaque process");
     task_release_aarch64_process(&parent);
 
     struct aarch64_linux_process *inherited =
-            make_process(&parent, 1001);
+            make_process(&parent, parent.pid, true);
     CHECK(inherited != NULL, "创建待验证浅拷贝的 process");
-    task_attach_aarch64_process(&parent, inherited);
+    CHECK(task_attach_aarch64_process(&parent, inherited),
+            "为浅拷贝验证接管 process");
     struct task *child = task_create_(&parent);
     CHECK(child != NULL && !task_has_aarch64_process(child) &&
             parent.aarch64_process == inherited,
@@ -138,11 +148,28 @@ int main(void) {
     struct task *aborted = task_create_(&parent);
     CHECK(aborted != NULL, "创建待中止任务");
     struct aarch64_linux_process *aborted_process =
-            make_process(aborted, aborted->pid);
+            make_process(aborted, aborted->pid, true);
     CHECK(aborted_process != NULL, "为待中止任务创建 process");
-    task_attach_aarch64_process(aborted, aborted_process);
+    CHECK(task_attach_aarch64_process(aborted, aborted_process),
+            "为待中止任务接管 process");
     task_abort_create(aborted);
     CHECK(!task_has_aarch64_process(&parent),
             "中止子任务不影响父任务所有权");
+
+    struct aarch64_linux_process *standalone =
+            make_process(&parent, parent.pid, false);
+    CHECK(standalone != NULL &&
+            !task_attach_aarch64_process(&parent, standalone) &&
+            !task_has_aarch64_process(&parent),
+            "attach 拒绝缺少内核服务闭包的 standalone process");
+    aarch64_linux_process_destroy(standalone);
+
+    struct aarch64_linux_process *wrong_tid =
+            make_process(&parent, parent.pid + 1, true);
+    CHECK(wrong_tid != NULL &&
+            !task_attach_aarch64_process(&parent, wrong_tid) &&
+            !task_has_aarch64_process(&parent),
+            "attach 拒绝服务正确但 tid 不匹配的 process");
+    aarch64_linux_process_destroy(wrong_tid);
     return 0;
 }

@@ -147,6 +147,7 @@ if get_option('kernel') == 'ish'
         'kernel/fs.c',
         'kernel/fs-task.c',
         'kernel/aarch64-exec-image.c',
+        'kernel/aarch64-task-runner.c',
         'kernel/aarch64-signal-service.c',
         'kernel/aarch64-syscall-service.c',
         'kernel/fs_info.c',
@@ -323,6 +324,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_task_lifecycle',
             aarch64_task_lifecycle_test)
+
+        aarch64_task_runner_test = executable(
+            'aarch64_task_runner_test',
+            'kernel/aarch64-task-runner-test.c',
+            dependencies: ish)
+        test('aarch64_task_runner', aarch64_task_runner_test)
     endif
 
 elif get_option('kernel') == 'linux'

@@ -120,8 +120,9 @@ static inline void task_set_mm(struct task *task, struct mm *mm) {
 
 bool task_has_aarch64_process(const struct task *task);
 // 这些入口仅由未发布 task 的构造线程或 task 自己的执行线程调用。
-// attach 接管唯一所有权；take 将所有权交还调用方且不销毁。
-void task_attach_aarch64_process(struct task *task,
+// attach 仅在生产服务闭包匹配时接管所有权；失败时所有权仍归调用方。
+// take 将所有权交还调用方且不销毁。
+bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process);
 struct aarch64_linux_process *task_take_aarch64_process(
         struct task *task);
