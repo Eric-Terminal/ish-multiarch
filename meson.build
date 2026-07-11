@@ -198,6 +198,9 @@ if get_option('kernel') == 'ish'
 
         fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
         test('fs_task', fs_task_test)
+
+        path_task_test = executable('path_task_test', 'fs/path-task-test.c', dependencies: ish)
+        test('path_task', path_task_test)
     endif
 
 elif get_option('kernel') == 'linux'

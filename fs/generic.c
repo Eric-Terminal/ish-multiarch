@@ -31,13 +31,14 @@ bool contains_mount_point(const char *path) {
     return false;
 }
 
-struct fd *generic_openat(struct fd *at, const char *path_raw, int flags, int mode) {
+struct fd *generic_openat_task(struct task *task, struct fd *at,
+        const char *path_raw, int flags, int mode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)
         return ERR_PTR(_EINVAL);
 
     // TODO really, really, seriously reconsider what I'm doing with the strings
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, N_SYMLINK_FOLLOW |
+    int err = path_normalize_task(task, at, path_raw, path, N_SYMLINK_FOLLOW |
             (flags & O_CREAT_ ? N_PARENT_DIR_WRITE : 0));
     if (err < 0)
         return ERR_PTR(err);
@@ -67,7 +68,7 @@ struct fd *generic_openat(struct fd *at, const char *path_raw, int flags, int mo
     if (flags & O_RDWR_) accmode = AC_R | AC_W;
     else if (flags & O_WRONLY_) accmode = AC_W;
     else accmode = AC_R;
-    err = access_check(&stat, accmode);
+    err = access_check_task(task, &stat, accmode);
     if (err < 0)
         goto error;
 
@@ -96,6 +97,10 @@ struct fd *generic_openat(struct fd *at, const char *path_raw, int flags, int mo
 error:
     fd_close(fd);
     return ERR_PTR(err);
+}
+
+struct fd *generic_openat(struct fd *at, const char *path_raw, int flags, int mode) {
+    return generic_openat_task(current, at, path_raw, flags, mode);
 }
 
 struct fd *generic_open(const char *path, int flags, int mode) {

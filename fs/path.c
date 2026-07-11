@@ -3,7 +3,10 @@
 #include "kernel/calls.h"
 #include "fs/path.h"
 
-static int __path_normalize(const char *at_path, const char *path, char *out, int flags, int levels) {
+static int __path_normalize(struct task *task,
+        const char *at_path, const char *path, char *out,
+        int flags, int levels, const char *root_path,
+        size_t root_floor) {
     // you must choose one
     if (flags & N_SYMLINK_FOLLOW)
         assert(!(flags & N_SYMLINK_NOFOLLOW));
@@ -12,6 +15,7 @@ static int __path_normalize(const char *at_path, const char *path, char *out, in
 
     const char *p = path;
     char *o = out;
+    char *floor = out + root_floor;
     *o = '\0';
     int n = MAX_PATH - 1;
 
@@ -37,11 +41,11 @@ static int __path_normalize(const char *at_path, const char *path, char *out, in
                 continue;
             } else if (p[1] == '.' && (p[2] == '\0' || p[2] == '/')) {
                 // double dot path component, delete the last component
-                if (o != out) {
+                if (o > floor) {
                     do {
                         o--;
                         n++;
-                    } while (*o != '/');
+                    } while (o > floor && *o != '/');
                 }
                 p += 2;
                 while (*p == '/')
@@ -81,16 +85,24 @@ static int __path_normalize(const char *at_path, const char *path, char *out, in
                     return _ELOOP;
                 // readlink does not null terminate
                 c[res] = '\0';
+                const char *restart_at = NULL;
+                size_t restart_floor = root_floor;
                 // if we should restart from the root, copy down
-                if (*c == '/')
+                if (*c == '/') {
                     memmove(out, c, strlen(c) + 1);
+                    restart_at = root_path;
+                    restart_floor = strcmp(root_path, "/") == 0 ?
+                            0 : strlen(root_path);
+                }
                 char *expanded_path = possible_symlink;
                 strcpy(expanded_path, out);
                 if (strcmp(p, "") != 0) {
                     strcat(expanded_path, "/");
                     strcat(expanded_path, p);
                 }
-                return __path_normalize(NULL, expanded_path, out, flags, levels + 1);
+                return __path_normalize(task, restart_at, expanded_path,
+                        out, flags, levels + 1,
+                        root_path, restart_floor);
             }
 
             // if there's a slash after this component, ensure that if it
@@ -102,7 +114,7 @@ static int __path_normalize(const char *at_path, const char *path, char *out, in
                 if (err >= 0) {
                     if (!S_ISDIR(stat.mode))
                         return _ENOTDIR;
-                    err = access_check(&stat, AC_X);
+                    err = access_check_task(task, &stat, AC_X);
                     if (err < 0)
                         return err;
                 }
@@ -118,27 +130,58 @@ static int __path_normalize(const char *at_path, const char *path, char *out, in
     return 0;
 }
 
-int path_normalize(struct fd *at, const char *path, char *out, int flags) {
+int path_normalize_task(struct task *task, struct fd *at,
+        const char *path, char *out, int flags) {
     assert(at != NULL);
     if (strcmp(path, "") == 0)
         return _ENOENT;
 
     // start with root or cwd, depending on whether it starts with a slash
-    lock(&current->fs->lock);
-    if (path[0] == '/')
-        at = current->fs->root;
-    else if (at == AT_PWD)
-        at = current->fs->pwd;
-    unlock(&current->fs->lock);
-    char at_path[MAX_PATH];
-    if (at != NULL) {
+    char at_path[MAX_PATH + 1];
+    char root_path[MAX_PATH + 1];
+    struct fs_info *fs = task->fs;
+    lock(&fs->lock);
+    int root_error = generic_getpath(fs->root, root_path);
+    if (root_error < 0) {
+        unlock(&fs->lock);
+        return root_error;
+    }
+    assert(path_is_normalized(root_path));
+    bool fs_path = path[0] == '/' || at == AT_PWD;
+    if (fs_path) {
+        if (path[0] == '/') {
+            at = fs->root;
+            strcpy(at_path, root_path);
+        } else {
+            at = fs->pwd;
+        }
+        int err = path[0] == '/' ? 0 : generic_getpath(at, at_path);
+        unlock(&fs->lock);
+        if (err < 0)
+            return err;
+        assert(path_is_normalized(at_path));
+    } else if (at != NULL) {
+        unlock(&fs->lock);
         int err = generic_getpath(at, at_path);
         if (err < 0)
             return err;
         assert(path_is_normalized(at_path));
+    } else {
+        unlock(&fs->lock);
     }
 
-    return __path_normalize(at != NULL ? at_path : NULL, path, out, flags, 0);
+    size_t root_length = strlen(root_path);
+    size_t root_floor = 0;
+    if (strcmp(root_path, "/") != 0 &&
+            strncmp(at_path, root_path, root_length) == 0 &&
+            (at_path[root_length] == '\0' || at_path[root_length] == '/'))
+        root_floor = root_length;
+    return __path_normalize(task, at != NULL ? at_path : NULL,
+            path, out, flags, 0, root_path, root_floor);
+}
+
+int path_normalize(struct fd *at, const char *path, char *out, int flags) {
+    return path_normalize_task(current, at, path, out, flags);
 }
 
 

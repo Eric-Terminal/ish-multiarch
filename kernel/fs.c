@@ -22,18 +22,22 @@ static void apply_umask(mode_t_ *mode) {
     unlock(&fs->lock);
 }
 
-int access_check(struct statbuf *stat, int check) {
-    if (superuser()) return 0;
+int access_check_task(struct task *task, struct statbuf *stat, int check) {
+    if (task->euid == 0) return 0;
     if (check == 0) return 0;
-    // Align check with the correct bits in mode
-    if (current->euid == stat->uid) {
+    // 将请求权限移动到文件所有者或所属组对应的位段。
+    if (task->euid == stat->uid) {
         check <<= 6;
-    } else if (current->egid == stat->gid) {
+    } else if (task->egid == stat->gid) {
         check <<= 3;
     }
     if (!(stat->mode & check))
         return _EACCES;
     return 0;
+}
+
+int access_check(struct statbuf *stat, int check) {
+    return access_check_task(current, stat, check);
 }
 
 // TODO ENAMETOOLONG
@@ -69,17 +73,7 @@ fd_t sys_openat(fd_t at_f, addr_t path_addr, dword_t flags, mode_t_ mode) {
     if (user_read_string(path_addr, path, sizeof(path)))
         return _EFAULT;
     STRACE("openat(%d, \"%s\", 0x%x, 0x%x)", at_f, path, flags, mode);
-
-    if (flags & O_CREAT_)
-        apply_umask(&mode);
-
-    struct fd *at = at_fd(at_f);
-    if (at == NULL)
-        return _EBADF;
-    struct fd *fd = generic_openat(at, path, flags, mode);
-    if (IS_ERR(fd))
-        return PTR_ERR(fd);
-    return f_install(fd, flags);
+    return file_openat_task(current, at_f, path, flags, mode);
 }
 
 fd_t sys_open(addr_t path_addr, dword_t flags, mode_t_ mode) {

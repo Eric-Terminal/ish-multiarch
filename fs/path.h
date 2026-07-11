@@ -1,6 +1,8 @@
 #ifndef PATH_H
 #define PATH_H
 
+struct task;
+
 #define AT_PWD (struct fd *) -2
 
 #define N_SYMLINK_FOLLOW 1
@@ -21,8 +23,10 @@
 // MAX_PATH, _ENAMETOOLONG is returned. The out buffer is expected to be at
 // least MAX_PATH in size.
 //
-// at is the file descriptor to use as a base to interpret relative paths. If
-// at is AT_PWD, uses current->pwd (with appropriate locking).
+// at 是相对路径的解析基准。AT_PWD 在 task 版中使用 task->fs->pwd，
+// 兼容入口则使用 current->fs->pwd，并在读取路径期间保持对应 fs 锁。
+int path_normalize_task(struct task *task, struct fd *at,
+        const char *path, char *out, int flags);
 int path_normalize(struct fd *at, const char *path, char *out, int flags);
 bool path_is_normalized(const char *path);
 
