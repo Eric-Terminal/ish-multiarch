@@ -162,7 +162,7 @@ static void halt_system(void) {
                     deliver_signal(task, SIGKILL_, SIGINFO_NIL);
                     break;
                 case 2:
-                    pthread_kill(task->thread, SIGTERM);
+                    pthread_kill(task_thread_load(task), SIGTERM);
                 }
             }
         }

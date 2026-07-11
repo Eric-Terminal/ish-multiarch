@@ -2,6 +2,7 @@
 #define TASK_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include "emu/cpu.h"
 #include "kernel/mm.h"
 #include "kernel/fs.h"
@@ -18,7 +19,8 @@ struct task {
     struct cpu_state cpu;
     struct mm *mm; // locked by general_lock
     struct mem *mem; // pointer to mm.mem, for convenience
-    pthread_t thread;
+    pthread_t thread; // 并发访问必须使用 task_thread_load/store。
+    atomic_bool start_ready; // host 线程在完整发布前等待。
     uint64_t threadid;
 
     struct tgroup *group; // immutable
@@ -92,6 +94,14 @@ struct task {
     lock_t waiting_cond_lock;
 };
 
+static inline pthread_t task_thread_load(const struct task *task) {
+    return __atomic_load_n(&task->thread, __ATOMIC_ACQUIRE);
+}
+
+static inline void task_thread_store(struct task *task, pthread_t thread) {
+    __atomic_store_n(&task->thread, thread, __ATOMIC_RELEASE);
+}
+
 // current will always give the process that is currently executing
 // if I have to stop using __thread, current will become a macro
 extern __thread struct task *current;
@@ -106,6 +116,10 @@ static inline void task_set_mm(struct task *task, struct mm *mm) {
 // parent as NULL to create the init process. Returns NULL if out of memory.
 // Ends with an underscore because there's a mach function by the same name
 struct task *task_create_(struct task *parent);
+// 调用方必须依次持有 pids_lock 与 task->group->lock。
+void task_publish_locked(struct task *task);
+void task_publish(struct task *task);
+void task_abort_create(struct task *task);
 // Removes the process from the process table and frees it. Must be called with pids_lock.
 void task_destroy(struct task *task);
 
@@ -175,6 +189,7 @@ static inline bool task_is_leader(struct task *task) {
 
 struct pid {
     dword_t id;
+    bool reserved;
     struct task *task;
     struct list session;
     struct list pgroup;
@@ -189,7 +204,11 @@ struct task *pid_get_task_zombie(dword_t id); // don't return null if the task e
 
 #define MAX_PID (1 << 15) // oughta be enough
 
-// TODO document
+// 建立 host 线程但暂不允许其执行 guest；用于完整发布与 ptrace 通知。
+void task_start_suspended(struct task *task);
+// 放行已建立的 host 线程；调用返回后不得再假定 task 仍然存活。
+void task_release_start(struct task *task);
+// 建立并立即放行 host 线程。
 void task_start(struct task *task);
 void task_run_current(void);
 

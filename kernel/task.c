@@ -13,14 +13,19 @@ static struct pid pids[MAX_PID + 1] = {};
 lock_t pids_lock = LOCK_INITIALIZER;
 
 static bool pid_empty(struct pid *pid) {
-    return pid->task == NULL && list_empty(&pid->session) && list_empty(&pid->pgroup);
+    return !pid->reserved && pid->task == NULL &&
+            list_empty(&pid->session) && list_empty(&pid->pgroup);
+}
+
+static struct pid *pid_slot(dword_t id) {
+    if (id >= array_size(pids))
+        return NULL;
+    return &pids[id];
 }
 
 struct pid *pid_get(dword_t id) {
-    if (id > sizeof(pids)/sizeof(pids[0]))
-        return NULL;
-    struct pid *pid = &pids[id];
-    if (pid_empty(pid))
+    struct pid *pid = pid_slot(id);
+    if (pid == NULL || pid->reserved || pid_empty(pid))
         return NULL;
     return pid;
 }
@@ -41,6 +46,50 @@ struct task *pid_get_task(dword_t id) {
 }
 
 struct task *task_create_(struct task *parent) {
+    struct task *task = malloc(sizeof(struct task));
+    if (task == NULL)
+        return NULL;
+    *task = (struct task) {};
+    if (parent != NULL)
+        *task = *parent;
+
+    task_thread_store(task, zero_init(pthread_t));
+    atomic_init(&task->start_ready, false);
+    task->threadid = 0;
+    task->cpu.poked_ptr = NULL;
+    task->cpu._poked = false;
+    list_init(&task->group_links);
+    list_init(&task->children);
+    list_init(&task->siblings);
+    task->parent = parent;
+    task->pending = 0;
+    task->waiting = 0;
+    list_init(&task->queue);
+    task->saved_mask = 0;
+    task->has_saved_mask = false;
+    task->clear_tid = 0;
+    task->robust_list = 0;
+    task->did_exec = false;
+    task->exit_code = 0;
+    task->zombie = false;
+    task->exiting = false;
+    task->vfork = NULL;
+    task->exit_signal = 0;
+
+    task->general_lock = (lock_t) {0};
+    lock_init(&task->general_lock);
+    task->sockrestart = (struct task_sockrestart) {};
+    list_init(&task->sockrestart.listen);
+    task->waiting_cond = NULL;
+    task->waiting_lock = NULL;
+    task->waiting_cond_lock = (lock_t) {0};
+    lock_init(&task->waiting_cond_lock);
+    task->pause = (cond_t) {0};
+    cond_init(&task->pause);
+    task->ptrace = (typeof(task->ptrace)) {0};
+    lock_init(&task->ptrace.lock);
+    cond_init(&task->ptrace.cond);
+
     lock(&pids_lock);
     static int cur_pid = 0;
     do {
@@ -49,49 +98,58 @@ struct task *task_create_(struct task *parent) {
     } while (!pid_empty(&pids[cur_pid]));
     struct pid *pid = &pids[cur_pid];
     pid->id = cur_pid;
+    pid->reserved = true;
     list_init(&pid->session);
     list_init(&pid->pgroup);
-
-    struct task *task = malloc(sizeof(struct task));
-    if (task == NULL)
-        return NULL;
-    *task = (struct task) {};
-    if (parent != NULL)
-        *task = *parent;
     task->pid = pid->id;
-    pid->task = task;
-
-    list_init(&task->children);
-    list_init(&task->siblings);
-    if (parent != NULL) {
-        task->parent = parent;
-        list_add(&parent->children, &task->siblings);
-    }
     unlock(&pids_lock);
-
-    task->pending = 0;
-    list_init(&task->queue);
-    task->clear_tid = 0;
-    task->robust_list = 0;
-    task->did_exec = false;
-    lock_init(&task->general_lock);
-
-    task->sockrestart = (struct task_sockrestart) {};
-    list_init(&task->sockrestart.listen);
-
-    task->waiting_cond = NULL;
-    task->waiting_lock = NULL;
-    lock_init(&task->waiting_cond_lock);
-    cond_init(&task->pause);
-
-    lock_init(&task->ptrace.lock);
-    cond_init(&task->ptrace.cond);
     return task;
+}
+
+void task_publish_locked(struct task *task) {
+    struct pid *pid = pid_slot(task->pid);
+    assert(pid != NULL && pid->reserved && pid->task == NULL);
+
+    struct tgroup *group = task->group;
+    if (task_is_leader(task)) {
+        struct pid *session = pid_slot(group->sid);
+        struct pid *pgroup = pid_slot(group->pgid);
+        assert(session != NULL && pgroup != NULL);
+        list_add(&session->session, &group->session);
+        list_add(&pgroup->pgroup, &group->pgroup);
+    }
+    list_add(&group->threads, &task->group_links);
+    if (task->parent != NULL)
+        list_add(&task->parent->children, &task->siblings);
+
+    pid->task = task;
+    pid->reserved = false;
+}
+
+void task_publish(struct task *task) {
+    lock(&pids_lock);
+    lock(&task->group->lock);
+    task_publish_locked(task);
+    unlock(&task->group->lock);
+    unlock(&pids_lock);
+}
+
+void task_abort_create(struct task *task) {
+    lock(&pids_lock);
+    struct pid *pid = pid_slot(task->pid);
+    assert(pid != NULL && pid->reserved && pid->task == NULL);
+    pid->reserved = false;
+    unlock(&pids_lock);
+    cond_destroy(&task->pause);
+    cond_destroy(&task->ptrace.cond);
+    free(task);
 }
 
 void task_destroy(struct task *task) {
     list_remove(&task->siblings);
-    pid_get(task->pid)->task = NULL;
+    struct pid *pid = pid_slot(task->pid);
+    assert(pid != NULL && !pid->reserved && pid->task == task);
+    pid->task = NULL;
     free(task);
 }
 
@@ -109,6 +167,8 @@ void task_run_current(void) {
 
 static void *task_thread(void *task) {
     current = task;
+    while (!atomic_load_explicit(&current->start_ready, memory_order_acquire))
+        sched_yield();
     update_thread_name();
     task_run_current();
     die("task_thread returned"); // above function call should never return
@@ -120,9 +180,25 @@ __attribute__((constructor)) static void create_attr(void) {
     pthread_attr_setdetachstate(&task_thread_attr, PTHREAD_CREATE_DETACHED);
 }
 
-void task_start(struct task *task) {
-    if (pthread_create(&task->thread, &task_thread_attr, task_thread, task) < 0)
+void task_start_suspended(struct task *task) {
+    atomic_store_explicit(&task->start_ready, false, memory_order_relaxed);
+    lock(&task->sighand->lock);
+    pthread_t thread;
+    if (pthread_create(&thread, &task_thread_attr, task_thread, task) != 0)
         die("could not create thread");
+    task_thread_store(task, thread);
+    unlock(&task->sighand->lock);
+}
+
+void task_release_start(struct task *task) {
+    atomic_store_explicit(&task->start_ready, true, memory_order_release);
+}
+
+void task_start(struct task *task) {
+    lock(&pids_lock);
+    task_start_suspended(task);
+    unlock(&pids_lock);
+    task_release_start(task);
 }
 
 int_t sys_sched_yield(void) {

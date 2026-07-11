@@ -67,7 +67,7 @@ static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ 
         return;
 
     if (task != current) {
-        pthread_kill(task->thread, SIGUSR1);
+        pthread_kill(task_thread_load(task), SIGUSR1);
 
         // wake up any pthread condition waiters
         // actual madness, I hope to god it's correct

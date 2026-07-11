@@ -52,40 +52,80 @@ static struct rlimit_ init_rlimits[16] = {
     [RLIMIT_RTTIME_]     = {RLIM_INFINITY_, RLIM_INFINITY_},
 };
 
-// TODO error propagation
 static struct task *construct_task(struct task *parent) {
     struct task *task = task_create_(parent);
+    if (task == NULL)
+        return ERR_PTR(_ENOMEM);
+    task_thread_store(task, pthread_self());
+    task->blocked = 0;
 
     struct tgroup *group = malloc(sizeof(struct tgroup));
+    if (group == NULL) {
+        task_abort_create(task);
+        return ERR_PTR(_ENOMEM);
+    }
     *group = (struct tgroup) {};
     list_init(&group->threads);
+    list_init(&group->session);
+    list_init(&group->pgroup);
     lock_init(&group->lock);
     cond_init(&group->child_exit);
     cond_init(&group->stopped_cond);
     memcpy(group->limits, init_rlimits, sizeof(init_rlimits));
     group->leader = task;
     group->personality = ADDR_NO_RANDOMIZE_;
-    list_add(&group->threads, &task->group_links);
+    group->sid = task->pid;
+    group->pgid = task->pid;
     task->group = group;
     task->tgid = task->pid;
-    task_setsid(task);
 
-    task_set_mm(task, mm_new());
+    int err = _ENOMEM;
+    struct mm *mm = mm_new();
+    if (mm == NULL)
+        goto fail_group;
+    task_set_mm(task, mm);
     task->sighand = sighand_new();
-    task->files = fdtable_new(3); // why is there a 3 here
+    if (task->sighand == NULL)
+        goto fail_mm;
+    task->files = fdtable_new(3); // 为 stdin、stdout、stderr 预留槽位。
+    if (IS_ERR(task->files)) {
+        err = (int) PTR_ERR(task->files);
+        goto fail_sighand;
+    }
 
     task->fs = fs_info_new();
+    if (task->fs == NULL)
+        goto fail_files;
     task->fs->umask = 0022;
     // we'll need to have current set to do the open call
     struct task *old_current = current;
     current = task;
-    task->fs->root = generic_open("/", O_RDONLY_, 0);
-    if (IS_ERR(task->fs->root))
-        return ERR_PTR(task->fs->root);
-    task->fs->pwd = fd_retain(task->fs->root);
+    struct fd *root = generic_open("/", O_RDONLY_, 0);
     current = old_current;
+    if (IS_ERR(root)) {
+        err = (int) PTR_ERR(root);
+        goto fail_fs;
+    }
+    task->fs->root = root;
+    task->fs->pwd = fd_retain(task->fs->root);
 
+    task_publish(task);
     return task;
+
+fail_fs:
+    fs_info_release(task->fs);
+fail_files:
+    fdtable_release(task->files);
+fail_sighand:
+    sighand_release(task->sighand);
+fail_mm:
+    mm_release(task->mm);
+fail_group:
+    cond_destroy(&group->child_exit);
+    cond_destroy(&group->stopped_cond);
+    free(group);
+    task_abort_create(task);
+    return ERR_PTR(err);
 }
 
 int become_first_process(void) {
@@ -109,11 +149,6 @@ int become_new_init_child(void) {
     if (IS_ERR(task))
         return PTR_ERR(task);
 
-    // these are things we definitely don't want to inherit
-    task->clear_tid = 0;
-    task->vfork = NULL;
-    task->blocked = task->pending = task->waiting = 0;
-    list_init(&task->queue);
     // TODO: think about whether it would be a good idea to inherit fs_info
 
     current = task;

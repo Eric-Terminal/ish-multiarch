@@ -14,6 +14,8 @@ struct fs_info *fs_info_new(void) {
 
 struct fs_info *fs_info_copy(struct fs_info *fs) {
     struct fs_info *new_fs = fs_info_new();
+    if (new_fs == NULL)
+        return NULL;
     new_fs->umask = fs->umask;
     new_fs->pwd = fd_retain(fs->pwd);
     new_fs->root = fd_retain(fs->root);
@@ -22,8 +24,10 @@ struct fs_info *fs_info_copy(struct fs_info *fs) {
 
 void fs_info_release(struct fs_info *fs) {
     if (--fs->refcount == 0) {
-        fd_close(fs->pwd);
-        fd_close(fs->root);
+        if (fs->pwd != NULL)
+            fd_close(fs->pwd);
+        if (fs->root != NULL)
+            fd_close(fs->root);
         free(fs);
     }
 }

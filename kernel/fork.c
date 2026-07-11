@@ -37,8 +37,8 @@ static void tgroup_init_copy(
         struct tgroup *group, struct tgroup *old_group) {
     *group = *old_group;
     list_init(&group->threads);
-    list_add(&old_group->pgroup, &group->pgroup);
-    list_add(&old_group->session, &group->session);
+    list_init(&group->pgroup);
+    list_init(&group->session);
     if (group->tty) {
         lock(&group->tty->lock);
         group->tty->refcount++;
@@ -47,13 +47,15 @@ static void tgroup_init_copy(
     group->itimer = NULL;
     group->doing_group_exit = false;
     group->children_rusage = (struct rusage_) {};
+    group->child_exit = (cond_t) {0};
     cond_init(&group->child_exit);
+    group->stopped_cond = (cond_t) {0};
     cond_init(&group->stopped_cond);
+    group->lock = (lock_t) {0};
     lock_init(&group->lock);
 }
 
 static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid_addr, addr_t tls_addr, addr_t ctid_addr) {
-    task->vfork = NULL;
     if (stack != 0)
         task->cpu.esp = stack;
 
@@ -62,7 +64,10 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
     if (flags & CLONE_VM_) {
         mm_retain(mm);
     } else {
-        task_set_mm(task, mm_copy(mm));
+        struct mm *new_mm = mm_copy(mm);
+        if (new_mm == NULL)
+            return _ENOMEM;
+        task_set_mm(task, new_mm);
     }
 
     if (flags & CLONE_FILES_) {
@@ -70,7 +75,7 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
     } else {
         task->files = fdtable_copy(task->files);
         if (IS_ERR(task->files)) {
-            err = PTR_ERR(task->files);
+            err = (int) PTR_ERR(task->files);
             goto fail_free_mem;
         }
     }
@@ -119,6 +124,7 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
         task->clear_tid = ctid_addr;
     task->exit_signal = flags & CSIGNAL_;
 
+    task_start_suspended(task);
     lock(&pids_lock);
     lock(&old_group->lock);
     if (new_group != NULL) {
@@ -126,9 +132,11 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
         task->group = new_group;
         task->group->leader = task;
         task->tgid = task->pid;
+        unlock(&old_group->lock);
+        lock(&new_group->lock);
     }
-    list_add(&task->group->threads, &task->group_links);
-    unlock(&old_group->lock);
+    task_publish_locked(task);
+    unlock(&task->group->lock);
     unlock(&pids_lock);
 
     // remember to do CLONE_SYSVSEM
@@ -160,18 +168,7 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
     struct task *task = task_create_(current);
     if (task == NULL)
         return _ENOMEM;
-    int err = copy_task(task, flags, stack, ptid, tls, ctid);
-    if (err < 0) {
-        // FIXME: there is a window between task_create_ and task_destroy where
-        // some other thread could get a pointer to the task.
-        // FIXME: task_destroy doesn't free all aspects of the task, which
-        // could cause leaks
-        lock(&pids_lock);
-        task_destroy(task);
-        unlock(&pids_lock);
-        return err;
-    }
-    task->cpu.eax = 0;
+    pid_t_ pid = task->pid;
 
     struct vfork_info vfork;
     if (flags & CLONE_VFORK_) {
@@ -180,16 +177,21 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
         vfork.done = false;
         task->vfork = &vfork;
     }
+    task->cpu.eax = 0;
 
-    // task might be destroyed by the time we finish, so save the pid
-    pid_t pid = task->pid;
+    int err = copy_task(task, flags, stack, ptid, tls, ctid);
+    if (err < 0) {
+        if (flags & CLONE_VFORK_)
+            cond_destroy(&vfork.cond);
+        task_abort_create(task);
+        return err;
+    }
 
     if (current->ptrace.traced) {
         current->ptrace.trap_event = PTRACE_EVENT_FORK_;
         send_signal(current, SIGTRAP_, SIGINFO_NIL);
     }
-
-    task_start(task);
+    task_release_start(task);
 
     if (flags & CLONE_VFORK_) {
         lock(&vfork.lock);
@@ -197,9 +199,6 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
             // FIXME this should stop waiting if a fatal signal is received
             wait_for_ignore_signals(&vfork.cond, &vfork.lock, NULL);
         unlock(&vfork.lock);
-        lock(&task->general_lock);
-        task->vfork = NULL;
-        unlock(&task->general_lock);
         cond_destroy(&vfork.cond);
     }
 
@@ -216,11 +215,13 @@ dword_t sys_vfork(void) {
 
 void vfork_notify(struct task *task) {
     lock(&task->general_lock);
-    if (task->vfork) {
-        lock(&task->vfork->lock);
-        task->vfork->done = true;
-        notify(&task->vfork->cond);
-        unlock(&task->vfork->lock);
+    struct vfork_info *vfork = task->vfork;
+    if (vfork != NULL) {
+        task->vfork = NULL;
+        lock(&vfork->lock);
+        vfork->done = true;
+        notify(&vfork->cond);
+        unlock(&vfork->lock);
     }
     unlock(&task->general_lock);
 }

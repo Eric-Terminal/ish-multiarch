@@ -5,8 +5,9 @@
 #include "task.h"
 #include <string.h>
 
-// Returns stopped child with the given pid, locked with the ptrace lock
+// 返回的子任务同时受 pids_lock 与 ptrace.lock 保护。
 static struct task *find_child(pid_t_ pid) {
+    lock(&pids_lock);
     struct task *child = NULL;
     list_for_each_entry(&current->children, child, siblings) {
         if (child->pid == pid) {
@@ -20,7 +21,14 @@ static struct task *find_child(pid_t_ pid) {
     }
     child = NULL;
 found:
+    if (child == NULL)
+        unlock(&pids_lock);
     return child;
+}
+
+static void release_child(struct task *child) {
+    unlock(&child->ptrace.lock);
+    unlock(&pids_lock);
 }
 
 // Ensure stopped, ptrace locked, etc. before calling this
@@ -80,13 +88,13 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             if (!child) return _EPERM;
 
             if (user_get_task(child, addr, peek)) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             } else if (user_put(data, peek)) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -100,15 +108,17 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             struct user_ user_ = {};
             get_user_regs(&child->cpu, &user_.user_regs);
 
-            if (addr & (sizeof(peek) - 1) || addr >= sizeof(struct user_))
+            if (addr & (sizeof(peek) - 1) || addr >= sizeof(struct user_)) {
+                release_child(child);
                 return _EIO;
+            }
 
             memcpy(&peek, (char *)&user_ + addr, sizeof(peek));
             if (user_put(data, peek)) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -120,10 +130,10 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             if (!child) return _EPERM;
 
             if (user_write_task_ptrace(child, addr, &data, sizeof(data))) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -136,7 +146,7 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             child->cpu.tf = false;
             child->ptrace.stopped = false;
             notify(&child->ptrace.cond);
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -146,9 +156,12 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             struct task *child = find_child(pid);
             if (!child) return _EPERM;
 
-            child->ptrace.stopped = false;
-            send_signal(child, SIGKILL_, SIGINFO_NIL);
             unlock(&child->ptrace.lock);
+            send_signal(child, SIGKILL_, SIGINFO_NIL);
+            lock(&child->ptrace.lock);
+            child->ptrace.stopped = false;
+            notify(&child->ptrace.cond);
+            release_child(child);
 
             return 0;
         }
@@ -161,7 +174,7 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             child->cpu.tf = true;
             child->ptrace.stopped = false;
             notify(&child->ptrace.cond);
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -174,10 +187,10 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             struct user_regs_struct_ user_regs_ = {};
             get_user_regs(&child->cpu, &user_regs_);
             if (user_put(data, user_regs_)) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -189,11 +202,12 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
 
             struct user_regs_struct_ user_regs_;
             if (user_get(data, user_regs_)) {
+                release_child(child);
                 return _EFAULT;
             } else {
                 set_user_regs(&child->cpu, &user_regs_);
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -206,11 +220,11 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
 
             struct user_fpregs_struct_ user_fpregs_ = {};
             if (user_put(data, user_fpregs_)) {
-                unlock(&child->ptrace.lock);
+                release_child(child);
                 return _EFAULT;
             }
             // TODO get float point registers
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -222,11 +236,12 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
 
             struct user_fpregs_struct_ user_fpregs_;
             if (user_get(data, user_fpregs_)) {
+                release_child(child);
                 return _EFAULT;
             } else {
                 // TODO set floating point registers
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }
@@ -241,9 +256,10 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             if (!child) return _EPERM;
 
             if (data && user_put(data, child->ptrace.info)) {
+                release_child(child);
                 return _EFAULT;
             }
-            unlock(&child->ptrace.lock);
+            release_child(child);
 
             return 0;
         }

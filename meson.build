@@ -230,6 +230,12 @@ if get_option('kernel') == 'ish'
             'kernel/clone-failure-test.c',
             dependencies: ish)
         test('clone_failure', clone_failure_test)
+
+        task_publication_test = executable(
+            'task_publication_test',
+            'kernel/task-publication-test.c',
+            dependencies: ish)
+        test('task_publication', task_publication_test)
     endif
 
 elif get_option('kernel') == 'linux'
