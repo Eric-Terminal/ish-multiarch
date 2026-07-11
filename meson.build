@@ -231,6 +231,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('signal_lock', signal_lock_test)
 
+        user_test = executable(
+            'user_test',
+            'kernel/user-test.c',
+            dependencies: ish)
+        test('user', user_test)
+
         timer_lifecycle_test = executable(
             'timer_lifecycle_test',
             'util/timer-lifecycle-test.c',
