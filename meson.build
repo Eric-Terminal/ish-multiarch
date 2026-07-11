@@ -242,6 +242,20 @@ if get_option('kernel') == 'ish'
             c_args: ['-DISH_GUEST_AARCH64=1'])
         test('signal_wire_aarch64', signal_wire_aarch64_test)
 
+        linux_signal_service_i386_probe = static_library(
+            'linux_signal_service_i386_probe',
+            'guest/linux/signal-service-backend-test.c',
+            include_directories: includes,
+            c_args: ['-DISH_GUEST_I386=1'])
+        linux_signal_service_bridge_test = executable(
+            'linux_signal_service_bridge_test',
+            'guest/linux/signal-service-bridge-test.c',
+            include_directories: includes,
+            c_args: ['-DISH_GUEST_AARCH64=1'],
+            link_with: linux_signal_service_i386_probe)
+        test('linux_signal_service_bridge',
+            linux_signal_service_bridge_test)
+
         signal_lock_test = executable(
             'signal_lock_test',
             'kernel/signal-lock-test.c',
