@@ -225,6 +225,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('signal_action', signal_action_test)
 
+        signal_lock_test = executable(
+            'signal_lock_test',
+            'kernel/signal-lock-test.c',
+            dependencies: ish)
+        test('signal_lock', signal_lock_test)
+
         clone_failure_test = executable(
             'clone_failure_test',
             'kernel/clone-failure-test.c',

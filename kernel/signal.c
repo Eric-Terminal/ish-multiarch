@@ -98,10 +98,20 @@ retry:
     }
 }
 
+static void resume_ptrace_stop_for_sigkill(struct task *task, int sig) {
+    if (sig != SIGKILL_)
+        return;
+    lock(&task->ptrace.lock);
+    task->ptrace.stopped = false;
+    notify(&task->ptrace.cond);
+    unlock(&task->ptrace.lock);
+}
+
 void deliver_signal(struct task *task, int sig, struct siginfo_ info) {
     lock(&task->sighand->lock);
     deliver_signal_unlocked(task, sig, info);
     unlock(&task->sighand->lock);
+    resume_ptrace_stop_for_sigkill(task, sig);
 }
 
 void send_signal(struct task *task, int sig, struct siginfo_ info) {
@@ -118,6 +128,7 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
         deliver_signal_unlocked(task, sig, info);
     }
     unlock(&sighand->lock);
+    resume_ptrace_stop_for_sigkill(task, sig);
 
     if (sig == SIGCONT_ || sig == SIGKILL_) {
         lock(&task->group->lock);
@@ -305,29 +316,33 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
         *action = (struct signal_action) {.handler = SIG_DFL_};
 }
 
-void signal_delivery_stop(int sig, struct siginfo_ *info) {
+// 调用前后均持有 sighand；通知父任务与睡眠期间会暂时释放它。
+static void signal_delivery_stop(int sig, const struct siginfo_ *info) {
+    if (sigset_has(current->pending, SIGKILL_))
+        return;
+
     lock(&current->ptrace.lock);
     current->ptrace.stopped = true;
     current->ptrace.signal = sig;
     current->ptrace.info = *info;
     unlock(&current->ptrace.lock);
-    notify(&current->parent->group->child_exit);
-    // TODO add siginfo
-    send_signal(current->parent, current->group->leader->exit_signal, SIGINFO_NIL);
 
+    // ptrace 父子可能共享 sighand，通知前必须先释放它。
     unlock(&current->sighand->lock);
-    lock(&current->ptrace.lock);
-    while (current->ptrace.stopped) {
-        wait_for_ignore_signals(&current->ptrace.cond, &current->ptrace.lock, NULL);
-        lock(&current->sighand->lock);
-        bool got_sigkill = sigset_has(current->pending, SIGKILL_);
-        unlock(&current->sighand->lock);
-        if (got_sigkill) {
-            STRACE("%d received a SIGKILL in signal delivery stop\n", current->pid);
-            unlock(&current->ptrace.lock);
-            do_exit_group(SIGKILL_);
-        }
+
+    lock(&pids_lock);
+    struct task *parent = current->parent;
+    if (parent != NULL) {
+        notify(&parent->group->child_exit);
+        // TODO add siginfo
+        send_signal(parent, current->group->leader->exit_signal, SIGINFO_NIL);
     }
+    unlock(&pids_lock);
+
+    lock(&current->ptrace.lock);
+    while (current->ptrace.stopped)
+        wait_for_ignore_signals(
+                &current->ptrace.cond, &current->ptrace.lock, NULL);
     unlock(&current->ptrace.lock);
     lock(&current->sighand->lock);
 }
@@ -351,24 +366,33 @@ void receive_signals(void) {
         current->blocked = current->saved_mask;
     }
 
-    struct sigqueue *sigqueue, *tmp;
-    list_for_each_entry_safe(&current->queue, sigqueue, tmp, queue) {
-        int sig = sigqueue->info.sig;
-        if (sigset_has(blocked, sig))
-            continue;
+    while (true) {
+        struct sigqueue *sigqueue = NULL;
+        struct sigqueue *candidate;
+        list_for_each_entry(&current->queue, candidate, queue) {
+            if (!sigset_has(blocked, candidate->info.sig)) {
+                sigqueue = candidate;
+                break;
+            }
+        }
+        if (sigqueue == NULL)
+            break;
+
+        struct siginfo_ info = sigqueue->info;
+        int sig = info.sig;
         list_remove(&sigqueue->queue);
         sigset_del(&current->pending, sig);
+        free(sigqueue);
 
         if (current->ptrace.traced && sig != SIGKILL_) {
             // This notifies the parent, goes to sleep, and waits for the
             // parent to tell it to continue.
             // Any signals received while waiting are left on the queue, except
             // for SIGKILL_, which causes an immediate exit.
-            signal_delivery_stop(sig, &sigqueue->info);
+            signal_delivery_stop(sig, &info);
         } else {
-            receive_signal(sighand, &sigqueue->info);
+            receive_signal(sighand, &info);
         }
-        free(sigqueue);
     }
 
     unlock(&sighand->lock);
@@ -380,9 +404,13 @@ void receive_signals(void) {
         unlock(&current->group->lock);
         if (now_stopped) {
             lock(&pids_lock);
-            notify(&current->parent->group->child_exit);
-            // TODO add siginfo
-            send_signal(current->parent, current->group->leader->exit_signal, SIGINFO_NIL);
+            struct task *parent = current->parent;
+            if (parent != NULL) {
+                notify(&parent->group->child_exit);
+                // TODO add siginfo
+                send_signal(parent,
+                        current->group->leader->exit_signal, SIGINFO_NIL);
+            }
             unlock(&pids_lock);
         }
     }

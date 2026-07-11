@@ -29,8 +29,8 @@ static int proc_pid_stat_show(struct proc_entry *entry, struct proc_data *buf) {
     if (task == NULL)
         return _ESRCH;
     lock(&task->general_lock);
-    lock(&task->group->lock);
     lock(&task->sighand->lock);
+    lock(&task->group->lock);
 
     proc_printf(buf, "%d ", task->pid);
     proc_printf(buf, "(%.16s) ", task->comm);
@@ -97,8 +97,8 @@ static int proc_pid_stat_show(struct proc_entry *entry, struct proc_data *buf) {
     // that's enough for now
     proc_printf(buf, "\n");
 
-    unlock(&task->sighand->lock);
     unlock(&task->group->lock);
+    unlock(&task->sighand->lock);
     unlock(&task->general_lock);
     proc_put_task(task);
     return 0;

@@ -132,15 +132,17 @@ noreturn void do_exit_group(int status) {
     } else {
         status = group->group_exit_code;
     }
+    unlock(&group->lock);
 
     // kill everyone else in the group
     struct task *task;
     list_for_each_entry(&group->threads, task, group_links) {
         deliver_signal(task, SIGKILL_, SIGINFO_NIL);
-        task->group->stopped = false;
-        notify(&task->group->stopped_cond);
     }
 
+    lock(&group->lock);
+    group->stopped = false;
+    notify(&group->stopped_cond);
     unlock(&group->lock);
     unlock(&pids_lock);
     do_exit(status);

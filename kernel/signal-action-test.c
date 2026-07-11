@@ -77,6 +77,8 @@ int main(void) {
     list_init(&task.queue);
     cond_init(&task.pause);
     lock_init(&task.waiting_cond_lock);
+    lock_init(&task.ptrace.lock);
+    cond_init(&task.ptrace.cond);
     task_thread_store(&task, pthread_self());
     task_set_mm(&task, mm_new());
     CHECK(task.mm != NULL, "创建 i386 用户地址空间");
@@ -419,6 +421,7 @@ int main(void) {
             "恢复 host 唤醒信号动作");
 
     current = NULL;
+    cond_destroy(&task.ptrace.cond);
     cond_destroy(&task.pause);
     mm_release(task.mm);
     return 0;
