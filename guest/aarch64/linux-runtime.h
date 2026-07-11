@@ -1,8 +1,8 @@
 #ifndef GUEST_AARCH64_LINUX_RUNTIME_H
 #define GUEST_AARCH64_LINUX_RUNTIME_H
 
-#include "guest/aarch64/linux-memory.h"
 #include "guest/aarch64/linux-syscall.h"
+#include "guest/linux/memory.h"
 #include "guest/linux/syscall-service.h"
 #include "guest/memory/tlb.h"
 
@@ -14,7 +14,7 @@ struct aarch64_linux_services {
 };
 
 struct aarch64_linux_runtime {
-    struct aarch64_linux_mm memory;
+    struct guest_linux_mm memory;
     const struct aarch64_linux_services *services;
 };
 

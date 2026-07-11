@@ -1,6 +1,6 @@
 #include <assert.h>
 
-#include "guest/aarch64/linux-memory.h"
+#include "guest/linux/memory.h"
 
 static bool page_end(guest_addr_t address, guest_addr_t *end) {
     if (address > UINT64_MAX - GUEST_MEMORY_PAGE_MASK)
@@ -9,7 +9,7 @@ static bool page_end(guest_addr_t address, guest_addr_t *end) {
     return true;
 }
 
-void aarch64_linux_mm_init(struct aarch64_linux_mm *memory,
+void guest_linux_mm_init(struct guest_linux_mm *memory,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit) {
     assert(memory != NULL && page_table != NULL);
@@ -19,7 +19,7 @@ void aarch64_linux_mm_init(struct aarch64_linux_mm *memory,
             start_brk, 0) &&
             guest_address_space_contains(&page_table->address_space,
                     brk_limit, 0));
-    *memory = (struct aarch64_linux_mm) {
+    *memory = (struct guest_linux_mm) {
         .page_table = page_table,
         .start_brk = start_brk,
         .brk = start_brk,
@@ -27,7 +27,7 @@ void aarch64_linux_mm_init(struct aarch64_linux_mm *memory,
     };
 }
 
-static void rollback_growth(struct aarch64_linux_mm *memory,
+static void rollback_growth(struct guest_linux_mm *memory,
         guest_addr_t first, guest_addr_t end) {
     for (guest_addr_t page = first; page < end;
             page += GUEST_MEMORY_PAGE_SIZE)
@@ -35,7 +35,7 @@ static void rollback_growth(struct aarch64_linux_mm *memory,
                 GUEST_PAGE_TABLE_OK);
 }
 
-guest_addr_t aarch64_linux_brk(struct aarch64_linux_mm *memory,
+guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
         guest_addr_t requested) {
     if (requested == 0)
         return memory->brk;

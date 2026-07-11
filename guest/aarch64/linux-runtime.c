@@ -83,7 +83,7 @@ void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit,
         const struct aarch64_linux_services *services) {
-    aarch64_linux_mm_init(&runtime->memory, page_table,
+    guest_linux_mm_init(&runtime->memory, page_table,
             start_brk, brk_limit);
     runtime->services = services;
 }
@@ -127,7 +127,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
     } else if (syscall.number == AARCH64_LINUX_SYS_GETTID) {
         result.return_value = (qword_t) task->tid;
     } else if (syscall.number == AARCH64_LINUX_SYS_BRK) {
-        result.return_value = aarch64_linux_brk(
+        result.return_value = guest_linux_brk(
                 &runtime->memory, syscall.arguments[0]);
     } else {
         result.return_value = dispatch_service(
