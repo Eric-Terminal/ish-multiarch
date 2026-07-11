@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <string.h>
 
 #include "guest/aarch64/elf64.h"
@@ -90,8 +91,27 @@ static enum aarch64_elf64_error validate_segments(
     for (word_t i = 0; i < image->program_header_count; i++) {
         struct aarch64_elf64_program_header header;
         aarch64_elf64_program_header(image, i, &header);
-        if (header.type == ELF_PT_INTERP)
-            return AARCH64_ELF64_UNSUPPORTED_DYNAMIC_LINKING;
+        if (header.type == ELF_PT_INTERP) {
+            // Linux 只采用首个 PT_INTERP，后续条目不再参与校验。
+            if (image->interpreter_path != NULL)
+                continue;
+            if (header.file_size < 2 ||
+                    header.file_size > AARCH64_ELF64_INTERPRETER_PATH_MAX ||
+                    !valid_file_range(image,
+                            header.file_offset, header.file_size))
+                return AARCH64_ELF64_BAD_SEGMENT;
+            const byte_t *path = image->data +
+                    (size_t) header.file_offset;
+            if (path[(size_t) header.file_size - 1] != '\0')
+                return AARCH64_ELF64_BAD_SEGMENT;
+            const byte_t *terminator = memchr(
+                    path, '\0', (size_t) header.file_size);
+            assert(terminator != NULL);
+            image->interpreter_path = (const char *) path;
+            image->interpreter_path_length =
+                    (size_t) (terminator - path);
+            continue;
+        }
         if (header.type != ELF_PT_LOAD)
             continue;
 

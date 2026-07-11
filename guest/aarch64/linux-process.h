@@ -13,6 +13,7 @@ enum aarch64_linux_process_error_stage {
     AARCH64_LINUX_PROCESS_ERROR_ARGUMENT,
     AARCH64_LINUX_PROCESS_ERROR_ALLOCATION,
     AARCH64_LINUX_PROCESS_ERROR_ELF,
+    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
     AARCH64_LINUX_PROCESS_ERROR_LOAD,
     AARCH64_LINUX_PROCESS_ERROR_LAYOUT,
     AARCH64_LINUX_PROCESS_ERROR_TRAMPOLINE,
@@ -22,6 +23,23 @@ enum aarch64_linux_process_error_stage {
 struct aarch64_linux_process_error {
     dword_t stage;
     dword_t detail;
+};
+
+enum aarch64_linux_interpreter_config_error {
+    AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED = 1,
+};
+
+enum aarch64_linux_interpreter_path_status {
+    AARCH64_LINUX_INTERPRETER_PATH_NONE,
+    AARCH64_LINUX_INTERPRETER_PATH_COPIED,
+    AARCH64_LINUX_INTERPRETER_PATH_BUFFER_TOO_SMALL,
+    AARCH64_LINUX_INTERPRETER_PATH_BAD_ELF,
+};
+
+struct aarch64_linux_interpreter_path_result {
+    dword_t status;
+    dword_t elf_error;
+    qword_t required_size;
 };
 
 struct aarch64_linux_process_config {
@@ -75,6 +93,12 @@ struct aarch64_linux_process_result {
 struct aarch64_linux_process *aarch64_linux_process_create(
         const struct aarch64_linux_process_config *config,
         struct aarch64_linux_process_error *error);
+// required_size 包含末尾 NUL；destination 为 NULL 可只查询长度，返回
+// BUFFER_TOO_SMALL；任何缓冲区不足情形都不写入部分路径。
+struct aarch64_linux_interpreter_path_result
+        aarch64_linux_copy_interpreter_path(
+        const void *elf_data, size_t elf_size,
+        char *destination, size_t capacity);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
 // fault/undefined 不推进 PC；调用方排入同步信号后应先调用 poll_signals。
@@ -85,12 +109,23 @@ struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
         struct aarch64_linux_process *process);
 
 _Static_assert(sizeof(enum aarch64_linux_process_error_stage) == 4 &&
-        sizeof(enum aarch64_linux_process_status) == 4,
+        sizeof(enum aarch64_linux_process_status) == 4 &&
+        sizeof(enum aarch64_linux_interpreter_config_error) == 4 &&
+        sizeof(enum aarch64_linux_interpreter_path_status) == 4,
         "AArch64 process 状态枚举必须保持 32 位");
 _Static_assert(offsetof(struct aarch64_linux_process_error, stage) == 0 &&
         offsetof(struct aarch64_linux_process_error, detail) == 4 &&
         sizeof(struct aarch64_linux_process_error) == 8,
         "AArch64 process 错误必须保持固定 DTO 布局");
+_Static_assert(offsetof(struct aarch64_linux_interpreter_path_result,
+                status) == 0 &&
+        offsetof(struct aarch64_linux_interpreter_path_result,
+                elf_error) == 4 &&
+        offsetof(struct aarch64_linux_interpreter_path_result,
+                required_size) == 8 &&
+        sizeof(struct aarch64_linux_interpreter_path_result) == 16 &&
+        _Alignof(struct aarch64_linux_interpreter_path_result) == 8,
+        "AArch64 解释器路径结果必须保持固定 DTO 布局");
 _Static_assert(sizeof(((struct aarch64_linux_process_config *) 0)->
                 load_bias) == 8 &&
         sizeof(((struct aarch64_linux_process_config *) 0)->

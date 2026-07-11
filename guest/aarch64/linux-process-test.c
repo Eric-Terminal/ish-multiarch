@@ -19,6 +19,9 @@
 #define PIE_LOAD_BIAS UINT64_C(0x0000400000000000)
 #define SIGNAL_HANDLER (TEXT_BASE + UINT64_C(0x140))
 
+static const char process_interpreter_path[] =
+        "/lib/ld-musl-aarch64.so.1";
+
 struct test_sink {
     void *expected_task_opaque;
     byte_t data[3];
@@ -115,6 +118,15 @@ static void make_test_elf(byte_t file[TEST_FILE_SIZE]) {
         put_u32(file + 0x100 + i * 4, program[i]);
     put_u32(file + 0x140, UINT32_C(0xd65f03c0));
     memcpy(file + 0x200, "hi\n", 3);
+}
+
+static void make_interpreted_test_elf(byte_t file[TEST_FILE_SIZE]) {
+    make_test_elf(file);
+    put_program_header(file + AARCH64_ELF64_HEADER_SIZE,
+            3, 4, 0x180, 0, sizeof(process_interpreter_path),
+            sizeof(process_interpreter_path), 1);
+    memcpy(file + 0x180, process_interpreter_path,
+            sizeof(process_interpreter_path));
 }
 
 static qword_t read_user_qword(
@@ -457,6 +469,54 @@ static void assert_create_fails(
     assert(error.detail == expected_detail);
 }
 
+static void test_interpreter_path_query(void) {
+    byte_t file[TEST_FILE_SIZE];
+    make_interpreted_test_elf(file);
+    struct aarch64_linux_interpreter_path_result result =
+            aarch64_linux_copy_interpreter_path(
+                    file, sizeof(file), NULL, 0);
+    assert(result.status ==
+            AARCH64_LINUX_INTERPRETER_PATH_BUFFER_TOO_SMALL);
+    assert(result.elf_error == 0 &&
+            result.required_size == sizeof(process_interpreter_path));
+
+    char destination[64];
+    char unchanged[sizeof(destination)];
+    memset(destination, 0xa5, sizeof(destination));
+    memcpy(unchanged, destination, sizeof(unchanged));
+    result = aarch64_linux_copy_interpreter_path(
+            file, sizeof(file), destination,
+            sizeof(process_interpreter_path) - 1);
+    assert(result.status ==
+            AARCH64_LINUX_INTERPRETER_PATH_BUFFER_TOO_SMALL);
+    assert(result.required_size == sizeof(process_interpreter_path));
+    assert(memcmp(destination, unchanged, sizeof(destination)) == 0);
+
+    result = aarch64_linux_copy_interpreter_path(
+            file, sizeof(file), destination, sizeof(destination));
+    assert(result.status == AARCH64_LINUX_INTERPRETER_PATH_COPIED);
+    assert(result.elf_error == 0 &&
+            result.required_size == sizeof(process_interpreter_path));
+    assert(strcmp(destination, process_interpreter_path) == 0);
+
+    make_test_elf(file);
+    result = aarch64_linux_copy_interpreter_path(
+            file, sizeof(file), destination, sizeof(destination));
+    assert(result.status == AARCH64_LINUX_INTERPRETER_PATH_NONE);
+    assert(result.elf_error == 0 && result.required_size == 0);
+
+    file[0] = 0;
+    result = aarch64_linux_copy_interpreter_path(
+            file, sizeof(file), destination, sizeof(destination));
+    assert(result.status == AARCH64_LINUX_INTERPRETER_PATH_BAD_ELF);
+    assert(result.elf_error == AARCH64_ELF64_BAD_IDENTIFICATION &&
+            result.required_size == 0);
+    result = aarch64_linux_copy_interpreter_path(
+            NULL, sizeof(file), destination, sizeof(destination));
+    assert(result.status == AARCH64_LINUX_INTERPRETER_PATH_BAD_ELF);
+    assert(result.elf_error == AARCH64_ELF64_BAD_IDENTIFICATION);
+}
+
 static void test_failure_transactions(void) {
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
@@ -506,6 +566,16 @@ static void test_failure_transactions(void) {
             environment, array_size(environment), random);
     assert_create_fails(&config, AARCH64_LINUX_PROCESS_ERROR_ELF,
             AARCH64_ELF64_BAD_IDENTIFICATION);
+    assert_fresh_create_succeeds(file);
+
+    byte_t interpreted[TEST_FILE_SIZE];
+    make_interpreted_test_elf(interpreted);
+    config = make_config(interpreted, sizeof(interpreted),
+            "/bin/process-test", arguments, array_size(arguments),
+            environment, array_size(environment), random);
+    assert_create_fails(&config,
+            AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+            AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED);
     assert_fresh_create_succeeds(file);
 
     byte_t pie[TEST_FILE_SIZE];
@@ -913,6 +983,7 @@ static void test_signal_trampoline_closure(void) {
 int main(void) {
     test_load_run_and_ownership();
     test_static_pie();
+    test_interpreter_path_query();
     test_failure_transactions();
     test_poll_events();
     test_fault_events();

@@ -5,6 +5,7 @@
 
 #define AARCH64_ELF64_HEADER_SIZE 64
 #define AARCH64_ELF64_PROGRAM_HEADER_SIZE 56
+#define AARCH64_ELF64_INTERPRETER_PATH_MAX 4096
 
 enum aarch64_elf64_error {
     AARCH64_ELF64_OK,
@@ -13,7 +14,6 @@ enum aarch64_elf64_error {
     AARCH64_ELF64_UNSUPPORTED_TYPE,
     AARCH64_ELF64_UNSUPPORTED_MACHINE,
     AARCH64_ELF64_BAD_HEADER,
-    AARCH64_ELF64_UNSUPPORTED_DYNAMIC_LINKING,
     AARCH64_ELF64_BAD_SEGMENT,
     AARCH64_ELF64_BAD_ENTRY,
 };
@@ -26,6 +26,9 @@ struct aarch64_elf64_image {
     qword_t program_header_offset;
     word_t program_header_count;
     word_t load_segment_count;
+    // 指向 data 中首个 PT_INTERP；长度按 Linux 语义止于首个 NUL。
+    const char *interpreter_path;
+    size_t interpreter_path_length;
 };
 
 struct aarch64_elf64_program_header {

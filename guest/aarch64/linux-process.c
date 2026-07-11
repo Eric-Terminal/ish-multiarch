@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "guest/aarch64/elf64-loader.h"
 #include "guest/aarch64/linux-process.h"
@@ -36,6 +37,54 @@ static void set_error(struct aarch64_linux_process_error *error,
             .detail = detail,
         };
     }
+}
+
+static struct aarch64_linux_interpreter_path_result interpreter_path_result(
+        enum aarch64_linux_interpreter_path_status status) {
+    return (struct aarch64_linux_interpreter_path_result) {
+        .status = (dword_t) status,
+    };
+}
+
+struct aarch64_linux_interpreter_path_result
+        aarch64_linux_copy_interpreter_path(
+        const void *elf_data, size_t elf_size,
+        char *destination, size_t capacity) {
+    if (elf_data == NULL && elf_size != 0) {
+        struct aarch64_linux_interpreter_path_result result =
+                interpreter_path_result(
+                        AARCH64_LINUX_INTERPRETER_PATH_BAD_ELF);
+        result.elf_error = AARCH64_ELF64_BAD_IDENTIFICATION;
+        return result;
+    }
+    struct aarch64_elf64_image image;
+    enum aarch64_elf64_error elf_error = aarch64_elf64_parse(
+            elf_data, elf_size, &image);
+    if (elf_error != AARCH64_ELF64_OK) {
+        struct aarch64_linux_interpreter_path_result result =
+                interpreter_path_result(
+                        AARCH64_LINUX_INTERPRETER_PATH_BAD_ELF);
+        result.elf_error = (dword_t) elf_error;
+        return result;
+    }
+    if (image.interpreter_path == NULL)
+        return interpreter_path_result(
+                AARCH64_LINUX_INTERPRETER_PATH_NONE);
+
+    qword_t required_size = (qword_t) image.interpreter_path_length + 1;
+    if (destination == NULL || capacity < required_size) {
+        struct aarch64_linux_interpreter_path_result result =
+                interpreter_path_result(
+                        AARCH64_LINUX_INTERPRETER_PATH_BUFFER_TOO_SMALL);
+        result.required_size = required_size;
+        return result;
+    }
+    memcpy(destination, image.interpreter_path, (size_t) required_size);
+    struct aarch64_linux_interpreter_path_result result =
+            interpreter_path_result(
+                    AARCH64_LINUX_INTERPRETER_PATH_COPIED);
+    result.required_size = required_size;
+    return result;
 }
 
 static struct aarch64_linux_process *create_failed(
@@ -128,6 +177,10 @@ struct aarch64_linux_process *aarch64_linux_process_create(
         return create_failed(process, error,
                 AARCH64_LINUX_PROCESS_ERROR_ELF,
                 (dword_t) elf_error);
+    if (image.interpreter_path != NULL)
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+                AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED);
 
     struct aarch64_elf64_load_result loaded;
     enum aarch64_elf64_load_error load_error = aarch64_elf64_load(
