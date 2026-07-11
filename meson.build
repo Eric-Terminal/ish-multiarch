@@ -146,6 +146,7 @@ if get_option('kernel') == 'ish'
 
         'kernel/fs.c',
         'kernel/fs-task.c',
+        'kernel/aarch64-exec-image.c',
         'kernel/aarch64-signal-service.c',
         'kernel/aarch64-syscall-service.c',
         'kernel/fs_info.c',
@@ -195,7 +196,7 @@ if get_option('kernel') == 'ish'
     libish = library('ish', src,
         include_directories: includes)
     ish = declare_dependency(
-        link_with: [libish, libish_emu, libfakefs],
+        link_with: [libish, libish_aarch64_core, libish_emu, libfakefs],
         dependencies: dependencies,
         include_directories: includes)
 
@@ -226,6 +227,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-process-syscall-test.c',
             dependencies: ish)
         test('aarch64_process_syscall', aarch64_process_syscall_test)
+
+        aarch64_exec_image_test = executable(
+            'aarch64_exec_image_test',
+            'kernel/aarch64-exec-image-test.c',
+            dependencies: ish)
+        test('aarch64_exec_image', aarch64_exec_image_test)
 
         aarch64_sigaltstack_test = executable(
             'aarch64_sigaltstack_test',
