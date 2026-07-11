@@ -692,6 +692,36 @@ static void execute_advsimd_pairwise_extrema(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_fmov_transfer(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.data_processing_1source.rd;
+    byte_t rn = instruction->operands.data_processing_1source.rn;
+    byte_t width = instruction->width;
+    if (instruction->opcode == AARCH64_OP_FMOV_GENERAL_FROM_SIMD) {
+        qword_t value = width == 16 ? cpu->v[rn].h[0] :
+                width == 32 ? cpu->v[rn].s[0] : cpu->v[rn].d[0];
+        write_register(cpu, rd, width == 64 ? 64 : 32, false, value);
+    } else if (instruction->opcode ==
+            AARCH64_OP_FMOV_GENERAL_FROM_SIMD_HIGH) {
+        write_register(cpu, rd, 64, false, cpu->v[rn].d[1]);
+    } else if (instruction->opcode == AARCH64_OP_FMOV_SIMD_FROM_GENERAL) {
+        qword_t value = read_register(
+                cpu, rn, width == 64 ? 64 : 32, false);
+        union aarch64_vector_reg result = {0};
+        if (width == 16)
+            result.h[0] = (word_t) value;
+        else if (width == 32)
+            result.s[0] = (dword_t) value;
+        else
+            result.d[0] = value;
+        cpu->v[rd] = result;
+    } else {
+        // 写入 D[1] 只替换向量高半，低 64 位必须保留。
+        cpu->v[rd].d[1] = read_register(cpu, rn, 64, false);
+    }
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1222,6 +1252,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_UMAXP:
         case AARCH64_OP_ADVSIMD_UMINP:
             execute_advsimd_pairwise_extrema(cpu, instruction);
+            break;
+        case AARCH64_OP_FMOV_GENERAL_FROM_SIMD:
+        case AARCH64_OP_FMOV_SIMD_FROM_GENERAL:
+        case AARCH64_OP_FMOV_GENERAL_FROM_SIMD_HIGH:
+        case AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL:
+            execute_fmov_transfer(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:

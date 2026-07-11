@@ -148,6 +148,38 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t width;
+    } fmov_transfers[] = {
+        {UINT32_C(0x1ee60000), AARCH64_OP_FMOV_GENERAL_FROM_SIMD, 16},
+        {UINT32_C(0x1e260000), AARCH64_OP_FMOV_GENERAL_FROM_SIMD, 32},
+        {UINT32_C(0x9e660000), AARCH64_OP_FMOV_GENERAL_FROM_SIMD, 64},
+        {UINT32_C(0x9eae0000), AARCH64_OP_FMOV_GENERAL_FROM_SIMD_HIGH, 64},
+        {UINT32_C(0x1ee70000), AARCH64_OP_FMOV_SIMD_FROM_GENERAL, 16},
+        {UINT32_C(0x1e270000), AARCH64_OP_FMOV_SIMD_FROM_GENERAL, 32},
+        {UINT32_C(0x9e670000), AARCH64_OP_FMOV_SIMD_FROM_GENERAL, 64},
+        {UINT32_C(0x9eaf0000), AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL, 64},
+        {UINT32_C(0x9ee60000), AARCH64_OP_FMOV_GENERAL_FROM_SIMD, 16},
+        {UINT32_C(0x9ee70000), AARCH64_OP_FMOV_SIMD_FROM_GENERAL, 16},
+    };
+    dword_t fmov_transfer = word & UINT32_C(0xfffffc00);
+    for (unsigned i = 0;
+            i < sizeof(fmov_transfers) / sizeof(fmov_transfers[0]); i++) {
+        if (fmov_transfer != fmov_transfers[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = fmov_transfers[i].opcode,
+            .width = fmov_transfers[i].width,
+            .operands.data_processing_1source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e208400)) {
         bool q = ((word >> 30) & 1) != 0;
         byte_t size = (word >> 22) & 3;
