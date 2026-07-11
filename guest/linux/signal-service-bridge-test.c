@@ -159,5 +159,27 @@ int main(void) {
             result.signal == TEST_FORCED_SIGNAL &&
             state.calls == 2 && state.valid,
             "强制 SIGSEGV 再次建帧失败时直接终止");
+
+    const struct guest_linux_signal_context context = {
+        .runtime_opaque = guest_linux_signal_test_service.runtime_opaque,
+        .task_opaque = &task_cookie,
+    };
+    const struct guest_linux_signal_restore_request restore = {
+        .stack_pointer = UINT64_C(0x00007fff12345678),
+        .blocked_mask = UINT64_C(0x8000000087654321),
+        .altstack = {
+            .base = UINT64_C(0x00007000abcdef01),
+            .size = UINT64_C(0x000000023456789a),
+            .flags = UINT32_C(0x12345678),
+        },
+    };
+    guest_linux_signal_test_service.restore(&context, &restore);
+    CHECK(guest_linux_signal_test_restore_count() == 1,
+            "恢复 DTO 跨 guest 类型域完整提交一次");
+
+    guest_linux_signal_test_service.bad_frame(
+            &context, UINT64_C(0x00007fffdeadbeef));
+    CHECK(guest_linux_signal_test_bad_frame_count() == 1,
+            "坏帧地址跨 guest 类型域完整上报一次");
     return 0;
 }

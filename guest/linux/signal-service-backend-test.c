@@ -12,16 +12,53 @@ static byte_t runtime_cookie;
 static dword_t test_mode;
 static void *test_task_opaque;
 static dword_t poll_count;
+static dword_t restore_count;
+static dword_t bad_frame_count;
 
 void guest_linux_signal_test_configure(
         dword_t mode, void *expected_task_opaque) {
     test_mode = mode;
     test_task_opaque = expected_task_opaque;
     poll_count = 0;
+    restore_count = 0;
+    bad_frame_count = 0;
 }
 
 dword_t guest_linux_signal_test_poll_count(void) {
     return poll_count;
+}
+
+dword_t guest_linux_signal_test_restore_count(void) {
+    return restore_count;
+}
+
+dword_t guest_linux_signal_test_bad_frame_count(void) {
+    return bad_frame_count;
+}
+
+static void test_restore(
+        const struct guest_linux_signal_context *context,
+        const struct guest_linux_signal_restore_request *request) {
+    assert(context != NULL && request != NULL);
+    assert(context->runtime_opaque == &runtime_cookie);
+    assert(context->task_opaque == test_task_opaque);
+    assert(request->stack_pointer == UINT64_C(0x00007fff12345678));
+    assert(request->blocked_mask == UINT64_C(0x8000000087654321));
+    assert(request->altstack.base == UINT64_C(0x00007000abcdef01));
+    assert(request->altstack.size == UINT64_C(0x000000023456789a));
+    assert(request->altstack.flags == UINT32_C(0x12345678));
+    assert(request->altstack.reserved == 0);
+    restore_count++;
+}
+
+static void test_bad_frame(
+        const struct guest_linux_signal_context *context,
+        qword_t frame_address) {
+    assert(context != NULL);
+    assert(context->runtime_opaque == &runtime_cookie);
+    assert(context->task_opaque == test_task_opaque);
+    assert(frame_address == UINT64_C(0x00007fffdeadbeef));
+    bad_frame_count++;
 }
 
 static struct guest_linux_signal_delivery make_delivery(
@@ -131,4 +168,6 @@ static struct guest_linux_signal_poll_result test_poll(
 const struct guest_linux_signal_service guest_linux_signal_test_service = {
     .runtime_opaque = &runtime_cookie,
     .poll = test_poll,
+    .restore = test_restore,
+    .bad_frame = test_bad_frame,
 };

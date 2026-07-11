@@ -22,5 +22,7 @@ extern const struct guest_linux_signal_service
 void guest_linux_signal_test_configure(
         dword_t mode, void *expected_task_opaque);
 dword_t guest_linux_signal_test_poll_count(void);
+dword_t guest_linux_signal_test_restore_count(void);
+dword_t guest_linux_signal_test_bad_frame_count(void);
 
 #endif

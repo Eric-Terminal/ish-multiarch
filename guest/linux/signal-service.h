@@ -73,6 +73,12 @@ struct guest_linux_signal_delivery {
     struct guest_linux_signal_stack altstack;
 };
 
+struct guest_linux_signal_restore_request {
+    qword_t stack_pointer;
+    qword_t blocked_mask;
+    struct guest_linux_signal_stack altstack;
+};
+
 enum guest_linux_signal_install_status {
     GUEST_LINUX_SIGNAL_INSTALL_COMPLETE,
     GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT,
@@ -105,9 +111,19 @@ typedef struct guest_linux_signal_poll_result
         guest_linux_signal_installer installer,
         void *installer_opaque);
 
+typedef void (*guest_linux_signal_restore)(
+        const struct guest_linux_signal_context *context,
+        const struct guest_linux_signal_restore_request *request);
+
+typedef void (*guest_linux_signal_bad_frame)(
+        const struct guest_linux_signal_context *context,
+        qword_t frame_address);
+
 struct guest_linux_signal_service {
     void *runtime_opaque;
     guest_linux_signal_poll poll;
+    guest_linux_signal_restore restore;
+    guest_linux_signal_bad_frame bad_frame;
 };
 
 // poll 是同步事务：backend 在选择锁内先消费队列节点，再调用 installer。
@@ -116,6 +132,8 @@ struct guest_linux_signal_service {
 // FRAME_FAULT 不提交原信号状态，并在同一次 poll 内改派强制故障。
 // 只有最终返回 HANDLER 时，调用方才能发布最后一次成功回调产生的候选 CPU。
 // STOP 已提交停止状态和父任务通知；TERMINATE 返回时已释放锁但尚未执行退出。
+// restore 同步提交当前 task 的阻塞掩码与替代栈；bad_frame 同步强制排队
+// SIGSEGV。两种回调都不得保存 context、request 或其内部数据的指针。
 
 _Static_assert(sizeof(enum guest_linux_signal_install_status) ==
                 sizeof(dword_t) &&
@@ -151,6 +169,14 @@ _Static_assert(sizeof(struct guest_linux_signal_delivery) == 112 &&
         offsetof(struct guest_linux_signal_delivery, blocked_mask) == 80 &&
         offsetof(struct guest_linux_signal_delivery, altstack) == 88,
         "Linux signal service 派送 DTO 布局必须固定");
+_Static_assert(sizeof(struct guest_linux_signal_restore_request) == 40 &&
+        _Alignof(struct guest_linux_signal_restore_request) == 8 &&
+        offsetof(struct guest_linux_signal_restore_request,
+                stack_pointer) == 0 &&
+        offsetof(struct guest_linux_signal_restore_request,
+                blocked_mask) == 8 &&
+        offsetof(struct guest_linux_signal_restore_request, altstack) == 16,
+        "Linux signal service 恢复 DTO 布局必须固定");
 _Static_assert(sizeof(struct guest_linux_signal_poll_result) == 8 &&
         offsetof(struct guest_linux_signal_poll_result, status) == 0 &&
         offsetof(struct guest_linux_signal_poll_result, signal) == 4,
