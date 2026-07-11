@@ -133,9 +133,10 @@ struct fdtable *fdtable_copy(struct fdtable *table) {
     return new_table;
 }
 
-static int fdtable_expand(struct fdtable *table, fd_t max) {
+static int fdtable_expand(struct task *task, fd_t max) {
+    struct fdtable *table = task->files;
     unsigned size = max + 1;
-    if (size > rlimit(RLIMIT_NOFILE_))
+    if (size > rlimit_task(task, RLIMIT_NOFILE_))
         return _EMFILE;
     if (table->size >= size)
         return 0;
@@ -143,22 +144,27 @@ static int fdtable_expand(struct fdtable *table, fd_t max) {
 }
 
 struct fd *fdtable_get(struct fdtable *table, fd_t f) {
-    if (f < 0 || (unsigned) f >= current->files->size)
+    if (f < 0 || (unsigned) f >= table->size)
         return NULL;
     return table->files[f];
 }
 
-struct fd *f_get(fd_t f) {
-    lock(&current->files->lock);
-    struct fd *fd = fdtable_get(current->files, f);
-    unlock(&current->files->lock);
+struct fd *f_get_task(struct task *task, fd_t f) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, f);
+    unlock(&table->lock);
     return fd;
 }
 
-static fd_t f_install_start(struct fd *fd, fd_t start) {
+struct fd *f_get(fd_t f) {
+    return f_get_task(current, f);
+}
+
+static fd_t f_install_start(struct task *task, struct fd *fd, fd_t start) {
     assert(start >= 0);
-    struct fdtable *table = current->files;
-    unsigned size = rlimit(RLIMIT_NOFILE_);
+    struct fdtable *table = task->files;
+    unsigned size = rlimit_task(task, RLIMIT_NOFILE_);
     if (size > table->size)
         size = table->size;
 
@@ -167,7 +173,7 @@ static fd_t f_install_start(struct fd *fd, fd_t start) {
         if (table->files[f] == NULL)
             break;
     if ((unsigned) f >= size) {
-        int err = fdtable_expand(table, f);
+        int err = fdtable_expand(task, f);
         if (err < 0)
             f = err;
     }
@@ -181,17 +187,22 @@ static fd_t f_install_start(struct fd *fd, fd_t start) {
     return f;
 }
 
-fd_t f_install(struct fd *fd, int flags) {
-    lock(&current->files->lock);
-    fd_t f = f_install_start(fd, 0);
+fd_t f_install_task(struct task *task, struct fd *fd, int flags) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    fd_t f = f_install_start(task, fd, 0);
     if (f >= 0) {
         if (flags & O_CLOEXEC_)
-            bit_set(f, current->files->cloexec);
+            bit_set(f, table->cloexec);
         if (flags & O_NONBLOCK_)
             fd_setflags(fd, O_NONBLOCK_);
     }
-    unlock(&current->files->lock);
+    unlock(&table->lock);
     return f;
+}
+
+fd_t f_install(struct fd *fd, int flags) {
+    return f_install_task(current, fd, flags);
 }
 
 static int fdtable_close(struct fdtable *table, fd_t f) {
@@ -206,11 +217,16 @@ static int fdtable_close(struct fdtable *table, fd_t f) {
     return err;
 }
 
-int f_close(fd_t f) {
-    lock(&current->files->lock);
-    int err = fdtable_close(current->files, f);
-    unlock(&current->files->lock);
+int f_close_task(struct task *task, fd_t f) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    int err = fdtable_close(table, f);
+    unlock(&table->lock);
     return err;
+}
+
+int f_close(fd_t f) {
+    return f_close_task(current, f);
 }
 
 dword_t sys_close(fd_t f) {
@@ -256,7 +272,7 @@ dword_t sys_dup3(fd_t f, fd_t new_f, int_t flags) {
     struct fd *fd = f_get(f);
     if (fd == NULL)
         return _EBADF;
-    int err = fdtable_expand(table, new_f);
+    int err = fdtable_expand(current, new_f);
     if (err < 0)
         return err;
     fd_retain(fd);
@@ -298,12 +314,12 @@ dword_t sys_fcntl(fd_t f, dword_t cmd, dword_t arg) {
         case F_DUPFD_:
             STRACE("fcntl(%d, F_DUPFD, %d)", f, arg);
             fd->refcount++;
-            return f_install_start(fd, arg);
+            return f_install_start(current, fd, arg);
 
         case F_DUPFD_CLOEXEC_:
             STRACE("fcntl(%d, F_DUPFD_CLOEXEC, %d)", f, arg);
             fd->refcount++;
-            new_f = f_install_start(fd, arg);
+            new_f = f_install_start(current, fd, arg);
             bit_set(new_f, table->cloexec);
             return new_f;
 

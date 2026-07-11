@@ -2,6 +2,8 @@
 #define RESOURCE_H
 #include "kernel/time.h"
 
+struct task;
+
 typedef qword_t rlim_t_;
 typedef dword_t rlim32_t_;
 #define RLIM_INFINITY_ ((rlim_t_) -1)
@@ -39,6 +41,7 @@ dword_t sys_setrlimit32(dword_t resource, addr_t rlim_addr);
 dword_t sys_prlimit64(pid_t_ pid, dword_t resource, addr_t new_limit_addr, addr_t old_limit_addr);
 dword_t sys_old_getrlimit32(dword_t resource, addr_t rlim_addr);
 
+rlim_t_ rlimit_task(struct task *task, int resource);
 rlim_t_ rlimit(int resource);
 
 struct rusage_ {

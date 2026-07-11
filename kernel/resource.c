@@ -37,11 +37,15 @@ static int rlimit_set(struct task *task, int resource, struct rlimit_ limit) {
     return 0;
 }
 
-rlim_t_ rlimit(int resource) {
+rlim_t_ rlimit_task(struct task *task, int resource) {
     struct rlimit_ limit;
-    if (rlimit_get(current, resource, &limit) != 0)
+    if (rlimit_get(task, resource, &limit) != 0)
         die("invalid resource %d", resource);
     return limit.cur;
+}
+
+rlim_t_ rlimit(int resource) {
+    return rlimit_task(current, resource);
 }
 
 static int do_getrlimit32(int resource, struct rlimit32_ *rlimit32) {

@@ -191,6 +191,9 @@ if get_option('kernel') == 'ish'
 
     if not meson.is_cross_build()
         executable('ish', ['main.c'], dependencies: ish)
+
+        fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
+        test('fd_task', fd_task_test)
     endif
 
 elif get_option('kernel') == 'linux'

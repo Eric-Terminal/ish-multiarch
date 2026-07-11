@@ -9,6 +9,8 @@
 #include "fs/proc.h"
 #include "fs/sockrestart.h"
 
+struct task;
+
 // FIXME almost everything that uses the structs in this file does so without any kind of sane locking
 
 struct fd {
@@ -181,12 +183,16 @@ void fdtable_release(struct fdtable *table);
 struct fdtable *fdtable_copy(struct fdtable *table);
 void fdtable_free(struct fdtable *table);
 void fdtable_do_cloexec(struct fdtable *table);
+// 调用者必须在访问返回指针期间持有 table->lock。
 struct fd *fdtable_get(struct fdtable *table, fd_t f);
 
+// 返回借用指针；与兼容接口相同，不延长 fd 生命周期。
+struct fd *f_get_task(struct task *task, fd_t f);
 struct fd *f_get(fd_t f);
-// steals a reference to the fd, gives it to the table on success and destroys it on error
-// flags is checked for O_CLOEXEC and O_NONBLOCK
+// 接管 fd 引用：成功时交给目标表，失败时销毁；flags 只处理 O_CLOEXEC 与 O_NONBLOCK。
+fd_t f_install_task(struct task *task, struct fd *fd, int flags);
 fd_t f_install(struct fd *fd, int flags);
+int f_close_task(struct task *task, fd_t f);
 int f_close(fd_t f);
 
 #endif
