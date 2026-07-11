@@ -200,6 +200,10 @@ if get_option('kernel') == 'ish'
         fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
         test('fs_task', fs_task_test)
 
+        stat_convert_test = executable(
+            'stat_convert_test', 'fs/stat-convert-test.c', dependencies: ish)
+        test('stat_convert', stat_convert_test)
+
         path_task_test = executable('path_task_test', 'fs/path-task-test.c', dependencies: ish)
         test('path_task', path_task_test)
 

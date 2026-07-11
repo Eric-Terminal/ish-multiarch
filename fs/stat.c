@@ -10,7 +10,7 @@
 #include "fs/path.h"
 
 struct newstat64 stat_convert_newstat64(struct statbuf stat) {
-    struct newstat64 newstat;
+    struct newstat64 newstat = {};
     newstat.dev = stat.dev;
     newstat.fucked_ino = stat.inode;
     newstat.ino = stat.inode;
