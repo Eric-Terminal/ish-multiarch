@@ -14,7 +14,7 @@
 struct test_sink {
     byte_t data[64];
     size_t size;
-    sqword_t next_result;
+    unsigned calls;
 };
 
 struct syscall_probe {
@@ -22,26 +22,26 @@ struct syscall_probe {
     unsigned calls;
 };
 
-static sqword_t write_sink(void *opaque, qword_t fd,
-        const byte_t *data, size_t size) {
-    struct test_sink *sink = opaque;
-    assert(fd == 1);
-    if (sink->next_result != 0) {
-        sqword_t result = sink->next_result;
-        sink->next_result = 0;
-        if (result > 0) {
-            memcpy(sink->data + sink->size, data, (size_t) result);
-            sink->size += (size_t) result;
-        }
-        return result;
-    }
-    memcpy(sink->data + sink->size, data, size);
-    sink->size += size;
-    return (sqword_t) size;
-}
-
 static qword_t encoded_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
+}
+
+static qword_t dispatch_sink(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    if (syscall->number != 64)
+        return encoded_error(GUEST_LINUX_ENOSYS);
+    struct test_sink *sink = context->runtime_opaque;
+    assert(syscall->arguments[0] == 1);
+    assert(syscall->arguments[2] <= sizeof(sink->data) - sink->size);
+    dword_t size = (dword_t) syscall->arguments[2];
+    if (!context->user.read(context->user.opaque,
+            syscall->arguments[1], sink->data + sink->size, size, fault))
+        return encoded_error(GUEST_LINUX_EFAULT);
+    sink->size += size;
+    sink->calls++;
+    return size;
 }
 
 static qword_t dispatch_probe(
@@ -93,9 +93,12 @@ int main(void) {
     struct guest_tlb tlb;
     guest_tlb_init(&tlb, &table.address_space);
     struct test_sink sink = {0};
+    const struct guest_linux_syscall_service sink_service = {
+        .runtime_opaque = &sink,
+        .dispatch = dispatch_sink,
+    };
     const struct aarch64_linux_services services = {
-        .opaque = &sink,
-        .write = write_sink,
+        .syscalls = &sink_service,
     };
     struct aarch64_linux_runtime runtime;
     aarch64_linux_runtime_init(&runtime, &table,
@@ -114,41 +117,10 @@ int main(void) {
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == sizeof(message) - 1);
     assert(sink.size == sizeof(message) - 1);
+    assert(sink.calls == 1);
     assert(memcmp(sink.data, message, sink.size) == 0);
 
-    memcpy(data_page + GUEST_MEMORY_PAGE_SIZE - 20, message, 20);
     sink = (struct test_sink) {0};
-    cpu.x[8] = 64;
-    cpu.x[0] = 1;
-    cpu.x[1] = DATA_PAGE + GUEST_MEMORY_PAGE_SIZE - 20;
-    cpu.x[2] = 40;
-    result = aarch64_linux_dispatch_syscall(
-            &cpu, &tlb, &runtime, &task);
-    assert(cpu.x[0] == 16);
-    assert(sink.size == 16);
-    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
-    assert(result.fault.address == DATA_PAGE + GUEST_MEMORY_PAGE_SIZE);
-
-    sink = (struct test_sink) {.next_result = 3};
-    cpu.x[8] = 64;
-    cpu.x[0] = 1;
-    cpu.x[1] = DATA_PAGE + 32;
-    cpu.x[2] = sizeof(message) - 1;
-    result = aarch64_linux_dispatch_syscall(
-            &cpu, &tlb, &runtime, &task);
-    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
-    assert(cpu.x[0] == 3);
-    assert(sink.size == 3);
-
-    sink = (struct test_sink) {.next_result = -GUEST_LINUX_EIO};
-    cpu.x[8] = 64;
-    cpu.x[0] = 1;
-    cpu.x[1] = DATA_PAGE + 32;
-    cpu.x[2] = 4;
-    result = aarch64_linux_dispatch_syscall(
-            &cpu, &tlb, &runtime, &task);
-    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EIO));
-
     cpu.x[8] = 64;
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + GUEST_MEMORY_PAGE_SIZE;
@@ -157,6 +129,9 @@ int main(void) {
             &cpu, &tlb, &runtime, &task);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_EFAULT));
     assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == DATA_PAGE + GUEST_MEMORY_PAGE_SIZE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(sink.size == 0 && sink.calls == 0);
 
     data_page[8] = 0x5a;
     readonly_page[3] = 0xa5;
@@ -217,6 +192,19 @@ int main(void) {
     result = aarch64_linux_dispatch_syscall(
             &cpu, &tlb, &runtime, &task);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
+    const struct aarch64_linux_services empty_services = {0};
+    runtime.services = &empty_services;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
+    const struct guest_linux_syscall_service empty_syscall_service = {0};
+    const struct aarch64_linux_services no_dispatch_services = {
+        .syscalls = &empty_syscall_service,
+    };
+    runtime.services = &no_dispatch_services;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
     runtime.services = &services;
 
     struct syscall_probe probe = {
@@ -227,8 +215,6 @@ int main(void) {
         .dispatch = dispatch_probe,
     };
     const struct aarch64_linux_services bridged_services = {
-        .opaque = &sink,
-        .write = write_sink,
         .syscalls = &syscall_service,
     };
     runtime.services = &bridged_services;

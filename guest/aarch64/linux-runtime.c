@@ -4,7 +4,6 @@
 #include "guest/linux/errno.h"
 #include "guest/linux/user-memory.h"
 
-#define AARCH64_LINUX_SYS_WRITE 64
 #define AARCH64_LINUX_SYS_EXIT 93
 #define AARCH64_LINUX_SYS_EXIT_GROUP 94
 #define AARCH64_LINUX_SYS_SET_TID_ADDRESS 96
@@ -13,43 +12,10 @@
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
-#define AARCH64_LINUX_WRITE_CHUNK_SIZE 16
 #define AARCH64_LINUX_MAX_TID INT32_C(0x3fffffff)
 
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
-}
-
-static qword_t dispatch_write(const struct guest_linux_syscall *syscall,
-        struct guest_tlb *tlb, const struct aarch64_linux_services *services,
-        struct guest_memory_fault *fault) {
-    if (services == NULL || services->write == NULL)
-        return linux_error(GUEST_LINUX_ENOSYS);
-
-    qword_t fd = syscall->arguments[0];
-    guest_addr_t address = syscall->arguments[1];
-    qword_t remaining = syscall->arguments[2];
-    qword_t completed = 0;
-    while (remaining != 0) {
-        // write 的部分完成边界不能随底层 TLB 最大访问宽度改变。
-        byte_t bytes[AARCH64_LINUX_WRITE_CHUNK_SIZE];
-        size_t chunk = remaining < sizeof(bytes) ?
-                (size_t) remaining : sizeof(bytes);
-        if (!guest_linux_copy_from_user(
-                tlb, address, bytes, chunk, fault))
-            return completed != 0 ? completed : linux_error(GUEST_LINUX_EFAULT);
-        sqword_t written = services->write(
-                services->opaque, fd, bytes, chunk);
-        if (written < 0)
-            return completed != 0 ? completed : (qword_t) written;
-        assert((qword_t) written <= chunk);
-        completed += (qword_t) written;
-        if ((size_t) written != chunk)
-            return completed;
-        address += (guest_addr_t) chunk;
-        remaining -= chunk;
-    }
-    return completed;
 }
 
 static void export_user_fault(struct guest_linux_user_fault *destination,
@@ -147,10 +113,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         return result;
     }
 
-    if (syscall.number == AARCH64_LINUX_SYS_WRITE)
-        result.return_value = dispatch_write(
-                &syscall, tlb, runtime->services, &result.fault);
-    else if (syscall.number == AARCH64_LINUX_SYS_SET_TID_ADDRESS) {
+    if (syscall.number == AARCH64_LINUX_SYS_SET_TID_ADDRESS) {
         task->clear_child_tid = syscall.arguments[0];
         result.return_value = (qword_t) task->tid;
     } else if (syscall.number == AARCH64_LINUX_SYS_GETTID) {

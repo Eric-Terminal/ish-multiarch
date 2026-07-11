@@ -139,6 +139,7 @@ if get_option('kernel') == 'ish'
 
         'kernel/fs.c',
         'kernel/fs-task.c',
+        'kernel/aarch64-syscall-service.c',
         'kernel/fs_info.c',
         'fs/mount.c',
         'fs/fd.c',
@@ -201,6 +202,12 @@ if get_option('kernel') == 'ish'
 
         path_task_test = executable('path_task_test', 'fs/path-task-test.c', dependencies: ish)
         test('path_task', path_task_test)
+
+        aarch64_syscall_service_test = executable(
+            'aarch64_syscall_service_test',
+            'kernel/aarch64-syscall-service-test.c',
+            dependencies: ish)
+        test('aarch64_syscall_service', aarch64_syscall_service_test)
     endif
 
 elif get_option('kernel') == 'linux'

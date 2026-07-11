@@ -7,9 +7,6 @@
 #include "guest/memory/tlb.h"
 
 struct aarch64_linux_services {
-    void *opaque;
-    sqword_t (*write)(void *opaque, qword_t fd,
-            const byte_t *data, size_t size);
     const struct guest_linux_syscall_service *syscalls;
 };
 

@@ -14,6 +14,7 @@
 struct test_sink {
     byte_t data[16];
     size_t size;
+    unsigned calls;
 };
 
 static void put_u16(byte_t *bytes, word_t value) {
@@ -83,14 +84,21 @@ static void make_test_elf(byte_t file[TEST_FILE_SIZE]) {
     memcpy(file + 0x200, "hi\n", 3);
 }
 
-static sqword_t write_sink(void *opaque, qword_t fd,
-        const byte_t *data, size_t size) {
-    struct test_sink *sink = opaque;
-    assert(fd == 1);
-    assert(sink->size + size <= sizeof(sink->data));
-    memcpy(sink->data + sink->size, data, size);
-    sink->size += size;
-    return (sqword_t) size;
+static qword_t dispatch_sink(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    struct test_sink *sink = context->runtime_opaque;
+    assert(context->task_opaque == NULL);
+    assert(syscall->number == 64);
+    assert(syscall->arguments[0] == 1);
+    assert(syscall->arguments[1] == DATA_ADDRESS);
+    assert(syscall->arguments[2] == 3);
+    assert(context->user.read(context->user.opaque,
+            syscall->arguments[1], sink->data, 3, fault));
+    sink->size = 3;
+    sink->calls++;
+    return 3;
 }
 
 static struct aarch64_linux_syscall_result run_to_syscall(
@@ -139,9 +147,12 @@ int main(void) {
     struct cpu_state cpu = {0};
     aarch64_linux_prepare_cpu(&cpu, &loaded, &stack);
     struct test_sink sink = {0};
+    const struct guest_linux_syscall_service syscall_service = {
+        .runtime_opaque = &sink,
+        .dispatch = dispatch_sink,
+    };
     const struct aarch64_linux_services services = {
-        .opaque = &sink,
-        .write = write_sink,
+        .syscalls = &syscall_service,
     };
     struct aarch64_linux_runtime runtime;
     aarch64_linux_runtime_init(&runtime, &table, loaded.brk_end,
@@ -152,13 +163,15 @@ int main(void) {
     struct aarch64_linux_syscall_result syscall =
             run_to_syscall(&runner, &cpu, &tlb, &runtime, &task);
     assert(syscall.action == AARCH64_LINUX_SYSCALL_RESUME);
+    assert(syscall.fault.kind == GUEST_MEMORY_FAULT_NONE);
     assert(cpu.x[0] == 3);
-    assert(sink.size == 3);
+    assert(sink.size == 3 && sink.calls == 1);
     assert(memcmp(sink.data, "hi\n", 3) == 0);
 
     syscall = run_to_syscall(&runner, &cpu, &tlb, &runtime, &task);
     assert(syscall.action == AARCH64_LINUX_SYSCALL_EXIT);
     assert(syscall.exit_status == 42);
+    assert(sink.calls == 1);
     assert(cpu.cycle == 9);
     assert(cpu.pc == loaded.entry + 9 * 4);
     guest_page_table_destroy(&table);
