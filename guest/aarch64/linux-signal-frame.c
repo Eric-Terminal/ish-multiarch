@@ -93,6 +93,9 @@ enum aarch64_linux_signal_frame_status aarch64_linux_build_rt_sigframe(
     if (!signal_frame_addresses(delivery->stack_top,
             &candidate_frame, &record_address))
         return AARCH64_LINUX_SIGNAL_FRAME_BAD_FRAME;
+    if (delivery->stack_bottom != 0 &&
+            candidate_frame < delivery->stack_bottom)
+        return AARCH64_LINUX_SIGNAL_FRAME_BAD_FRAME;
 
     struct aarch64_linux_signal_stack_image image = {0};
     pack_interrupted_context(&image.frame, interrupted, delivery);

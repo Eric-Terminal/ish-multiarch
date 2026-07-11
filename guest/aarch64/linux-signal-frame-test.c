@@ -110,6 +110,10 @@ int main(void) {
     struct cpu_state interrupted = make_interrupted_cpu();
     struct cpu_state interrupted_sentinel = interrupted;
     struct aarch64_linux_signal_delivery delivery = make_delivery();
+    guest_addr_t expected_record = STACK_TOP - 16;
+    guest_addr_t expected_frame = expected_record -
+            sizeof(struct aarch64_linux_rt_sigframe);
+    delivery.stack_bottom = expected_frame;
     struct cpu_state handler_cpu;
     memset(&handler_cpu, 0xcc, sizeof(handler_cpu));
     guest_addr_t frame_address = UINT64_MAX;
@@ -120,9 +124,6 @@ int main(void) {
     assert(memcmp(&interrupted, &interrupted_sentinel,
             sizeof(interrupted)) == 0);
 
-    guest_addr_t expected_record = STACK_TOP - 16;
-    guest_addr_t expected_frame = expected_record -
-            sizeof(struct aarch64_linux_rt_sigframe);
     assert(frame_address == expected_frame);
     assert(fault.kind == GUEST_MEMORY_FAULT_NONE);
     assert(handler_cpu.x[0] == (qword_t) delivery.signal);
@@ -135,6 +136,31 @@ int main(void) {
     assert(handler_cpu.pc == delivery.handler);
     assert(handler_cpu.nzcv == interrupted.nzcv);
     assert(!handler_cpu.exclusive.valid);
+
+    byte_t image_before[sizeof(struct aarch64_linux_rt_sigframe) +
+            sizeof(struct frame_record)];
+    byte_t image_after[sizeof(image_before)];
+    assert(guest_linux_copy_from_user(&tlb, expected_frame,
+            image_before, sizeof(image_before), &fault));
+    struct aarch64_linux_signal_delivery below_bottom = delivery;
+    below_bottom.signal++;
+    below_bottom.blocked_mask ^= UINT64_MAX;
+    // 帧首地址低于非零栈下界一字节时，必须在任何用户写入前拒绝。
+    below_bottom.stack_bottom = expected_frame + 1;
+    struct cpu_state rejected_cpu;
+    memset(&rejected_cpu, 0x5a, sizeof(rejected_cpu));
+    struct cpu_state rejected_cpu_before = rejected_cpu;
+    guest_addr_t rejected_address = UINT64_C(0xdeadbeefdeadbeef);
+    assert(aarch64_linux_build_rt_sigframe(&interrupted, &tlb,
+            &below_bottom, &rejected_cpu, &rejected_address, &fault) ==
+            AARCH64_LINUX_SIGNAL_FRAME_BAD_FRAME);
+    assert(memcmp(&rejected_cpu, &rejected_cpu_before,
+            sizeof(rejected_cpu)) == 0);
+    assert(rejected_address == UINT64_C(0xdeadbeefdeadbeef));
+    assert(guest_linux_copy_from_user(&tlb, expected_frame,
+            image_after, sizeof(image_after), &fault));
+    assert(memcmp(image_after, image_before, sizeof(image_before)) == 0);
+    delivery.stack_bottom = 0;
 
     struct aarch64_linux_rt_sigframe frame =
             read_frame(&tlb, frame_address);

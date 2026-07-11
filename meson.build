@@ -440,17 +440,21 @@ if not meson.is_cross_build()
         link_with: libish_aarch64_core)
     test('aarch64_linux_signal_frame', aarch64_linux_signal_frame_test)
 
-    aarch64_linux_runtime_test = executable('aarch64_linux_runtime_test', [
-            'guest/memory/address-space.c',
-            'guest/memory/tlb.c',
-            'guest/memory/page-table.c',
-            'guest/linux/user-memory.c',
-            'guest/aarch64/linux-syscall.c',
-            'guest/linux/memory.c',
-            'guest/aarch64/linux-runtime.c',
-            'guest/aarch64/linux-runtime-test.c',
-        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    aarch64_linux_runtime_test = executable('aarch64_linux_runtime_test',
+        'guest/aarch64/linux-runtime-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: libish_aarch64_core)
     test('aarch64_linux_runtime', aarch64_linux_runtime_test)
+
+    aarch64_linux_runtime_signal_test = executable(
+        'aarch64_linux_runtime_signal_test',
+        'guest/aarch64/linux-runtime-signal-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: libish_aarch64_core)
+    test('aarch64_linux_runtime_signal',
+        aarch64_linux_runtime_signal_test)
 
     aarch64_linux_user_memory_test = executable(
         'aarch64_linux_user_memory_test', [

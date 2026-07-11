@@ -19,6 +19,7 @@ struct aarch64_linux_signal_delivery {
     qword_t action_flags;
     qword_t blocked_mask;
     struct aarch64_linux_stack altstack;
+    guest_addr_t stack_bottom;
     guest_addr_t stack_top;
     qword_t fault_address;
 };

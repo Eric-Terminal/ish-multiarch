@@ -107,8 +107,13 @@ static struct aarch64_linux_syscall_result run_to_syscall(
         struct aarch64_linux_task *task) {
     while (true) {
         struct aarch64_step_result step = aarch64_run_one(runner, cpu);
-        if (step.stop == AARCH64_STEP_RETIRED)
+        if (step.stop == AARCH64_STEP_RETIRED) {
+            struct guest_linux_signal_poll_result signal =
+                    aarch64_linux_poll_signals(
+                            cpu, tlb, runtime, task);
+            assert(signal.status == GUEST_LINUX_SIGNAL_POLL_IDLE);
             continue;
+        }
         assert(step.stop == AARCH64_STEP_SYSCALL);
         return aarch64_linux_dispatch_syscall(cpu, tlb, runtime, task);
     }

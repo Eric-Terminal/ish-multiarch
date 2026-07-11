@@ -1,6 +1,8 @@
 #include <assert.h>
 
 #include "guest/aarch64/linux-runtime.h"
+#include "guest/aarch64/linux-signal-frame.h"
+#include "guest/aarch64/linux-signal-info.h"
 #include "guest/linux/errno.h"
 #include "guest/linux/user-memory.h"
 
@@ -45,6 +47,82 @@ static bool service_write_user(void *opaque, qword_t address,
             opaque, address, source, size, &memory_fault);
     export_user_fault(fault, &memory_fault);
     return copied;
+}
+
+struct signal_install_state {
+    const struct cpu_state *interrupted;
+    struct guest_tlb *tlb;
+    struct cpu_state candidate;
+    guest_addr_t signal_trampoline;
+    bool candidate_valid;
+};
+
+static bool checked_altstack_top(
+        const struct guest_linux_signal_stack *stack,
+        guest_addr_t *top) {
+    if (stack->size == 0) {
+        *top = stack->base;
+        return true;
+    }
+    if (stack->base > AARCH64_LINUX_USER_ADDRESS_MAX ||
+            stack->size > AARCH64_LINUX_USER_ADDRESS_MAX - stack->base)
+        return false;
+    *top = stack->base + stack->size;
+    return true;
+}
+
+static enum guest_linux_signal_install_status install_signal_frame(
+        void *opaque,
+        const struct guest_linux_signal_delivery *delivery) {
+    struct signal_install_state *state = opaque;
+    state->candidate_valid = false;
+
+    guest_addr_t altstack_top;
+    if (!checked_altstack_top(&delivery->altstack, &altstack_top))
+        return GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT;
+
+    guest_addr_t sp = state->interrupted->sp;
+    bool altstack_configured = delivery->altstack.size != 0;
+    bool on_altstack = altstack_configured &&
+            sp > delivery->altstack.base &&
+            sp - delivery->altstack.base <= delivery->altstack.size;
+    bool enter_altstack = altstack_configured && !on_altstack &&
+            (delivery->action.flags & AARCH64_LINUX_SA_ONSTACK);
+    qword_t restorer = delivery->action.restorer;
+    if (!(delivery->action.flags & AARCH64_LINUX_SA_RESTORER)) {
+        if (state->signal_trampoline == 0)
+            return GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT;
+        restorer = state->signal_trampoline;
+    }
+    struct aarch64_linux_signal_delivery wire = {
+        .signal = delivery->info.signal,
+        .info = aarch64_linux_pack_siginfo(&delivery->info),
+        .handler = delivery->action.handler,
+        .restorer = restorer,
+        .action_flags = delivery->action.flags,
+        .blocked_mask = delivery->blocked_mask,
+        .altstack = {
+            .sp = delivery->altstack.base,
+            .flags = (sdword_t) delivery->altstack.flags,
+            .size = delivery->altstack.size,
+        },
+        .stack_top = enter_altstack ? altstack_top : sp,
+        .stack_bottom = on_altstack || enter_altstack ?
+                delivery->altstack.base : 0,
+        .fault_address = state->interrupted->segfault_addr,
+    };
+    struct cpu_state candidate;
+    guest_addr_t frame_address;
+    struct guest_memory_fault fault;
+    enum aarch64_linux_signal_frame_status status =
+            aarch64_linux_build_rt_sigframe(state->interrupted,
+                    state->tlb, &wire, &candidate,
+                    &frame_address, &fault);
+    if (status != AARCH64_LINUX_SIGNAL_FRAME_OK)
+        return GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT;
+    state->candidate = candidate;
+    state->candidate_valid = true;
+    return GUEST_LINUX_SIGNAL_INSTALL_COMPLETE;
 }
 
 static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
@@ -94,6 +172,39 @@ void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid,
     };
 }
 
+struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
+        struct cpu_state *cpu, struct guest_tlb *tlb,
+        const struct aarch64_linux_runtime *runtime,
+        const struct aarch64_linux_task *task) {
+    assert(cpu != NULL && tlb != NULL && runtime != NULL && task != NULL);
+    const struct guest_linux_signal_service *service =
+            runtime->services == NULL ? NULL : runtime->services->signals;
+    if (service == NULL || service->poll == NULL) {
+        return (struct guest_linux_signal_poll_result) {
+            .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+        };
+    }
+
+    const struct cpu_state interrupted = *cpu;
+    struct signal_install_state install = {
+        .interrupted = &interrupted,
+        .tlb = tlb,
+        .signal_trampoline = runtime->services->signal_trampoline,
+    };
+    const struct guest_linux_signal_context context = {
+        .runtime_opaque = service->runtime_opaque,
+        .task_opaque = task->service_opaque,
+    };
+    struct guest_linux_signal_poll_result result = service->poll(
+            &context, install_signal_frame, &install);
+    assert(result.status <= GUEST_LINUX_SIGNAL_POLL_TERMINATE);
+    if (result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER) {
+        assert(install.candidate_valid);
+        *cpu = install.candidate;
+    }
+    return result;
+}
+
 struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         struct cpu_state *cpu, struct guest_tlb *tlb,
         struct aarch64_linux_runtime *runtime,
@@ -141,5 +252,12 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
                 cpu->sp, &result.fault);
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
+    struct guest_linux_signal_poll_result signal =
+            aarch64_linux_poll_signals(cpu, tlb, runtime, task);
+    result.signal = signal.signal;
+    if (signal.status == GUEST_LINUX_SIGNAL_POLL_STOP)
+        result.action = AARCH64_LINUX_SYSCALL_STOP;
+    else if (signal.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE)
+        result.action = AARCH64_LINUX_SYSCALL_TERMINATE;
     return result;
 }
