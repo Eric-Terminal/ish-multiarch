@@ -28,6 +28,11 @@ static int signal_is_blockable(int sig) {
 #define SIGNAL_CALL_HANDLER 2
 #define SIGNAL_STOP 3
 
+static bool signal_default_ignored(int sig) {
+    return sig == SIGURG_ || sig == SIGCONT_ ||
+            sig == SIGCHLD_ || sig == SIGWINCH_;
+}
+
 static int signal_action(struct sighand *sighand, int sig) {
     if (signal_is_blockable(sig)) {
         struct signal_action *action = &sighand->action[sig];
@@ -37,11 +42,9 @@ static int signal_action(struct sighand *sighand, int sig) {
             return SIGNAL_CALL_HANDLER;
     }
 
+    if (signal_default_ignored(sig))
+        return SIGNAL_IGNORE;
     switch (sig) {
-        case SIGURG_: case SIGCONT_: case SIGCHLD_:
-        case SIGIO_: case SIGWINCH_:
-            return SIGNAL_IGNORE;
-
         case SIGSTOP_: case SIGTSTP_: case SIGTTIN_: case SIGTTOU_:
             return SIGNAL_STOP;
 
@@ -460,6 +463,28 @@ void sighand_release(struct sighand *sighand) {
     }
 }
 
+static bool signal_action_discards_pending(
+        int sig, const struct signal_action *action) {
+    if (action->handler == SIG_IGN_)
+        return true;
+    return action->handler == SIG_DFL_ && signal_default_ignored(sig);
+}
+
+// 调用方按 pids_lock -> sighand->lock 持锁，保证线程链表与信号队列稳定。
+static void discard_group_pending_signal(struct tgroup *group, int sig) {
+    struct task *task;
+    list_for_each_entry(&group->threads, task, group_links) {
+        sigset_del(&task->pending, sig);
+        struct sigqueue *sigqueue, *tmp;
+        list_for_each_entry_safe(&task->queue, sigqueue, tmp, queue) {
+            if (sigqueue->info.sig == sig) {
+                list_remove(&sigqueue->queue);
+                free(sigqueue);
+            }
+        }
+    }
+}
+
 int task_sigaction(struct task *task, int sig,
         const struct signal_action *action,
         struct signal_action *oldaction) {
@@ -475,13 +500,22 @@ int task_sigaction(struct task *task, int sig,
         action = &normalized;
     }
 
+    bool discard_pending = action != NULL &&
+            signal_action_discards_pending(sig, action);
+    if (action != NULL)
+        lock(&pids_lock);
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
     if (oldaction)
         *oldaction = sighand->action[sig];
-    if (action)
+    if (action) {
         sighand->action[sig] = *action;
+        if (discard_pending)
+            discard_group_pending_signal(task->group, sig);
+    }
     unlock(&sighand->lock);
+    if (action != NULL)
+        unlock(&pids_lock);
     return 0;
 }
 

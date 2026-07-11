@@ -3,6 +3,7 @@
 
 #include "fs/fd.h"
 #include "guest/aarch64/linux-file-abi.h"
+#include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
@@ -24,6 +25,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
@@ -355,6 +357,71 @@ static qword_t dispatch_rt_sigprocmask(
     return 0;
 }
 
+static struct signal_action unpack_aarch64_sigaction(
+        const struct aarch64_linux_sigaction *wire) {
+    return (struct signal_action) {
+        .handler = wire->handler,
+        .flags = wire->flags & AARCH64_LINUX_SA_SUPPORTED_FLAGS,
+        .restorer = wire->restorer,
+        .mask = wire->mask,
+    };
+}
+
+static struct aarch64_linux_sigaction pack_aarch64_sigaction(
+        const struct signal_action *action) {
+    return (struct aarch64_linux_sigaction) {
+        .handler = action->handler,
+        .flags = action->flags & AARCH64_LINUX_SA_SUPPORTED_FLAGS,
+        .restorer = action->restorer,
+        .mask = action->mask,
+    };
+}
+
+static qword_t dispatch_rt_sigaction(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    if (syscall->arguments[3] != sizeof(sigset_t_))
+        return syscall_result(_EINVAL);
+
+    qword_t action_address = syscall->arguments[1];
+    struct signal_action action;
+    if (action_address != 0) {
+        struct aarch64_linux_sigaction wire_action;
+        if (!user_range_fits(action_address, sizeof(wire_action)))
+            return user_range_error(fault, action_address,
+                    GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                action_address, &wire_action, sizeof(wire_action), fault))
+            return syscall_result(_EFAULT);
+        action = unpack_aarch64_sigaction(&wire_action);
+    }
+
+    qword_t oldaction_address = syscall->arguments[2];
+    struct signal_action oldaction;
+    int error = task_sigaction(task,
+            (sdword_t) (dword_t) syscall->arguments[0],
+            action_address != 0 ? &action : NULL,
+            oldaction_address != 0 ? &oldaction : NULL);
+    if (error < 0)
+        return syscall_result(error);
+    if (oldaction_address == 0)
+        return 0;
+
+    struct aarch64_linux_sigaction wire_oldaction =
+            pack_aarch64_sigaction(&oldaction);
+    if (!user_range_fits(oldaction_address, sizeof(wire_oldaction)))
+        return user_range_error(fault, oldaction_address,
+                GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            oldaction_address, &wire_oldaction,
+            sizeof(wire_oldaction), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_syscall(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -380,6 +447,9 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_SIGACTION:
+            return dispatch_rt_sigaction(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RT_SIGPROCMASK:
             return dispatch_rt_sigprocmask(
                     context, syscall, task, fault);

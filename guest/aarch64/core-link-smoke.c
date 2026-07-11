@@ -1,5 +1,6 @@
 #include "guest/aarch64/decode.h"
 #include "guest/aarch64/linux-file-abi.h"
+#include "guest/aarch64/linux-signal-abi.h"
 
 int main(void) {
     struct aarch64_decoded instruction;
