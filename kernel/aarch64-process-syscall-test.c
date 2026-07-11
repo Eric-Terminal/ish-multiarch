@@ -420,13 +420,17 @@ int main(void) {
     CHECK(fixture.sighand.action[NUM_SIGS].handler == SIG_DFL_,
             "动作 helper 不依赖 TLS current");
 
+    explicit_sighand.altstack = UINT32_C(0x12345000);
+    explicit_sighand.altstack_size = UINT32_C(0x8000);
     struct sighand *copied_sighand = sighand_copy(&explicit_sighand);
     CHECK(copied_sighand != NULL &&
             copied_sighand->action[NUM_SIGS].handler == full_action.handler &&
             copied_sighand->action[NUM_SIGS].flags == full_action.flags &&
             copied_sighand->action[NUM_SIGS].restorer == full_action.restorer &&
-            copied_sighand->action[NUM_SIGS].mask == high_signal_bit,
-            "sighand 复制保留扩宽后的完整动作状态");
+            copied_sighand->action[NUM_SIGS].mask == high_signal_bit &&
+            copied_sighand->altstack == explicit_sighand.altstack &&
+            copied_sighand->altstack_size == explicit_sighand.altstack_size,
+            "sighand 在同一快照中复制完整动作与替代栈状态");
     sighand_release(copied_sighand);
 
     explicit_sighand.action[SIGUSR1_] = full_action;
@@ -436,8 +440,6 @@ int main(void) {
         .restorer = UINT64_MAX,
         .mask = UINT64_MAX,
     };
-    explicit_sighand.altstack = UINT32_C(0x12345000);
-    explicit_sighand.altstack_size = UINT32_C(0x8000);
     task_signal_exec_reset(&explicit_task);
     CHECK(explicit_sighand.action[SIGUSR1_].handler == SIG_DFL_ &&
             explicit_sighand.action[SIGUSR1_].flags == 0 &&

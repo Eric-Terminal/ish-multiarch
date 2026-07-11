@@ -453,7 +453,11 @@ struct sighand *sighand_copy(struct sighand *sighand) {
     struct sighand *new_sighand = sighand_new();
     if (new_sighand == NULL)
         return NULL;
+    lock(&sighand->lock);
     memcpy(new_sighand->action, sighand->action, sizeof(new_sighand->action));
+    new_sighand->altstack = sighand->altstack;
+    new_sighand->altstack_size = sighand->altstack_size;
+    unlock(&sighand->lock);
     return new_sighand;
 }
 
