@@ -7,7 +7,7 @@
 
 static int proc_show_version(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
     struct uname uts;
-    do_uname(&uts);
+    do_uname(&uts, "i686");
     proc_printf(buf, "%s version %s %s\n", uts.system, uts.release, uts.version);
     return 0;
 }

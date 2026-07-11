@@ -12,7 +12,7 @@
 const char *uname_version = "SUPER AWESOME";
 const char *uname_hostname_override = NULL;
 
-void do_uname(struct uname *uts) {
+void do_uname(struct uname *uts, const char *machine) {
     struct utsname real_uname;
     uname(&real_uname);
     const char *hostname = real_uname.nodename;
@@ -20,17 +20,17 @@ void do_uname(struct uname *uts) {
         hostname = uname_hostname_override;
 
     memset(uts, 0, sizeof(struct uname));
-    strcpy(uts->system, "Linux");
-    strcpy(uts->hostname, hostname);
-    strcpy(uts->release, "4.20.69-ish");
+    snprintf(uts->system, sizeof(uts->system), "%s", "Linux");
+    snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);
+    snprintf(uts->release, sizeof(uts->release), "%s", "4.20.69-ish");
     snprintf(uts->version, sizeof(uts->version), "%s %s %s", uname_version, __DATE__, __TIME__);
-    strcpy(uts->arch, "i686");
-    strcpy(uts->domain, "(none)");
+    snprintf(uts->arch, sizeof(uts->arch), "%s", machine);
+    snprintf(uts->domain, sizeof(uts->domain), "%s", "(none)");
 }
 
 dword_t sys_uname(addr_t uts_addr) {
     struct uname uts;
-    do_uname(&uts);
+    do_uname(&uts, "i686");
     if (user_put(uts_addr, uts))
         return _EFAULT;
     return 0;

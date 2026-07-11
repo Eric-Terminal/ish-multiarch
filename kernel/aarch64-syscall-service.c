@@ -5,6 +5,7 @@
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/task.h"
@@ -23,6 +24,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
     AARCH64_LINUX_SYS_GETUID = 174,
@@ -296,6 +298,24 @@ static qword_t dispatch_fstat(
             syscall->arguments[1], fault);
 }
 
+static qword_t dispatch_uname(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    dword_t size = sizeof(struct uname);
+    qword_t address = syscall->arguments[0];
+    if (!user_range_fits(address, size))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+
+    struct uname uts;
+    do_uname(&uts, "aarch64");
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &uts, size, fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_syscall(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -321,6 +341,8 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_UNAME:
+            return dispatch_uname(context, syscall, fault);
         case AARCH64_LINUX_SYS_GETPID:
             return (qword_t) task_getpid(task);
         case AARCH64_LINUX_SYS_GETPPID:

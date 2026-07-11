@@ -224,7 +224,15 @@ struct uname {
     char arch[UNAME_LENGTH];     // i686
     char domain[UNAME_LENGTH];   // lol
 };
-void do_uname(struct uname *uts);
+_Static_assert(sizeof(struct uname) == 390,
+        "Linux new_utsname 线协议必须固定为六个 65 字节字段");
+_Static_assert(__builtin_offsetof(struct uname, hostname) == 65 &&
+        __builtin_offsetof(struct uname, release) == 130 &&
+        __builtin_offsetof(struct uname, version) == 195 &&
+        __builtin_offsetof(struct uname, arch) == 260 &&
+        __builtin_offsetof(struct uname, domain) == 325,
+        "Linux new_utsname 字段偏移必须与宿主 ABI 无关");
+void do_uname(struct uname *uts, const char *machine);
 dword_t sys_uname(addr_t uts_addr);
 dword_t sys_sethostname(addr_t hostname_addr, dword_t hostname_len);
 
