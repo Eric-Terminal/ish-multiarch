@@ -373,6 +373,12 @@ if not meson.is_cross_build()
         include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_linux_file_abi', aarch64_linux_file_abi_test)
 
+    aarch64_linux_signal_abi_test = executable(
+        'aarch64_linux_signal_abi_test',
+        'guest/aarch64/linux-signal-abi-test.c',
+        include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_linux_signal_abi', aarch64_linux_signal_abi_test)
+
     aarch64_linux_runtime_test = executable('aarch64_linux_runtime_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
