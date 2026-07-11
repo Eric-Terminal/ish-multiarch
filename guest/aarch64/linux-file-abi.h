@@ -1,0 +1,56 @@
+#ifndef GUEST_AARCH64_LINUX_FILE_ABI_H
+#define GUEST_AARCH64_LINUX_FILE_ABI_H
+
+#include "misc.h"
+
+struct aarch64_linux_stat {
+    qword_t dev;
+    qword_t ino;
+    dword_t mode;
+    dword_t nlink;
+    dword_t uid;
+    dword_t gid;
+    qword_t rdev;
+    qword_t pad1;
+    sqword_t size;
+    sdword_t blksize;
+    sdword_t pad2;
+    sqword_t blocks;
+    sqword_t atime_sec;
+    qword_t atime_nsec;
+    sqword_t mtime_sec;
+    qword_t mtime_nsec;
+    sqword_t ctime_sec;
+    qword_t ctime_nsec;
+    dword_t unused4;
+    dword_t unused5;
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_stat) == 128 &&
+        _Alignof(struct aarch64_linux_stat) == 8,
+        "AArch64 Linux stat ABI 必须固定为 128 字节且按 8 字节对齐");
+_Static_assert(__builtin_offsetof(struct aarch64_linux_stat, dev) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_stat, ino) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_stat, mode) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_stat, nlink) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_stat, uid) == 24 &&
+        __builtin_offsetof(struct aarch64_linux_stat, gid) == 28 &&
+        __builtin_offsetof(struct aarch64_linux_stat, rdev) == 32 &&
+        __builtin_offsetof(struct aarch64_linux_stat, pad1) == 40,
+        "AArch64 Linux stat 前半字段偏移不正确");
+_Static_assert(__builtin_offsetof(struct aarch64_linux_stat, size) == 48 &&
+        __builtin_offsetof(struct aarch64_linux_stat, blksize) == 56 &&
+        __builtin_offsetof(struct aarch64_linux_stat, pad2) == 60 &&
+        __builtin_offsetof(struct aarch64_linux_stat, blocks) == 64,
+        "AArch64 Linux stat 文件大小字段偏移不正确");
+_Static_assert(__builtin_offsetof(struct aarch64_linux_stat, atime_sec) == 72 &&
+        __builtin_offsetof(struct aarch64_linux_stat, atime_nsec) == 80 &&
+        __builtin_offsetof(struct aarch64_linux_stat, mtime_sec) == 88 &&
+        __builtin_offsetof(struct aarch64_linux_stat, mtime_nsec) == 96 &&
+        __builtin_offsetof(struct aarch64_linux_stat, ctime_sec) == 104 &&
+        __builtin_offsetof(struct aarch64_linux_stat, ctime_nsec) == 112 &&
+        __builtin_offsetof(struct aarch64_linux_stat, unused4) == 120 &&
+        __builtin_offsetof(struct aarch64_linux_stat, unused5) == 124,
+        "AArch64 Linux stat 时间与保留字段偏移不正确");
+
+#endif

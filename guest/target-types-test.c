@@ -1,6 +1,7 @@
 #include <assert.h>
 
 #include "misc.h"
+#include "guest/aarch64/linux-file-abi.h"
 #include "guest/linux/syscall-service.h"
 
 int main(void) {

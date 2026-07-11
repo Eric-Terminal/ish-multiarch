@@ -9,7 +9,7 @@ qword_t guest_linux_service_backend_probe(
         struct guest_linux_user_fault *fault);
 
 static bool read_probe(void *opaque, qword_t address,
-        void *destination, size_t size,
+        void *destination, dword_t size,
         struct guest_linux_user_fault *fault) {
     assert(*(const qword_t *) opaque == UINT64_C(0x0f1e2d3c4b5a6978));
     assert(address == UINT64_C(0xf123456789abcdef));
@@ -25,7 +25,7 @@ static bool read_probe(void *opaque, qword_t address,
 }
 
 static bool write_probe(void *opaque, qword_t address,
-        const void *source, size_t size,
+        const void *source, dword_t size,
         struct guest_linux_user_fault *fault) {
     use(fault);
     assert(*(const qword_t *) opaque == UINT64_C(0x0f1e2d3c4b5a6978));

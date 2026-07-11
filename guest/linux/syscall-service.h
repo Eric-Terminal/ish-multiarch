@@ -25,10 +25,10 @@ _Static_assert(offsetof(struct guest_linux_user_fault, access) == 8 &&
 struct guest_linux_user_access {
     void *opaque;
     bool (*read)(void *opaque, qword_t address,
-            void *destination, size_t size,
+            void *destination, dword_t size,
             struct guest_linux_user_fault *fault);
     bool (*write)(void *opaque, qword_t address,
-            const void *source, size_t size,
+            const void *source, dword_t size,
             struct guest_linux_user_fault *fault);
 };
 

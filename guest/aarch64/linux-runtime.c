@@ -62,7 +62,7 @@ static void export_user_fault(struct guest_linux_user_fault *destination,
 }
 
 static bool service_read_user(void *opaque, qword_t address,
-        void *destination, size_t size,
+        void *destination, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct guest_memory_fault memory_fault = {0};
     bool copied = guest_linux_copy_from_user(opaque,
@@ -72,7 +72,7 @@ static bool service_read_user(void *opaque, qword_t address,
 }
 
 static bool service_write_user(void *opaque, qword_t address,
-        const void *source, size_t size,
+        const void *source, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct guest_memory_fault memory_fault = {0};
     bool copied = guest_linux_copy_to_user(
