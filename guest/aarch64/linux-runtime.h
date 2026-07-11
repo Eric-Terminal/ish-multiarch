@@ -7,6 +7,8 @@
 #include "guest/linux/syscall-service.h"
 #include "guest/memory/tlb.h"
 
+#define AARCH64_LINUX_MAX_TID INT32_C(0x3fffffff)
+
 struct aarch64_linux_services {
     const struct guest_linux_syscall_service *syscalls;
     const struct guest_linux_signal_service *signals;

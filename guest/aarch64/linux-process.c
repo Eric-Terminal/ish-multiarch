@@ -1,0 +1,310 @@
+#include <assert.h>
+#include <stdlib.h>
+
+#include "guest/aarch64/elf64-loader.h"
+#include "guest/aarch64/linux-process.h"
+#include "guest/aarch64/linux-runtime.h"
+#include "guest/aarch64/linux-signal-trampoline.h"
+#include "guest/aarch64/linux-stack.h"
+#include "guest/aarch64/runner.h"
+
+#define AARCH64_LINUX_PROCESS_ADDRESS_BITS 48
+#define AARCH64_LINUX_PROCESS_ADDRESS_LIMIT \
+    (UINT64_C(1) << AARCH64_LINUX_PROCESS_ADDRESS_BITS)
+
+_Static_assert(AARCH64_LINUX_PROCESS_RANDOM_SIZE ==
+                AARCH64_LINUX_RANDOM_SIZE,
+        "process 与初始栈的随机字节长度必须一致");
+
+struct aarch64_linux_process {
+    struct guest_page_table page_table;
+    struct guest_tlb tlb;
+    struct aarch64_runner runner;
+    struct cpu_state cpu;
+    struct guest_linux_syscall_service syscall_service;
+    struct guest_linux_signal_service signal_service;
+    struct aarch64_linux_services services;
+    struct aarch64_linux_runtime runtime;
+    struct aarch64_linux_task task;
+};
+
+static void set_error(struct aarch64_linux_process_error *error,
+        enum aarch64_linux_process_error_stage stage, dword_t detail) {
+    if (error != NULL) {
+        *error = (struct aarch64_linux_process_error) {
+            .stage = (dword_t) stage,
+            .detail = detail,
+        };
+    }
+}
+
+static struct aarch64_linux_process *create_failed(
+        struct aarch64_linux_process *process,
+        struct aarch64_linux_process_error *error,
+        enum aarch64_linux_process_error_stage stage, dword_t detail) {
+    aarch64_linux_process_destroy(process);
+    set_error(error, stage, detail);
+    return NULL;
+}
+
+static bool page_aligned(qword_t value) {
+    return (value & GUEST_MEMORY_PAGE_MASK) == 0;
+}
+
+static bool ranges_overlap(qword_t first_start, qword_t first_end,
+        qword_t second_start, qword_t second_end) {
+    return first_start < second_end && second_start < first_end;
+}
+
+static bool valid_config(
+        const struct aarch64_linux_process_config *config) {
+    if (config == NULL || config->elf_data == NULL ||
+            config->elf_size == 0 || config->executable == NULL ||
+            config->random == NULL || config->tid <= 0 ||
+            config->tid > AARCH64_LINUX_MAX_TID ||
+            (config->argument_count != 0 && config->arguments == NULL) ||
+            (config->environment_count != 0 &&
+                    config->environment == NULL) ||
+            config->stack_size == 0 || config->stack_size > SIZE_MAX ||
+            !page_aligned(config->stack_top) ||
+            !page_aligned(config->stack_size) ||
+            config->stack_size > config->stack_top ||
+            config->stack_top > AARCH64_LINUX_PROCESS_ADDRESS_LIMIT ||
+            config->signal_trampoline_page == 0 ||
+            !page_aligned(config->signal_trampoline_page) ||
+            config->signal_trampoline_page >=
+                    AARCH64_LINUX_PROCESS_ADDRESS_LIMIT ||
+            !page_aligned(config->brk_limit) ||
+            config->brk_limit >= AARCH64_LINUX_PROCESS_ADDRESS_LIMIT)
+        return false;
+    for (size_t i = 0; i < config->argument_count; i++) {
+        if (config->arguments[i] == NULL)
+            return false;
+    }
+    for (size_t i = 0; i < config->environment_count; i++) {
+        if (config->environment[i] == NULL)
+            return false;
+    }
+    return true;
+}
+
+static void copy_services(struct aarch64_linux_process *process,
+        const struct aarch64_linux_process_config *config,
+        guest_addr_t signal_trampoline) {
+    if (config->syscalls != NULL) {
+        process->syscall_service = *config->syscalls;
+        process->services.syscalls = &process->syscall_service;
+    }
+    if (config->signals != NULL) {
+        process->signal_service = *config->signals;
+        process->services.signals = &process->signal_service;
+    }
+    process->services.signal_trampoline = signal_trampoline;
+}
+
+struct aarch64_linux_process *aarch64_linux_process_create(
+        const struct aarch64_linux_process_config *config,
+        struct aarch64_linux_process_error *error) {
+    set_error(error, AARCH64_LINUX_PROCESS_ERROR_NONE, 0);
+    if (!valid_config(config)) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ARGUMENT, 0);
+        return NULL;
+    }
+
+    struct aarch64_linux_process *process = calloc(1, sizeof(*process));
+    if (process == NULL) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+        return NULL;
+    }
+    if (!guest_page_table_init(&process->page_table,
+            AARCH64_LINUX_PROCESS_ADDRESS_BITS))
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+
+    struct aarch64_elf64_image image;
+    enum aarch64_elf64_error elf_error = aarch64_elf64_parse(
+            config->elf_data, config->elf_size, &image);
+    if (elf_error != AARCH64_ELF64_OK)
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_ELF,
+                (dword_t) elf_error);
+
+    struct aarch64_elf64_load_result loaded;
+    enum aarch64_elf64_load_error load_error = aarch64_elf64_load(
+            &image, &process->page_table,
+            (guest_addr_t) config->load_bias, &loaded);
+    if (load_error != AARCH64_ELF64_LOAD_OK)
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_LOAD,
+                (dword_t) load_error);
+
+    qword_t stack_bottom = config->stack_top - config->stack_size;
+    qword_t trampoline_end = config->signal_trampoline_page +
+            GUEST_MEMORY_PAGE_SIZE;
+    if (config->brk_limit < loaded.brk_end ||
+            ranges_overlap(loaded.brk_end, config->brk_limit,
+                    stack_bottom, config->stack_top) ||
+            ranges_overlap(loaded.brk_end, config->brk_limit,
+                    config->signal_trampoline_page, trampoline_end))
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_LAYOUT, 0);
+
+    guest_addr_t signal_trampoline;
+    enum guest_page_table_result page_table_error =
+            aarch64_linux_map_signal_trampoline(
+                    &process->page_table,
+                    (guest_addr_t) config->signal_trampoline_page,
+                    &signal_trampoline);
+    if (page_table_error != GUEST_PAGE_TABLE_OK)
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_TRAMPOLINE,
+                (dword_t) page_table_error);
+
+    const struct aarch64_linux_stack_config stack_config = {
+        .stack_top = (guest_addr_t) config->stack_top,
+        .stack_size = (size_t) config->stack_size,
+        .executable = config->executable,
+        .arguments = config->arguments,
+        .argument_count = config->argument_count,
+        .environment = config->environment,
+        .environment_count = config->environment_count,
+        .random = config->random,
+        .uid = config->uid,
+        .euid = config->euid,
+        .gid = config->gid,
+        .egid = config->egid,
+    };
+    struct aarch64_linux_stack_result stack;
+    enum aarch64_linux_stack_error stack_error =
+            aarch64_linux_build_initial_stack(
+                    &process->page_table, &loaded,
+                    &stack_config, &stack);
+    if (stack_error != AARCH64_LINUX_STACK_OK)
+        return create_failed(process, error,
+                AARCH64_LINUX_PROCESS_ERROR_STACK,
+                (dword_t) stack_error);
+
+    copy_services(process, config, signal_trampoline);
+    aarch64_linux_runtime_init(&process->runtime,
+            &process->page_table, loaded.brk_end,
+            (guest_addr_t) config->brk_limit, &process->services);
+    aarch64_linux_task_init(&process->task,
+            config->tid, config->task_opaque);
+    guest_tlb_init(&process->tlb,
+            &process->page_table.address_space);
+    aarch64_runner_init(&process->runner, &process->tlb);
+    aarch64_linux_prepare_cpu(&process->cpu, &loaded, &stack);
+    return process;
+}
+
+void aarch64_linux_process_destroy(
+        struct aarch64_linux_process *process) {
+    if (process == NULL)
+        return;
+    guest_page_table_destroy(&process->page_table);
+    free(process);
+}
+
+static struct aarch64_linux_process_result process_result(
+        enum aarch64_linux_process_status status) {
+    return (struct aarch64_linux_process_result) {
+        .status = (dword_t) status,
+    };
+}
+
+static void export_fault(struct guest_linux_user_fault *destination,
+        const struct guest_memory_fault *source) {
+    *destination = (struct guest_linux_user_fault) {
+        .address = source->address,
+        .access = (dword_t) source->access,
+        .kind = (dword_t) source->kind,
+    };
+}
+
+static void apply_signal_result(
+        struct aarch64_linux_process_result *result,
+        struct guest_linux_signal_poll_result signal) {
+    result->signal = signal.signal;
+    if (signal.status == GUEST_LINUX_SIGNAL_POLL_STOP)
+        result->status = AARCH64_LINUX_PROCESS_STOP;
+    else if (signal.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE)
+        result->status = AARCH64_LINUX_PROCESS_TERMINATE;
+}
+
+struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
+        struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    struct aarch64_linux_process_result result = process_result(
+            AARCH64_LINUX_PROCESS_RUNNABLE);
+    apply_signal_result(&result, aarch64_linux_poll_signals(
+            &process->cpu, &process->tlb,
+            &process->runtime, &process->task));
+    return result;
+}
+
+static void apply_syscall_result(
+        struct aarch64_linux_process_result *result,
+        const struct aarch64_linux_syscall_result *syscall) {
+    result->exit_status = syscall->exit_status;
+    result->signal = syscall->signal;
+    if (syscall->fault.kind != GUEST_MEMORY_FAULT_NONE)
+        export_fault(&result->fault, &syscall->fault);
+    switch (syscall->action) {
+        case AARCH64_LINUX_SYSCALL_RESUME:
+            break;
+        case AARCH64_LINUX_SYSCALL_EXIT:
+            result->status = AARCH64_LINUX_PROCESS_EXIT;
+            break;
+        case AARCH64_LINUX_SYSCALL_EXIT_GROUP:
+            result->status = AARCH64_LINUX_PROCESS_EXIT_GROUP;
+            break;
+        case AARCH64_LINUX_SYSCALL_STOP:
+            result->status = AARCH64_LINUX_PROCESS_STOP;
+            break;
+        case AARCH64_LINUX_SYSCALL_TERMINATE:
+            result->status = AARCH64_LINUX_PROCESS_TERMINATE;
+            break;
+    }
+}
+
+struct aarch64_linux_process_result aarch64_linux_process_run_one(
+        struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    struct aarch64_linux_process_result result = process_result(
+            AARCH64_LINUX_PROCESS_RUNNABLE);
+    struct aarch64_step_result step = aarch64_run_one(
+            &process->runner, &process->cpu);
+    result.instruction = step.instruction;
+    switch (step.stop) {
+        case AARCH64_STEP_RETIRED:
+            apply_signal_result(&result, aarch64_linux_poll_signals(
+                    &process->cpu, &process->tlb,
+                    &process->runtime, &process->task));
+            break;
+        case AARCH64_STEP_FETCH_FAULT:
+            result.status = AARCH64_LINUX_PROCESS_FETCH_FAULT;
+            export_fault(&result.fault, &step.fault);
+            process->cpu.segfault_addr = step.fault.address;
+            process->cpu.segfault_was_write = false;
+            break;
+        case AARCH64_STEP_DATA_FAULT:
+            result.status = AARCH64_LINUX_PROCESS_DATA_FAULT;
+            export_fault(&result.fault, &step.fault);
+            process->cpu.segfault_addr = step.fault.address;
+            process->cpu.segfault_was_write =
+                    step.fault.access == GUEST_MEMORY_WRITE;
+            break;
+        case AARCH64_STEP_UNDEFINED:
+            result.status = AARCH64_LINUX_PROCESS_UNDEFINED;
+            break;
+        case AARCH64_STEP_SYSCALL: {
+            struct aarch64_linux_syscall_result syscall =
+                    aarch64_linux_dispatch_syscall(
+                            &process->cpu, &process->tlb,
+                            &process->runtime, &process->task);
+            apply_syscall_result(&result, &syscall);
+            break;
+        }
+    }
+    return result;
+}

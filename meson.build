@@ -43,6 +43,7 @@ aarch64_core_src = [
     'guest/aarch64/linux-signal-info.c',
     'guest/aarch64/linux-signal-frame.c',
     'guest/aarch64/linux-signal-trampoline.c',
+    'guest/aarch64/linux-process.c',
     'guest/linux/memory.c',
     'guest/aarch64/linux-runtime.c',
     'guest/aarch64/elf64.c',
@@ -474,6 +475,14 @@ if not meson.is_cross_build()
         link_with: libish_aarch64_core)
     test('aarch64_linux_signal_trampoline',
         aarch64_linux_signal_trampoline_test)
+
+    aarch64_linux_process_test = executable(
+        'aarch64_linux_process_test',
+        'guest/aarch64/linux-process-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: libish_aarch64_core)
+    test('aarch64_linux_process', aarch64_linux_process_test)
 
     aarch64_linux_user_memory_test = executable(
         'aarch64_linux_user_memory_test', [

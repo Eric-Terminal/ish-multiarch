@@ -15,8 +15,6 @@
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
-#define AARCH64_LINUX_MAX_TID INT32_C(0x3fffffff)
-
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
