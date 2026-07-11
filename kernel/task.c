@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "guest/aarch64/linux-process.h"
 #include "kernel/calls.h"
 #include "kernel/task.h"
 #include "kernel/memory.h"
@@ -11,6 +12,30 @@ __thread struct task *current;
 
 static struct pid pids[MAX_PID + 1] = {};
 lock_t pids_lock = LOCK_INITIALIZER;
+
+bool task_has_aarch64_process(const struct task *task) {
+    return task->aarch64_process != NULL;
+}
+
+void task_attach_aarch64_process(struct task *task,
+        struct aarch64_linux_process *process) {
+    assert(task != NULL && process != NULL &&
+            task->aarch64_process == NULL);
+    task->aarch64_process = process;
+}
+
+struct aarch64_linux_process *task_take_aarch64_process(
+        struct task *task) {
+    assert(task != NULL);
+    struct aarch64_linux_process *process = task->aarch64_process;
+    task->aarch64_process = NULL;
+    return process;
+}
+
+void task_release_aarch64_process(struct task *task) {
+    aarch64_linux_process_destroy(
+            task_take_aarch64_process(task));
+}
 
 static bool pid_empty(struct pid *pid) {
     return !pid->reserved && pid->task == NULL &&
@@ -55,6 +80,8 @@ struct task *task_create_(struct task *parent) {
     } else {
         task_altstack_reset(task);
     }
+    // opaque process 不可通过 task 的结构体浅拷贝共享。
+    task->aarch64_process = NULL;
 
     task_thread_store(task, zero_init(pthread_t));
     atomic_init(&task->start_ready, false);
@@ -143,12 +170,14 @@ void task_abort_create(struct task *task) {
     assert(pid != NULL && pid->reserved && pid->task == NULL);
     pid->reserved = false;
     unlock(&pids_lock);
+    task_release_aarch64_process(task);
     cond_destroy(&task->pause);
     cond_destroy(&task->ptrace.cond);
     free(task);
 }
 
 void task_destroy(struct task *task) {
+    assert(task->aarch64_process == NULL);
     list_remove(&task->siblings);
     struct pid *pid = pid_slot(task->pid);
     assert(pid != NULL && !pid->reserved && pid->task == task);

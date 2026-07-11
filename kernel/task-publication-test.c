@@ -46,6 +46,8 @@ int main(void) {
     };
     parent.cpu._poked = true;
     parent.cpu.poked_ptr = &parent.cpu._poked;
+    parent.aarch64_process =
+            (struct aarch64_linux_process *) (uintptr_t) 0x1234;
     parent.exiting = true;
     parent.zombie = true;
     parent.exit_code = UINT32_MAX;
@@ -87,6 +89,7 @@ int main(void) {
             child->altstack.stack == parent.altstack.stack &&
             child->altstack.size == parent.altstack.size &&
             child->altstack.flags == parent.altstack.flags &&
+            child->aarch64_process == NULL &&
             child->cpu.poked_ptr == NULL &&
             !child->cpu._poked && !child->ptrace.traced &&
             !child->exiting && !child->zombie && child->exit_code == 0,
@@ -217,5 +220,6 @@ int main(void) {
     cond_destroy(&parent.pause);
     cond_destroy(&parent.ptrace.cond);
     cond_destroy(&group.stopped_cond);
+    parent.aarch64_process = NULL;
     return 0;
 }

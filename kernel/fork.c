@@ -168,6 +168,9 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
         return _EINVAL;
     if (flags & CLONE_THREAD_ && !(flags & CLONE_SIGHAND_))
         return _EINVAL;
+    // opaque AArch64 CPU/页表尚无可共享或可复制的 clone 事务。
+    if (task_has_aarch64_process(current))
+        return _ENOSYS;
 
     struct task *task = task_create_(current);
     if (task == NULL)

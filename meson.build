@@ -194,9 +194,10 @@ if get_option('kernel') == 'ish'
     ]
 
     libish = library('ish', src,
-        include_directories: includes)
+        include_directories: includes,
+        link_whole: libish_aarch64_core)
     ish = declare_dependency(
-        link_with: [libish, libish_aarch64_core, libish_emu, libfakefs],
+        link_with: [libish, libish_emu, libfakefs],
         dependencies: dependencies,
         include_directories: includes)
 
@@ -315,6 +316,13 @@ if get_option('kernel') == 'ish'
             'kernel/task-publication-test.c',
             dependencies: ish)
         test('task_publication', task_publication_test)
+
+        aarch64_task_lifecycle_test = executable(
+            'aarch64_task_lifecycle_test',
+            'kernel/aarch64-task-lifecycle-test.c',
+            dependencies: ish)
+        test('aarch64_task_lifecycle',
+            aarch64_task_lifecycle_test)
     endif
 
 elif get_option('kernel') == 'linux'

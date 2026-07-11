@@ -59,6 +59,15 @@ int main(void) {
     const dword_t shared_flags = TEST_CLONE_VM | TEST_CLONE_FS |
             TEST_CLONE_FILES | TEST_CLONE_SIGHAND |
             TEST_CLONE_THREAD;
+    parent.aarch64_process =
+            (struct aarch64_linux_process *) (uintptr_t) 0x1234;
+    CHECK(sys_clone(shared_flags, 0, 0, 0, 0) == (dword_t) _ENOSYS &&
+            list_size(&group.threads) == 1 &&
+            list_empty(&parent.children) && parent.mm->refcount == 1 &&
+            files.refcount == 1 && fs.refcount == 1 &&
+            sighand.refcount == 1,
+            "AArch64 clone 在分配或共享资源前关闭失败");
+    parent.aarch64_process = NULL;
     static const struct {
         dword_t flags;
         addr_t parent_tid;

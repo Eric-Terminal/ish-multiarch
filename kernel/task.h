@@ -13,10 +13,14 @@
 #include "util/timer.h"
 #include "util/sync.h"
 
+struct aarch64_linux_process;
+
 // everything here is private to the thread executing this task and needs no
 // locking, unless otherwise specified
 struct task {
     struct cpu_state cpu;
+    // 非空时由 task 独占；AArch64 CPU 与页表封装在 opaque process 中。
+    struct aarch64_linux_process *aarch64_process;
     struct mm *mm; // locked by general_lock
     struct mem *mem; // pointer to mm.mem, for convenience
     pthread_t thread; // 并发访问必须使用 task_thread_load/store。
@@ -113,6 +117,15 @@ static inline void task_set_mm(struct task *task, struct mm *mm) {
     task->mem = &task->mm->mem;
     task->cpu.mmu = &task->mem->mmu;
 }
+
+bool task_has_aarch64_process(const struct task *task);
+// 这些入口仅由未发布 task 的构造线程或 task 自己的执行线程调用。
+// attach 接管唯一所有权；take 将所有权交还调用方且不销毁。
+void task_attach_aarch64_process(struct task *task,
+        struct aarch64_linux_process *process);
+struct aarch64_linux_process *task_take_aarch64_process(
+        struct task *task);
+void task_release_aarch64_process(struct task *task);
 
 // Creates a new process, initializes most fields from the parent. Specify
 // parent as NULL to create the init process. Returns NULL if out of memory.

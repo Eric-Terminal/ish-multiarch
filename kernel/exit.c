@@ -63,6 +63,7 @@ noreturn void do_exit(int status) {
         tgroup_timers_destroy(current->group);
 
     // release all our resources
+    task_release_aarch64_process(current);
     mm_release(current->mm);
     current->mm = NULL;
     fdtable_release(current->files);
