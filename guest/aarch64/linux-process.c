@@ -423,6 +423,7 @@ struct aarch64_linux_process_result aarch64_linux_process_run_one(
             break;
         case AARCH64_STEP_UNDEFINED:
             result.status = AARCH64_LINUX_PROCESS_UNDEFINED;
+            result.fault.address = process->cpu.pc;
             break;
         case AARCH64_STEP_SYSCALL: {
             struct aarch64_linux_syscall_result syscall =

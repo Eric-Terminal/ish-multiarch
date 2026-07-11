@@ -733,7 +733,9 @@ static void test_fault_events(void) {
         result = aarch64_linux_process_run_one(process);
         assert(result.status == AARCH64_LINUX_PROCESS_UNDEFINED);
         assert(result.instruction == UINT32_C(0xffffffff));
-        assert_empty_result_fields(&result);
+        assert(result.fault.address == TEXT_BASE + 0x100);
+        assert(result.fault.access == 0 && result.fault.kind == 0);
+        assert(result.signal == 0 && result.exit_status == 0);
     }
     aarch64_linux_process_destroy(process);
 

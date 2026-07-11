@@ -24,6 +24,10 @@ void signal_force_sigsegv_locked(
 void signal_force_sigsegv_info_locked(
         struct sighand *sighand, int failed_signal,
         const struct siginfo_ *info);
+// 强制同步异常会解除阻塞，并在被阻塞或忽略时恢复默认动作；精确信息移到队首。
+void signal_force_sync_info_locked(
+        struct sighand *sighand, int signal,
+        const struct siginfo_ *info);
 void signal_ptrace_stop_locked(
         int signal, const struct siginfo_ *info);
 

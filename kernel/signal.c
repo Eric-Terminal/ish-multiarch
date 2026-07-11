@@ -236,35 +236,44 @@ static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame)
     memcpy(frame->retcode, &rt_retcode, sizeof(rt_retcode));
 }
 
-static void force_sigsegv_locked(
-        struct sighand *sighand, int failed_signal,
+static void force_signal_info_locked(
+        struct sighand *sighand, int signal, bool reset_action,
         const struct siginfo_ *precise_info) {
-    struct signal_action *segv_action = &sighand->action[SIGSEGV_];
-    bool was_blocked = sigset_has(current->blocked, SIGSEGV_);
-    if (failed_signal == SIGSEGV_ || was_blocked ||
-            segv_action->handler == SIG_IGN_) {
-        *segv_action = (struct signal_action) {
+    assert(current != NULL && current->sighand == sighand &&
+            signal >= 1 && signal <= NUM_SIGS);
+    struct signal_action *action = &sighand->action[signal];
+    bool was_blocked = sigset_has(current->blocked, signal);
+    if (reset_action || was_blocked || action->handler == SIG_IGN_) {
+        *action = (struct signal_action) {
             .handler = SIG_DFL_,
         };
     }
-    sigset_del(&current->blocked, SIGSEGV_);
-    deliver_signal_unlocked(current, SIGSEGV_,
+    sigset_del(&current->blocked, signal);
+    deliver_signal_unlocked(current, signal,
             precise_info != NULL ? *precise_info : SIGINFO_NIL);
 
-    // 建帧失败是同步故障，必须先于队列里已有的异步信号处理。
+    // 同步故障必须先于队列里已有的异步信号处理。
     struct sigqueue *forced;
     list_for_each_entry(&current->queue, forced, queue) {
-        if (forced->info.sig == SIGSEGV_) {
-            // 坏帧故障必须覆盖合并前的异步信息，才能保留准确故障地址。
+        if (forced->info.sig == signal) {
+            // 强制故障必须覆盖合并前的信息，才能保留准确故障地址。
             if (precise_info != NULL) {
                 forced->info = *precise_info;
-                forced->info.sig = SIGSEGV_;
+                forced->info.sig = signal;
             }
             list_remove(&forced->queue);
             list_add(&current->queue, &forced->queue);
-            break;
+            return;
         }
     }
+    assert(false && "pending 位必须有对应的强制信号队列节点");
+}
+
+static void force_sigsegv_locked(
+        struct sighand *sighand, int failed_signal,
+        const struct siginfo_ *precise_info) {
+    force_signal_info_locked(sighand, SIGSEGV_,
+            failed_signal == SIGSEGV_, precise_info);
 }
 
 void signal_force_sigsegv_locked(
@@ -277,6 +286,14 @@ void signal_force_sigsegv_info_locked(
         const struct siginfo_ *info) {
     assert(info != NULL);
     force_sigsegv_locked(sighand, failed_signal, info);
+}
+
+void signal_force_sync_info_locked(
+        struct sighand *sighand, int signal,
+        const struct siginfo_ *info) {
+    assert(info != NULL && info->sig == signal &&
+            sigset_has(SYNCHRONOUS_MASK, signal));
+    force_signal_info_locked(sighand, signal, false, info);
 }
 
 static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {

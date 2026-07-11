@@ -80,6 +80,8 @@ _Static_assert(sizeof(struct signal_action) == 32,
 #define SI_TKILL_ -6
 #define SI_KERNEL_ 128
 #define TRAP_TRACE_ 2
+#define ILL_ILLOPC_ 1
+#define BUS_ADRALN_ 1
 #define SEGV_MAPERR_ 1
 #define SEGV_ACCERR_ 2
 

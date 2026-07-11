@@ -119,7 +119,8 @@ struct aarch64_linux_interpreter_path_result
         char *destination, size_t capacity);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
-// fault/undefined 不推进 PC；调用方排入同步信号后应先调用 poll_signals。
+// fault/undefined 不推进 PC；undefined 的 fault.address 保存精确 PC。
+// 调用方排入同步信号后应先调用 poll_signals。
 struct aarch64_linux_process_result aarch64_linux_process_run_one(
         struct aarch64_linux_process *process);
 // 单独建立信号安全点，不执行 guest 指令。

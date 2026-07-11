@@ -6,6 +6,7 @@
 
 #include "guest/aarch64/linux-signal-abi.h"
 #include "kernel/aarch64-signal-service.h"
+#include "kernel/signal-delivery.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
 
@@ -850,6 +851,117 @@ static int test_bad_frame_resets_blocked_or_ignored_handler(void) {
     return 0;
 }
 
+static void force_sync_info(struct signal_fixture *fixture,
+        int signal, const struct siginfo_ *info) {
+    lock(&fixture->sighand.lock);
+    signal_force_sync_info_locked(
+            &fixture->sighand, signal, info);
+    unlock(&fixture->sighand.lock);
+}
+
+static int test_forced_sync_info_priority_and_handler(void) {
+    struct signal_fixture fixture;
+    struct installer_probe probe;
+    init_fixture(&fixture);
+    const struct signal_action action = {
+        .handler = HANDLER_ONE,
+        .flags = SA_SIGINFO_,
+        .mask = sig_mask(SIGUSR2_),
+    };
+    fixture.sighand.action[SIGILL_] = action;
+    queue_signal(&fixture.task, SIGUSR1_);
+
+    struct siginfo_ info = {
+        .sig = SIGILL_,
+        .code = ILL_ILLOPC_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
+        .fault.addr = UINT64_C(0x0000400012345000),
+    };
+    force_sync_info(&fixture, SIGILL_, &info);
+    struct sigqueue *first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(first->info.sig == SIGILL_ &&
+            first->info.code == ILL_ILLOPC_ &&
+            first->info.payload_kind == SIGNAL_INFO_PAYLOAD_FAULT &&
+            first->info.fault.addr == info.fault.addr &&
+            fixture.task.pending ==
+                    (sig_mask(SIGILL_) | sig_mask(SIGUSR1_)) &&
+            memcmp(&fixture.sighand.action[SIGILL_],
+                    &action, sizeof(action)) == 0,
+            "未阻塞同步异常抢占异步队列并保留自定义 handler");
+
+    info.fault.addr = UINT64_C(0x0000400087654000);
+    force_sync_info(&fixture, SIGILL_, &info);
+    first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(list_size(&fixture.task.queue) == 2 &&
+            first->info.sig == SIGILL_ &&
+            first->info.fault.addr == info.fault.addr,
+            "重复同步异常合并队列节点并更新精确故障地址");
+
+    init_probe(&probe, &fixture.task);
+    struct guest_linux_signal_poll_result result =
+            poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER &&
+            result.signal == SIGILL_ && probe.calls == 1 &&
+            probe.deliveries[0].info.code == ILL_ILLOPC_ &&
+            probe.deliveries[0].info.fault.address == info.fault.addr &&
+            fixture.task.pending == sig_mask(SIGUSR1_),
+            "强制同步异常在下一安全点携带精确信息进入 handler");
+    destroy_fixture(&fixture);
+    return 0;
+}
+
+static int test_forced_sync_resets_blocked_or_ignored_action(void) {
+    struct signal_fixture fixture;
+    struct installer_probe probe;
+    init_fixture(&fixture);
+    fixture.task.blocked = sig_mask(SIGILL_) | sig_mask(SIGUSR2_);
+    fixture.sighand.action[SIGILL_] = (struct signal_action) {
+        .handler = HANDLER_ONE,
+        .flags = SA_SIGINFO_,
+        .mask = sig_mask(SIGALRM_),
+    };
+    const struct siginfo_ ill = {
+        .sig = SIGILL_,
+        .code = ILL_ILLOPC_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
+        .fault.addr = UINT64_C(0x0000400011110000),
+    };
+    force_sync_info(&fixture, SIGILL_, &ill);
+    init_probe(&probe, &fixture.task);
+    struct guest_linux_signal_poll_result result =
+            poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE &&
+            result.signal == SIGILL_ && probe.calls == 0 &&
+            fixture.task.blocked == sig_mask(SIGUSR2_) &&
+            fixture.sighand.action[SIGILL_].handler == SIG_DFL_,
+            "被阻塞的同步异常解除阻塞并恢复默认致命动作");
+    destroy_fixture(&fixture);
+
+    init_fixture(&fixture);
+    fixture.sighand.action[SIGBUS_] = (struct signal_action) {
+        .handler = SIG_IGN_,
+        .flags = SA_NODEFER_,
+        .mask = sig_mask(SIGALRM_),
+    };
+    const struct siginfo_ bus = {
+        .sig = SIGBUS_,
+        .code = BUS_ADRALN_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
+        .fault.addr = UINT64_C(0x0000400022220001),
+    };
+    force_sync_info(&fixture, SIGBUS_, &bus);
+    init_probe(&probe, &fixture.task);
+    result = poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE &&
+            result.signal == SIGBUS_ && probe.calls == 0 &&
+            fixture.sighand.action[SIGBUS_].handler == SIG_DFL_,
+            "被忽略的同步异常恢复默认动作并强制投递");
+    destroy_fixture(&fixture);
+    return 0;
+}
+
 int main(void) {
     if (test_idle_and_blocked_pending() != 0)
         return 1;
@@ -876,6 +988,10 @@ int main(void) {
     if (test_bad_frame_info_priority_and_handler() != 0)
         return 1;
     if (test_bad_frame_resets_blocked_or_ignored_handler() != 0)
+        return 1;
+    if (test_forced_sync_info_priority_and_handler() != 0)
+        return 1;
+    if (test_forced_sync_resets_blocked_or_ignored_action() != 0)
         return 1;
     return 0;
 }
