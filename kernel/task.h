@@ -110,6 +110,9 @@ struct task *task_create_(struct task *parent);
 void task_destroy(struct task *task);
 
 // misc
+pid_t_ task_getpid(const struct task *task);
+pid_t_ task_gettid(const struct task *task);
+pid_t_ task_getppid(const struct task *task);
 void vfork_notify(struct task *task);
 pid_t_ task_setsid(struct task *task);
 void task_leave_session(struct task *task);

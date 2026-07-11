@@ -15,7 +15,7 @@
 
 // 该 host-buffer 引导通道按块限制内存；消息型 fd 接入时必须改用保留消息边界的单次 I/O 通道。
 
-enum aarch64_linux_file_syscall {
+enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETCWD = 17,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
@@ -23,6 +23,12 @@ enum aarch64_linux_file_syscall {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_GETPID = 172,
+    AARCH64_LINUX_SYS_GETPPID = 173,
+    AARCH64_LINUX_SYS_GETUID = 174,
+    AARCH64_LINUX_SYS_GETEUID = 175,
+    AARCH64_LINUX_SYS_GETGID = 176,
+    AARCH64_LINUX_SYS_GETEGID = 177,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -315,6 +321,18 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_GETPID:
+            return (qword_t) task_getpid(task);
+        case AARCH64_LINUX_SYS_GETPPID:
+            return (qword_t) task_getppid(task);
+        case AARCH64_LINUX_SYS_GETUID:
+            return task->uid;
+        case AARCH64_LINUX_SYS_GETEUID:
+            return task->euid;
+        case AARCH64_LINUX_SYS_GETGID:
+            return task->gid;
+        case AARCH64_LINUX_SYS_GETEGID:
+            return task->egid;
         default:
             return syscall_result(_ENOSYS);
     }

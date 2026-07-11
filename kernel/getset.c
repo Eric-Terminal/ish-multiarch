@@ -2,24 +2,37 @@
 #include "kernel/task.h"
 #include "kernel/personality.h"
 
-pid_t_ sys_getpid(void) {
-    STRACE("getpid()");
-    return current->tgid;
+pid_t_ task_getpid(const struct task *task) {
+    return task->tgid;
 }
-pid_t_ sys_gettid(void) {
-    STRACE("gettid()");
-    return current->pid;
+
+pid_t_ task_gettid(const struct task *task) {
+    return task->pid;
 }
-pid_t_ sys_getppid(void) {
-    STRACE("getppid()");
+
+pid_t_ task_getppid(const struct task *task) {
     pid_t_ ppid;
     lock(&pids_lock);
-    if (current->parent != NULL)
-        ppid = current->parent->pid;
+    const struct task *parent = task->group->leader->parent;
+    if (parent != NULL)
+        ppid = parent->tgid;
     else
         ppid = 0;
     unlock(&pids_lock);
     return ppid;
+}
+
+pid_t_ sys_getpid(void) {
+    STRACE("getpid()");
+    return task_getpid(current);
+}
+pid_t_ sys_gettid(void) {
+    STRACE("gettid()");
+    return task_gettid(current);
+}
+pid_t_ sys_getppid(void) {
+    STRACE("getppid()");
+    return task_getppid(current);
 }
 
 dword_t sys_getuid32(void) {
