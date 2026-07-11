@@ -204,6 +204,17 @@ int main(void) {
     struct mount *mount = mount_find(root_lookup);
     mount->data = &probe;
 
+    struct fs_info bootstrap_fs = {0};
+    lock_init(&bootstrap_fs.lock);
+    struct task bootstrap_task = {.fs = &bootstrap_fs};
+    char normalized[MAX_PATH];
+    CHECK(path_normalize_task(&bootstrap_task, AT_PWD, "/", normalized,
+            N_SYMLINK_FOLLOW) == 0 && normalized[0] == '\0',
+            "首个任务可在安装 root 前解析绝对根路径");
+    CHECK(path_normalize_task(&bootstrap_task, AT_PWD, "bootstrap", normalized,
+            N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/bootstrap") == 0,
+            "首个任务可在安装 cwd 前从根路径解析相对名称");
+
     struct task_fixture decoy;
     struct task_fixture target;
     struct file_state decoy_pwd_state;
@@ -225,7 +236,6 @@ int main(void) {
             "显式目录 fd 安装成功");
     current = &decoy.task;
 
-    char normalized[MAX_PATH];
     CHECK(path_normalize_task(&target.task, AT_PWD, "child", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/target/child") == 0,
             "相对路径使用目标任务 cwd");

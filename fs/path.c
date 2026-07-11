@@ -154,25 +154,34 @@ int path_normalize_task(struct task *task, struct fd *at,
     char root_path[MAX_PATH + 1];
     struct fs_info *fs = task->fs;
     lock(&fs->lock);
-    int root_error = generic_getpath(fs->root, root_path);
-    if (root_error < 0) {
-        unlock(&fs->lock);
-        return root_error;
+    if (fs->root != NULL) {
+        int root_error = generic_getpath(fs->root, root_path);
+        if (root_error < 0) {
+            unlock(&fs->lock);
+            return root_error;
+        }
+    } else {
+        // 首个任务打开根目录前，fs 尚处于没有 root/cwd 的引导状态。
+        assert(fs->pwd == NULL);
+        strcpy(root_path, "/");
     }
     assert(path_is_normalized(root_path));
     bool fs_path = path[0] == '/' || at == AT_PWD;
     if (fs_path) {
+        int err = 0;
         if (path[0] == '/') {
             at = fs->root;
             strcpy(at_path, root_path);
         } else {
             at = fs->pwd;
+            if (at != NULL)
+                err = generic_getpath(at, at_path);
         }
-        int err = path[0] == '/' ? 0 : generic_getpath(at, at_path);
         unlock(&fs->lock);
         if (err < 0)
             return err;
-        assert(path_is_normalized(at_path));
+        if (at != NULL)
+            assert(path_is_normalized(at_path));
     } else if (at != NULL) {
         unlock(&fs->lock);
         int err = generic_getpath(at, at_path);
