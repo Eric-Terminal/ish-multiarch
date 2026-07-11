@@ -622,6 +622,41 @@ static void execute_advsimd_compare(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static qword_t advsimd_logical_word(enum aarch64_opcode opcode,
+        qword_t old, qword_t left, qword_t right) {
+    if (opcode == AARCH64_OP_ADVSIMD_AND)
+        return left & right;
+    if (opcode == AARCH64_OP_ADVSIMD_BIC)
+        return left & ~right;
+    if (opcode == AARCH64_OP_ADVSIMD_ORR)
+        return left | right;
+    if (opcode == AARCH64_OP_ADVSIMD_ORN)
+        return left | ~right;
+    if (opcode == AARCH64_OP_ADVSIMD_EOR)
+        return left ^ right;
+    if (opcode == AARCH64_OP_ADVSIMD_BSL)
+        return (old & left) | (~old & right);
+    if (opcode == AARCH64_OP_ADVSIMD_BIT)
+        return (right & left) | (~right & old);
+    return (~right & left) | (right & old);
+}
+
+static void execute_advsimd_logical(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    union aarch64_vector_reg result = {0};
+    result.d[0] = advsimd_logical_word(instruction->opcode,
+            cpu->v[rd].d[0], cpu->v[rn].d[0], cpu->v[rm].d[0]);
+    if (instruction->width == 128) {
+        result.d[1] = advsimd_logical_word(instruction->opcode,
+                cpu->v[rd].d[1], cpu->v[rn].d[1], cpu->v[rm].d[1]);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1136,6 +1171,16 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_CMTST:
         case AARCH64_OP_ADVSIMD_CMEQ:
             execute_advsimd_compare(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_AND:
+        case AARCH64_OP_ADVSIMD_BIC:
+        case AARCH64_OP_ADVSIMD_ORR:
+        case AARCH64_OP_ADVSIMD_ORN:
+        case AARCH64_OP_ADVSIMD_EOR:
+        case AARCH64_OP_ADVSIMD_BSL:
+        case AARCH64_OP_ADVSIMD_BIT:
+        case AARCH64_OP_ADVSIMD_BIF:
+            execute_advsimd_logical(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
