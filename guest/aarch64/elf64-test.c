@@ -164,6 +164,12 @@ int main(void) {
     put_u64(file + AARCH64_ELF64_HEADER_SIZE + 32, 1);
     file[TEST_INTERPRETER_OFFSET] = '\0';
     assert(parse(file) == AARCH64_ELF64_BAD_SEGMENT);
+    assert(aarch64_elf64_parse_as_interpreter(
+            file, sizeof(file), &image) == AARCH64_ELF64_OK);
+    assert(image.program_header_count == 2);
+    assert(image.load_segment_count == 1);
+    assert(image.interpreter_path == NULL);
+    assert(image.interpreter_path_length == 0);
     make_interpreted_image(file);
     put_u64(file + AARCH64_ELF64_HEADER_SIZE + 32, 3);
     memcpy(file + TEST_INTERPRETER_OFFSET, "abc", 3);

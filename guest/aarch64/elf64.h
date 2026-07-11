@@ -44,6 +44,10 @@ struct aarch64_elf64_program_header {
 
 enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
         size_t size, struct aarch64_elf64_image *image);
+// Linux 不递归处理解释器自身的 PT_INTERP，此入口完全忽略这些条目。
+enum aarch64_elf64_error aarch64_elf64_parse_as_interpreter(
+        const void *data, size_t size,
+        struct aarch64_elf64_image *image);
 bool aarch64_elf64_program_header(const struct aarch64_elf64_image *image,
         word_t index, struct aarch64_elf64_program_header *header);
 

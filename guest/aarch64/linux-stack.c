@@ -156,7 +156,7 @@ enum aarch64_linux_stack_error aarch64_linux_build_initial_stack(
         {GUEST_AT_PHENT, AARCH64_ELF64_PROGRAM_HEADER_SIZE},
         {GUEST_AT_PHNUM, loaded->program_header_count},
         {GUEST_AT_PAGESZ, GUEST_MEMORY_PAGE_SIZE},
-        {GUEST_AT_BASE, 0},
+        {GUEST_AT_BASE, config->interpreter_base},
         {GUEST_AT_FLAGS, 0},
         {GUEST_AT_ENTRY, loaded->entry},
         {GUEST_AT_UID, config->uid},
@@ -240,12 +240,18 @@ out:
 void aarch64_linux_prepare_cpu(struct cpu_state *cpu,
         const struct aarch64_elf64_load_result *loaded,
         const struct aarch64_linux_stack_result *stack) {
+    aarch64_linux_prepare_cpu_at(cpu, loaded->entry, stack);
+}
+
+void aarch64_linux_prepare_cpu_at(struct cpu_state *cpu,
+        guest_addr_t initial_pc,
+        const struct aarch64_linux_stack_result *stack) {
     struct mmu *mmu = cpu->mmu;
     bool *poked_ptr = cpu->poked_ptr;
     *cpu = (struct cpu_state) {
         .mmu = mmu,
         .sp = stack->stack_pointer,
-        .pc = loaded->entry,
+        .pc = initial_pc,
         .poked_ptr = poked_ptr,
     };
 }

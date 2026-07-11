@@ -15,10 +15,14 @@ int main(void) {
     const struct aarch64_linux_process_result result = {
         .fault.address = UINT64_C(0x00007fff12345000),
     };
+    const struct aarch64_linux_interpreter_image interpreter = {
+        .load_bias = UINT64_C(0x0000500000000000),
+    };
     if (config.load_bias <= UINT32_MAX ||
             config.stack_top <= UINT32_MAX ||
             config.signal_trampoline_page <= UINT32_MAX ||
             config.brk_limit <= UINT32_MAX ||
+            interpreter.load_bias <= UINT32_MAX ||
             result.fault.address <= UINT32_MAX)
         return 1;
     return aarch64_decode(UINT32_C(0xd503201f), &instruction) ? 0 : 1;

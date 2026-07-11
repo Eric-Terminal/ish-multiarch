@@ -27,6 +27,7 @@ struct aarch64_linux_stack_config {
     dword_t euid;
     dword_t gid;
     dword_t egid;
+    guest_addr_t interpreter_base;
 };
 
 struct aarch64_linux_stack_result {
@@ -44,6 +45,9 @@ enum aarch64_linux_stack_error aarch64_linux_build_initial_stack(
         struct aarch64_linux_stack_result *result);
 void aarch64_linux_prepare_cpu(struct cpu_state *cpu,
         const struct aarch64_elf64_load_result *loaded,
+        const struct aarch64_linux_stack_result *stack);
+void aarch64_linux_prepare_cpu_at(struct cpu_state *cpu,
+        guest_addr_t initial_pc,
         const struct aarch64_linux_stack_result *stack);
 
 #endif

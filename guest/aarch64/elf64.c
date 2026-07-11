@@ -83,7 +83,8 @@ static bool is_power_of_two(qword_t value) {
 }
 
 static enum aarch64_elf64_error validate_segments(
-        struct aarch64_elf64_image *image) {
+        struct aarch64_elf64_image *image,
+        bool inspect_interpreter_path) {
     bool entry_in_executable_segment = false;
     bool have_previous_load = false;
     guest_addr_t previous_load_address = 0;
@@ -92,6 +93,8 @@ static enum aarch64_elf64_error validate_segments(
         struct aarch64_elf64_program_header header;
         aarch64_elf64_program_header(image, i, &header);
         if (header.type == ELF_PT_INTERP) {
+            if (!inspect_interpreter_path)
+                continue;
             // Linux 只采用首个 PT_INTERP，后续条目不再参与校验。
             if (image->interpreter_path != NULL)
                 continue;
@@ -147,8 +150,9 @@ static enum aarch64_elf64_error validate_segments(
     return AARCH64_ELF64_OK;
 }
 
-enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
-        size_t size, struct aarch64_elf64_image *image) {
+static enum aarch64_elf64_error parse_elf64(const void *data,
+        size_t size, struct aarch64_elf64_image *image,
+        bool inspect_interpreter_path) {
     *image = (struct aarch64_elf64_image) {0};
     if (size < AARCH64_ELF64_HEADER_SIZE)
         return AARCH64_ELF64_TRUNCATED;
@@ -191,5 +195,16 @@ enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
         .program_header_offset = program_header_offset,
         .program_header_count = program_header_count,
     };
-    return validate_segments(image);
+    return validate_segments(image, inspect_interpreter_path);
+}
+
+enum aarch64_elf64_error aarch64_elf64_parse(const void *data,
+        size_t size, struct aarch64_elf64_image *image) {
+    return parse_elf64(data, size, image, true);
+}
+
+enum aarch64_elf64_error aarch64_elf64_parse_as_interpreter(
+        const void *data, size_t size,
+        struct aarch64_elf64_image *image) {
+    return parse_elf64(data, size, image, false);
 }

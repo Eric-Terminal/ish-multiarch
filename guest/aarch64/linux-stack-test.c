@@ -8,6 +8,7 @@
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define STACK_SIZE (2 * GUEST_MEMORY_PAGE_SIZE)
 #define LOAD_BIAS UINT64_C(0x0000400000000000)
+#define INTERPRETER_BASE UINT64_C(0x0000500000000000)
 
 static qword_t read_qword(struct guest_tlb *tlb, guest_addr_t address) {
     byte_t bytes[8];
@@ -60,6 +61,7 @@ int main(void) {
         .euid = 1001,
         .gid = 1002,
         .egid = 1003,
+        .interpreter_base = INTERPRETER_BASE,
     };
     struct aarch64_linux_stack_result stack;
     assert(aarch64_linux_build_initial_stack(&table, &loaded,
@@ -121,7 +123,7 @@ int main(void) {
         } else if (type == GUEST_AT_PAGESZ) {
             assert(value == GUEST_MEMORY_PAGE_SIZE);
         } else if (type == GUEST_AT_BASE) {
-            assert(value == 0);
+            assert(value == INTERPRETER_BASE);
             assert(value != loaded.load_bias);
         } else if (type == GUEST_AT_ENTRY) {
             assert(value == loaded.entry);
@@ -179,6 +181,13 @@ int main(void) {
     assert(cpu.cycle == 0 && cpu.nzcv == 0 && cpu.tpidr_el0 == 0);
     assert(cpu.x[0] == 0 && cpu.x[30] == 0);
     assert(!cpu.exclusive.valid);
+
+    aarch64_linux_prepare_cpu_at(&cpu,
+            INTERPRETER_BASE + 0x100, &stack);
+    assert(cpu.mmu == (struct mmu *) (uintptr_t) 0x1234);
+    assert(cpu.poked_ptr == &poked);
+    assert(cpu.pc == INTERPRETER_BASE + 0x100);
+    assert(cpu.sp == stack.stack_pointer && cpu.cycle == 0);
 
     guest_page_table_destroy(&table);
 

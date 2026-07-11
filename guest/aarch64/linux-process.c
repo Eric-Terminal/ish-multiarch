@@ -12,6 +12,7 @@
 #define AARCH64_LINUX_PROCESS_ADDRESS_BITS 48
 #define AARCH64_LINUX_PROCESS_ADDRESS_LIMIT \
     (UINT64_C(1) << AARCH64_LINUX_PROCESS_ADDRESS_BITS)
+#define ELF_PT_LOAD 1
 
 _Static_assert(AARCH64_LINUX_PROCESS_RANDOM_SIZE ==
                 AARCH64_LINUX_RANDOM_SIZE,
@@ -102,6 +103,8 @@ static bool page_aligned(qword_t value) {
 
 static bool ranges_overlap(qword_t first_start, qword_t first_end,
         qword_t second_start, qword_t second_end) {
+    if (first_start >= first_end || second_start >= second_end)
+        return false;
     return first_start < second_end && second_start < first_end;
 }
 
@@ -137,6 +140,29 @@ static bool valid_config(
     return true;
 }
 
+static bool loaded_image_overlaps_range(
+        const struct aarch64_elf64_image *image,
+        guest_addr_t load_bias, qword_t range_start,
+        qword_t range_end) {
+    for (word_t i = 0; i < image->program_header_count; i++) {
+        struct aarch64_elf64_program_header segment;
+        aarch64_elf64_program_header(image, i, &segment);
+        if (segment.type != ELF_PT_LOAD || segment.memory_size == 0)
+            continue;
+        assert(segment.virtual_address <= UINT64_MAX - load_bias);
+        qword_t address = segment.virtual_address + load_bias;
+        assert(segment.memory_size <=
+                AARCH64_LINUX_PROCESS_ADDRESS_LIMIT - address);
+        qword_t segment_start = address & ~GUEST_MEMORY_PAGE_MASK;
+        qword_t segment_end = (address + segment.memory_size +
+                GUEST_MEMORY_PAGE_MASK) & ~GUEST_MEMORY_PAGE_MASK;
+        if (ranges_overlap(range_start, range_end,
+                segment_start, segment_end))
+            return true;
+    }
+    return false;
+}
+
 static void copy_services(struct aarch64_linux_process *process,
         const struct aarch64_linux_process_config *config,
         guest_addr_t signal_trampoline) {
@@ -154,10 +180,51 @@ static void copy_services(struct aarch64_linux_process *process,
 struct aarch64_linux_process *aarch64_linux_process_create(
         const struct aarch64_linux_process_config *config,
         struct aarch64_linux_process_error *error) {
+    return aarch64_linux_process_create_with_interpreter(
+            config, NULL, error);
+}
+
+struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
+        const struct aarch64_linux_process_config *config,
+        const struct aarch64_linux_interpreter_image *interpreter,
+        struct aarch64_linux_process_error *error) {
     set_error(error, AARCH64_LINUX_PROCESS_ERROR_NONE, 0);
     if (!valid_config(config)) {
         set_error(error, AARCH64_LINUX_PROCESS_ERROR_ARGUMENT, 0);
         return NULL;
+    }
+
+    struct aarch64_elf64_image main_image;
+    enum aarch64_elf64_error elf_error = aarch64_elf64_parse(
+            config->elf_data, config->elf_size, &main_image);
+    if (elf_error != AARCH64_ELF64_OK)
+        return create_failed(NULL, error,
+                AARCH64_LINUX_PROCESS_ERROR_ELF,
+                (dword_t) elf_error);
+    bool needs_interpreter = main_image.interpreter_path != NULL;
+    if (needs_interpreter && interpreter == NULL)
+        return create_failed(NULL, error,
+                AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+                AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED);
+    if (!needs_interpreter && interpreter != NULL)
+        return create_failed(NULL, error,
+                AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+                AARCH64_LINUX_INTERPRETER_CONFIG_UNEXPECTED);
+
+    struct aarch64_elf64_image interpreter_image;
+    if (interpreter != NULL) {
+        if (interpreter->data == NULL || interpreter->size == 0)
+            return create_failed(NULL, error,
+                    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+                    AARCH64_LINUX_INTERPRETER_CONFIG_INVALID);
+        elf_error = aarch64_elf64_parse_as_interpreter(
+                interpreter->data, interpreter->size,
+                &interpreter_image);
+        if (elf_error != AARCH64_ELF64_OK)
+            return create_failed(NULL, error,
+                    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER_ELF,
+                    (dword_t) elf_error);
+        // 与 Linux 一致，解释器自身的 PT_INTERP 不递归处理。
     }
 
     struct aarch64_linux_process *process = calloc(1, sizeof(*process));
@@ -170,35 +237,38 @@ struct aarch64_linux_process *aarch64_linux_process_create(
         return create_failed(process, error,
                 AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
 
-    struct aarch64_elf64_image image;
-    enum aarch64_elf64_error elf_error = aarch64_elf64_parse(
-            config->elf_data, config->elf_size, &image);
-    if (elf_error != AARCH64_ELF64_OK)
-        return create_failed(process, error,
-                AARCH64_LINUX_PROCESS_ERROR_ELF,
-                (dword_t) elf_error);
-    if (image.interpreter_path != NULL)
-        return create_failed(process, error,
-                AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
-                AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED);
-
-    struct aarch64_elf64_load_result loaded;
+    struct aarch64_elf64_load_result main_loaded;
     enum aarch64_elf64_load_error load_error = aarch64_elf64_load(
-            &image, &process->page_table,
-            (guest_addr_t) config->load_bias, &loaded);
+            &main_image, &process->page_table,
+            (guest_addr_t) config->load_bias, &main_loaded);
     if (load_error != AARCH64_ELF64_LOAD_OK)
         return create_failed(process, error,
                 AARCH64_LINUX_PROCESS_ERROR_LOAD,
                 (dword_t) load_error);
 
+    struct aarch64_elf64_load_result interpreter_loaded = {0};
+    if (interpreter != NULL) {
+        load_error = aarch64_elf64_load(
+                &interpreter_image, &process->page_table,
+                (guest_addr_t) interpreter->load_bias,
+                &interpreter_loaded);
+        if (load_error != AARCH64_ELF64_LOAD_OK)
+            return create_failed(process, error,
+                    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER_LOAD,
+                    (dword_t) load_error);
+    }
+
     qword_t stack_bottom = config->stack_top - config->stack_size;
     qword_t trampoline_end = config->signal_trampoline_page +
             GUEST_MEMORY_PAGE_SIZE;
-    if (config->brk_limit < loaded.brk_end ||
-            ranges_overlap(loaded.brk_end, config->brk_limit,
+    if (config->brk_limit < main_loaded.brk_end ||
+            ranges_overlap(main_loaded.brk_end, config->brk_limit,
                     stack_bottom, config->stack_top) ||
-            ranges_overlap(loaded.brk_end, config->brk_limit,
-                    config->signal_trampoline_page, trampoline_end))
+            ranges_overlap(main_loaded.brk_end, config->brk_limit,
+                    config->signal_trampoline_page, trampoline_end) ||
+            (interpreter != NULL && loaded_image_overlaps_range(
+                    &interpreter_image, interpreter_loaded.load_bias,
+                    main_loaded.brk_end, config->brk_limit)))
         return create_failed(process, error,
                 AARCH64_LINUX_PROCESS_ERROR_LAYOUT, 0);
 
@@ -226,11 +296,12 @@ struct aarch64_linux_process *aarch64_linux_process_create(
         .euid = config->euid,
         .gid = config->gid,
         .egid = config->egid,
+        .interpreter_base = interpreter_loaded.load_bias,
     };
     struct aarch64_linux_stack_result stack;
     enum aarch64_linux_stack_error stack_error =
             aarch64_linux_build_initial_stack(
-                    &process->page_table, &loaded,
+                    &process->page_table, &main_loaded,
                     &stack_config, &stack);
     if (stack_error != AARCH64_LINUX_STACK_OK)
         return create_failed(process, error,
@@ -239,14 +310,17 @@ struct aarch64_linux_process *aarch64_linux_process_create(
 
     copy_services(process, config, signal_trampoline);
     aarch64_linux_runtime_init(&process->runtime,
-            &process->page_table, loaded.brk_end,
+            &process->page_table, main_loaded.brk_end,
             (guest_addr_t) config->brk_limit, &process->services);
     aarch64_linux_task_init(&process->task,
             config->tid, config->task_opaque);
     guest_tlb_init(&process->tlb,
             &process->page_table.address_space);
     aarch64_runner_init(&process->runner, &process->tlb);
-    aarch64_linux_prepare_cpu(&process->cpu, &loaded, &stack);
+    guest_addr_t initial_pc = interpreter == NULL ?
+            main_loaded.entry : interpreter_loaded.entry;
+    aarch64_linux_prepare_cpu_at(
+            &process->cpu, initial_pc, &stack);
     return process;
 }
 

@@ -14,7 +14,9 @@ enum aarch64_linux_process_error_stage {
     AARCH64_LINUX_PROCESS_ERROR_ALLOCATION,
     AARCH64_LINUX_PROCESS_ERROR_ELF,
     AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
+    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER_ELF,
     AARCH64_LINUX_PROCESS_ERROR_LOAD,
+    AARCH64_LINUX_PROCESS_ERROR_INTERPRETER_LOAD,
     AARCH64_LINUX_PROCESS_ERROR_LAYOUT,
     AARCH64_LINUX_PROCESS_ERROR_TRAMPOLINE,
     AARCH64_LINUX_PROCESS_ERROR_STACK,
@@ -27,6 +29,8 @@ struct aarch64_linux_process_error {
 
 enum aarch64_linux_interpreter_config_error {
     AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED = 1,
+    AARCH64_LINUX_INTERPRETER_CONFIG_UNEXPECTED,
+    AARCH64_LINUX_INTERPRETER_CONFIG_INVALID,
 };
 
 enum aarch64_linux_interpreter_path_status {
@@ -67,6 +71,12 @@ struct aarch64_linux_process_config {
     const struct guest_linux_signal_service *signals;
 };
 
+struct aarch64_linux_interpreter_image {
+    const void *data;
+    size_t size;
+    qword_t load_bias;
+};
+
 enum aarch64_linux_process_status {
     AARCH64_LINUX_PROCESS_RUNNABLE,
     AARCH64_LINUX_PROCESS_EXIT,
@@ -92,6 +102,14 @@ struct aarch64_linux_process_result {
  */
 struct aarch64_linux_process *aarch64_linux_process_create(
         const struct aarch64_linux_process_config *config,
+        struct aarch64_linux_process_error *error);
+/*
+ * 调用方须先用主程序 PT_INTERP 路径从 guest 文件系统读取解释器。
+ * 两份 ELF 缓冲区都只在 create 调用期间借用，成功后即可释放。
+ */
+struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
+        const struct aarch64_linux_process_config *config,
+        const struct aarch64_linux_interpreter_image *interpreter,
         struct aarch64_linux_process_error *error);
 // required_size 包含末尾 NUL；destination 为 NULL 可只查询长度，返回
 // BUFFER_TOO_SMALL；任何缓冲区不足情形都不写入部分路径。
@@ -137,6 +155,9 @@ _Static_assert(sizeof(((struct aarch64_linux_process_config *) 0)->
         sizeof(((struct aarch64_linux_process_config *) 0)->
                 brk_limit) == 8,
         "AArch64 process 的 guest 地址与范围必须保持 64 位");
+_Static_assert(sizeof(((struct aarch64_linux_interpreter_image *) 0)->
+                load_bias) == 8,
+        "AArch64 解释器 load bias 必须保持 64 位");
 _Static_assert(offsetof(struct aarch64_linux_process_result, status) == 0 &&
         offsetof(struct aarch64_linux_process_result, signal) == 4 &&
         offsetof(struct aarch64_linux_process_result, exit_status) == 8 &&
