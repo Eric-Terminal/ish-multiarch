@@ -584,6 +584,44 @@ static void execute_advsimd_permute(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_compare(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    qword_t true_value = vector_element_mask(element_size);
+    qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
+    union aarch64_vector_reg result = {0};
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t left = read_vector_element(&cpu->v[rn], element_size, lane);
+        qword_t right = read_vector_element(&cpu->v[rm], element_size, lane);
+        bool matches;
+        if (instruction->opcode == AARCH64_OP_ADVSIMD_CMTST) {
+            matches = (left & right) != 0;
+        } else if (instruction->opcode == AARCH64_OP_ADVSIMD_CMEQ) {
+            matches = left == right;
+        } else {
+            bool unsigned_comparison =
+                    instruction->opcode == AARCH64_OP_ADVSIMD_CMHI ||
+                    instruction->opcode == AARCH64_OP_ADVSIMD_CMHS;
+            bool equal_matches =
+                    instruction->opcode == AARCH64_OP_ADVSIMD_CMGE ||
+                    instruction->opcode == AARCH64_OP_ADVSIMD_CMHS;
+            qword_t ordered_left = unsigned_comparison ? left : left ^ sign;
+            qword_t ordered_right = unsigned_comparison ? right : right ^ sign;
+            matches = equal_matches ? ordered_left >= ordered_right :
+                    ordered_left > ordered_right;
+        }
+        write_vector_element(&result, element_size, lane,
+                matches ? true_value : 0);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1090,6 +1128,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_ZIP1:
         case AARCH64_OP_ADVSIMD_ZIP2:
             execute_advsimd_permute(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_CMGT:
+        case AARCH64_OP_ADVSIMD_CMGE:
+        case AARCH64_OP_ADVSIMD_CMHI:
+        case AARCH64_OP_ADVSIMD_CMHS:
+        case AARCH64_OP_ADVSIMD_CMTST:
+        case AARCH64_OP_ADVSIMD_CMEQ:
+            execute_advsimd_compare(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
