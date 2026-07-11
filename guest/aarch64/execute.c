@@ -739,7 +739,8 @@ static bool execute_load_store_pair(struct cpu_state *cpu,
     byte_t rt = instruction->operands.load_store_pair.rt;
     byte_t rt2 = instruction->operands.load_store_pair.rt2;
     byte_t rn = instruction->operands.load_store_pair.rn;
-    byte_t size = (byte_t) (instruction->width / 8);
+    bool signed_load = instruction->operands.load_store_pair.signed_load;
+    byte_t size = signed_load ? 4 : (byte_t) (instruction->width / 8);
     guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
     enum aarch64_address_mode address_mode =
             instruction->operands.load_store_pair.address_mode;
@@ -756,6 +757,10 @@ static bool execute_load_store_pair(struct cpu_state *cpu,
             return false;
         qword_t first = load_little_endian(bytes, size);
         qword_t second = load_little_endian(bytes + size, size);
+        if (signed_load) {
+            first = sign_extend_load(first, size);
+            second = sign_extend_load(second, size);
+        }
         write_register(cpu, rt, instruction->width, false, first);
         write_register(cpu, rt2, instruction->width, false, second);
     } else {

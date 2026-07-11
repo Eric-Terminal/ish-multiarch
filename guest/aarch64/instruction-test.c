@@ -772,6 +772,7 @@ static void assert_load_store_pair(dword_t word, enum aarch64_opcode opcode,
     assert(instruction.operands.load_store_pair.rt2 == rt2);
     assert(instruction.operands.load_store_pair.offset == offset);
     assert(instruction.operands.load_store_pair.address_mode == address_mode);
+    assert(!instruction.operands.load_store_pair.signed_load);
 }
 
 static void test_load_store_pair_decode(void) {
@@ -785,6 +786,17 @@ static void test_load_store_pair_decode(void) {
             8, 5, 3, 4, 24, AARCH64_ADDRESS_OFFSET);
     assert_load_store_pair(UINT32_C(0xa9400400), AARCH64_OP_LOAD_PAIR,
             8, 0, 0, 1, 0, AARCH64_ADDRESS_OFFSET);
+
+    struct aarch64_decoded ldpsw = decode(UINT32_C(0x69410440));
+    assert(ldpsw.opcode == AARCH64_OP_LOAD_PAIR);
+    assert(ldpsw.width == 64);
+    assert(ldpsw.operands.load_store_pair.rn == 2);
+    assert(ldpsw.operands.load_store_pair.rt == 0);
+    assert(ldpsw.operands.load_store_pair.rt2 == 1);
+    assert(ldpsw.operands.load_store_pair.offset == 8);
+    assert(ldpsw.operands.load_store_pair.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    assert(ldpsw.operands.load_store_pair.signed_load);
 }
 
 static void test_svc_decode(void) {
@@ -851,7 +863,6 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x9a970ad5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0x69000440), &invalid));
-    assert(!aarch64_decode(UINT32_C(0x69410440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xe9000440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xe9400440), &invalid));
     assert(!aarch64_decode(UINT32_C(0xed410440), &invalid));

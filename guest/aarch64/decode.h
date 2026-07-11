@@ -169,6 +169,7 @@ struct aarch64_decoded {
             byte_t rn;
             int64_t offset;
             enum aarch64_address_mode address_mode;
+            bool signed_load;
         } load_store_pair;
         struct {
             word_t immediate;

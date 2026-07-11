@@ -792,7 +792,9 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         bool vector = (word >> 26) & 1;
         byte_t mode = (word >> 23) & 3;
         bool load = (word >> 22) & 1;
-        if (vector || (operation != 0 && operation != 2) || mode == 0)
+        bool signed_load = operation == 1;
+        if (vector || operation == 3 || mode == 0 ||
+                (signed_load && !load))
             return false;
 
         byte_t rt = word & 0x1f;
@@ -804,7 +806,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 (rn == rt || rn == rt2)))
             return false;
 
-        byte_t size = operation == 0 ? 4 : 8;
+        byte_t size = operation == 2 ? 8 : 4;
         enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
         if (mode == 1)
             address_mode = AARCH64_ADDRESS_POST_INDEX;
@@ -812,7 +814,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             address_mode = AARCH64_ADDRESS_PRE_INDEX;
         *decoded = (struct aarch64_decoded) {
             .opcode = load ? AARCH64_OP_LOAD_PAIR : AARCH64_OP_STORE_PAIR,
-            .width = (byte_t) (size * 8),
+            .width = signed_load ? 64 : (byte_t) (size * 8),
             .operands.load_store_pair = {
                 .rt = rt,
                 .rt2 = rt2,
@@ -820,6 +822,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .offset = sign_extend((word >> 15) &
                         UINT32_C(0x7f), 7) * (int64_t) size,
                 .address_mode = address_mode,
+                .signed_load = signed_load,
             },
         };
         return true;
