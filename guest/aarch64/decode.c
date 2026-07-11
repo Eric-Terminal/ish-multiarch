@@ -148,6 +148,25 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e208400)) {
+        bool q = ((word >> 30) & 1) != 0;
+        byte_t size = (word >> 22) & 3;
+        // 64 位向量不存在单个 64 位 lane 的 ADD arrangement。
+        if (!q && size == 3)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_ADD,
+            .width = q ? 128 : 64,
+            .operands.advsimd_three_same = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .element_size = (byte_t) (1U << size),
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x9fe08400)) == UINT32_C(0x0e000400)) {
         bool q = ((word >> 30) & 1) != 0;
         bool op = ((word >> 29) & 1) != 0;

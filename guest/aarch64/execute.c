@@ -500,6 +500,25 @@ static void write_vector_element(union aarch64_vector_reg *reg,
             ((value & mask) << shift);
 }
 
+static void execute_advsimd_add(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    // Q=0 写回也必须清零目标寄存器的高 64 位。
+    union aarch64_vector_reg result = {0};
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t left = read_vector_element(&cpu->v[rn], element_size, lane);
+        qword_t right = read_vector_element(&cpu->v[rm], element_size, lane);
+        write_vector_element(&result, element_size, lane, left + right);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -991,6 +1010,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_SMOV:
         case AARCH64_OP_ADVSIMD_UMOV:
             execute_advsimd_copy(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_ADD:
+            execute_advsimd_add(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
