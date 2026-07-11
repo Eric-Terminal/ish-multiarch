@@ -24,6 +24,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
@@ -316,6 +317,44 @@ static qword_t dispatch_uname(
     return 0;
 }
 
+static qword_t dispatch_rt_sigprocmask(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    if (syscall->arguments[3] != sizeof(sigset_t_))
+        return syscall_result(_EINVAL);
+
+    qword_t oldset_address = syscall->arguments[2];
+    sigset_t_ oldset;
+    if (oldset_address != 0)
+        task_sigprocmask(task, 0, NULL, &oldset);
+
+    qword_t set_address = syscall->arguments[1];
+    sigset_t_ set;
+    if (set_address != 0) {
+        if (!user_range_fits(set_address, sizeof(set)))
+            return user_range_error(fault, set_address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                set_address, &set, sizeof(set), fault))
+            return syscall_result(_EFAULT);
+        int error = task_sigprocmask(task,
+                (dword_t) syscall->arguments[0], &set, NULL);
+        if (error < 0)
+            return syscall_result(error);
+    }
+    if (oldset_address == 0)
+        return 0;
+    if (!user_range_fits(oldset_address, sizeof(oldset)))
+        return user_range_error(fault, oldset_address,
+                GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            oldset_address, &oldset, sizeof(oldset), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_syscall(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -341,6 +380,9 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_SIGPROCMASK:
+            return dispatch_rt_sigprocmask(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNAME:
             return dispatch_uname(context, syscall, fault);
         case AARCH64_LINUX_SYS_GETPID:

@@ -18,33 +18,68 @@
     } \
 } while (0)
 
-struct identity_fixture {
+struct process_fixture {
     struct task task;
     struct task leader;
     struct task parent;
     struct task decoy_parent;
     struct tgroup group;
+    struct sighand sighand;
 };
 
 struct user_probe {
     byte_t bytes[USER_MEMORY_SIZE];
+    qword_t fail_read_at;
     qword_t fail_write_at;
     unsigned reads;
     unsigned writes;
+    qword_t last_read_address;
+    dword_t last_read_size;
     qword_t last_write_address;
     dword_t last_write_size;
 };
 
-static bool reject_user_read(void *opaque, qword_t address,
+static bool probe_user_read(void *opaque, qword_t address,
         void *destination, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct user_probe *probe = opaque;
     probe->reads++;
-    (void) address;
-    (void) destination;
-    (void) size;
-    (void) fault;
-    return false;
+    probe->last_read_address = address;
+    probe->last_read_size = size;
+
+    if (address < USER_BASE) {
+        *fault = (struct guest_linux_user_fault) {
+            .address = address,
+            .access = GUEST_MEMORY_READ,
+            .kind = GUEST_MEMORY_FAULT_UNMAPPED,
+        };
+        return false;
+    }
+    qword_t offset = address - USER_BASE;
+    if (offset > sizeof(probe->bytes) ||
+            size > sizeof(probe->bytes) - offset) {
+        *fault = (struct guest_linux_user_fault) {
+            .address = address,
+            .access = GUEST_MEMORY_READ,
+            .kind = GUEST_MEMORY_FAULT_UNMAPPED,
+        };
+        return false;
+    }
+
+    if (probe->fail_read_at >= address &&
+            probe->fail_read_at - address < size) {
+        dword_t prefix = (dword_t) (probe->fail_read_at - address);
+        memcpy(destination, &probe->bytes[offset], prefix);
+        *fault = (struct guest_linux_user_fault) {
+            .address = probe->fail_read_at,
+            .access = GUEST_MEMORY_READ,
+            .kind = GUEST_MEMORY_FAULT_UNMAPPED,
+        };
+        return false;
+    }
+
+    memcpy(destination, &probe->bytes[offset], size);
+    return true;
 }
 
 static bool probe_user_write(void *opaque, qword_t address,
@@ -92,14 +127,33 @@ static bool probe_user_write(void *opaque, qword_t address,
 
 static void reset_user_probe(struct user_probe *probe, byte_t fill) {
     memset(probe->bytes, fill, sizeof(probe->bytes));
+    probe->fail_read_at = UINT64_MAX;
     probe->fail_write_at = UINT64_MAX;
     probe->reads = 0;
     probe->writes = 0;
+    probe->last_read_address = 0;
+    probe->last_read_size = 0;
     probe->last_write_address = 0;
     probe->last_write_size = 0;
 }
 
-static qword_t invoke(struct identity_fixture *fixture,
+static void store_user_sigset(struct user_probe *probe,
+        qword_t address, sigset_t_ set) {
+    assert(address >= USER_BASE &&
+            address - USER_BASE <= sizeof(probe->bytes) - sizeof(set));
+    memcpy(&probe->bytes[address - USER_BASE], &set, sizeof(set));
+}
+
+static sigset_t_ load_user_sigset(
+        const struct user_probe *probe, qword_t address) {
+    assert(address >= USER_BASE &&
+            address - USER_BASE <= sizeof(probe->bytes) - sizeof(sigset_t_));
+    sigset_t_ set;
+    memcpy(&set, &probe->bytes[address - USER_BASE], sizeof(set));
+    return set;
+}
+
+static qword_t invoke(struct process_fixture *fixture,
         struct user_probe *probe, struct guest_linux_user_fault *fault,
         qword_t number, qword_t argument0, qword_t argument1,
         qword_t argument2, qword_t argument3, qword_t argument4,
@@ -108,7 +162,7 @@ static qword_t invoke(struct identity_fixture *fixture,
         .task_opaque = &fixture->task,
         .user = {
             .opaque = probe,
-            .read = reject_user_read,
+            .read = probe_user_read,
             .write = probe_user_write,
         },
     };
@@ -123,8 +177,8 @@ static qword_t invoke(struct identity_fixture *fixture,
             &context, &syscall, fault);
 }
 
-static void init_fixture(struct identity_fixture *fixture) {
-    *fixture = (struct identity_fixture) {0};
+static void init_fixture(struct process_fixture *fixture) {
+    *fixture = (struct process_fixture) {0};
     fixture->task.group = &fixture->group;
     fixture->task.pid = 12345;
     fixture->task.tgid = 12000;
@@ -132,6 +186,8 @@ static void init_fixture(struct identity_fixture *fixture) {
     fixture->task.euid = UINT32_C(0xa1b2c3d4);
     fixture->task.gid = UINT32_C(0x76543210);
     fixture->task.egid = UINT32_C(0x10203040);
+    lock_init(&fixture->sighand.lock);
+    fixture->task.sighand = &fixture->sighand;
 
     fixture->leader.pid = 12000;
     fixture->leader.tgid = 12000;
@@ -147,7 +203,7 @@ static void init_fixture(struct identity_fixture *fixture) {
 }
 
 int main(void) {
-    struct identity_fixture fixture;
+    struct process_fixture fixture;
     struct user_probe probe;
     struct guest_linux_user_fault fault;
     init_fixture(&fixture);
@@ -265,6 +321,146 @@ int main(void) {
             "官方 i386 uname 继续报告 i686");
     uname_version = saved_version;
     uname_hostname_override = saved_hostname;
+
+    const qword_t set_address = USER_BASE + 3;
+    const qword_t oldset_address = USER_BASE + 29;
+    const sigset_t_ high_signal_bit = UINT64_C(1) << 63;
+    const sigset_t_ initial_mask = sig_mask(SIGUSR1_) | high_signal_bit;
+    CHECK(sig_mask(63) == (UINT64_C(1) << 62),
+            "信号位计算在 ILP32 宿主仍保持 64 位");
+
+    struct sighand explicit_sighand = {0};
+    lock_init(&explicit_sighand.lock);
+    struct task explicit_task = {
+        .sighand = &explicit_sighand,
+        .blocked = sig_mask(SIGUSR1_),
+    };
+    sigset_t_ explicit_set = high_signal_bit | sig_mask(SIGUSR2_);
+    sigset_t_ explicit_old;
+    CHECK(task_sigprocmask(&explicit_task, SIG_SETMASK_,
+            &explicit_set, &explicit_old) == 0 &&
+            explicit_old == sig_mask(SIGUSR1_) &&
+            explicit_task.blocked == explicit_set &&
+            fixture.task.blocked == 0,
+            "掩码 helper 只修改显式目标 task");
+
+    fixture.task.blocked = initial_mask;
+    reset_user_probe(&probe, 0);
+    store_user_sigset(&probe, set_address, sig_mask(SIGUSR2_));
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_BLOCK_, set_address, oldset_address,
+            UINT64_C(0x100000008), UINT64_MAX, UINT64_MAX);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            fixture.task.blocked == initial_mask &&
+            probe.reads == 0 && probe.writes == 0,
+            "rt_sigprocmask 按完整参数拒绝非 8 字节 sigset");
+
+    reset_user_probe(&probe, 0x77);
+    result = invoke(&fixture, &probe, &fault, 135,
+            UINT64_MAX, 0, oldset_address, sizeof(sigset_t_), 0, 0);
+    CHECK(result == 0 && fixture.task.blocked == initial_mask &&
+            probe.reads == 0 && probe.writes == 1 &&
+            load_user_sigset(&probe, oldset_address) == initial_mask,
+            "NULL set 忽略 how 并输出调用前的完整掩码");
+
+    fixture.task.blocked = sig_mask(SIGUSR1_);
+    sigset_t_ block_mask = sig_mask(SIGUSR2_) | sig_mask(SIGKILL_) |
+            sig_mask(SIGSTOP_) | high_signal_bit;
+    reset_user_probe(&probe, 0x55);
+    store_user_sigset(&probe, set_address, block_mask);
+    result = invoke(&fixture, &probe, &fault, 135,
+            UINT64_C(0xfeedface00000000) | SIG_BLOCK_,
+            set_address, set_address, sizeof(sigset_t_), 0, 0);
+    sigset_t_ blocked_mask = sig_mask(SIGUSR1_) |
+            sig_mask(SIGUSR2_) | high_signal_bit;
+    CHECK(result == 0 && fixture.task.blocked == blocked_mask &&
+            probe.reads == 1 && probe.writes == 1 &&
+            load_user_sigset(&probe, set_address) == sig_mask(SIGUSR1_),
+            "BLOCK 支持输入输出别名、高位 how 与 64 位 signal wire");
+    CHECK(!sigset_has(fixture.task.blocked, SIGKILL_) &&
+            !sigset_has(fixture.task.blocked, SIGSTOP_),
+            "SIGKILL 与 SIGSTOP 永远不能被阻塞");
+
+    reset_user_probe(&probe, 0);
+    store_user_sigset(&probe, set_address,
+            sig_mask(SIGUSR1_) | high_signal_bit);
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_UNBLOCK_, set_address, 0, sizeof(sigset_t_), 0, 0);
+    CHECK(result == 0 && fixture.task.blocked == sig_mask(SIGUSR2_),
+            "UNBLOCK 只清除输入集合中的信号");
+
+    reset_user_probe(&probe, 0);
+    store_user_sigset(&probe, set_address,
+            high_signal_bit | sig_mask(SIGKILL_) | sig_mask(SIGSTOP_));
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_SETMASK_, set_address, 0, sizeof(sigset_t_), 0, 0);
+    CHECK(result == 0 && fixture.task.blocked == high_signal_bit,
+            "SETMASK 保留最高位并剔除不可阻塞信号");
+
+    reset_user_probe(&probe, 0x44);
+    store_user_sigset(&probe, set_address, sig_mask(SIGUSR1_));
+    result = invoke(&fixture, &probe, &fault, 135,
+            3, set_address, oldset_address, sizeof(sigset_t_), 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            fixture.task.blocked == high_signal_bit &&
+            probe.reads == 1 && probe.writes == 0,
+            "非法 how 在读取 set 后拒绝且不写 oldset");
+
+    reset_user_probe(&probe, 0x22);
+    store_user_sigset(&probe, set_address, sig_mask(SIGUSR1_));
+    probe.fail_read_at = set_address + 4;
+    result = invoke(&fixture, &probe, &fault, 135,
+            3, set_address, oldset_address,
+            sizeof(sigset_t_), 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            fixture.task.blocked == high_signal_bit &&
+            probe.reads == 1 && probe.writes == 0 &&
+            fault.address == probe.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "set 读取故障优先于 how、oldset 与状态变更");
+
+    fixture.task.blocked = high_signal_bit | sig_mask(SIGUSR1_);
+    reset_user_probe(&probe, 0xcc);
+    store_user_sigset(&probe, set_address, sig_mask(SIGUSR1_));
+    probe.fail_write_at = oldset_address + 4;
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_UNBLOCK_, set_address, oldset_address,
+            sizeof(sigset_t_), 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            fixture.task.blocked == high_signal_bit &&
+            probe.reads == 1 && probe.writes == 1 &&
+            fault.address == probe.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "oldset 部分写故障不回滚已生效的新掩码");
+
+    qword_t wrapping_sigset_address =
+            UINT64_MAX - (qword_t) sizeof(sigset_t_) + 2;
+    reset_user_probe(&probe, 0);
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_BLOCK_, wrapping_sigset_address, oldset_address,
+            sizeof(sigset_t_), 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            fixture.task.blocked == high_signal_bit &&
+            probe.reads == 0 && probe.writes == 0 &&
+            fault.address == wrapping_sigset_address &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "set 地址回绕在用户回调与状态变更前失败");
+
+    reset_user_probe(&probe, 0);
+    store_user_sigset(&probe, set_address, sig_mask(SIGUSR2_));
+    result = invoke(&fixture, &probe, &fault, 135,
+            SIG_SETMASK_, set_address, wrapping_sigset_address,
+            sizeof(sigset_t_), 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            fixture.task.blocked == sig_mask(SIGUSR2_) &&
+            probe.reads == 1 && probe.writes == 0 &&
+            fault.address == wrapping_sigset_address &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "oldset 地址回绕保留已应用的 SETMASK 副作用");
 
     current = NULL;
     return 0;
