@@ -657,6 +657,41 @@ static void execute_advsimd_logical(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_pairwise_extrema(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    byte_t half = lanes / 2;
+    bool minimum = instruction->opcode == AARCH64_OP_ADVSIMD_SMINP ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_UMINP;
+    bool unsigned_comparison =
+            instruction->opcode == AARCH64_OP_ADVSIMD_UMAXP ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_UMINP;
+    qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
+    union aarch64_vector_reg result = {0};
+    // 结果前半归约 Rn、后半归约 Rm；延迟写回保护全寄存器别名。
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        byte_t source = lane < half ? rn : rm;
+        byte_t pair = (byte_t) (2 * (lane % half));
+        qword_t left = read_vector_element(
+                &cpu->v[source], element_size, pair);
+        qword_t right = read_vector_element(
+                &cpu->v[source], element_size, (byte_t) (pair + 1));
+        qword_t ordered_left = unsigned_comparison ? left : left ^ sign;
+        qword_t ordered_right = unsigned_comparison ? right : right ^ sign;
+        bool select_left = minimum ? ordered_left <= ordered_right :
+                ordered_left >= ordered_right;
+        qword_t value = select_left ? left : right;
+        write_vector_element(&result, element_size, lane, value);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1181,6 +1216,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_BIT:
         case AARCH64_OP_ADVSIMD_BIF:
             execute_advsimd_logical(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SMAXP:
+        case AARCH64_OP_ADVSIMD_SMINP:
+        case AARCH64_OP_ADVSIMD_UMAXP:
+        case AARCH64_OP_ADVSIMD_UMINP:
+            execute_advsimd_pairwise_extrema(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
