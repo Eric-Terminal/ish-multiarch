@@ -20,6 +20,12 @@ struct guest_page_table_node {
     void *entries[GUEST_PAGE_TABLE_ENTRY_COUNT];
 };
 
+struct prepared_page_mapping {
+    struct guest_page_mapping *mapping;
+    byte_t *new_page;
+    byte_t *old_page;
+};
+
 static unsigned page_index(guest_addr_t address, byte_t shift) {
     return (unsigned) ((address >> shift) & GUEST_PAGE_TABLE_INDEX_MASK);
 }
@@ -65,6 +71,8 @@ static const struct guest_address_space_ops page_table_ops = {
 bool guest_page_table_init(struct guest_page_table *table,
         byte_t address_bits) {
     *table = (struct guest_page_table) {0};
+    if (address_bits <= GUEST_MEMORY_PAGE_BITS || address_bits > 48)
+        return false;
     table->root = calloc(1, sizeof(*table->root));
     if (table->root == NULL)
         return false;
@@ -113,20 +121,32 @@ static bool valid_page(const struct guest_page_table *table,
                     page_base, GUEST_MEMORY_PAGE_SIZE);
 }
 
+static bool valid_range(const struct guest_page_table *table,
+        struct guest_page_range range) {
+    if ((range.first & GUEST_MEMORY_PAGE_MASK) != 0)
+        return false;
+    if (range.page_count == 0)
+        return guest_address_space_contains(
+                &table->address_space, range.first, 0);
+    if (!valid_page(table, range.first))
+        return false;
+
+    qword_t max_address = (UINT64_C(1) <<
+            table->address_space.address_bits) - 1;
+    qword_t available_pages = ((max_address - range.first) >>
+            GUEST_MEMORY_PAGE_BITS) + 1;
+    return range.page_count <= available_pages;
+}
+
 static void *allocate_slot(void **slot, size_t size) {
     if (*slot == NULL)
         *slot = calloc(1, size);
     return *slot;
 }
 
-enum guest_page_table_result guest_page_table_map(
+static enum guest_page_table_result prepare_mapping_slot(
         struct guest_page_table *table, guest_addr_t page_base,
-        unsigned permissions, byte_t **host_page) {
-    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
-    assert(host_page != NULL);
-    if (!valid_page(table, page_base))
-        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
-
+        struct guest_page_mapping **mapping) {
     struct guest_page_table_node *level1 = allocate_slot(
             &table->root->entries[page_index(page_base, 39)],
             sizeof(*level1));
@@ -142,9 +162,23 @@ enum guest_page_table_result guest_page_table_map(
             sizeof(*leaf));
     if (leaf == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    *mapping = &leaf->entries[page_index(page_base, 12)];
+    return GUEST_PAGE_TABLE_OK;
+}
 
-    struct guest_page_mapping *mapping =
-            &leaf->entries[page_index(page_base, 12)];
+enum guest_page_table_result guest_page_table_map(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page) {
+    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    assert(host_page != NULL);
+    if (!valid_page(table, page_base))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    struct guest_page_mapping *mapping;
+    enum guest_page_table_result prepare = prepare_mapping_slot(
+            table, page_base, &mapping);
+    if (prepare != GUEST_PAGE_TABLE_OK)
+        return prepare;
     if (mapping->host_page != NULL) {
         *host_page = mapping->host_page;
         return GUEST_PAGE_TABLE_ALREADY_MAPPED;
@@ -155,6 +189,75 @@ enum guest_page_table_result guest_page_table_map(
     mapping->permissions = permissions;
     *host_page = mapping->host_page;
     guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
+}
+
+static void discard_prepared_pages(struct prepared_page_mapping *prepared,
+        size_t count) {
+    for (size_t i = 0; i < count; i++)
+        free(prepared[i].new_page);
+    free(prepared);
+}
+
+enum guest_page_table_result guest_page_table_map_zero_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions, bool replace) {
+    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    if (!valid_range(table, range))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+    if (range.page_count == 0)
+        return GUEST_PAGE_TABLE_OK;
+    if (range.page_count >
+            (qword_t) (SIZE_MAX / sizeof(struct prepared_page_mapping)))
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+
+    guest_addr_t page = range.first;
+    if (!replace) {
+        for (qword_t i = 0; i < range.page_count; i++) {
+            if (find_mapping(table, page) != NULL)
+                return GUEST_PAGE_TABLE_ALREADY_MAPPED;
+            page += GUEST_MEMORY_PAGE_SIZE;
+        }
+    }
+
+    size_t count = (size_t) range.page_count;
+    struct prepared_page_mapping *prepared =
+            calloc(count, sizeof(*prepared));
+    if (prepared == NULL)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    for (size_t i = 0; i < count; i++) {
+        prepared[i].new_page = calloc(1, GUEST_MEMORY_PAGE_SIZE);
+        if (prepared[i].new_page == NULL) {
+            discard_prepared_pages(prepared, count);
+            return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+        }
+    }
+
+    page = range.first;
+    for (size_t i = 0; i < count; i++) {
+        enum guest_page_table_result result = prepare_mapping_slot(
+                table, page, &prepared[i].mapping);
+        if (result != GUEST_PAGE_TABLE_OK) {
+            /*
+             * 已挂接的空节点不含 backing，对查询完全不可见，并会在后续
+             * 使用或销毁页表时复用、释放。可见映射直到提交阶段才会改变。
+             */
+            discard_prepared_pages(prepared, count);
+            return result;
+        }
+        page += GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        prepared[i].old_page = prepared[i].mapping->host_page;
+        prepared[i].mapping->host_page = prepared[i].new_page;
+        prepared[i].mapping->permissions = permissions;
+        prepared[i].new_page = NULL;
+    }
+    guest_address_space_changed(&table->address_space);
+    for (size_t i = 0; i < count; i++)
+        free(prepared[i].old_page);
+    free(prepared);
     return GUEST_PAGE_TABLE_OK;
 }
 
@@ -188,7 +291,7 @@ static bool leaf_is_empty(const struct guest_page_table_leaf *leaf) {
     return true;
 }
 
-enum guest_page_table_result guest_page_table_unmap(
+static enum guest_page_table_result unmap_page(
         struct guest_page_table *table, guest_addr_t page_base) {
     if (!valid_page(table, page_base))
         return GUEST_PAGE_TABLE_INVALID_ADDRESS;
@@ -220,7 +323,46 @@ enum guest_page_table_result guest_page_table_unmap(
             }
         }
     }
-    guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_unmap(
+        struct guest_page_table *table, guest_addr_t page_base) {
+    enum guest_page_table_result result = unmap_page(table, page_base);
+    if (result == GUEST_PAGE_TABLE_OK)
+        guest_address_space_changed(&table->address_space);
+    return result;
+}
+
+enum guest_page_table_result guest_page_table_unmap_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        bool allow_holes) {
+    if (!valid_range(table, range))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    guest_addr_t page = range.first;
+    if (!allow_holes) {
+        for (qword_t i = 0; i < range.page_count; i++) {
+            if (find_mapping(table, page) == NULL)
+                return GUEST_PAGE_TABLE_NOT_MAPPED;
+            page += GUEST_MEMORY_PAGE_SIZE;
+        }
+    }
+
+    bool changed = false;
+    page = range.first;
+    for (qword_t i = 0; i < range.page_count; i++) {
+        enum guest_page_table_result result = unmap_page(table, page);
+        if (result == GUEST_PAGE_TABLE_OK) {
+            changed = true;
+        } else if (result != GUEST_PAGE_TABLE_NOT_MAPPED) {
+            assert(false);
+            return result;
+        }
+        page += GUEST_MEMORY_PAGE_SIZE;
+    }
+    if (changed)
+        guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
 }
 
@@ -237,5 +379,38 @@ enum guest_page_table_result guest_page_table_protect(
         mapping->permissions = permissions;
         guest_address_space_changed(&table->address_space);
     }
+    return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_protect_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions) {
+    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    if (!valid_range(table, range))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    guest_addr_t page = range.first;
+    for (qword_t i = 0; i < range.page_count; i++) {
+        if (find_mapping(table, page) == NULL)
+            return GUEST_PAGE_TABLE_NOT_MAPPED;
+        page += GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    bool changed = false;
+    page = range.first;
+    for (qword_t i = 0; i < range.page_count; i++) {
+        struct guest_page_mapping *mapping = find_mapping(table, page);
+        if (mapping == NULL) {
+            assert(false);
+            return GUEST_PAGE_TABLE_NOT_MAPPED;
+        }
+        if (mapping->permissions != permissions) {
+            mapping->permissions = permissions;
+            changed = true;
+        }
+        page += GUEST_MEMORY_PAGE_SIZE;
+    }
+    if (changed)
+        guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
 }

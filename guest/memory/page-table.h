@@ -18,6 +18,11 @@ struct guest_page_table {
     struct guest_page_table_node *root;
 };
 
+struct guest_page_range {
+    guest_addr_t first;
+    qword_t page_count;
+};
+
 bool guest_page_table_init(struct guest_page_table *table,
         byte_t address_bits);
 void guest_page_table_destroy(struct guest_page_table *table);
@@ -31,6 +36,15 @@ enum guest_page_table_result guest_page_table_unmap(
         struct guest_page_table *table, guest_addr_t page_base);
 enum guest_page_table_result guest_page_table_protect(
         struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions);
+enum guest_page_table_result guest_page_table_map_zero_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions, bool replace);
+enum guest_page_table_result guest_page_table_unmap_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        bool allow_holes);
+enum guest_page_table_result guest_page_table_protect_range(
+        struct guest_page_table *table, struct guest_page_range range,
         unsigned permissions);
 
 #endif

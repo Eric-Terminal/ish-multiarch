@@ -6,8 +6,27 @@
 
 #define HIGH_PAGE UINT64_C(0x0000123456789000)
 #define NEXT_PAGE (HIGH_PAGE + GUEST_MEMORY_PAGE_SIZE)
+#define RANGE_BASE UINT64_C(0x0000200000000000)
 
-int main(void) {
+static byte_t *lookup_page(struct guest_page_table *table,
+        guest_addr_t page, unsigned expected_permissions) {
+    byte_t *host_page;
+    unsigned permissions;
+    assert(guest_page_table_lookup(table, page,
+            &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
+    assert(permissions == expected_permissions);
+    return host_page;
+}
+
+static void assert_not_mapped(struct guest_page_table *table,
+        guest_addr_t page) {
+    byte_t *host_page;
+    unsigned permissions;
+    assert(guest_page_table_lookup(table, page,
+            &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
+}
+
+static void test_single_page_operations(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
     assert(table.address_space.generation == 1);
@@ -89,5 +108,256 @@ int main(void) {
 
     guest_page_table_destroy(&table);
     assert(table.root == NULL);
+}
+
+static void test_supported_address_widths(void) {
+    static const byte_t rejected[] = {12, 49, 64};
+    for (size_t i = 0; i < array_size(rejected); i++) {
+        struct guest_page_table table;
+        assert(!guest_page_table_init(&table, rejected[i]));
+        assert(table.root == NULL);
+        guest_page_table_destroy(&table);
+    }
+
+    struct guest_page_table narrow;
+    assert(guest_page_table_init(&narrow, 13));
+    byte_t *host_page;
+    assert(guest_page_table_map(&narrow, GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ, &host_page) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map(&narrow, 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ, &host_page) ==
+            GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    guest_page_table_destroy(&narrow);
+}
+
+static void test_atomic_map_and_replace(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    const struct guest_page_range range = {
+        .first = RANGE_BASE,
+        .page_count = 3,
+    };
+    byte_t *left;
+    byte_t *right;
+    assert(guest_page_table_map(&table,
+            RANGE_BASE - GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &left) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map(&table,
+            RANGE_BASE + 3 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ, &right) == GUEST_PAGE_TABLE_OK);
+    left[0] = 0x31;
+    right[0] = 0x42;
+
+    qword_t generation = table.address_space.generation;
+    assert(guest_page_table_map_zero_range(&table, range,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    byte_t *old_pages[3];
+    for (qword_t i = 0; i < range.page_count; i++) {
+        old_pages[i] = lookup_page(&table,
+                range.first + i * GUEST_MEMORY_PAGE_SIZE,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+        for (size_t offset = 0; offset < GUEST_MEMORY_PAGE_SIZE; offset++)
+            assert(old_pages[i][offset] == 0);
+        old_pages[i][0] = (byte_t) (0x80 + i);
+    }
+
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &table.address_space);
+    struct guest_memory_fault fault;
+    byte_t value;
+    assert(guest_tlb_read(&tlb, RANGE_BASE, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(value == 0x80);
+    qword_t observed_generation = tlb.observed_generation;
+
+    generation = table.address_space.generation;
+    assert(guest_page_table_map_zero_range(&table, range,
+            GUEST_MEMORY_READ, true) == GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    assert(tlb.observed_generation == observed_generation);
+    for (qword_t i = 0; i < range.page_count; i++) {
+        byte_t *replacement = lookup_page(&table,
+                range.first + i * GUEST_MEMORY_PAGE_SIZE,
+                GUEST_MEMORY_READ);
+        for (size_t offset = 0; offset < GUEST_MEMORY_PAGE_SIZE; offset++)
+            assert(replacement[offset] == 0);
+    }
+    assert(guest_tlb_read(&tlb, RANGE_BASE, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(value == 0);
+    assert(tlb.observed_generation == table.address_space.generation);
+    assert(!guest_tlb_write(&tlb, RANGE_BASE, &value, 1, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(left[0] == 0x31 && right[0] == 0x42);
+
+    generation = table.address_space.generation;
+    assert(guest_page_table_protect_range(&table, range, 0) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    for (qword_t i = 0; i < range.page_count; i++)
+        lookup_page(&table, range.first + i * GUEST_MEMORY_PAGE_SIZE, 0);
+    assert(!guest_tlb_read(&tlb, RANGE_BASE, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    generation = table.address_space.generation;
+    assert(guest_page_table_protect_range(&table, range, 0) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation);
+
+    assert(guest_page_table_unmap_range(&table, range, false) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    assert(!guest_tlb_read(&tlb, RANGE_BASE, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(left[0] == 0x31 && right[0] == 0x42);
+    guest_page_table_destroy(&table);
+}
+
+static void test_conflicts_and_holes(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    const guest_addr_t base = RANGE_BASE + UINT64_C(0x200000);
+    byte_t *middle;
+    assert(guest_page_table_map(&table, base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ, &middle) == GUEST_PAGE_TABLE_OK);
+    middle[0] = 0x5a;
+    const struct guest_page_range three_pages = {
+        .first = base,
+        .page_count = 3,
+    };
+    qword_t generation = table.address_space.generation;
+    assert(guest_page_table_map_zero_range(&table, three_pages,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_ALREADY_MAPPED);
+    assert(table.address_space.generation == generation);
+    assert_not_mapped(&table, base);
+    assert_not_mapped(&table, base + 2 * GUEST_MEMORY_PAGE_SIZE);
+    assert(lookup_page(&table, base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ) == middle);
+    assert(middle[0] == 0x5a);
+
+    byte_t *first;
+    byte_t *last;
+    assert(guest_page_table_map(&table, base,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &first) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map(&table,
+            base + 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &last) ==
+            GUEST_PAGE_TABLE_OK);
+    first[0] = 0x11;
+    last[0] = 0x22;
+    assert(guest_page_table_unmap(&table,
+            base + GUEST_MEMORY_PAGE_SIZE) == GUEST_PAGE_TABLE_OK);
+
+    generation = table.address_space.generation;
+    assert(guest_page_table_protect_range(&table, three_pages,
+            GUEST_MEMORY_READ) == GUEST_PAGE_TABLE_NOT_MAPPED);
+    assert(table.address_space.generation == generation);
+    assert(lookup_page(&table, base,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE)[0] == 0x11);
+    assert(lookup_page(&table, base + 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE)[0] == 0x22);
+    assert(guest_page_table_unmap_range(&table, three_pages, false) ==
+            GUEST_PAGE_TABLE_NOT_MAPPED);
+    assert(table.address_space.generation == generation);
+
+    assert(guest_page_table_unmap_range(&table, three_pages, true) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    assert_not_mapped(&table, base);
+    assert_not_mapped(&table, base + GUEST_MEMORY_PAGE_SIZE);
+    assert_not_mapped(&table, base + 2 * GUEST_MEMORY_PAGE_SIZE);
+    generation = table.address_space.generation;
+    assert(guest_page_table_unmap_range(&table, three_pages, true) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation);
+    guest_page_table_destroy(&table);
+}
+
+static void test_tree_and_address_boundaries(void) {
+    static const guest_addr_t boundaries[] = {
+        UINT64_C(1) << 21,
+        UINT64_C(1) << 30,
+        UINT64_C(1) << 39,
+    };
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    for (size_t i = 0; i < array_size(boundaries); i++) {
+        const struct guest_page_range range = {
+            .first = boundaries[i] - GUEST_MEMORY_PAGE_SIZE,
+            .page_count = 2,
+        };
+        qword_t generation = table.address_space.generation;
+        assert(guest_page_table_map_zero_range(&table, range,
+                GUEST_MEMORY_READ, false) == GUEST_PAGE_TABLE_OK);
+        assert(table.address_space.generation == generation + 1);
+        lookup_page(&table, range.first, GUEST_MEMORY_READ);
+        lookup_page(&table, boundaries[i], GUEST_MEMORY_READ);
+        assert(guest_page_table_unmap_range(&table, range, false) ==
+                GUEST_PAGE_TABLE_OK);
+        assert(table.address_space.generation == generation + 2);
+    }
+
+    const struct guest_page_range top = {
+        .first = (UINT64_C(1) << 48) - 2 * GUEST_MEMORY_PAGE_SIZE,
+        .page_count = 2,
+    };
+    qword_t generation = table.address_space.generation;
+    assert(guest_page_table_map_zero_range(&table, top,
+            GUEST_MEMORY_READ, false) == GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    const struct guest_page_range beyond_top = {
+        .first = top.first,
+        .page_count = 3,
+    };
+    generation = table.address_space.generation;
+    assert(guest_page_table_map_zero_range(&table, beyond_top,
+            GUEST_MEMORY_READ, true) == GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(guest_page_table_protect_range(&table, beyond_top,
+            GUEST_MEMORY_READ) == GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(guest_page_table_unmap_range(&table, beyond_top, true) ==
+            GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(table.address_space.generation == generation);
+    lookup_page(&table, top.first, GUEST_MEMORY_READ);
+    lookup_page(&table, top.first + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ);
+
+    const struct guest_page_range huge = {
+        .first = 0,
+        .page_count = UINT64_MAX,
+    };
+    assert(guest_page_table_map_zero_range(&table, huge,
+            GUEST_MEMORY_READ, false) == GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(guest_page_table_protect_range(&table, huge,
+            GUEST_MEMORY_READ) == GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(guest_page_table_unmap_range(&table, huge, true) ==
+            GUEST_PAGE_TABLE_INVALID_ADDRESS);
+    assert(table.address_space.generation == generation);
+
+    const struct guest_page_range empty = {
+        .first = RANGE_BASE,
+        .page_count = 0,
+    };
+    assert(guest_page_table_map_zero_range(&table, empty,
+            GUEST_MEMORY_READ, false) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_protect_range(&table, empty,
+            GUEST_MEMORY_READ) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_unmap_range(&table, empty, false) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation);
+    guest_page_table_destroy(&table);
+}
+
+int main(void) {
+    test_single_page_operations();
+    test_supported_address_widths();
+    test_atomic_map_and_replace();
+    test_conflicts_and_holes();
+    test_tree_and_address_boundaries();
     return 0;
 }
