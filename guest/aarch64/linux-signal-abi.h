@@ -58,7 +58,34 @@ struct aarch64_linux_siginfo {
     sdword_t error;
     sdword_t code;
     dword_t reserved;
-    _Alignas(8) byte_t payload[112];
+    union {
+        _Alignas(8) byte_t payload[112];
+        struct {
+            sdword_t pid;
+            dword_t uid;
+        } kill;
+        struct {
+            sdword_t timer;
+            sdword_t overrun;
+            qword_t value;
+            sdword_t private_value;
+        } timer;
+        struct {
+            sdword_t pid;
+            dword_t uid;
+            sdword_t status;
+            sqword_t utime;
+            sqword_t stime;
+        } child;
+        struct {
+            qword_t address;
+        } fault;
+        struct {
+            qword_t address;
+            sdword_t syscall;
+            dword_t architecture;
+        } sigsys;
+    };
 };
 
 struct aarch64_linux_ctx {
@@ -109,7 +136,25 @@ _Static_assert(sizeof(struct aarch64_linux_siginfo) == 128 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, signo) == 0 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, error) == 4 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, code) == 8 &&
-        __builtin_offsetof(struct aarch64_linux_siginfo, payload) == 16,
+        __builtin_offsetof(struct aarch64_linux_siginfo, reserved) == 12 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, payload) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, kill.pid) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, kill.uid) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, timer.timer) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, timer.overrun) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, timer.value) == 24 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo,
+                timer.private_value) == 32 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, child.pid) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, child.uid) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, child.status) == 24 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, child.utime) == 32 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, child.stime) == 40 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, fault.address) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, sigsys.address) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, sigsys.syscall) == 24 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo,
+                sigsys.architecture) == 28,
         "AArch64 Linux siginfo ABI 布局不正确");
 _Static_assert(sizeof(struct aarch64_linux_ctx) == 8 &&
         _Alignof(struct aarch64_linux_ctx) == 4 &&
