@@ -224,6 +224,12 @@ if get_option('kernel') == 'ish'
             'kernel/signal-action-test.c',
             dependencies: ish)
         test('signal_action', signal_action_test)
+
+        clone_failure_test = executable(
+            'clone_failure_test',
+            'kernel/clone-failure-test.c',
+            dependencies: ish)
+        test('clone_failure', clone_failure_test)
     endif
 
 elif get_option('kernel') == 'linux'

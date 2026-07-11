@@ -33,8 +33,8 @@
 #define IMPLEMENTED_FLAGS (CLONE_VM_|CLONE_FILES_|CLONE_FS_|CLONE_SIGHAND_|CLONE_SYSVSEM_|CLONE_VFORK_|CLONE_THREAD_|\
         CLONE_SETTLS_|CLONE_CHILD_SETTID_|CLONE_PARENT_SETTID_|CLONE_CHILD_CLEARTID_|CLONE_DETACHED_)
 
-static struct tgroup *tgroup_copy(struct tgroup *old_group) {
-    struct tgroup *group = malloc(sizeof(struct tgroup));
+static void tgroup_init_copy(
+        struct tgroup *group, struct tgroup *old_group) {
     *group = *old_group;
     list_init(&group->threads);
     list_add(&old_group->pgroup, &group->pgroup);
@@ -50,7 +50,6 @@ static struct tgroup *tgroup_copy(struct tgroup *old_group) {
     cond_init(&group->child_exit);
     cond_init(&group->stopped_cond);
     lock_init(&group->lock);
-    return group;
 }
 
 static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid_addr, addr_t tls_addr, addr_t ctid_addr) {
@@ -94,16 +93,14 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
     }
 
     struct tgroup *old_group = task->group;
-    lock(&pids_lock);
-    lock(&old_group->lock);
+    struct tgroup *new_group = NULL;
     if (!(flags & CLONE_THREAD_)) {
-        task->group = tgroup_copy(old_group);
-        task->group->leader = task;
-        task->tgid = task->pid;
+        new_group = malloc(sizeof(*new_group));
+        if (new_group == NULL) {
+            err = _ENOMEM;
+            goto fail_free_sighand;
+        }
     }
-    list_add(&task->group->threads, &task->group_links);
-    unlock(&old_group->lock);
-    unlock(&pids_lock);
 
     if (flags & CLONE_SETTLS_) {
         err = task_set_thread_area(task, tls_addr);
@@ -122,10 +119,23 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
         task->clear_tid = ctid_addr;
     task->exit_signal = flags & CSIGNAL_;
 
+    lock(&pids_lock);
+    lock(&old_group->lock);
+    if (new_group != NULL) {
+        tgroup_init_copy(new_group, old_group);
+        task->group = new_group;
+        task->group->leader = task;
+        task->tgid = task->pid;
+    }
+    list_add(&task->group->threads, &task->group_links);
+    unlock(&old_group->lock);
+    unlock(&pids_lock);
+
     // remember to do CLONE_SYSVSEM
     return 0;
 
 fail_free_sighand:
+    free(new_group);
     sighand_release(task->sighand);
 fail_free_fs:
     fs_info_release(task->fs);
