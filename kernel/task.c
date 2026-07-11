@@ -50,8 +50,11 @@ struct task *task_create_(struct task *parent) {
     if (task == NULL)
         return NULL;
     *task = (struct task) {};
-    if (parent != NULL)
+    if (parent != NULL) {
         *task = *parent;
+    } else {
+        task_altstack_reset(task);
+    }
 
     task_thread_store(task, zero_init(pthread_t));
     atomic_init(&task->start_ready, false);

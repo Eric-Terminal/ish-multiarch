@@ -58,6 +58,8 @@ static struct task *construct_task(struct task *parent) {
         return ERR_PTR(_ENOMEM);
     task_thread_store(task, pthread_self());
     task->blocked = 0;
+    // construct_task 总会建立独立地址空间，不能继承指向父 mm 的替代栈。
+    task_altstack_reset(task);
 
     struct tgroup *group = malloc(sizeof(struct tgroup));
     if (group == NULL) {

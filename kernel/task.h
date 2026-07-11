@@ -48,6 +48,8 @@ struct task {
     // private
     sigset_t_ saved_mask;
     bool has_saved_mask;
+    // guest 地址宽度独立于 arm64_32 等 host ABI。
+    struct signal_altstack altstack;
 
     struct {
         // Locks all ptrace-related things

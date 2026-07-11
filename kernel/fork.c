@@ -71,6 +71,8 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
             return _ENOMEM;
         task_set_mm(task, new_mm);
     }
+    task_altstack_on_clone(task,
+            (flags & CLONE_VM_) != 0, (flags & CLONE_VFORK_) != 0);
 
     if (flags & CLONE_FILES_) {
         task->files->refcount++;

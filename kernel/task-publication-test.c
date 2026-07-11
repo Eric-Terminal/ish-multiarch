@@ -39,6 +39,11 @@ int main(void) {
     parent.waiting = sig_mask(SIGALRM_);
     parent.saved_mask = UINT64_MAX;
     parent.has_saved_mask = true;
+    parent.altstack = (struct signal_altstack) {
+        .stack = UINT64_C(0x0000400012345000),
+        .size = UINT64_C(0x8000),
+        .flags = SS_ONSTACK_,
+    };
     parent.cpu._poked = true;
     parent.cpu.poked_ptr = &parent.cpu._poked;
     parent.exiting = true;
@@ -78,10 +83,14 @@ int main(void) {
     CHECK(child->parent == &parent &&
             child->blocked == parent.blocked && child->pending == 0 &&
             child->waiting == 0 && child->saved_mask == 0 &&
-            !child->has_saved_mask && child->cpu.poked_ptr == NULL &&
+            !child->has_saved_mask &&
+            child->altstack.stack == parent.altstack.stack &&
+            child->altstack.size == parent.altstack.size &&
+            child->altstack.flags == parent.altstack.flags &&
+            child->cpu.poked_ptr == NULL &&
             !child->cpu._poked && !child->ptrace.traced &&
             !child->exiting && !child->zombie && child->exit_code == 0,
-            "构建阶段只继承可继承状态并重置线程私有字段");
+            "构建阶段继承替代栈并重置不可继承的线程私有字段");
 
     task_publish(child);
     lock(&pids_lock);

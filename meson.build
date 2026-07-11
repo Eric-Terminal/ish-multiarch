@@ -130,6 +130,7 @@ if get_option('kernel') == 'ish'
         'kernel/futex.c',
         'kernel/getset.c',
         'kernel/signal.c',
+        'kernel/signal-altstack.c',
         'kernel/resource.c',
         'kernel/random.c',
         'kernel/misc.c',

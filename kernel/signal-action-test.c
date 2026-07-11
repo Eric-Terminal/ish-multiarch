@@ -9,8 +9,12 @@
 #include "kernel/mm.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
+#include "kernel/vdso.h"
 
 #define USER_PAGE UINT32_C(0x00100000)
+#define ALTSTACK_PAGE UINT32_C(0x00200000)
+#define NORMAL_STACK_PAGE UINT32_C(0x00300000)
+#define VDSO_BASE UINT32_C(0x00400000)
 #define INPUT_ADDRESS (USER_PAGE + 3)
 #define OUTPUT_ADDRESS (USER_PAGE + 67)
 
@@ -79,9 +83,11 @@ int main(void) {
     lock_init(&task.waiting_cond_lock);
     lock_init(&task.ptrace.lock);
     cond_init(&task.ptrace.cond);
+    task_altstack_reset(&task);
     task_thread_store(&task, pthread_self());
     task_set_mm(&task, mm_new());
     CHECK(task.mm != NULL, "创建 i386 用户地址空间");
+    task.mm->vdso = VDSO_BASE;
     current = &task;
 
     struct sigaction host_ignore = {.sa_handler = SIG_IGN};
@@ -256,6 +262,183 @@ int main(void) {
             address < USER_PAGE + PAGE_SIZE; address++)
         CHECK(load_user_byte(address) == 0,
                 "旧动作写回故障保留已复制的默认动作前缀");
+
+    const addr_t altstack_input_address = USER_PAGE + 320;
+    const addr_t altstack_output_address = USER_PAGE + 352;
+    struct stack_t_ queried_stack;
+    CHECK(sys_sigaltstack(0, altstack_output_address) == 0 &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            queried_stack.stack == 0 &&
+            queried_stack.flags == SS_DISABLE_ &&
+            queried_stack.size == 0,
+            "未配置的线程替代栈查询为禁用状态");
+
+    struct stack_t_ stack_sentinel;
+    memset(&stack_sentinel, 0xcc, sizeof(stack_sentinel));
+    const struct stack_t_ small_stack = {
+        .stack = ALTSTACK_PAGE,
+        .size = MINSIGSTKSZ_ - 1,
+    };
+    CHECK(user_put(altstack_input_address, small_stack) == 0 &&
+            user_put(altstack_output_address, stack_sentinel) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    altstack_output_address) == (dword_t) _ENOMEM &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            memcmp(&queried_stack, &stack_sentinel,
+                    sizeof(queried_stack)) == 0 &&
+            task.altstack.size == 0,
+            "过小替代栈不改状态也不写旧状态");
+    CHECK(trylock(&sighand.lock) == 0,
+            "替代栈 ENOMEM 路径不遗留 sighand 锁");
+    unlock(&sighand.lock);
+
+    const struct stack_t_ invalid_flags_stack = {
+        .stack = ALTSTACK_PAGE,
+        .flags = SS_ONSTACK_ | SS_DISABLE_,
+        .size = PAGE_SIZE,
+    };
+    CHECK(user_put(altstack_input_address, invalid_flags_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    altstack_output_address) == (dword_t) _EINVAL &&
+            task.altstack.size == 0,
+            "替代栈拒绝组合模式标志");
+
+    const struct stack_t_ configured_stack = {
+        .stack = ALTSTACK_PAGE,
+        .size = PAGE_SIZE,
+    };
+    CHECK(user_put(altstack_input_address, configured_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    altstack_input_address) == 0 &&
+            user_get(altstack_input_address, queried_stack) == 0 &&
+            queried_stack.stack == 0 &&
+            queried_stack.flags == SS_DISABLE_ &&
+            queried_stack.size == 0 &&
+            task.altstack.stack == configured_stack.stack &&
+            task.altstack.size == configured_stack.size &&
+            task.altstack.flags == 0,
+            "替代栈输入输出同址时先读取新状态再写回旧状态");
+
+    const struct stack_t_ zero_based_stack = {
+        .stack = 0,
+        .size = MINSIGSTKSZ_,
+    };
+    CHECK(user_put(altstack_input_address, zero_based_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0 &&
+            task.altstack.stack == 0 &&
+            task.altstack.size == MINSIGSTKSZ_ &&
+            !task_on_altstack(&task, 0) &&
+            task_on_altstack(&task, MINSIGSTKSZ_),
+            "地址零的非空替代栈保持启用且使用无回绕边界判断");
+
+    const struct stack_t_ restored_onstack_mode = {
+        .stack = ALTSTACK_PAGE,
+        .flags = SS_ONSTACK_,
+        .size = PAGE_SIZE,
+    };
+    CHECK(user_put(altstack_input_address, restored_onstack_mode) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0 &&
+            task.altstack.flags == SS_ONSTACK_ &&
+            sys_sigaltstack(0, altstack_output_address) == 0 &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            queried_stack.flags == 0,
+            "替代栈接受恢复用 ONSTACK 模式并动态查询当前位置");
+
+    const struct stack_t_ wrapping_stack = {
+        .stack = UINT32_MAX - MINSIGSTKSZ_ + 1,
+        .size = MINSIGSTKSZ_,
+    };
+    CHECK(user_put(altstack_input_address, wrapping_stack) == 0 &&
+            user_put(altstack_output_address, stack_sentinel) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    altstack_output_address) == (dword_t) _ENOMEM &&
+            task.altstack.stack == ALTSTACK_PAGE &&
+            task.altstack.size == PAGE_SIZE &&
+            task.altstack.flags == SS_ONSTACK_ &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            memcmp(&queried_stack, &stack_sentinel,
+                    sizeof(queried_stack)) == 0,
+            "替代栈拒绝越过 i386 地址上界的范围");
+
+    const struct stack_t_ disable_stack = {
+        .stack = UINT32_MAX,
+        .flags = SS_DISABLE_,
+        .size = 1,
+    };
+    CHECK(user_put(altstack_input_address, disable_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0 &&
+            task.altstack.stack == 0 && task.altstack.size == 0 &&
+            task.altstack.flags == SS_DISABLE_,
+            "禁用替代栈忽略输入范围并清空全部状态");
+
+    struct task peer_task = {
+        .sighand = &sighand,
+        .altstack = {
+            .stack = UINT64_C(0x0000400012345000),
+            .size = UINT64_C(0x8000),
+            .flags = SS_ONSTACK_,
+        },
+    };
+    CHECK(user_put(altstack_input_address, configured_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0 &&
+            peer_task.altstack.stack == UINT64_C(0x0000400012345000) &&
+            peer_task.altstack.size == UINT64_C(0x8000) &&
+            peer_task.altstack.flags == SS_ONSTACK_ &&
+            !task_on_altstack(&peer_task,
+                    UINT64_C(0x0000400012345000)) &&
+            task_on_altstack(&peer_task,
+                    UINT64_C(0x000040001234d000)),
+            "共享 sighand 的线程拥有互不影响的 64 位替代栈");
+
+    struct task clone_altstack = {.altstack = task.altstack};
+    task_altstack_on_clone(&clone_altstack, false, false);
+    CHECK(clone_altstack.altstack.stack == task.altstack.stack &&
+            clone_altstack.altstack.size == task.altstack.size,
+            "普通 fork 继承线程替代栈");
+    clone_altstack.altstack = task.altstack;
+    task_altstack_on_clone(&clone_altstack, true, true);
+    CHECK(clone_altstack.altstack.stack == task.altstack.stack &&
+            clone_altstack.altstack.size == task.altstack.size,
+            "vfork 共享地址空间时保留替代栈");
+    task_altstack_on_clone(&clone_altstack, true, false);
+    CHECK(clone_altstack.altstack.stack == 0 &&
+            clone_altstack.altstack.size == 0 &&
+            clone_altstack.altstack.flags == SS_DISABLE_,
+            "普通 CLONE_VM 子任务从禁用替代栈开始");
+
+    task.cpu.esp = ALTSTACK_PAGE + PAGE_SIZE;
+    CHECK(sys_sigaltstack(0, altstack_output_address) == 0 &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            queried_stack.flags == SS_ONSTACK_ &&
+            user_put(altstack_input_address, disable_stack) == 0 &&
+            user_put(altstack_output_address, stack_sentinel) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    altstack_output_address) == (dword_t) _EPERM &&
+            task.altstack.stack == ALTSTACK_PAGE &&
+            task.altstack.size == PAGE_SIZE &&
+            user_get(altstack_output_address, queried_stack) == 0 &&
+            memcmp(&queried_stack, &stack_sentinel,
+                    sizeof(queried_stack)) == 0,
+            "位于替代栈时允许查询但拒绝修改且不写旧状态");
+
+    task.cpu.esp = NORMAL_STACK_PAGE + PAGE_SIZE;
+    CHECK(user_put(altstack_output_address, stack_sentinel) == 0 &&
+            sys_sigaltstack(crossing_address,
+                    altstack_output_address) == (dword_t) _EFAULT &&
+            task.altstack.stack == ALTSTACK_PAGE &&
+            load_user_byte(altstack_output_address) == 0xcc,
+            "替代栈输入故障优先且不写旧状态");
+    const struct stack_t_ second_stack = {
+        .stack = ALTSTACK_PAGE + PAGE_SIZE,
+        .size = PAGE_SIZE,
+    };
+    CHECK(user_put(altstack_input_address, second_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address,
+                    crossing_address) == (dword_t) _EFAULT &&
+            task.altstack.stack == second_stack.stack &&
+            task.altstack.size == second_stack.size,
+            "替代栈旧状态写回故障不回滚已应用的新状态");
+    task_altstack_reset(&task);
 
     const addr_t wait_set_address = USER_PAGE + 128;
     const addr_t wait_info_address = USER_PAGE + 160;
@@ -480,6 +663,233 @@ int main(void) {
 
     task.blocked = 0;
     clear_pending_signals(&task);
+
+    write_wrlock(&task.mem->lock);
+    int altstack_map_error = pt_map_nothing(
+            task.mem, PAGE(ALTSTACK_PAGE), 1, P_RWX);
+    int normal_stack_map_error = pt_map_nothing(
+            task.mem, PAGE(NORMAL_STACK_PAGE), 1, P_RWX);
+    write_wrunlock(&task.mem->lock);
+    CHECK(altstack_map_error == 0 && normal_stack_map_error == 0,
+            "映射普通栈与替代信号栈测试页");
+
+    struct tgroup signal_group = {0};
+    lock_init(&signal_group.lock);
+    cond_init(&signal_group.stopped_cond);
+    signal_group.leader = &task;
+    task.group = &signal_group;
+    CHECK(user_put(altstack_input_address, configured_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0,
+            "为信号帧派送配置线程替代栈");
+
+    const dword_t normal_stack_top = NORMAL_STACK_PAGE + PAGE_SIZE;
+    const dword_t original_eip = UINT32_C(0x08049000);
+    const dword_t original_eax = UINT32_C(0x13579bdf);
+    const struct signal_action normal_stack_action = {
+        .handler = UINT32_C(0x0804a000),
+        .mask = sig_mask(SIGUSR2_),
+        .flags = SA_SIGINFO_,
+    };
+    CHECK(task_sigaction(&task, SIGUSR1_,
+                    &normal_stack_action, NULL) == 0,
+            "安装不请求替代栈的信号动作");
+    task.cpu.esp = normal_stack_top;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    task.blocked = 0;
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t normal_frame_address = task.cpu.esp;
+    struct rt_sigframe_ delivered_frame;
+    CHECK(normal_frame_address >= NORMAL_STACK_PAGE &&
+            normal_frame_address < normal_stack_top &&
+            task.cpu.eip == normal_stack_action.handler &&
+            user_get(normal_frame_address, delivered_frame) == 0 &&
+            delivered_frame.uc.mcontext.sp == normal_stack_top &&
+            delivered_frame.restorer == VDSO_BASE +
+                    (addr_t) vdso_symbol("__kernel_rt_sigreturn") &&
+            delivered_frame.uc.stack.stack == ALTSTACK_PAGE &&
+            delivered_frame.uc.stack.size == PAGE_SIZE &&
+            delivered_frame.uc.stack.flags == 0,
+            "未设置 SA_ONSTACK 时信号帧留在普通栈并保存替代栈配置");
+    delivered_frame.uc.stack = (struct stack_t_) {
+        .stack = ALTSTACK_PAGE,
+        .size = MINSIGSTKSZ_ - 1,
+    };
+    CHECK(user_put(normal_frame_address, delivered_frame) == 0,
+            "把过小替代栈状态写入普通栈返回帧");
+    task.cpu.esp = normal_frame_address +
+            offsetof(struct rt_sigframe_, sig);
+    CHECK(sys_rt_sigreturn() == original_eax &&
+            task.cpu.esp == normal_stack_top &&
+            task.cpu.eip == original_eip && task.blocked == 0 &&
+            task.altstack.stack == ALTSTACK_PAGE &&
+            task.altstack.size == PAGE_SIZE,
+            "rt_sigreturn 忽略 ENOMEM 并恢复普通栈帧上下文");
+
+    const struct signal_action altstack_action = {
+        .handler = UINT32_C(0x0804b000),
+        .flags = SA_SIGINFO_ | SA_ONSTACK_,
+    };
+    CHECK(task_sigaction(&task, SIGUSR2_,
+                    &altstack_action, NULL) == 0,
+            "安装请求替代栈的信号动作");
+    task.cpu.esp = normal_stack_top;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    deliver_signal(&task, SIGUSR2_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t altstack_frame_address = task.cpu.esp;
+    CHECK(altstack_frame_address > ALTSTACK_PAGE &&
+            altstack_frame_address < ALTSTACK_PAGE + PAGE_SIZE &&
+            task.cpu.eip == altstack_action.handler &&
+            user_get(altstack_frame_address, delivered_frame) == 0 &&
+            delivered_frame.uc.mcontext.sp == normal_stack_top &&
+            delivered_frame.uc.stack.stack == ALTSTACK_PAGE &&
+            delivered_frame.uc.stack.size == PAGE_SIZE &&
+            delivered_frame.uc.stack.flags == 0,
+            "SA_ONSTACK 从替代栈顶向下建立信号帧");
+    delivered_frame.uc.stack = (struct stack_t_) {
+        .flags = SS_DISABLE_,
+    };
+    CHECK(user_put(altstack_frame_address, delivered_frame) == 0,
+            "把禁用替代栈状态写入返回帧");
+    task.cpu.esp = altstack_frame_address +
+            offsetof(struct rt_sigframe_, sig);
+    CHECK(sys_rt_sigreturn() == original_eax &&
+            task.cpu.esp == normal_stack_top &&
+            task.cpu.eip == original_eip &&
+            task.altstack.stack == 0 && task.altstack.size == 0 &&
+            task.altstack.flags == SS_DISABLE_,
+            "rt_sigreturn 复用线程私有状态机恢复禁用状态");
+
+    task.cpu.esp = normal_stack_top;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    deliver_signal(&task, SIGUSR2_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t disabled_frame_address = task.cpu.esp;
+    CHECK(disabled_frame_address >= NORMAL_STACK_PAGE &&
+            disabled_frame_address < normal_stack_top &&
+            user_get(disabled_frame_address, delivered_frame) == 0 &&
+            delivered_frame.uc.stack.flags == SS_DISABLE_,
+            "禁用替代栈时 SA_ONSTACK 明确回落到普通栈");
+    task.cpu.esp = disabled_frame_address +
+            offsetof(struct rt_sigframe_, sig);
+    CHECK(sys_rt_sigreturn() == original_eax &&
+            task.cpu.esp == normal_stack_top,
+            "从替代栈禁用状态的普通帧返回");
+
+    CHECK(user_put(altstack_input_address, configured_stack) == 0 &&
+            sys_sigaltstack(altstack_input_address, 0) == 0,
+            "为嵌套派送重新启用替代栈");
+
+    const struct signal_action legacy_altstack_action = {
+        .handler = UINT32_C(0x0804c000),
+        .flags = SA_ONSTACK_,
+    };
+    CHECK(task_sigaction(&task, SIGTERM_,
+                    &legacy_altstack_action, NULL) == 0,
+            "安装非 SA_SIGINFO 的替代栈动作");
+    task.cpu.esp = normal_stack_top;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    deliver_signal(&task, SIGTERM_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t legacy_frame_address = task.cpu.esp;
+    struct sigframe_ legacy_frame;
+    CHECK(legacy_frame_address > ALTSTACK_PAGE &&
+            legacy_frame_address < ALTSTACK_PAGE + PAGE_SIZE &&
+            user_get(legacy_frame_address, legacy_frame) == 0 &&
+            legacy_frame.sc.sp == normal_stack_top,
+            "非 SA_SIGINFO 动作也在替代栈建立传统信号帧");
+    task.cpu.esp = legacy_frame_address +
+            offsetof(struct sigframe_, sc);
+    CHECK(sys_sigreturn() == original_eax &&
+            task.cpu.esp == normal_stack_top &&
+            task.cpu.eip == original_eip,
+            "传统 sigreturn 从替代栈恢复上下文");
+
+    dword_t nested_stack_pointer = ALTSTACK_PAGE + PAGE_SIZE / 2;
+    task.cpu.esp = nested_stack_pointer;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    deliver_signal(&task, SIGUSR2_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t nested_frame_address = task.cpu.esp;
+    CHECK(nested_frame_address > ALTSTACK_PAGE &&
+            nested_frame_address < nested_stack_pointer &&
+            user_get(nested_frame_address, delivered_frame) == 0 &&
+            delivered_frame.uc.mcontext.sp == nested_stack_pointer,
+            "已在替代栈上的嵌套派送沿当前栈指针继续向下建帧");
+    delivered_frame.uc.stack = (struct stack_t_) {
+        .stack = ALTSTACK_PAGE,
+        .size = MINSIGSTKSZ_ - 1,
+    };
+    CHECK(user_put(nested_frame_address, delivered_frame) == 0,
+            "把非法替代栈状态写入嵌套返回帧");
+    task.cpu.esp = nested_frame_address +
+            offsetof(struct rt_sigframe_, sig);
+    CHECK(sys_rt_sigreturn() == original_eax &&
+            task.cpu.esp == nested_stack_pointer &&
+            task.cpu.eip == original_eip &&
+            task.altstack.stack == ALTSTACK_PAGE &&
+            task.altstack.size == PAGE_SIZE,
+            "rt_sigreturn 忽略仍在替代栈上的 EPERM 并恢复上下文");
+
+    dword_t rejected_frame = UINT32_MAX;
+    CHECK(!i386_signal_frame_pointer(&task, &altstack_action,
+                    ALTSTACK_PAGE + 8, sizeof(struct rt_sigframe_),
+                    &rejected_frame) &&
+            rejected_frame == UINT32_MAX,
+            "栈底空间不足时拒绝越界信号帧且不写输出");
+
+    const dword_t unmapped_stack_top = UINT32_C(0x00600000);
+    const dword_t original_ecx = UINT32_C(0x2468ace0);
+    const dword_t original_edx = UINT32_C(0x0badc0de);
+    const struct signal_action segv_altstack_action = {
+        .handler = UINT32_C(0x0804d000),
+        .mask = sig_mask(SIGALRM_),
+        .flags = SA_SIGINFO_ | SA_ONSTACK_,
+    };
+    CHECK(task_sigaction(&task, SIGSEGV_,
+                    &segv_altstack_action, NULL) == 0,
+            "为建帧故障安装可捕获的替代栈 SIGSEGV 动作");
+    task.cpu.esp = unmapped_stack_top;
+    task.cpu.eip = original_eip;
+    task.cpu.eax = original_eax;
+    task.cpu.ecx = original_ecx;
+    task.cpu.edx = original_edx;
+    task.blocked = sig_mask(SIGTERM_);
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
+    deliver_signal(&task, SIGALRM_, (struct siginfo_) {.code = SI_USER_});
+    receive_signals();
+    addr_t segv_frame_address = task.cpu.esp;
+    CHECK(segv_frame_address > ALTSTACK_PAGE &&
+            segv_frame_address < ALTSTACK_PAGE + PAGE_SIZE &&
+            task.cpu.eip == segv_altstack_action.handler &&
+            task.pending == sig_mask(SIGALRM_) &&
+            list_size(&task.queue) == 1 &&
+            user_get(segv_frame_address, delivered_frame) == 0 &&
+            delivered_frame.info.sig == SIGSEGV_ &&
+            delivered_frame.uc.mcontext.sp == unmapped_stack_top &&
+            delivered_frame.uc.mcontext.ip == original_eip &&
+            delivered_frame.uc.mcontext.ax == original_eax &&
+            delivered_frame.uc.mcontext.cx == original_ecx &&
+            delivered_frame.uc.mcontext.dx == original_edx &&
+            delivered_frame.uc.sigmask == sig_mask(SIGTERM_) &&
+            task.blocked == (sig_mask(SIGTERM_) |
+                    sig_mask(SIGSEGV_) | sig_mask(SIGALRM_)) &&
+            sighand.action[SIGSEGV_].handler ==
+                    segv_altstack_action.handler,
+            "建帧故障立即转入替代栈 SIGSEGV 并应用 handler 掩码");
+    CHECK(trylock(&sighand.lock) == 0,
+            "信号帧用户写故障不会递归锁死 sighand");
+    unlock(&sighand.lock);
+    clear_pending_signals(&task);
+    task.cpu.esp = normal_stack_top;
+    cond_destroy(&signal_group.stopped_cond);
+
     CHECK(sigaction(SIGUSR1, &old_host_action, NULL) == 0,
             "恢复 host 唤醒信号动作");
 

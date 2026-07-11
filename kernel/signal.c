@@ -15,8 +15,6 @@
 int xsave_extra = 0;
 int fxsave_extra = 0;
 static void sigmask_set(struct task *task, sigset_t_ set);
-static void altstack_to_user(struct sighand *sighand, struct stack_t_ *user_stack);
-static bool is_on_altstack(dword_t sp, struct sighand *sighand);
 
 static int signal_is_blockable(int sig) {
     return sig != SIGKILL_ && sig != SIGSTOP_;
@@ -217,7 +215,12 @@ static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame)
     frame->info = *info;
     frame->uc.flags = 0;
     frame->uc.link = 0;
-    altstack_to_user(current->sighand, &frame->uc.stack);
+    // 返回帧保存可恢复的配置标志，而不是动态计算的 ONSTACK 状态。
+    frame->uc.stack = (struct stack_t_) {
+        .stack = (addr_t) current->altstack.stack,
+        .flags = current->altstack.flags,
+        .size = (dword_t) current->altstack.size,
+    };
     setup_sigcontext(&frame->uc.mcontext, &current->cpu);
     frame->uc.sigmask = current->blocked;
 
@@ -234,20 +237,44 @@ static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame)
     memcpy(frame->retcode, &rt_retcode, sizeof(rt_retcode));
 }
 
-static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
+static void force_sigsegv_unlocked(
+        struct sighand *sighand, int failed_signal) {
+    struct signal_action *segv_action = &sighand->action[SIGSEGV_];
+    bool was_blocked = sigset_has(current->blocked, SIGSEGV_);
+    if (failed_signal == SIGSEGV_ || was_blocked ||
+            segv_action->handler == SIG_IGN_) {
+        *segv_action = (struct signal_action) {
+            .handler = SIG_DFL_,
+        };
+    }
+    sigset_del(&current->blocked, SIGSEGV_);
+    deliver_signal_unlocked(current, SIGSEGV_, SIGINFO_NIL);
+
+    // 建帧失败是同步故障，必须先于队列里已有的异步信号处理。
+    struct sigqueue *forced;
+    list_for_each_entry(&current->queue, forced, queue) {
+        if (forced->info.sig == SIGSEGV_) {
+            list_remove(&forced->queue);
+            list_add(&current->queue, &forced->queue);
+            break;
+        }
+    }
+}
+
+static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     int sig = info->sig;
     STRACE("%d receiving signal %d\n", current->pid, sig);
 
     switch (signal_action(sighand, sig)) {
         case SIGNAL_IGNORE:
-            return;
+            return true;
 
         case SIGNAL_STOP:
             lock(&current->group->lock);
             current->group->stopped = true;
             current->group->group_exit_code = sig << 8 | 0x7f;
             unlock(&current->group->lock);
-            return;
+            return true;
 
         case SIGNAL_KILL:
             unlock(&sighand->lock); // do_exit must be called without this lock
@@ -271,49 +298,42 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
         frame_size = sizeof(frame.sigframe);
     }
 
-    // set up registers for signal handler
-    current->cpu.eax = info->sig;
-    current->cpu.eip = (dword_t) action->handler;
-
-    dword_t sp = current->cpu.esp;
-    if (sighand->altstack && !is_on_altstack(sp, sighand)) {
-        sp = sighand->altstack + sighand->altstack_size;
+    dword_t sp;
+    if (!i386_signal_frame_pointer(current, action,
+            current->cpu.esp, frame_size, &sp)) {
+        printk("signal frame for %d does not fit on the guest stack\n", sig);
+        force_sigsegv_unlocked(sighand, sig);
+        return false;
     }
-    if (xsave_extra) {
-        // do as the kernel does
-        // this is superhypermega condensed version of fpu__alloc_mathframe in
-        // arch/x86/kernel/fpu/signal.c
-        sp -= xsave_extra;
-        sp &=~ 0x3f;
-        sp -= fxsave_extra;
-    }
-    sp -= frame_size;
-    // align sp + 4 on a 16-byte boundary because that's what the abi says
-    sp = ((sp + 4) & ~0xf) - 4;
-    current->cpu.esp = sp;
-
-    // Update the mask. By default the signal will be blocked while in the
-    // handler, but sigaction is allowed to customize this.
-    if (!(action->flags & SA_NODEFER_))
-        sigset_add(&current->blocked, info->sig);
-    current->blocked |= action->mask;
 
     // these have to be filled in after the location of the frame is known
     if (need_siginfo) {
         frame.rt_sigframe.pinfo = sp + offsetof(struct rt_sigframe_, info);
         frame.rt_sigframe.puc = sp + offsetof(struct rt_sigframe_, uc);
-        current->cpu.edx = frame.rt_sigframe.pinfo;
-        current->cpu.ecx = frame.rt_sigframe.puc;
     }
 
     // install frame
     if (user_write(sp, &frame, frame_size)) {
         printk("failed to install frame for %d at %#x\n", info->sig, sp);
-        deliver_signal(current, SIGSEGV_, SIGINFO_NIL);
+        force_sigsegv_unlocked(sighand, sig);
+        return false;
     }
+
+    // 只有完整帧落地后，handler 寄存器和掩码才对 guest 可见。
+    current->cpu.eax = info->sig;
+    current->cpu.eip = (dword_t) action->handler;
+    current->cpu.esp = sp;
+    if (need_siginfo) {
+        current->cpu.edx = frame.rt_sigframe.pinfo;
+        current->cpu.ecx = frame.rt_sigframe.puc;
+    }
+    if (!(action->flags & SA_NODEFER_))
+        sigset_add(&current->blocked, info->sig);
+    current->blocked |= action->mask;
 
     if (action->flags & SA_RESETHAND_)
         *action = (struct signal_action) {.handler = SIG_DFL_};
+    return true;
 }
 
 // 调用前后均持有 sighand；通知父任务与睡眠期间会暂时释放它。
@@ -390,8 +410,13 @@ void receive_signals(void) {
             // Any signals received while waiting are left on the queue, except
             // for SIGKILL_, which causes an immediate exit.
             signal_delivery_stop(sig, &info);
+        } else if (!receive_signal(sighand, &info)) {
+            // 返回 guest 前立即消费强制故障；二次建帧失败会转为致命处置。
+            sigset_del(&blocked, SIGSEGV_);
+            continue;
         } else {
-            receive_signal(sighand, &info);
+            // handler 新增的阻塞位必须立即约束本轮后续派送。
+            blocked = current->blocked;
         }
     }
 
@@ -443,13 +468,14 @@ dword_t sys_rt_sigreturn(void) {
     }
     restore_sigcontext(&frame.uc.mcontext, cpu);
 
+    struct signal_altstack restored_altstack = {
+        .stack = frame.uc.stack.stack,
+        .size = frame.uc.stack.size,
+        .flags = frame.uc.stack.flags,
+    };
+    (void) task_sigaltstack(current, cpu->esp,
+            &restored_altstack, NULL, MINSIGSTKSZ_, UINT32_MAX);
     lock(&current->sighand->lock);
-    // FIXME this duplicates logic from sys_sigaltstack
-    if (!is_on_altstack(cpu->esp, current->sighand) &&
-            frame.uc.stack.size >= MINSIGSTKSZ_) {
-        current->sighand->altstack = frame.uc.stack.stack;
-        current->sighand->altstack_size = frame.uc.stack.size;
-    }
     sigmask_set(current, frame.uc.sigmask);
     unlock(&current->sighand->lock);
     return cpu->eax;
@@ -488,8 +514,6 @@ struct sighand *sighand_copy(struct sighand *sighand) {
         return NULL;
     lock(&sighand->lock);
     memcpy(new_sighand->action, sighand->action, sizeof(new_sighand->action));
-    new_sighand->altstack = sighand->altstack;
-    new_sighand->altstack_size = sighand->altstack_size;
     unlock(&sighand->lock);
     return new_sighand;
 }
@@ -565,9 +589,8 @@ void task_signal_exec_reset(struct task *task) {
             .handler = handler == SIG_IGN_ ? SIG_IGN_ : SIG_DFL_,
         };
     }
-    sighand->altstack = 0;
-    sighand->altstack_size = 0;
     unlock(&sighand->lock);
+    task_altstack_reset(task);
 }
 
 static struct signal_action unpack_i386_sigaction(
@@ -707,55 +730,6 @@ int_t sys_rt_sigpending(addr_t set_addr, uint_t size) {
     sigset_t_ pending = task_sigpending(current);
     if (user_write(set_addr, &pending, size))
         return _EFAULT;
-    return 0;
-}
-
-static bool is_on_altstack(dword_t sp, struct sighand *sighand) {
-    return sp > sighand->altstack && sp <= sighand->altstack + sighand->altstack_size;
-}
-
-static void altstack_to_user(struct sighand *sighand, struct stack_t_ *user_stack) {
-    user_stack->stack = sighand->altstack;
-    user_stack->size = sighand->altstack_size;
-    user_stack->flags = 0;
-    if (sighand->altstack == 0)
-        user_stack->flags |= SS_DISABLE_;
-    if (is_on_altstack(current->cpu.esp, sighand))
-        user_stack->flags |= SS_ONSTACK_;
-}
-
-dword_t sys_sigaltstack(addr_t ss_addr, addr_t old_ss_addr) {
-    STRACE("sigaltstack(0x%x, 0x%x)", ss_addr, old_ss_addr);
-    struct sighand *sighand = current->sighand;
-    lock(&sighand->lock);
-    if (old_ss_addr != 0) {
-        struct stack_t_ old_ss;
-        altstack_to_user(sighand, &old_ss);
-        if (user_put(old_ss_addr, old_ss)) {
-            unlock(&sighand->lock);
-            return _EFAULT;
-        }
-    }
-    if (ss_addr != 0) {
-        if (is_on_altstack(current->cpu.esp, sighand)) {
-            unlock(&sighand->lock);
-            return _EPERM;
-        }
-        struct stack_t_ ss;
-        if (user_get(ss_addr, ss)) {
-            unlock(&sighand->lock);
-            return _EFAULT;
-        }
-        if (ss.flags & SS_DISABLE_) {
-            sighand->altstack = 0;
-        } else {
-            if (ss.size < MINSIGSTKSZ_)
-                return _ENOMEM;
-            sighand->altstack = ss.stack;
-            sighand->altstack_size = ss.size;
-        }
-    }
-    unlock(&sighand->lock);
     return 0;
 }
 

@@ -13,6 +13,7 @@ typedef qword_t sigset_t_;
 #define SIG_IGN_ 1
 
 #define SA_SIGINFO_ 4
+#define SA_ONSTACK_ UINT64_C(0x08000000)
 #define SA_NODEFER_ 0x40000000
 #define SA_RESETHAND_ 0x80000000
 
@@ -154,8 +155,6 @@ void sigmask_set_temp(sigset_t_ mask);
 struct sighand {
     atomic_uint refcount;
     struct signal_action action[NUM_SIGS + 1];
-    addr_t altstack;
-    dword_t altstack_size;
     lock_t lock;
 };
 struct sighand *sighand_new(void);
@@ -200,9 +199,32 @@ struct stack_t_ {
     dword_t flags;
     dword_t size;
 };
+_Static_assert(sizeof(struct stack_t_) == 12 &&
+        __builtin_offsetof(struct stack_t_, stack) == 0 &&
+        __builtin_offsetof(struct stack_t_, flags) == 4 &&
+        __builtin_offsetof(struct stack_t_, size) == 8,
+        "i386 sigaltstack wire 必须固定为 12 字节");
+
+struct signal_altstack {
+    qword_t stack;
+    qword_t size;
+    dword_t flags;
+};
+
 #define SS_ONSTACK_ 1
 #define SS_DISABLE_ 2
 #define MINSIGSTKSZ_ 2048
+bool task_on_altstack(const struct task *task, qword_t stack_pointer);
+bool i386_signal_frame_pointer(const struct task *task,
+        const struct signal_action *action, dword_t original_sp,
+        size_t frame_size, dword_t *frame_pointer);
+int task_sigaltstack(struct task *task, qword_t stack_pointer,
+        const struct signal_altstack *new_stack,
+        struct signal_altstack *old_stack,
+        qword_t minimum_size, qword_t address_limit);
+void task_altstack_reset(struct task *task);
+void task_altstack_on_clone(
+        struct task *task, bool shares_vm, bool is_vfork);
 dword_t sys_sigaltstack(addr_t ss, addr_t old_ss);
 
 int_t sys_rt_sigsuspend(addr_t mask_addr, uint_t size);

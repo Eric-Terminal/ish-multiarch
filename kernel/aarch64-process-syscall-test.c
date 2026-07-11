@@ -420,17 +420,17 @@ int main(void) {
     CHECK(fixture.sighand.action[NUM_SIGS].handler == SIG_DFL_,
             "动作 helper 不依赖 TLS current");
 
-    explicit_sighand.altstack = UINT32_C(0x12345000);
-    explicit_sighand.altstack_size = UINT32_C(0x8000);
+    explicit_task.altstack = (struct signal_altstack) {
+        .stack = UINT64_C(0x0000400012345000),
+        .size = UINT64_C(0x8000),
+    };
     struct sighand *copied_sighand = sighand_copy(&explicit_sighand);
     CHECK(copied_sighand != NULL &&
             copied_sighand->action[NUM_SIGS].handler == full_action.handler &&
             copied_sighand->action[NUM_SIGS].flags == full_action.flags &&
             copied_sighand->action[NUM_SIGS].restorer == full_action.restorer &&
-            copied_sighand->action[NUM_SIGS].mask == high_signal_bit &&
-            copied_sighand->altstack == explicit_sighand.altstack &&
-            copied_sighand->altstack_size == explicit_sighand.altstack_size,
-            "sighand 在同一快照中复制完整动作与替代栈状态");
+            copied_sighand->action[NUM_SIGS].mask == high_signal_bit,
+            "sighand 快照只复制线程组共享的完整信号动作");
     sighand_release(copied_sighand);
 
     explicit_sighand.action[SIGUSR1_] = full_action;
@@ -450,9 +450,10 @@ int main(void) {
             explicit_sighand.action[SIGUSR2_].restorer == 0 &&
             explicit_sighand.action[SIGUSR2_].mask == 0 &&
             explicit_sighand.action[NUM_SIGS].handler == SIG_DFL_ &&
-            explicit_sighand.altstack == 0 &&
-            explicit_sighand.altstack_size == 0,
-            "exec 重置只保留忽略处置并清除全部附属状态");
+            explicit_task.altstack.stack == 0 &&
+            explicit_task.altstack.size == 0 &&
+            explicit_task.altstack.flags == SS_DISABLE_,
+            "exec 重置只保留忽略处置并清除当前线程替代栈");
 
     const qword_t action_address = USER_BASE + 101;
     const qword_t oldaction_address = USER_BASE + 181;
