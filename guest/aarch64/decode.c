@@ -167,6 +167,31 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbf208c00)) == UINT32_C(0x0e000800)) {
+        bool q = ((word >> 30) & 1) != 0;
+        byte_t size = (word >> 22) & 3;
+        byte_t operation = (word >> 12) & 7;
+        if ((!q && size == 3) || operation == 0 || operation == 4)
+            return false;
+        static const enum aarch64_opcode opcodes[2][3] = {
+            {AARCH64_OP_ADVSIMD_UZP1, AARCH64_OP_ADVSIMD_TRN1,
+                    AARCH64_OP_ADVSIMD_ZIP1},
+            {AARCH64_OP_ADVSIMD_UZP2, AARCH64_OP_ADVSIMD_TRN2,
+                    AARCH64_OP_ADVSIMD_ZIP2},
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[operation >> 2][(operation & 3) - 1],
+            .width = q ? 128 : 64,
+            .operands.advsimd_three_same = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .element_size = (byte_t) (1U << size),
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbfe08c00)) == UINT32_C(0x0e000000)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = (word >> 12) & 1 ?

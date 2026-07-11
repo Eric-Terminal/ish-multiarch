@@ -548,6 +548,42 @@ static void execute_advsimd_table(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_permute(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    byte_t half = lanes / 2;
+    bool second = instruction->opcode == AARCH64_OP_ADVSIMD_UZP2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_TRN2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_ZIP2;
+    union aarch64_vector_reg result = {0};
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        byte_t source;
+        byte_t index;
+        if (instruction->opcode == AARCH64_OP_ADVSIMD_UZP1 ||
+                instruction->opcode == AARCH64_OP_ADVSIMD_UZP2) {
+            source = lane < half ? rn : rm;
+            index = (byte_t) (2 * (lane % half) + second);
+        } else if (instruction->opcode == AARCH64_OP_ADVSIMD_TRN1 ||
+                instruction->opcode == AARCH64_OP_ADVSIMD_TRN2) {
+            source = (lane & 1) == 0 ? rn : rm;
+            index = (byte_t) (2 * (lane / 2) + second);
+        } else {
+            source = (lane & 1) == 0 ? rn : rm;
+            index = (byte_t) ((second ? half : 0) + lane / 2);
+        }
+        qword_t value = read_vector_element(
+                &cpu->v[source], element_size, index);
+        write_vector_element(&result, element_size, lane, value);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1046,6 +1082,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_TBL:
         case AARCH64_OP_ADVSIMD_TBX:
             execute_advsimd_table(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_UZP1:
+        case AARCH64_OP_ADVSIMD_UZP2:
+        case AARCH64_OP_ADVSIMD_TRN1:
+        case AARCH64_OP_ADVSIMD_TRN2:
+        case AARCH64_OP_ADVSIMD_ZIP1:
+        case AARCH64_OP_ADVSIMD_ZIP2:
+            execute_advsimd_permute(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
