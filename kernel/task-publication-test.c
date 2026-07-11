@@ -128,6 +128,41 @@ int main(void) {
     CHECK(trylock(&child->ptrace.lock) == 0,
             "ptrace 成功路径释放子任务锁");
     unlock(&child->ptrace.lock);
+
+    child->aarch64_process =
+            (struct aarch64_linux_process *) (uintptr_t) 0x5678;
+    child->cpu.tf = true;
+    child->ptrace.stopped = true;
+    CHECK(sys_ptrace(PTRACE_PEEKDATA_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_PEEKUSER_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_POKEDATA_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO,
+            "AArch64 任务拒绝 i386 ptrace 内存与 user 区访问");
+    CHECK(sys_ptrace(PTRACE_SINGLESTEP_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_GETREGS_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_SETREGS_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_GETFPREGS_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO &&
+            sys_ptrace(PTRACE_SETFPREGS_, (dword_t) child->pid,
+                    0, 0) == (dword_t) _EIO,
+            "AArch64 任务拒绝 i386 ptrace 寄存器操作");
+    CHECK(trylock(&pids_lock) == 0,
+            "AArch64 ptrace 拒绝路径释放 PID 生命周期锁");
+    unlock(&pids_lock);
+    CHECK(trylock(&child->ptrace.lock) == 0,
+            "AArch64 ptrace 拒绝路径释放子任务锁");
+    unlock(&child->ptrace.lock);
+    child->ptrace.stopped = true;
+    CHECK(sys_ptrace(PTRACE_CONT_, (dword_t) child->pid, 0, 0) == 0 &&
+            !child->ptrace.stopped && child->cpu.tf,
+            "AArch64 ptrace continue 不改写 i386 单步寄存器");
+    child->aarch64_process = NULL;
+
     CHECK(sys_ptrace(PTRACE_CONT_, 0, 0, 0) == (dword_t) _EPERM,
             "ptrace 未找到子任务时返回 EPERM");
     CHECK(trylock(&pids_lock) == 0,
