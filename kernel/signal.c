@@ -775,6 +775,7 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
         if (sigset_has(set, sigqueue->info.sig)) {
             found = true;
             list_remove(&sigqueue->queue);
+            sigset_del(&current->pending, sigqueue->info.sig);
             break;
         }
     }

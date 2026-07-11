@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "kernel/calls.h"
@@ -13,7 +14,7 @@
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
-        fprintf(stderr, "i386 信号动作测试失败：%s（第 %d 行）\n", \
+        fprintf(stderr, "i386 信号测试失败：%s（第 %d 行）\n", \
                 message, __LINE__); \
         return 1; \
     } \
@@ -37,6 +38,7 @@ int main(void) {
     struct sighand sighand = {0};
     lock_init(&sighand.lock);
     task.sighand = &sighand;
+    list_init(&task.queue);
     task_set_mm(&task, mm_new());
     CHECK(task.mm != NULL, "创建 i386 用户地址空间");
     current = &task;
@@ -144,6 +146,41 @@ int main(void) {
             address < USER_PAGE + PAGE_SIZE; address++)
         CHECK(load_user_byte(address) == 0,
                 "旧动作写回故障保留已复制的默认动作前缀");
+
+    const addr_t wait_set_address = USER_PAGE + 128;
+    const addr_t wait_info_address = USER_PAGE + 160;
+    const sigset_t_ wait_set = sig_mask(SIGALRM_);
+    CHECK(user_put(wait_set_address, wait_set) == 0,
+            "写入 sigtimedwait 等待集合");
+    deliver_signal(&task, SIGALRM_, (struct siginfo_) {.code = SI_USER_});
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
+    CHECK(sigset_has(task.pending, SIGALRM_) &&
+            sigset_has(task.pending, SIGUSR1_) &&
+            list_size(&task.queue) == 2,
+            "预排等待目标与无关信号");
+
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, 0, sizeof(sigset_t_));
+    struct siginfo_ waited_info;
+    CHECK(result == SIGALRM_ &&
+            user_get(wait_info_address, waited_info) == 0 &&
+            waited_info.sig == SIGALRM_ && task.waiting == 0 &&
+            !sigset_has(task.pending, SIGALRM_) &&
+            sigset_has(task.pending, SIGUSR1_) &&
+            list_size(&task.queue) == 1,
+            "sigtimedwait 消费目标节点并只清对应 pending 位");
+
+    deliver_signal(&task, SIGALRM_, (struct siginfo_) {.code = SI_USER_});
+    CHECK(sigset_has(task.pending, SIGALRM_) &&
+            list_size(&task.queue) == 2,
+            "被等待消费的同号信号可以再次入队");
+
+    struct sigqueue *queued, *queued_tmp;
+    list_for_each_entry_safe(&task.queue, queued, queued_tmp, queue) {
+        list_remove(&queued->queue);
+        free(queued);
+    }
+    task.pending = 0;
 
     current = NULL;
     mm_release(task.mm);
