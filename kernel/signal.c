@@ -2,6 +2,7 @@
 #include <string.h>
 #include <signal.h>
 #include "kernel/calls.h"
+#include "kernel/signal-delivery.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
 #include "kernel/vdso.h"
@@ -16,7 +17,7 @@ int xsave_extra = 0;
 int fxsave_extra = 0;
 static void sigmask_set(struct task *task, sigset_t_ set);
 
-static int signal_is_blockable(int sig) {
+static bool signal_is_blockable(int sig) {
     return sig != SIGKILL_ && sig != SIGSTOP_;
 }
 
@@ -25,33 +26,29 @@ static int signal_is_blockable(int sig) {
         sig_mask(SIGILL_) | sig_mask(SIGTRAP_) | sig_mask(SIGFPE_) | \
         sig_mask(SIGSYS_))
 
-#define SIGNAL_IGNORE 0
-#define SIGNAL_KILL 1
-#define SIGNAL_CALL_HANDLER 2
-#define SIGNAL_STOP 3
-
 static bool signal_default_ignored(int sig) {
     return sig == SIGURG_ || sig == SIGCONT_ ||
             sig == SIGCHLD_ || sig == SIGWINCH_;
 }
 
-static int signal_action(struct sighand *sighand, int sig) {
+enum signal_delivery_disposition signal_disposition_locked(
+        const struct sighand *sighand, int sig) {
     if (signal_is_blockable(sig)) {
-        struct signal_action *action = &sighand->action[sig];
+        const struct signal_action *action = &sighand->action[sig];
         if (action->handler == SIG_IGN_)
-            return SIGNAL_IGNORE;
+            return SIGNAL_DELIVERY_IGNORE;
         if (action->handler != SIG_DFL_)
-            return SIGNAL_CALL_HANDLER;
+            return SIGNAL_DELIVERY_HANDLER;
     }
 
     if (signal_default_ignored(sig))
-        return SIGNAL_IGNORE;
+        return SIGNAL_DELIVERY_IGNORE;
     switch (sig) {
         case SIGSTOP_: case SIGTSTP_: case SIGTTIN_: case SIGTTOU_:
-            return SIGNAL_STOP;
+            return SIGNAL_DELIVERY_STOP;
 
         default:
-            return SIGNAL_KILL;
+            return SIGNAL_DELIVERY_TERMINATE;
     }
 }
 
@@ -121,7 +118,8 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
 
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
-    if (signal_action(sighand, sig) != SIGNAL_IGNORE ||
+    if (signal_disposition_locked(sighand, sig) !=
+            SIGNAL_DELIVERY_IGNORE ||
             sigset_has(task->blocked, sig)) {
         deliver_signal_unlocked(task, sig, info);
     }
@@ -141,7 +139,8 @@ bool try_self_signal(int sig) {
 
     struct sighand *sighand = current->sighand;
     lock(&sighand->lock);
-    bool can_send = signal_action(sighand, sig) != SIGNAL_IGNORE &&
+    bool can_send = signal_disposition_locked(sighand, sig) !=
+            SIGNAL_DELIVERY_IGNORE &&
         !sigset_has(current->blocked, sig);
     if (can_send)
         deliver_signal_unlocked(current, sig, SIGINFO_NIL);
@@ -237,7 +236,7 @@ static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame)
     memcpy(frame->retcode, &rt_retcode, sizeof(rt_retcode));
 }
 
-static void force_sigsegv_unlocked(
+void signal_force_sigsegv_locked(
         struct sighand *sighand, int failed_signal) {
     struct signal_action *segv_action = &sighand->action[SIGSEGV_];
     bool was_blocked = sigset_has(current->blocked, SIGSEGV_);
@@ -265,20 +264,23 @@ static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     int sig = info->sig;
     STRACE("%d receiving signal %d\n", current->pid, sig);
 
-    switch (signal_action(sighand, sig)) {
-        case SIGNAL_IGNORE:
+    switch (signal_disposition_locked(sighand, sig)) {
+        case SIGNAL_DELIVERY_IGNORE:
             return true;
 
-        case SIGNAL_STOP:
+        case SIGNAL_DELIVERY_STOP:
             lock(&current->group->lock);
             current->group->stopped = true;
             current->group->group_exit_code = sig << 8 | 0x7f;
             unlock(&current->group->lock);
             return true;
 
-        case SIGNAL_KILL:
+        case SIGNAL_DELIVERY_TERMINATE:
             unlock(&sighand->lock); // do_exit must be called without this lock
             do_exit_group(sig);
+
+        case SIGNAL_DELIVERY_HANDLER:
+            break;
     }
 
     struct signal_action *action = &sighand->action[info->sig];
@@ -302,7 +304,7 @@ static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     if (!i386_signal_frame_pointer(current, action,
             current->cpu.esp, frame_size, &sp)) {
         printk("signal frame for %d does not fit on the guest stack\n", sig);
-        force_sigsegv_unlocked(sighand, sig);
+        signal_force_sigsegv_locked(sighand, sig);
         return false;
     }
 
@@ -315,7 +317,7 @@ static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     // install frame
     if (user_write(sp, &frame, frame_size)) {
         printk("failed to install frame for %d at %#x\n", info->sig, sp);
-        force_sigsegv_unlocked(sighand, sig);
+        signal_force_sigsegv_locked(sighand, sig);
         return false;
     }
 
@@ -337,7 +339,8 @@ static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
 }
 
 // 调用前后均持有 sighand；通知父任务与睡眠期间会暂时释放它。
-static void signal_delivery_stop(int sig, const struct siginfo_ *info) {
+void signal_ptrace_stop_locked(
+        int sig, const struct siginfo_ *info) {
     if (sigset_has(current->pending, SIGKILL_))
         return;
 
@@ -409,7 +412,7 @@ void receive_signals(void) {
             // parent to tell it to continue.
             // Any signals received while waiting are left on the queue, except
             // for SIGKILL_, which causes an immediate exit.
-            signal_delivery_stop(sig, &info);
+            signal_ptrace_stop_locked(sig, &info);
         } else if (!receive_signal(sighand, &info)) {
             // 返回 guest 前立即消费强制故障；二次建帧失败会转为致命处置。
             sigset_del(&blocked, SIGSEGV_);

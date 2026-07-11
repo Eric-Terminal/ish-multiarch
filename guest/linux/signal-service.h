@@ -110,11 +110,12 @@ struct guest_linux_signal_service {
     guest_linux_signal_poll poll;
 };
 
-// poll 是同步事务：backend 在选择锁内消费候选并调用 installer。
+// poll 是同步事务：backend 在选择锁内先消费队列节点，再调用 installer。
 // installer 只准备 caller-owned 候选状态，不得发布 CPU、保存 delivery 指针、
-// 阻塞或重入 service。COMPLETE 后 backend 提交 mask/action 并返回 HANDLER，
-// 调用方必须在 guest 再次执行前发布最后一次成功回调产生的候选 CPU。
-// FRAME_FAULT 由 backend 在同一次 poll 内转为强制故障，可再次调用 installer。
+// 阻塞或重入 service。COMPLETE 后 backend 才提交 mask 与 SA_RESETHAND；
+// FRAME_FAULT 不提交原信号状态，并在同一次 poll 内改派强制故障。
+// 只有最终返回 HANDLER 时，调用方才能发布最后一次成功回调产生的候选 CPU。
+// STOP 已提交停止状态和父任务通知；TERMINATE 返回时已释放锁但尚未执行退出。
 
 _Static_assert(sizeof(enum guest_linux_signal_install_status) ==
                 sizeof(dword_t) &&

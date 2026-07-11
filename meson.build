@@ -131,6 +131,7 @@ if get_option('kernel') == 'ish'
         'kernel/futex.c',
         'kernel/getset.c',
         'kernel/signal.c',
+        'kernel/signal-delivery.c',
         'kernel/signal-wire.c',
         'kernel/signal-altstack.c',
         'kernel/resource.c',
@@ -142,6 +143,7 @@ if get_option('kernel') == 'ish'
 
         'kernel/fs.c',
         'kernel/fs-task.c',
+        'kernel/aarch64-signal-service.c',
         'kernel/aarch64-syscall-service.c',
         'kernel/fs_info.c',
         'fs/mount.c',
@@ -227,6 +229,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-sigaltstack-test.c',
             dependencies: ish)
         test('aarch64_sigaltstack', aarch64_sigaltstack_test)
+
+        aarch64_signal_service_test = executable(
+            'aarch64_signal_service_test',
+            'kernel/aarch64-signal-service-test.c',
+            dependencies: ish)
+        test('aarch64_signal_service', aarch64_signal_service_test)
 
         signal_action_test = executable(
             'signal_action_test',
