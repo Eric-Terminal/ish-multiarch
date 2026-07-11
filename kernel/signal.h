@@ -176,8 +176,9 @@ dword_t sys_sigreturn(void);
 #define SIG_SETMASK_ 2
 int task_sigprocmask(struct task *task, dword_t how,
         const sigset_t_ *set, sigset_t_ *oldset);
+sigset_t_ task_sigpending(struct task *task);
 dword_t sys_rt_sigprocmask(dword_t how, addr_t set, addr_t oldset, dword_t size);
-int_t sys_rt_sigpending(addr_t set_addr);
+int_t sys_rt_sigpending(addr_t set_addr, uint_t size);
 
 static inline sigset_t_ sig_mask(int sig) {
     assert(sig >= 1 && sig <= NUM_SIGS);

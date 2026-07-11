@@ -833,6 +833,77 @@ int main(void) {
             fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
             "oldset 地址回绕保留已应用的 SETMASK 副作用");
 
+    fixture.task.blocked = sig_mask(SIGUSR1_) | high_signal_bit;
+    fixture.task.pending = sig_mask(SIGUSR1_) | sig_mask(SIGUSR2_) |
+            high_signal_bit;
+    reset_user_probe(&probe, 0x66);
+    result = invoke(&fixture, &probe, &fault, 136,
+            oldset_address, UINT64_C(0x100000008),
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            probe.reads == 0 && probe.writes == 0,
+            "rt_sigpending 按完整 64 位参数拒绝错误 sigset 大小");
+
+    reset_user_probe(&probe, 0x66);
+    result = invoke(&fixture, &probe, &fault, 136,
+            oldset_address, sizeof(sigset_t_) + 1,
+            0, 0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            probe.reads == 0 && probe.writes == 0,
+            "AArch64 rt_sigpending 拒绝紧邻上界的 sigset 大小");
+
+    reset_user_probe(&probe, 0x55);
+    result = invoke(&fixture, &probe, &fault, 136,
+            UINT64_MAX, 0,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && probe.reads == 0 && probe.writes == 0,
+            "AArch64 rt_sigpending 的零长度查询不访问用户地址");
+
+    reset_user_probe(&probe, 0xa5);
+    result = invoke(&fixture, &probe, &fault, 136,
+            oldset_address, sizeof(dword_t),
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && probe.reads == 0 && probe.writes == 1 &&
+            probe.last_write_address == oldset_address &&
+            probe.last_write_size == sizeof(dword_t) &&
+            load_user_sigset(&probe, oldset_address) ==
+                    (UINT64_C(0xa5a5a5a5) << 32 |
+                    (dword_t) sig_mask(SIGUSR1_)),
+            "AArch64 rt_sigpending 仅写入请求的 sigset 前缀");
+
+    reset_user_probe(&probe, 0xcc);
+    probe.fail_write_at = oldset_address + 2;
+    result = invoke(&fixture, &probe, &fault, 136,
+            oldset_address, sizeof(dword_t), 0, 0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            probe.reads == 0 && probe.writes == 1 &&
+            probe.last_write_size == sizeof(dword_t) &&
+            fault.address == probe.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "AArch64 rt_sigpending 传播 sigset 前缀的部分写故障");
+
+    reset_user_probe(&probe, 0x77);
+    result = invoke(&fixture, &probe, &fault, 136,
+            oldset_address, sizeof(sigset_t_),
+            UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && probe.reads == 0 && probe.writes == 1 &&
+            load_user_sigset(&probe, oldset_address) ==
+                    (sig_mask(SIGUSR1_) | high_signal_bit),
+            "AArch64 rt_sigpending 写回阻塞 pending 的 64 位快照");
+
+    reset_user_probe(&probe, 0);
+    result = invoke(&fixture, &probe, &fault, 136,
+            wrapping_sigset_address, sizeof(sigset_t_),
+            0, 0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT &&
+            probe.writes == 0 &&
+            fault.address == wrapping_sigset_address &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "rt_sigpending 在用户回调前拒绝 64 位地址回绕");
+    fixture.task.pending = 0;
+
     current = NULL;
     return 0;
 }

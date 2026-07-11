@@ -97,6 +97,69 @@ int main(void) {
     CHECK(map_error == 0 && fill_user_page(0xa5) == 0,
             "映射并初始化用户测试页");
 
+    const addr_t crossing_sigset_address =
+            USER_PAGE + PAGE_SIZE - sizeof(dword_t);
+    const sigset_t_ process_mask = sig_mask(SIGUSR1_);
+    CHECK(user_put(INPUT_ADDRESS, process_mask) == 0,
+            "写入进程信号掩码输入");
+    CHECK(sys_rt_sigprocmask(SIG_BLOCK_, INPUT_ADDRESS,
+                    crossing_sigset_address, sizeof(sigset_t_)) ==
+                    (dword_t) _EFAULT &&
+            task.blocked == process_mask,
+            "rt_sigprocmask 的旧掩码写故障不回滚新掩码");
+    CHECK(fill_user_page(0xa5) == 0 &&
+            sys_rt_sigprocmask(SIG_BLOCK_, crossing_sigset_address,
+                    OUTPUT_ADDRESS, sizeof(sigset_t_)) ==
+                    (dword_t) _EFAULT &&
+            task.blocked == process_mask &&
+            load_user_byte(OUTPUT_ADDRESS) == 0xa5,
+            "rt_sigprocmask 的输入故障不写旧掩码");
+    CHECK(user_put(INPUT_ADDRESS, process_mask) == 0 &&
+            sys_rt_sigprocmask(3, INPUT_ADDRESS,
+                    OUTPUT_ADDRESS, sizeof(sigset_t_)) ==
+                    (dword_t) _EINVAL &&
+            task.blocked == process_mask &&
+            load_user_byte(OUTPUT_ADDRESS) == 0xa5,
+            "rt_sigprocmask 的非法操作不写旧掩码");
+
+    task.blocked = sig_mask(SIGUSR1_) | sig_mask(NUM_SIGS);
+    task.pending = sig_mask(SIGUSR1_) | sig_mask(SIGUSR2_) |
+            sig_mask(NUM_SIGS);
+    CHECK(sys_rt_sigpending(OUTPUT_ADDRESS,
+                    sizeof(sigset_t_) + 1) == _EINVAL &&
+            load_user_byte(OUTPUT_ADDRESS) == 0xa5,
+            "rt_sigpending 按完整参数拒绝错误 sigset 大小");
+    CHECK(sys_rt_sigpending(UINT32_MAX, 0) == 0,
+            "rt_sigpending 的零长度查询不访问用户地址");
+    CHECK(sys_rt_sigpending(
+                    UINT32_MAX - sizeof(sigset_t_) + 2,
+                    sizeof(sigset_t_)) == _EFAULT,
+            "rt_sigpending 拒绝回绕 32 位地址空间的写回范围");
+    CHECK(sys_rt_sigpending(OUTPUT_ADDRESS, sizeof(dword_t)) == 0,
+            "rt_sigpending 接受 sigset 的前缀长度");
+    dword_t pending_prefix;
+    CHECK(user_get(OUTPUT_ADDRESS, pending_prefix) == 0 &&
+            pending_prefix == (dword_t) sig_mask(SIGUSR1_) &&
+            load_user_byte(OUTPUT_ADDRESS + sizeof(pending_prefix)) == 0xa5,
+            "rt_sigpending 仅写入请求的 sigset 前缀");
+    sigset_t_ pending_snapshot;
+    CHECK(sys_rt_sigpending(OUTPUT_ADDRESS, sizeof(sigset_t_)) == 0 &&
+            user_get(OUTPUT_ADDRESS, pending_snapshot) == 0 &&
+            pending_snapshot ==
+                    (sig_mask(SIGUSR1_) | sig_mask(NUM_SIGS)),
+            "rt_sigpending 在 sighand 锁内取得阻塞 pending 快照");
+    struct sighand other_sighand = {0};
+    lock_init(&other_sighand.lock);
+    struct task other_task = {
+        .sighand = &other_sighand,
+        .blocked = sig_mask(SIGUSR2_),
+        .pending = sig_mask(SIGUSR1_) | sig_mask(SIGUSR2_),
+    };
+    CHECK(task_sigpending(&other_task) == sig_mask(SIGUSR2_),
+            "task_sigpending 查询显式任务而非当前任务");
+    task.blocked = 0;
+    task.pending = 0;
+
     const struct i386_sigaction wire_action = {
         .handler = UINT32_C(0x81234567),
         .flags = UINT32_C(0xfedcba98),

@@ -679,25 +679,33 @@ dword_t sys_rt_sigprocmask(dword_t how, addr_t set_addr, addr_t oldset_addr, dwo
             how == SIG_SETMASK_ ? "SIG_SETMASK" : "??",
             set_addr != 0 ? (long long) set : -1, oldset_addr, size);
 
-    if (oldset_addr != 0) {
-        sigset_t_ oldset;
-        task_sigprocmask(current, 0, NULL, &oldset);
-        if (user_put(oldset_addr, oldset))
-            return _EFAULT;
-    }
-    if (set_addr != 0) {
-        int err = task_sigprocmask(current, how, &set, NULL);
-        if (err < 0)
-            return err;
-    }
+    sigset_t_ oldset;
+    int err = task_sigprocmask(current, how,
+            set_addr != 0 ? &set : NULL,
+            oldset_addr != 0 ? &oldset : NULL);
+    if (err < 0)
+        return err;
+    if (oldset_addr != 0 && user_put(oldset_addr, oldset))
+        return _EFAULT;
     return 0;
 }
 
-int_t sys_rt_sigpending(addr_t set_addr) {
-    STRACE("rt_sigpending(%#x)");
-    // as defined by the standard
-    sigset_t_ pending = current->pending & current->blocked;
-    if (user_put(set_addr, pending))
+sigset_t_ task_sigpending(struct task *task) {
+    struct sighand *sighand = task->sighand;
+    lock(&sighand->lock);
+    sigset_t_ pending = task->pending & task->blocked;
+    unlock(&sighand->lock);
+    return pending;
+}
+
+int_t sys_rt_sigpending(addr_t set_addr, uint_t size) {
+    STRACE("rt_sigpending(%#x, %u)", set_addr, size);
+    if (size > sizeof(sigset_t_))
+        return _EINVAL;
+    if (size != 0 && set_addr > UINT32_MAX - size + 1)
+        return _EFAULT;
+    sigset_t_ pending = task_sigpending(current);
+    if (user_write(set_addr, &pending, size))
         return _EFAULT;
     return 0;
 }

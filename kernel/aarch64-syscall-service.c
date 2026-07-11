@@ -27,6 +27,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
+    AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
@@ -326,11 +327,6 @@ static qword_t dispatch_rt_sigprocmask(
     if (syscall->arguments[3] != sizeof(sigset_t_))
         return syscall_result(_EINVAL);
 
-    qword_t oldset_address = syscall->arguments[2];
-    sigset_t_ oldset;
-    if (oldset_address != 0)
-        task_sigprocmask(task, 0, NULL, &oldset);
-
     qword_t set_address = syscall->arguments[1];
     sigset_t_ set;
     if (set_address != 0) {
@@ -340,11 +336,16 @@ static qword_t dispatch_rt_sigprocmask(
         if (!context->user.read(context->user.opaque,
                 set_address, &set, sizeof(set), fault))
             return syscall_result(_EFAULT);
-        int error = task_sigprocmask(task,
-                (dword_t) syscall->arguments[0], &set, NULL);
-        if (error < 0)
-            return syscall_result(error);
     }
+
+    qword_t oldset_address = syscall->arguments[2];
+    sigset_t_ oldset;
+    int error = task_sigprocmask(task,
+            (dword_t) syscall->arguments[0],
+            set_address != 0 ? &set : NULL,
+            oldset_address != 0 ? &oldset : NULL);
+    if (error < 0)
+        return syscall_result(error);
     if (oldset_address == 0)
         return 0;
     if (!user_range_fits(oldset_address, sizeof(oldset)))
@@ -353,6 +354,28 @@ static qword_t dispatch_rt_sigprocmask(
     assert(context->user.write != NULL);
     if (!context->user.write(context->user.opaque,
             oldset_address, &oldset, sizeof(oldset), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
+static qword_t dispatch_rt_sigpending(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t requested_size = syscall->arguments[1];
+    if (requested_size > sizeof(sigset_t_))
+        return syscall_result(_EINVAL);
+
+    dword_t size = (dword_t) requested_size;
+    sigset_t_ pending = task_sigpending(task);
+    if (size == 0)
+        return 0;
+    qword_t address = syscall->arguments[0];
+    if (!user_range_fits(address, size))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &pending, size, fault))
         return syscall_result(_EFAULT);
     return 0;
 }
@@ -452,6 +475,9 @@ static qword_t dispatch_syscall(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RT_SIGPROCMASK:
             return dispatch_rt_sigprocmask(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_SIGPENDING:
+            return dispatch_rt_sigpending(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNAME:
             return dispatch_uname(context, syscall, fault);
