@@ -19,6 +19,8 @@
 
 struct open_probe {
     char last_path[MAX_PATH];
+    char last_stat_path[MAX_PATH];
+    char last_fstat_path[MAX_PATH];
     int last_flags;
     int last_mode;
     unsigned opens;
@@ -89,9 +91,14 @@ static struct fd *probe_open(struct mount *mount,
 
 static int probe_stat(struct mount *mount, const char *path, struct statbuf *stat) {
     struct open_probe *probe = mount->data;
+    strcpy(probe->last_stat_path, path);
+    mode_t_ mode = S_IFDIR |
+            (strcmp(path, "/target/guard") == 0 ? 0100 : 0711);
+    if (strcmp(path, "/target/created") == 0)
+        mode = S_IFREG | 0711;
     *stat = (struct statbuf) {
         .inode = 1,
-        .mode = S_IFDIR | (strcmp(path, "/target/guard") == 0 ? 0100 : 0711),
+        .mode = mode,
         .uid = probe->owner,
         .gid = probe->group,
     };
@@ -100,6 +107,7 @@ static int probe_stat(struct mount *mount, const char *path, struct statbuf *sta
 
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct file_state *state = fd->data;
+    strcpy(state->probe->last_fstat_path, state->path);
     *stat = (struct statbuf) {
         .inode = 2,
         .mode = state->probe->file_mode,
@@ -272,6 +280,59 @@ int main(void) {
     CHECK(access_check(&permission, AC_W) == 0, "兼容权限入口保留超级用户语义");
     decoy.task.euid = 2000;
 
+    struct statbuf target_stat;
+    memset(&target_stat, 0xff, sizeof(target_stat));
+    CHECK(generic_statat(AT_PWD, "child", &target_stat, true) == 0 &&
+            strcmp(probe.last_stat_path, "/decoy/child") == 0,
+            "兼容 statat 入口仍使用 current 的 cwd");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "child", 0,
+            &target_stat) == 0 && target_stat.inode == 1 &&
+            strcmp(probe.last_stat_path, "/target/child") == 0,
+            "statat 相对路径使用目标任务 cwd");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "link", 0,
+            &target_stat) == 0 &&
+            strcmp(probe.last_stat_path, "/sandbox/absolute") == 0,
+            "statat 默认跟随末尾符号链接并受目标 root 约束");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "link",
+            AT_SYMLINK_NOFOLLOW_, &target_stat) == 0 &&
+            strcmp(probe.last_stat_path, "/target/link") == 0,
+            "statat 可选择不跟随末尾符号链接");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "link/",
+            AT_SYMLINK_NOFOLLOW_, &target_stat) == 0 &&
+            strcmp(probe.last_stat_path, "/sandbox/absolute") == 0,
+            "末尾斜杠强制 statat 跟随符号链接并检查目录");
+    CHECK(file_statat_task(&target.task, 0, "nested", AT_NO_AUTOMOUNT_,
+            &target_stat) == 0 &&
+            strcmp(probe.last_stat_path, "/explicit/nested") == 0,
+            "statat 使用目标任务 dirfd 并接受 NO_AUTOMOUNT");
+    CHECK(file_statat_task(&target.task, 0, "nested", AT_STATX_DONT_SYNC_,
+            &target_stat) == 0,
+            "statat 接受由底层文件系统决定的属性同步提示");
+    CHECK(file_statat_task(&target.task, 99, "relative", 0,
+            &target_stat) == _EBADF, "statat 相对路径拒绝无效 dirfd");
+    CHECK(file_statat_task(&target.task, 99, "/absolute", 0,
+            &target_stat) == 0 &&
+            strcmp(probe.last_stat_path, "/sandbox/absolute") == 0,
+            "statat 绝对路径忽略无效 dirfd");
+    CHECK(file_statat_task(&target.task, 0, "", AT_EMPTY_PATH_,
+            &target_stat) == 0 && target_stat.inode == 2 &&
+            strcmp(probe.last_fstat_path, "/explicit") == 0,
+            "statat 的 EMPTY_PATH 直接查询目标任务 dirfd");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "", AT_EMPTY_PATH_,
+            &target_stat) == 0 &&
+            strcmp(probe.last_fstat_path, "/target") == 0,
+            "statat 的 EMPTY_PATH 可查询目标任务 cwd");
+    CHECK(file_statat_task(&target.task, 99, "", AT_EMPTY_PATH_,
+            &target_stat) == _EBADF,
+            "statat 的 EMPTY_PATH 拒绝无效 dirfd");
+    CHECK(file_statat_task(&target.task, 99, "", 0,
+            &target_stat) == _ENOENT,
+            "statat 空路径在检查 dirfd 前返回 ENOENT");
+    memset(&target_stat, 0xff, sizeof(target_stat));
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "", INT32_MIN,
+            &target_stat) == _EINVAL && target_stat.inode == 0,
+            "statat 拒绝未知 flags 并清零 host 结果");
+
     unsigned opens_before = probe.opens;
     CHECK(file_openat_task(&target.task, 99, "",
             O_WRONLY_ | O_RDWR_, 0) == _EINVAL && probe.opens == opens_before,
@@ -292,6 +353,16 @@ int main(void) {
     CHECK(file_openat_task(&target.task, cwd_fd, "child", O_RDONLY_, 0) ==
             _ENOTDIR && probe.opens == opens_before,
             "相对 openat 拒绝普通文件 dirfd");
+    CHECK(file_statat_task(&target.task, cwd_fd, "child", 0,
+            &target_stat) == _ENOTDIR,
+            "相对 statat 拒绝普通文件 dirfd");
+    CHECK(file_statat_task(&target.task, cwd_fd, "", AT_EMPTY_PATH_,
+            &target_stat) == 0 &&
+            strcmp(probe.last_fstat_path, "/target/created") == 0,
+            "statat 的 EMPTY_PATH 可直接查询普通文件 dirfd");
+    CHECK(file_statat_task(&target.task, AT_FDCWD_, "created/", 0,
+            &target_stat) == _ENOTDIR,
+            "statat 拒绝带末尾斜杠的普通文件路径");
 
     fd_t explicit_fd = file_openat_task(
             &target.task, 0, "nested", O_RDONLY_, 0);

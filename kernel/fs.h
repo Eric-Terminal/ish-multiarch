@@ -26,10 +26,12 @@ void fs_info_release(struct fs_info *fs);
 
 void fs_chdir(struct fs_info *fs, struct fd *pwd);
 
-// fd_ops 仍可读取线程局部 current；调用方必须在 task 自己的执行线程内使用这些入口。
+// fd_ops 与 fs_ops 仍可读取线程局部 current；调用方必须在 task 自己的执行线程内使用这些入口。
 ssize_t file_read_task(struct task *task, fd_t fd, void *buffer, size_t size);
 ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t size);
 int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
+int file_statat_task(struct task *task, fd_t dirfd, const char *path,
+        int flags, struct statbuf *stat);
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
@@ -55,7 +57,11 @@ struct attr {
     ((struct attr) {.type = attr_##_type, ._type = thing})
 
 #define AT_SYMLINK_NOFOLLOW_ 0x100
+#define AT_NO_AUTOMOUNT_ 0x800
 #define AT_EMPTY_PATH_ 0x1000
+#define AT_STATX_FORCE_SYNC_ 0x2000
+#define AT_STATX_DONT_SYNC_ 0x4000
+#define AT_STATX_SYNC_TYPE_ (AT_STATX_FORCE_SYNC_ | AT_STATX_DONT_SYNC_)
 
 struct fd *generic_open(const char *path, int flags, int mode);
 struct fd *generic_openat_task(struct task *task, struct fd *at,
@@ -74,7 +80,10 @@ int generic_seek(struct fd *fd, off_t_ off, int whence, size_t size);
 #define AC_X 1
 #define AC_F 0
 int generic_accessat(struct fd *dirfd, const char *path, int mode);
-int generic_statat(struct fd *at, const char *path, struct statbuf *stat, bool follow_links);
+int generic_statat_task(struct task *task, struct fd *at,
+        const char *path, struct statbuf *stat, bool follow_links);
+int generic_statat(struct fd *at, const char *path,
+        struct statbuf *stat, bool follow_links);
 int generic_setattrat(struct fd *at, const char *path, struct attr attr, bool follow_links);
 int generic_utime(struct fd *at, const char *path, struct timespec atime, struct timespec mtime, bool follow_links);
 ssize_t generic_readlinkat(struct fd *at, const char *path, char *buf, size_t bufsize);

@@ -72,6 +72,7 @@ static int __path_normalize(struct task *task,
         // copy up to a slash or null
         while (*p != '/' && *p != '\0' && --n > 0)
             *o++ = *p++;
+        bool followed_by_slash = *p == '/';
         // eat any slashes
         while (*p == '/')
             p++;
@@ -79,7 +80,7 @@ static int __path_normalize(struct task *task,
         if (n == 0)
             return _ENAMETOOLONG;
 
-        if ((flags & N_SYMLINK_FOLLOW) || *p != '\0') {
+        if ((flags & N_SYMLINK_FOLLOW) || *p != '\0' || followed_by_slash) {
             // this buffer is used to store the path that we're readlinking, then
             // if it turns out to point to a symlink it's reused as the buffer
             // passed to the next path_normalize call
@@ -108,6 +109,10 @@ static int __path_normalize(struct task *task,
                 if (strcmp(p, "") != 0) {
                     strcat(expanded_path, "/");
                     strcat(expanded_path, p);
+                } else if (followed_by_slash) {
+                    if (strlen(expanded_path) + 1 >= MAX_PATH)
+                        return _ENAMETOOLONG;
+                    strcat(expanded_path, "/");
                 }
                 return __path_normalize(task, restart_at, expanded_path,
                         out, flags, levels + 1, root_path);
@@ -115,8 +120,8 @@ static int __path_normalize(struct task *task,
 
             // if there's a slash after this component, ensure that if it
             // exists, it's a directory and that we have execute perms on it
-            if (*(p - 1) == '/') {
-                struct statbuf stat;
+            if (followed_by_slash) {
+                struct statbuf stat = {};
                 int err = mount->fs->stat(mount, possible_symlink, &stat);
                 mount_release(mount);
                 if (err >= 0) {

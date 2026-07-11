@@ -56,12 +56,53 @@ ssize_t file_write_task(struct task *task, fd_t fd_number,
     return result;
 }
 
-int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
+static int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
     memset(stat, 0, sizeof(*stat));
-    struct fd *fd = f_get_task(task, fd_number);
     if (fd == NULL)
         return _EBADF;
     return fd->mount->fs->fstat(fd, stat);
+}
+
+int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
+    return file_fstat_fd(f_get_task(task, fd_number), stat);
+}
+
+int file_statat_task(struct task *task, fd_t dirfd,
+        const char *path, int flags, struct statbuf *stat) {
+    memset(stat, 0, sizeof(*stat));
+    const int supported_flags = AT_SYMLINK_NOFOLLOW_ |
+            AT_NO_AUTOMOUNT_ | AT_EMPTY_PATH_ | AT_STATX_SYNC_TYPE_;
+    if (flags & ~supported_flags)
+        return _EINVAL;
+    if (path[0] == '\0') {
+        if (!(flags & AT_EMPTY_PATH_))
+            return _ENOENT;
+        struct fd *fd;
+        bool retained = false;
+        if (dirfd == AT_FDCWD_) {
+            lock(&task->fs->lock);
+            fd = fd_retain(task->fs->pwd);
+            unlock(&task->fs->lock);
+            retained = true;
+        } else {
+            fd = f_get_task(task, dirfd);
+        }
+        if (fd == NULL)
+            return _EBADF;
+        int error = file_fstat_fd(fd, stat);
+        if (retained)
+            fd_close(fd);
+        return error;
+    }
+
+    // 绝对路径和 openat 一样从目标 root 解析，不检查传入的 dirfd。
+    struct fd *at = path[0] == '/' ? AT_PWD : at_fd_task(task, dirfd);
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type))
+        return _ENOTDIR;
+    return generic_statat_task(task, at, path, stat,
+            !(flags & AT_SYMLINK_NOFOLLOW_));
 }
 
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size) {

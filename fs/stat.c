@@ -5,6 +5,7 @@
 #include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
+#include "kernel/task.h"
 #include "fs/fd.h"
 #include "fs/path.h"
 
@@ -30,9 +31,11 @@ struct newstat64 stat_convert_newstat64(struct statbuf stat) {
     return newstat;
 }
 
-int generic_statat(struct fd *at, const char *path_raw, struct statbuf *stat, bool follow_links) {
+int generic_statat_task(struct task *task, struct fd *at,
+        const char *path_raw, struct statbuf *stat, bool follow_links) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, follow_links ? N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
+    int err = path_normalize_task(task, at, path_raw, path,
+            follow_links ? N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
@@ -40,6 +43,11 @@ int generic_statat(struct fd *at, const char *path_raw, struct statbuf *stat, bo
     err = mount->fs->stat(mount, path, stat);
     mount_release(mount);
     return err;
+}
+
+int generic_statat(struct fd *at, const char *path_raw,
+        struct statbuf *stat, bool follow_links) {
+    return generic_statat_task(current, at, path_raw, stat, follow_links);
 }
 
 // TODO get rid of this and maybe everything else in the file
