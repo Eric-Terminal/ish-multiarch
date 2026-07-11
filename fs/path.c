@@ -3,10 +3,22 @@
 #include "kernel/calls.h"
 #include "fs/path.h"
 
+static char *path_root_floor(char *out, char *current,
+        const char *root_path) {
+    if (strcmp(root_path, "/") == 0)
+        return out;
+    size_t root_length = strlen(root_path);
+    size_t current_length = (size_t) (current - out);
+    if (current_length >= root_length &&
+            memcmp(out, root_path, root_length) == 0 &&
+            (current_length == root_length || out[root_length] == '/'))
+        return out + root_length;
+    return out;
+}
+
 static int __path_normalize(struct task *task,
         const char *at_path, const char *path, char *out,
-        int flags, int levels, const char *root_path,
-        size_t root_floor) {
+        int flags, int levels, const char *root_path) {
     // you must choose one
     if (flags & N_SYMLINK_FOLLOW)
         assert(!(flags & N_SYMLINK_NOFOLLOW));
@@ -15,7 +27,6 @@ static int __path_normalize(struct task *task,
 
     const char *p = path;
     char *o = out;
-    char *floor = out + root_floor;
     *o = '\0';
     int n = MAX_PATH - 1;
 
@@ -41,6 +52,7 @@ static int __path_normalize(struct task *task,
                 continue;
             } else if (p[1] == '.' && (p[2] == '\0' || p[2] == '/')) {
                 // double dot path component, delete the last component
+                char *floor = path_root_floor(out, o, root_path);
                 if (o > floor) {
                     do {
                         o--;
@@ -86,13 +98,10 @@ static int __path_normalize(struct task *task,
                 // readlink does not null terminate
                 c[res] = '\0';
                 const char *restart_at = NULL;
-                size_t restart_floor = root_floor;
                 // if we should restart from the root, copy down
                 if (*c == '/') {
                     memmove(out, c, strlen(c) + 1);
                     restart_at = root_path;
-                    restart_floor = strcmp(root_path, "/") == 0 ?
-                            0 : strlen(root_path);
                 }
                 char *expanded_path = possible_symlink;
                 strcpy(expanded_path, out);
@@ -101,8 +110,7 @@ static int __path_normalize(struct task *task,
                     strcat(expanded_path, p);
                 }
                 return __path_normalize(task, restart_at, expanded_path,
-                        out, flags, levels + 1,
-                        root_path, restart_floor);
+                        out, flags, levels + 1, root_path);
             }
 
             // if there's a slash after this component, ensure that if it
@@ -170,14 +178,8 @@ int path_normalize_task(struct task *task, struct fd *at,
         unlock(&fs->lock);
     }
 
-    size_t root_length = strlen(root_path);
-    size_t root_floor = 0;
-    if (strcmp(root_path, "/") != 0 &&
-            strncmp(at_path, root_path, root_length) == 0 &&
-            (at_path[root_length] == '\0' || at_path[root_length] == '/'))
-        root_floor = root_length;
     return __path_normalize(task, at != NULL ? at_path : NULL,
-            path, out, flags, 0, root_path, root_floor);
+            path, out, flags, 0, root_path);
 }
 
 int path_normalize(struct fd *at, const char *path, char *out, int flags) {

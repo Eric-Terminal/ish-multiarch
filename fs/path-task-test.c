@@ -246,6 +246,10 @@ int main(void) {
     CHECK(path_normalize_task(&decoy.task, AT_PWD, "../escape", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/escape") == 0,
             "cwd 位于 root 外时保留 Linux 的相对路径行为");
+    CHECK(path_normalize_task(&target.task, AT_PWD,
+            "../sandbox/dir/../../escape", normalized,
+            N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/sandbox/escape") == 0,
+            "从 root 外重新进入 root 后动态恢复 .. 边界");
     CHECK(path_normalize_task(&target.task, explicit_dir, "../escape", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/escape") == 0,
             "显式 dirfd 位于 root 外时允许相对回退");
