@@ -100,6 +100,12 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_MVNI,
     AARCH64_OP_ADVSIMD_ORR_IMMEDIATE,
     AARCH64_OP_ADVSIMD_BIC_IMMEDIATE,
+    AARCH64_OP_ADVSIMD_DUP_ELEMENT,
+    AARCH64_OP_ADVSIMD_DUP_GENERAL,
+    AARCH64_OP_ADVSIMD_INS_ELEMENT,
+    AARCH64_OP_ADVSIMD_INS_GENERAL,
+    AARCH64_OP_ADVSIMD_SMOV,
+    AARCH64_OP_ADVSIMD_UMOV,
 };
 
 enum aarch64_shift_type {
@@ -245,6 +251,13 @@ struct aarch64_decoded {
             byte_t rd;
             qword_t immediate;
         } advsimd_immediate;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t element_size;
+            byte_t destination_index;
+            byte_t source_index;
+        } advsimd_copy;
         struct {
             byte_t rs;
             byte_t rt;

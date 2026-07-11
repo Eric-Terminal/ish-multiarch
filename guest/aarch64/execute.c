@@ -478,6 +478,69 @@ static void execute_advsimd_immediate(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static qword_t vector_element_mask(byte_t element_size) {
+    return element_size == 8 ? UINT64_MAX :
+            (UINT64_C(1) << (element_size * 8)) - 1;
+}
+
+static qword_t read_vector_element(const union aarch64_vector_reg *reg,
+        byte_t element_size, byte_t index) {
+    unsigned bit = (unsigned) index * element_size * 8;
+    qword_t value = reg->d[bit / 64] >> (bit % 64);
+    return value & vector_element_mask(element_size);
+}
+
+static void write_vector_element(union aarch64_vector_reg *reg,
+        byte_t element_size, byte_t index, qword_t value) {
+    unsigned bit = (unsigned) index * element_size * 8;
+    unsigned half = bit / 64;
+    unsigned shift = bit % 64;
+    qword_t mask = vector_element_mask(element_size);
+    reg->d[half] = (reg->d[half] & ~(mask << shift)) |
+            ((value & mask) << shift);
+}
+
+static void execute_advsimd_copy(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_copy.rd;
+    byte_t rn = instruction->operands.advsimd_copy.rn;
+    byte_t element_size = instruction->operands.advsimd_copy.element_size;
+    qword_t value;
+
+    if (instruction->opcode == AARCH64_OP_ADVSIMD_DUP_GENERAL ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_INS_GENERAL) {
+        value = read_register(cpu, rn,
+                element_size == 8 ? 64 : 32, false);
+    } else {
+        value = read_vector_element(&cpu->v[rn], element_size,
+                instruction->operands.advsimd_copy.source_index);
+    }
+
+    if (instruction->opcode == AARCH64_OP_ADVSIMD_DUP_ELEMENT ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_DUP_GENERAL) {
+        union aarch64_vector_reg result = {0};
+        byte_t lanes = (byte_t) (instruction->width /
+                (element_size * 8));
+        for (byte_t lane = 0; lane < lanes; lane++)
+            write_vector_element(&result, element_size, lane, value);
+        cpu->v[rd] = result;
+    } else if (instruction->opcode == AARCH64_OP_ADVSIMD_INS_ELEMENT ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_INS_GENERAL) {
+        write_vector_element(&cpu->v[rd], element_size,
+                instruction->operands.advsimd_copy.destination_index, value);
+    } else {
+        if (instruction->opcode == AARCH64_OP_ADVSIMD_SMOV &&
+                element_size != 8) {
+            qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
+            qword_t mask = vector_element_mask(element_size);
+            if (value & sign)
+                value |= ~mask;
+        }
+        write_register(cpu, rd, instruction->width, false, value);
+    }
+    cpu->pc += 4;
+}
+
 static void execute_data_processing_2source(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
@@ -915,6 +978,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_ORR_IMMEDIATE:
         case AARCH64_OP_ADVSIMD_BIC_IMMEDIATE:
             execute_advsimd_immediate(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_DUP_ELEMENT:
+        case AARCH64_OP_ADVSIMD_DUP_GENERAL:
+        case AARCH64_OP_ADVSIMD_INS_ELEMENT:
+        case AARCH64_OP_ADVSIMD_INS_GENERAL:
+        case AARCH64_OP_ADVSIMD_SMOV:
+        case AARCH64_OP_ADVSIMD_UMOV:
+            execute_advsimd_copy(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:

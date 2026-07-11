@@ -148,6 +148,66 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x9fe08400)) == UINT32_C(0x0e000400)) {
+        bool q = ((word >> 30) & 1) != 0;
+        bool op = ((word >> 29) & 1) != 0;
+        byte_t imm5 = (word >> 16) & 0x1f;
+        byte_t imm4 = (word >> 11) & 0xf;
+        if ((imm5 & 0xf) == 0)
+            return false;
+
+        byte_t size_shift = 0;
+        while ((imm5 & (1U << size_shift)) == 0)
+            size_shift++;
+        byte_t element_size = (byte_t) (1U << size_shift);
+        byte_t index = imm5 >> (size_shift + 1);
+        enum aarch64_opcode opcode;
+        byte_t width;
+
+        if (op) {
+            if (!q)
+                return false;
+            opcode = AARCH64_OP_ADVSIMD_INS_ELEMENT;
+            width = 128;
+        } else if (imm4 == 0 || imm4 == 1) {
+            if (!q && element_size == 8)
+                return false;
+            opcode = imm4 == 0 ? AARCH64_OP_ADVSIMD_DUP_ELEMENT :
+                    AARCH64_OP_ADVSIMD_DUP_GENERAL;
+            width = q ? 128 : 64;
+        } else if (imm4 == 3) {
+            if (!q)
+                return false;
+            opcode = AARCH64_OP_ADVSIMD_INS_GENERAL;
+            width = 128;
+        } else if (imm4 == 5) {
+            if ((!q && element_size > 2) || (q && element_size > 4))
+                return false;
+            opcode = AARCH64_OP_ADVSIMD_SMOV;
+            width = q ? 64 : 32;
+        } else if (imm4 == 7) {
+            if ((!q && element_size > 4) || (q && element_size != 8))
+                return false;
+            opcode = AARCH64_OP_ADVSIMD_UMOV;
+            width = q ? 64 : 32;
+        } else {
+            return false;
+        }
+
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = width,
+            .operands.advsimd_copy = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .element_size = element_size,
+                .destination_index = index,
+                .source_index = op ? imm4 >> size_shift : index,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x9ff80c00)) == UINT32_C(0x0f000400)) {
         bool op = (word >> 29) & 1;
         byte_t cmode = (word >> 12) & UINT32_C(0xf);
