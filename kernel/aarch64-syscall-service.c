@@ -25,6 +25,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_SIGALTSTACK = 132,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
@@ -358,6 +359,57 @@ static qword_t dispatch_rt_sigprocmask(
     return 0;
 }
 
+static qword_t dispatch_sigaltstack(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t new_address = syscall->arguments[0];
+    struct signal_altstack new_stack;
+    if (new_address != 0) {
+        struct aarch64_linux_stack wire;
+        if (!user_range_fits(new_address, sizeof(wire)))
+            return user_range_error(fault, new_address,
+                    GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                new_address, &wire, sizeof(wire), fault))
+            return syscall_result(_EFAULT);
+        if (wire.flags != 0 && wire.flags != SS_DISABLE_)
+            return syscall_result(_EINVAL);
+        new_stack = (struct signal_altstack) {
+            .stack = wire.sp,
+            .size = wire.size,
+            .flags = (dword_t) wire.flags,
+        };
+    }
+
+    qword_t old_address = syscall->arguments[1];
+    struct signal_altstack old_stack;
+    int error = task_sigaltstack(task, context->stack_pointer,
+            new_address != 0 ? &new_stack : NULL,
+            old_address != 0 ? &old_stack : NULL,
+            AARCH64_LINUX_MINSIGSTKSZ,
+            AARCH64_LINUX_USER_ADDRESS_MAX);
+    if (error < 0)
+        return syscall_result(error);
+    if (old_address == 0)
+        return 0;
+
+    struct aarch64_linux_stack wire_old = {
+        .sp = old_stack.stack,
+        .flags = (sdword_t) old_stack.flags,
+        .size = old_stack.size,
+    };
+    if (!user_range_fits(old_address, sizeof(wire_old)))
+        return user_range_error(fault, old_address,
+                GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            old_address, &wire_old, sizeof(wire_old), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_rt_sigpending(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -470,6 +522,9 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SIGALTSTACK:
+            return dispatch_sigaltstack(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RT_SIGACTION:
             return dispatch_rt_sigaction(
                     context, syscall, task, fault);

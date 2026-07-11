@@ -13,6 +13,7 @@ qword_t guest_linux_service_backend_probe(
             UINT64_C(0x1020304050607080));
     assert(*(const qword_t *) context->task_opaque ==
             UINT64_C(0x8877665544332211));
+    assert(context->stack_pointer == UINT64_C(0xfedcba9876543210));
     assert(syscall->number == UINT64_C(0xfedcba9876543210));
     assert(syscall->arguments[5] == UINT64_C(0x8000000000000005));
 

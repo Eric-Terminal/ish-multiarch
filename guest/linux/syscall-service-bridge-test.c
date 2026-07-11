@@ -45,6 +45,7 @@ int main(void) {
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = &runtime,
         .task_opaque = &task,
+        .stack_pointer = UINT64_C(0xfedcba9876543210),
         .user = {
             .opaque = &user,
             .read = read_probe,

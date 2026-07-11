@@ -35,6 +35,8 @@ struct guest_linux_user_access {
 struct guest_linux_syscall_context {
     void *runtime_opaque;
     void *task_opaque;
+    // 供 sigaltstack 等没有显式 SP 参数的系统调用读取调用点 guest 栈指针。
+    qword_t stack_pointer;
     struct guest_linux_user_access user;
 };
 

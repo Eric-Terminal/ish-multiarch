@@ -50,6 +50,7 @@ static qword_t dispatch_probe(
         struct guest_linux_user_fault *fault) {
     struct syscall_probe *probe = context->runtime_opaque;
     assert(context->task_opaque == probe->expected_task);
+    assert(context->stack_pointer == UINT64_C(0x00007fffffff1230));
     assert(syscall->number == 56);
     for (unsigned i = 0; i < GUEST_LINUX_SYSCALL_ARGUMENT_COUNT; i++)
         assert(syscall->arguments[i] ==
@@ -218,6 +219,7 @@ int main(void) {
         .syscalls = &syscall_service,
     };
     runtime.services = &bridged_services;
+    cpu.sp = UINT64_C(0x00007fffffff1230);
     cpu.x[8] = 178;
     result = aarch64_linux_dispatch_syscall(
             &cpu, &tlb, &runtime, &task);

@@ -50,6 +50,7 @@ static bool service_write_user(void *opaque, qword_t address,
 static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
         struct guest_tlb *tlb, const struct aarch64_linux_services *services,
         const struct aarch64_linux_task *task,
+        guest_addr_t stack_pointer,
         struct guest_memory_fault *fault) {
     if (services == NULL || services->syscalls == NULL ||
             services->syscalls->dispatch == NULL)
@@ -57,6 +58,7 @@ static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = services->syscalls->runtime_opaque,
         .task_opaque = task->service_opaque,
+        .stack_pointer = stack_pointer,
         .user = {
             .opaque = tlb,
             .read = service_read_user,
@@ -135,7 +137,8 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
                 syscall.arguments[2]);
     } else {
         result.return_value = dispatch_service(
-                &syscall, tlb, runtime->services, task, &result.fault);
+                &syscall, tlb, runtime->services, task,
+                cpu->sp, &result.fault);
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
     return result;

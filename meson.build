@@ -222,6 +222,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_process_syscall', aarch64_process_syscall_test)
 
+        aarch64_sigaltstack_test = executable(
+            'aarch64_sigaltstack_test',
+            'kernel/aarch64-sigaltstack-test.c',
+            dependencies: ish)
+        test('aarch64_sigaltstack', aarch64_sigaltstack_test)
+
         signal_action_test = executable(
             'signal_action_test',
             'kernel/signal-action-test.c',
