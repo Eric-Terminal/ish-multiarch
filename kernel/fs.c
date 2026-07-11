@@ -209,63 +209,20 @@ dword_t sys_mknod(addr_t path_addr, mode_t_ mode, dev_t_ dev) {
     return sys_mknodat(AT_FDCWD_, path_addr, mode, dev);
 }
 
-static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
-    struct fd *fd = f_get(fd_no);
-    if (fd == NULL)
-        return _EBADF;
-    if (S_ISDIR(fd->type))
-        return _EISDIR;
-
-    ssize_t res;
-    if (fd->ops->read) {
-        res = fd->ops->read(fd, buf, size);
-    } else if (fd->ops->pread) {
-        res = fd->ops->pread(fd, buf, size, fd->offset);
-        if (res > 0) {
-            fd->ops->lseek(fd, res, LSEEK_CUR);
-        }
-    } else {
-        return _EBADF;
-    }
-
-    if (res >= 0) {
-        size_t print_size = res;
-        if (print_size > 100) print_size = 100;
-        STRACE(" \"%.*s\"", print_size, buf);
-    }
-    return res;
-}
-
 dword_t sys_read(fd_t fd_no, addr_t buf_addr, dword_t size) {
     STRACE("read(%d, 0x%x, %d)", fd_no, buf_addr, size);
     char *buf = (char *) malloc(size);
     if (buf == NULL)
         return _ENOMEM;
-    int_t res = sys_read_buf(fd_no, buf, size);
+    int_t res = file_read_task(current, fd_no, buf, size);
     if (res >= 0) {
+        size_t print_size = res;
+        if (print_size > 100) print_size = 100;
+        STRACE(" \"%.*s\"", print_size, buf);
         if (user_write(buf_addr, buf, res))
             res = _EFAULT;
     }
     free(buf);
-    return res;
-}
-
-static ssize_t sys_write_buf(fd_t fd_no, void *buf, size_t size) {
-    struct fd *fd = f_get(fd_no);
-    if (fd == NULL)
-        return _EBADF;
-
-    ssize_t res;
-    if (fd->ops->write) {
-        res = fd->ops->write(fd, buf, size);
-    } else if (fd->ops->pwrite) {
-        res = fd->ops->pwrite(fd, buf, size, fd->offset);
-        if (res > 0) {
-            fd->ops->lseek(fd, res, LSEEK_CUR);
-        }
-    } else {
-        return _EBADF;
-    }
     return res;
 }
 
@@ -282,7 +239,7 @@ dword_t sys_write(fd_t fd_no, addr_t buf_addr, dword_t size) {
     if (print_size > 100) print_size = 100;
     STRACE("write(%d, \"%.*s\", %d)", fd_no, print_size, buf, size);
 
-    res = sys_write_buf(fd_no, buf, size);
+    res = file_write_task(current, fd_no, buf, size);
 out:
     free(buf);
     return res;
@@ -325,13 +282,17 @@ dword_t sys_readv(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count) {
         free(iovec);
         return _ENOMEM;
     }
-    ssize_t res = sys_read_buf(fd_no, buf, io_size);
+    ssize_t res = file_read_task(current, fd_no, buf, io_size);
     if (res < 0)
         goto error;
 
+    size_t print_size = res;
+    if (print_size > 100) print_size = 100;
+    STRACE(" \"%.*s\"", print_size, buf);
+
     size_t offset = 0;
     for (unsigned i = 0; i < iovec_count; i++) {
-        size_t print_size = iovec[i].len;
+        print_size = iovec[i].len;
         if (print_size > 100) print_size = 100;
         STRACE(" {\"%.*s\", %u}", print_size, buf + offset, iovec[i].len);
 
@@ -373,7 +334,7 @@ dword_t sys_writev(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count) {
         STRACE(" {\"%.*s\", %u}", print_size, buf + offset, iovec[i].len);
         offset += iovec[i].len;
     }
-    res = sys_write_buf(fd_no, buf, io_size);
+    res = file_write_task(current, fd_no, buf, io_size);
 
 error:
     free(buf);
@@ -536,27 +497,14 @@ dword_t sys_ioctl(fd_t f, dword_t cmd, dword_t arg) {
 
 dword_t sys_getcwd(addr_t buf_addr, dword_t size) {
     STRACE("getcwd(%#x, %#x)", buf_addr, size);
-    lock(&current->fs->lock);
-    struct fd *wd = current->fs->pwd;
     char pwd[MAX_PATH + 1];
-    int err = generic_getpath(wd, pwd);
-    unlock(&current->fs->lock);
-    if (err < 0)
-        return err;
-
-    if (strlen(pwd) + 1 > size)
-        return _ERANGE;
-    size = strlen(pwd) + 1;
-    char *buf = malloc(size);
-    if (buf == NULL)
-        return _ENOMEM;
-    strcpy(buf, pwd);
-    STRACE(" \"%.*s\"", size, buf);
-    dword_t res = size;
-    if (user_write(buf_addr, buf, size))
-        res = _EFAULT;
-    free(buf);
-    return res;
+    ssize_t result = fs_getcwd_task(current, pwd, size);
+    if (result < 0)
+        return result;
+    STRACE(" \"%.*s\"", (int) result, pwd);
+    if (user_write(buf_addr, pwd, (size_t) result))
+        return _EFAULT;
+    return result;
 }
 
 static struct fd *open_dir(const char *path) {

@@ -11,6 +11,8 @@
 #include <dirent.h>
 #include <sqlite3.h>
 
+struct task;
+
 struct fs_info {
     atomic_uint refcount;
     mode_t_ umask;
@@ -23,6 +25,12 @@ struct fs_info *fs_info_copy(struct fs_info *fs);
 void fs_info_release(struct fs_info *fs);
 
 void fs_chdir(struct fs_info *fs, struct fd *pwd);
+
+// fd_ops 仍可读取线程局部 current；调用方必须在 task 自己的执行线程内使用这些入口。
+ssize_t file_read_task(struct task *task, fd_t fd, void *buffer, size_t size);
+ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t size);
+int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
+ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 
 #define MAX_PATH 4096
 #define MAX_NAME 256

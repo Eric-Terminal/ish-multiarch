@@ -138,6 +138,7 @@ if get_option('kernel') == 'ish'
         'kernel/ptrace.c',
 
         'kernel/fs.c',
+        'kernel/fs-task.c',
         'kernel/fs_info.c',
         'fs/mount.c',
         'fs/fd.c',
@@ -194,6 +195,9 @@ if get_option('kernel') == 'ish'
 
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
+
+        fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
+        test('fs_task', fs_task_test)
     endif
 
 elif get_option('kernel') == 'linux'
