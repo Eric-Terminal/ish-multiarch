@@ -1,8 +1,15 @@
 #include <assert.h>
 
 #include "misc.h"
+#include "guest/linux/syscall-service.h"
 
 int main(void) {
+    static_assert(sizeof(struct guest_linux_user_fault) == 16,
+            "syscall service 故障结构不能随 guest 地址宽度变化");
+    static_assert(offsetof(struct guest_linux_user_fault, address) == 0 &&
+            offsetof(struct guest_linux_user_fault, access) == 8 &&
+            offsetof(struct guest_linux_user_fault, kind) == 12,
+            "syscall service 故障结构偏移必须跨 guest 一致");
 #if defined(ISH_GUEST_I386)
     static_assert(sizeof(guest_addr_t) == 4, "i386 guest 地址必须为 32 位");
     static_assert(sizeof(guest_long_t) == 4, "i386 guest long 必须为 32 位");

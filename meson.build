@@ -259,6 +259,18 @@ if not meson.is_cross_build()
         include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_types', aarch64_types_test)
 
+    linux_syscall_service_i386_probe = static_library(
+        'linux_syscall_service_i386_probe',
+        'guest/linux/syscall-service-backend-test.c',
+        include_directories: includes, c_args: ['-DISH_GUEST_I386=1'])
+    linux_syscall_service_bridge_test = executable(
+        'linux_syscall_service_bridge_test',
+        'guest/linux/syscall-service-bridge-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        link_with: linux_syscall_service_i386_probe)
+    test('linux_syscall_service_bridge', linux_syscall_service_bridge_test)
+
     aarch64_cpu_test = executable('aarch64_cpu_test', 'guest/aarch64/cpu-test.c',
         include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_cpu', aarch64_cpu_test)

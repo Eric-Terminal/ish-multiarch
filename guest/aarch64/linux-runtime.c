@@ -52,15 +52,33 @@ static qword_t dispatch_write(const struct guest_linux_syscall *syscall,
     return completed;
 }
 
+static void export_user_fault(struct guest_linux_user_fault *destination,
+        const struct guest_memory_fault *source) {
+    *destination = (struct guest_linux_user_fault) {
+        .address = source->address,
+        .access = (dword_t) source->access,
+        .kind = (dword_t) source->kind,
+    };
+}
+
 static bool service_read_user(void *opaque, qword_t address,
-        void *destination, size_t size, struct guest_memory_fault *fault) {
-    return guest_linux_copy_from_user(opaque,
-            address, destination, size, fault);
+        void *destination, size_t size,
+        struct guest_linux_user_fault *fault) {
+    struct guest_memory_fault memory_fault = {0};
+    bool copied = guest_linux_copy_from_user(opaque,
+            address, destination, size, &memory_fault);
+    export_user_fault(fault, &memory_fault);
+    return copied;
 }
 
 static bool service_write_user(void *opaque, qword_t address,
-        const void *source, size_t size, struct guest_memory_fault *fault) {
-    return guest_linux_copy_to_user(opaque, address, source, size, fault);
+        const void *source, size_t size,
+        struct guest_linux_user_fault *fault) {
+    struct guest_memory_fault memory_fault = {0};
+    bool copied = guest_linux_copy_to_user(
+            opaque, address, source, size, &memory_fault);
+    export_user_fault(fault, &memory_fault);
+    return copied;
 }
 
 static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
@@ -79,7 +97,15 @@ static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
             .write = service_write_user,
         },
     };
-    return services->syscalls->dispatch(&context, syscall, fault);
+    struct guest_linux_user_fault service_fault = {0};
+    qword_t result = services->syscalls->dispatch(
+            &context, syscall, &service_fault);
+    *fault = (struct guest_memory_fault) {
+        .address = (guest_addr_t) service_fault.address,
+        .access = (enum guest_memory_access) service_fault.access,
+        .kind = (enum guest_memory_fault_kind) service_fault.kind,
+    };
+    return result;
 }
 
 void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,

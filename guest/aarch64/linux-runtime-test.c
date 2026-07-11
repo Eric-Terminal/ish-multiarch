@@ -47,7 +47,7 @@ static qword_t encoded_error(unsigned error) {
 static qword_t dispatch_probe(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
-        struct guest_memory_fault *fault) {
+        struct guest_linux_user_fault *fault) {
     struct syscall_probe *probe = context->runtime_opaque;
     assert(context->task_opaque == probe->expected_task);
     assert(syscall->number == 56);
@@ -59,9 +59,21 @@ static qword_t dispatch_probe(
     assert(context->user.read(context->user.opaque,
             DATA_PAGE + 8, &value, sizeof(value), fault));
     assert(value == 0x5a);
+    assert(fault->address == DATA_PAGE + 8);
+    assert(fault->access == GUEST_MEMORY_READ);
+    assert(fault->kind == GUEST_MEMORY_FAULT_NONE);
     value = 0xc3;
     assert(context->user.write(context->user.opaque,
             DATA_PAGE + 9, &value, sizeof(value), fault));
+    assert(fault->address == DATA_PAGE + 9);
+    assert(fault->access == GUEST_MEMORY_WRITE);
+    assert(fault->kind == GUEST_MEMORY_FAULT_NONE);
+    assert(!context->user.read(context->user.opaque,
+            DATA_PAGE + GUEST_MEMORY_PAGE_SIZE,
+            &value, sizeof(value), fault));
+    assert(fault->address == DATA_PAGE + GUEST_MEMORY_PAGE_SIZE);
+    assert(fault->access == GUEST_MEMORY_READ);
+    assert(fault->kind == GUEST_MEMORY_FAULT_UNMAPPED);
     probe->calls++;
     return encoded_error(GUEST_LINUX_EIO);
 }
@@ -232,7 +244,9 @@ int main(void) {
     result = aarch64_linux_dispatch_syscall(
             &cpu, &tlb, &runtime, &task);
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
-    assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+    assert(result.fault.address == DATA_PAGE + GUEST_MEMORY_PAGE_SIZE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_EIO));
     assert(probe.calls == 1);
     assert(data_page[9] == 0xc3);
