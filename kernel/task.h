@@ -133,6 +133,7 @@ void task_leave_session(struct task *task);
 
 struct posix_timer {
     struct timer *timer;
+    bool deleting;
     int_t timer_id;
     struct tgroup *tgroup;
     pid_t_ thread_pid;

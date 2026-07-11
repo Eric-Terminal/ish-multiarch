@@ -89,6 +89,11 @@ int main(void) {
             list_size(&parent.children) == 1 &&
             list_size(&group.threads) == 2,
             "发布点同时公开 PID、父子链与线程组链");
+    child->exiting = true;
+    CHECK(pid_get_task(child->pid) == NULL &&
+            pid_get_task_zombie(child->pid) == child,
+            "退出中的任务不再暴露给普通查询但保留生命周期查找");
+    child->exiting = false;
     unlock(&pids_lock);
 
     current = &parent;

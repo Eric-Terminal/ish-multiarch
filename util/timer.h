@@ -2,6 +2,7 @@
 #define UTIL_TIMER_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 #include <pthread.h>
 #include <assert.h>
@@ -50,32 +51,94 @@ static inline struct timespec timespec_normalize(struct timespec ts) {
 }
 
 typedef void (*timer_callback_t)(void *data);
+
+// 定时器时间值不能依赖 arm64_32 上仅有 32 位的 time_t。
+struct timer_time {
+    int64_t sec;
+    int64_t nsec;
+};
+
+static inline struct timer_time timer_time_from_timespec(
+        struct timespec time) {
+    return (struct timer_time) {
+        .sec = time.tv_sec,
+        .nsec = time.tv_nsec,
+    };
+}
+
+static inline struct timer_time timer_time_add(
+        struct timer_time time, struct timer_time duration) {
+    int64_t nsec = time.nsec + duration.nsec;
+    int64_t carry = nsec >= INT64_C(1000000000);
+    if (carry)
+        nsec -= INT64_C(1000000000);
+
+    int64_t sec;
+    if (__builtin_add_overflow(time.sec, duration.sec, &sec))
+        return duration.sec > 0
+                ? (struct timer_time) {INT64_MAX, 999999999}
+                : (struct timer_time) {INT64_MIN, 0};
+    if (__builtin_add_overflow(sec, carry, &sec))
+        return (struct timer_time) {INT64_MAX, 999999999};
+    return (struct timer_time) {sec, nsec};
+}
+
+static inline struct timer_time timer_time_subtract(
+        struct timer_time time, struct timer_time other) {
+    int64_t nsec = time.nsec - other.nsec;
+    int64_t borrow = nsec < 0;
+    if (borrow)
+        nsec += INT64_C(1000000000);
+
+    int64_t sec;
+    if (__builtin_sub_overflow(time.sec, other.sec, &sec))
+        return other.sec < 0
+                ? (struct timer_time) {INT64_MAX, 999999999}
+                : (struct timer_time) {INT64_MIN, 0};
+    if (__builtin_sub_overflow(sec, borrow, &sec))
+        return (struct timer_time) {INT64_MIN, 0};
+    return (struct timer_time) {sec, nsec};
+}
+
+static inline bool timer_time_is_zero(struct timer_time time) {
+    return time.sec == 0 && time.nsec == 0;
+}
+
+static inline bool timer_time_positive(struct timer_time time) {
+    return time.sec > 0 || (time.sec == 0 && time.nsec > 0);
+}
+
 struct timer {
     clockid_t clockid;
-    struct timespec start;
-    struct timespec end;
-    struct timespec interval;
+    struct timer_time end;
+    struct timer_time interval;
 
     bool active;
     bool thread_running;
+    uint64_t generation;
+    uint64_t callback_generation;
     pthread_t thread;
     timer_callback_t callback;
     void *data;
     lock_t lock;
+    cond_t changed;
 
-    bool dead; // set by timer_free, the thread will free the timer if this is set when it finishes
+    bool dead; // 销毁已经开始，禁止再次设置。
 };
 
 struct timer *timer_new(clockid_t clockid, timer_callback_t callback, void *data);
 void timer_free(struct timer *timer);
-// value is how long to wait until the next fire
-// interval is how long after that to wait until the next fire (if non-zero)
-// bizarre interface is based off setitimer, because this is going to be used
-// to implement setitimer
+// value 表示距下次触发的时长，interval 表示非零时的后续触发间隔。
 struct timer_spec {
-    struct timespec value;
-    struct timespec interval;
+    struct timer_time value;
+    struct timer_time interval;
 };
 int timer_set(struct timer *timer, struct timer_spec spec, struct timer_spec *oldspec);
+// value 为所选时钟域中的绝对截止时间；全零仍表示停用。
+int timer_set_absolute(
+        struct timer *timer, struct timer_spec spec,
+        struct timer_spec *oldspec);
+// 仅供当前回调在取得外部状态锁后判断自己是否已被重设淘汰。
+bool timer_callback_is_current(struct timer *timer);
 
 #endif

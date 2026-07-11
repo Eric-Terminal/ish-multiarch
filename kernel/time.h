@@ -2,6 +2,8 @@
 #define TIME_H
 #include "misc.h"
 
+struct tgroup;
+
 dword_t sys_time(addr_t time_out);
 dword_t sys_stime(addr_t time);
 #define CLOCK_REALTIME_ 0
@@ -68,6 +70,8 @@ uint_t sys_alarm(uint_t seconds);
 int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr);
 int_t sys_timer_settime(dword_t timer, int_t flags, addr_t new_value_addr, addr_t old_value_addr);
 int_t sys_timer_delete(dword_t timer_id);
+// 全组线程均进入退出流程后，在无外部锁状态同步终止全部定时器。
+void tgroup_timers_destroy(struct tgroup *group);
 fd_t sys_timerfd_create(int_t clockid, int_t flags);
 int_t sys_timerfd_settime(fd_t f, int_t flags, addr_t new_value_addr, addr_t old_value_addr);
 

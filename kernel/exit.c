@@ -18,9 +18,6 @@ static bool exit_tgroup(struct task *task) {
         // don't need to lock the group since the only pointers to it come from:
         // - other threads' current->group, but there are none left thanks to that list_empty call
         // - locking pids_lock first, which do_exit did
-        if (group->itimer)
-            timer_free(group->itimer);
-
         // The group will be removed from its group and session by reap_if_zombie,
         // because fish tries to set the pgid to that of an exited but not reaped
         // task.
@@ -37,7 +34,7 @@ static struct task *find_new_parent(struct task *task) {
         if (!new_parent->exiting)
             return new_parent;
     }
-    return pid_get_task(1);
+    return pid_get_task_zombie(1);
 }
 
 noreturn void do_exit(int status) {
@@ -48,6 +45,22 @@ noreturn void do_exit(int status) {
         if (user_put(clear_tid, zero) == 0)
             futex_wake(clear_tid, 1);
     }
+
+    // 最后一个进入退出流程的线程负责在资源仍完整时退休组定时器。
+    lock(&pids_lock);
+    current->exiting = true;
+    bool all_exiting = true;
+    struct task *group_task;
+    list_for_each_entry(
+            &current->group->threads, group_task, group_links) {
+        if (!group_task->exiting) {
+            all_exiting = false;
+            break;
+        }
+    }
+    unlock(&pids_lock);
+    if (all_exiting)
+        tgroup_timers_destroy(current->group);
 
     // release all our resources
     mm_release(current->mm);
@@ -69,7 +82,6 @@ noreturn void do_exit(int status) {
 
     // the actual freeing needs pids_lock
     lock(&pids_lock);
-    current->exiting = true;
     // release the sighand
     sighand_release(current->sighand);
     current->sighand = NULL;
@@ -89,7 +101,8 @@ noreturn void do_exit(int status) {
         list_add(&new_parent->children, &child->siblings);
     }
 
-    if (exit_tgroup(current)) {
+    bool group_dead = exit_tgroup(current);
+    if (group_dead) {
         // notify parent that we died
         struct task *parent = leader->parent;
         if (parent == NULL) {
@@ -148,14 +161,16 @@ noreturn void do_exit_group(int status) {
     do_exit(status);
 }
 
-// always called from init process
+// 仅由持有 pids_lock 的 init 退出路径调用，并在返回前重新持有该锁。
 static void halt_system(void) {
     for (int state = 0; state < 3; state++) {
         int tasks_found = 0;
         for (int i = 2; i < MAX_PID; i++) {
-            struct task *task = pid_get_task(i);
-            if (task != NULL) {
+            struct task *task = pid_get_task_zombie(i);
+            if (task != NULL && !task->zombie) {
                 tasks_found++;
+                if (task->exiting)
+                    continue;
                 switch (state) {
                 case 0:
                     deliver_signal(task, SIGTERM_, SIGINFO_NIL);
@@ -170,8 +185,11 @@ static void halt_system(void) {
         }
         if (tasks_found == 0)
             break;
-        if (state != 2)
+        if (state != 2) {
+            unlock(&pids_lock);
             sleep(1);
+            lock(&pids_lock);
+        }
     }
 
     // unmount all filesystems

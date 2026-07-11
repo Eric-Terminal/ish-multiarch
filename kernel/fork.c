@@ -1,4 +1,5 @@
 #include "debug.h"
+#include <string.h>
 #include "kernel/task.h"
 #include "fs/fd.h"
 #include "kernel/calls.h"
@@ -45,6 +46,7 @@ static void tgroup_init_copy(
         unlock(&group->tty->lock);
     }
     group->itimer = NULL;
+    memset(group->posix_timers, 0, sizeof(group->posix_timers));
     group->doing_group_exit = false;
     group->children_rusage = (struct rusage_) {};
     group->child_exit = (cond_t) {0};

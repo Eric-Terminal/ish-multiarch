@@ -231,6 +231,18 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('signal_lock', signal_lock_test)
 
+        timer_lifecycle_test = executable(
+            'timer_lifecycle_test',
+            'util/timer-lifecycle-test.c',
+            dependencies: ish)
+        test('timer_lifecycle', timer_lifecycle_test)
+
+        timer_syscall_test = executable(
+            'timer_syscall_test',
+            'kernel/timer-syscall-test.c',
+            dependencies: ish)
+        test('timer_syscall', timer_syscall_test)
+
         clone_failure_test = executable(
             'clone_failure_test',
             'kernel/clone-failure-test.c',

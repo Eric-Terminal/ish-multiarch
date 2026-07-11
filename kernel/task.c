@@ -40,7 +40,7 @@ struct task *pid_get_task_zombie(dword_t id) {
 
 struct task *pid_get_task(dword_t id) {
     struct task *task = pid_get_task_zombie(id);
-    if (task != NULL && task->zombie)
+    if (task != NULL && (task->zombie || task->exiting))
         return NULL;
     return task;
 }
