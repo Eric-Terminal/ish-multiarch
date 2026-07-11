@@ -10,6 +10,9 @@
 #define AARCH64_LINUX_SYS_SET_TID_ADDRESS 96
 #define AARCH64_LINUX_SYS_GETTID 178
 #define AARCH64_LINUX_SYS_BRK 214
+#define AARCH64_LINUX_SYS_MUNMAP 215
+#define AARCH64_LINUX_SYS_MMAP 222
+#define AARCH64_LINUX_SYS_MPROTECT 226
 #define AARCH64_LINUX_WRITE_CHUNK_SIZE 16
 #define AARCH64_LINUX_MAX_TID INT32_C(0x3fffffff)
 
@@ -129,6 +132,18 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
     } else if (syscall.number == AARCH64_LINUX_SYS_BRK) {
         result.return_value = guest_linux_brk(
                 &runtime->memory, syscall.arguments[0]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MUNMAP) {
+        result.return_value = guest_linux_munmap(&runtime->memory,
+                syscall.arguments[0], syscall.arguments[1]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MMAP) {
+        result.return_value = guest_linux_mmap(&runtime->memory,
+                syscall.arguments[0], syscall.arguments[1],
+                syscall.arguments[2], syscall.arguments[3],
+                syscall.arguments[4], syscall.arguments[5]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MPROTECT) {
+        result.return_value = guest_linux_mprotect(&runtime->memory,
+                syscall.arguments[0], syscall.arguments[1],
+                syscall.arguments[2]);
     } else {
         result.return_value = dispatch_service(
                 &syscall, tlb, runtime->services, task, &result.fault);

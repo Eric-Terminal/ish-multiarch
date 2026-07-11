@@ -3,6 +3,7 @@
 
 #include "guest/aarch64/linux-runtime.h"
 #include "guest/linux/errno.h"
+#include "guest/linux/mman.h"
 #include "guest/memory/page-table.h"
 
 #define DATA_PAGE UINT64_C(0x000056789abcd000)
@@ -247,6 +248,60 @@ int main(void) {
             &cpu, &tlb, &runtime, &task);
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == BRK_BASE + 1);
+
+    cpu.x[8] = 222;
+    cpu.x[0] = 0;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS;
+    cpu.x[4] = UINT64_MAX;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    guest_addr_t mapped = (guest_addr_t) runtime.memory.mmap_base;
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+    assert(cpu.x[0] == mapped);
+    byte_t *mapped_page;
+    unsigned mapped_permissions;
+    assert(guest_page_table_lookup(&table, mapped,
+            &mapped_page, &mapped_permissions) == GUEST_PAGE_TABLE_OK);
+    assert(mapped_permissions ==
+            (GUEST_MEMORY_READ | GUEST_MEMORY_WRITE));
+
+    cpu.x[8] = 226;
+    cpu.x[0] = mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+    assert(guest_page_table_lookup(&table, mapped,
+            &mapped_page, &mapped_permissions) == GUEST_PAGE_TABLE_OK);
+    assert(mapped_permissions == 0);
+
+    cpu.x[8] = 215;
+    cpu.x[0] = mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+    assert(guest_page_table_lookup(&table, mapped,
+            &mapped_page, &mapped_permissions) ==
+            GUEST_PAGE_TABLE_NOT_MAPPED);
+    assert(probe.calls == 1);
+
+    cpu.x[8] = 222;
+    cpu.x[0] = 0;
+    cpu.x[1] = 0;
+    cpu.x[2] = 0;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS;
+    cpu.x[4] = UINT64_MAX;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+    assert(probe.calls == 1);
 
     memset(data_page + 12, 0x6b, sizeof(dword_t));
     cpu.x[8] = 96;
