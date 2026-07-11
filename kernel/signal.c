@@ -236,8 +236,9 @@ static void setup_rt_sigframe(struct siginfo_ *info, struct rt_sigframe_ *frame)
     memcpy(frame->retcode, &rt_retcode, sizeof(rt_retcode));
 }
 
-void signal_force_sigsegv_locked(
-        struct sighand *sighand, int failed_signal) {
+static void force_sigsegv_locked(
+        struct sighand *sighand, int failed_signal,
+        const struct siginfo_ *precise_info) {
     struct signal_action *segv_action = &sighand->action[SIGSEGV_];
     bool was_blocked = sigset_has(current->blocked, SIGSEGV_);
     if (failed_signal == SIGSEGV_ || was_blocked ||
@@ -247,17 +248,35 @@ void signal_force_sigsegv_locked(
         };
     }
     sigset_del(&current->blocked, SIGSEGV_);
-    deliver_signal_unlocked(current, SIGSEGV_, SIGINFO_NIL);
+    deliver_signal_unlocked(current, SIGSEGV_,
+            precise_info != NULL ? *precise_info : SIGINFO_NIL);
 
     // 建帧失败是同步故障，必须先于队列里已有的异步信号处理。
     struct sigqueue *forced;
     list_for_each_entry(&current->queue, forced, queue) {
         if (forced->info.sig == SIGSEGV_) {
+            // 坏帧故障必须覆盖合并前的异步信息，才能保留准确故障地址。
+            if (precise_info != NULL) {
+                forced->info = *precise_info;
+                forced->info.sig = SIGSEGV_;
+            }
             list_remove(&forced->queue);
             list_add(&current->queue, &forced->queue);
             break;
         }
     }
+}
+
+void signal_force_sigsegv_locked(
+        struct sighand *sighand, int failed_signal) {
+    force_sigsegv_locked(sighand, failed_signal, NULL);
+}
+
+void signal_force_sigsegv_info_locked(
+        struct sighand *sighand, int failed_signal,
+        const struct siginfo_ *info) {
+    assert(info != NULL);
+    force_sigsegv_locked(sighand, failed_signal, info);
 }
 
 static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {

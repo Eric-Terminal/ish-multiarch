@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "guest/aarch64/linux-signal-abi.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
@@ -159,6 +160,32 @@ static struct guest_linux_signal_poll_result poll_signal(
                     &context, capture_delivery, probe);
     probe->poll_active = false;
     return result;
+}
+
+static struct guest_linux_signal_context signal_context(
+        struct signal_fixture *fixture) {
+    return (struct guest_linux_signal_context) {
+        .runtime_opaque = ish_aarch64_linux_signal_service.runtime_opaque,
+        .task_opaque = &fixture->task,
+    };
+}
+
+static void restore_signal(
+        struct signal_fixture *fixture,
+        const struct guest_linux_signal_restore_request *request) {
+    const struct guest_linux_signal_context context =
+            signal_context(fixture);
+    current = &fixture->task;
+    ish_aarch64_linux_signal_service.restore(&context, request);
+}
+
+static void report_bad_frame(
+        struct signal_fixture *fixture, qword_t frame_address) {
+    const struct guest_linux_signal_context context =
+            signal_context(fixture);
+    current = &fixture->task;
+    ish_aarch64_linux_signal_service.bad_frame(
+            &context, frame_address);
 }
 
 static bool sighand_is_unlocked(struct sighand *sighand) {
@@ -625,6 +652,204 @@ static int test_ptrace_stop_restarts_selection(void) {
     return 0;
 }
 
+static int test_restore_valid_and_disabled_altstack(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture);
+    fixture.task.blocked = sig_mask(SIGALRM_);
+    fixture.task.altstack = (struct signal_altstack) {
+        .stack = UINT64_C(0x0000700010000000),
+        .size = UINT64_C(8192),
+    };
+
+    const qword_t restored_base = UINT64_C(0x0000700020000000);
+    struct guest_linux_signal_restore_request request = {
+        .stack_pointer = UINT64_C(0x0000600012345000),
+        .blocked_mask = sig_mask(SIGUSR1_) |
+                sig_mask(SIGKILL_) | sig_mask(SIGSTOP_),
+        .altstack = {
+            .base = restored_base,
+            .size = AARCH64_LINUX_MINSIGSTKSZ + 1024,
+            .reserved = UINT32_C(0xa5a5a5a5),
+        },
+    };
+    restore_signal(&fixture, &request);
+    CHECK(fixture.task.blocked == sig_mask(SIGUSR1_) &&
+            fixture.task.altstack.stack == restored_base &&
+            fixture.task.altstack.size ==
+                    AARCH64_LINUX_MINSIGSTKSZ + 1024 &&
+            fixture.task.altstack.flags == 0,
+            "恢复掩码时清除不可阻塞位并安装有效替代栈");
+
+    request.blocked_mask = sig_mask(SIGUSR2_);
+    request.altstack = (struct guest_linux_signal_stack) {
+        .base = UINT64_C(0xffffffffffffffff),
+        .size = UINT64_C(0xeeeeeeeeeeeeeeee),
+        .flags = SS_DISABLE_,
+        .reserved = UINT32_C(0xcccccccc),
+    };
+    restore_signal(&fixture, &request);
+    CHECK(fixture.task.blocked == sig_mask(SIGUSR2_) &&
+            fixture.task.altstack.stack == 0 &&
+            fixture.task.altstack.size == 0 &&
+            fixture.task.altstack.flags == SS_DISABLE_,
+            "恢复禁用替代栈并忽略 DTO 保留字段");
+
+    destroy_fixture(&fixture);
+    return 0;
+}
+
+static int test_restore_rejects_invalid_altstack_only(void) {
+    const struct signal_altstack old_stack = {
+        .stack = UINT64_C(0x0000700012345000),
+        .size = UINT64_C(8192),
+        .flags = 0,
+    };
+    const qword_t new_base = UINT64_C(0x0000700023456000);
+    const qword_t outside_sp = UINT64_C(0x0000600012345000);
+    const struct {
+        struct guest_linux_signal_stack altstack;
+        qword_t stack_pointer;
+        const char *message;
+    } cases[] = {
+        {
+            .altstack = {
+                .base = new_base,
+                .size = UINT64_C(8192),
+                .flags = UINT32_C(4),
+            },
+            .stack_pointer = outside_sp,
+            .message = "无效 flags 保留原替代栈但提交掩码",
+        },
+        {
+            .altstack = {
+                .base = new_base,
+                .size = AARCH64_LINUX_MINSIGSTKSZ - 1,
+            },
+            .stack_pointer = outside_sp,
+            .message = "过小替代栈保留原配置但提交掩码",
+        },
+        {
+            .altstack = {
+                .base = AARCH64_LINUX_USER_ADDRESS_MAX - 4096,
+                .size = UINT64_C(8192),
+            },
+            .stack_pointer = outside_sp,
+            .message = "越过用户地址上界时保留原配置但提交掩码",
+        },
+        {
+            .altstack = {
+                .base = new_base,
+                .size = UINT64_C(8192),
+            },
+            .stack_pointer = old_stack.stack + 128,
+            .message = "仍在旧替代栈上时保留原配置但提交掩码",
+        },
+    };
+
+    for (size_t index = 0; index < array_size(cases); index++) {
+        struct signal_fixture fixture;
+        init_fixture(&fixture);
+        fixture.task.blocked = sig_mask(SIGALRM_);
+        fixture.task.altstack = old_stack;
+        const struct guest_linux_signal_restore_request request = {
+            .stack_pointer = cases[index].stack_pointer,
+            .blocked_mask = sig_mask(SIGUSR2_) |
+                    sig_mask(SIGKILL_) | sig_mask(SIGSTOP_),
+            .altstack = cases[index].altstack,
+        };
+        restore_signal(&fixture, &request);
+        CHECK(fixture.task.blocked == sig_mask(SIGUSR2_) &&
+                memcmp(&fixture.task.altstack,
+                        &old_stack, sizeof(old_stack)) == 0,
+                cases[index].message);
+        destroy_fixture(&fixture);
+    }
+    return 0;
+}
+
+static bool queued_bad_frame_matches(
+        const struct sigqueue *queued, qword_t frame_address) {
+    return queued->info.sig == SIGSEGV_ &&
+            queued->info.sig_errno == 0 &&
+            queued->info.code == SEGV_MAPERR_ &&
+            queued->info.payload_kind == SIGNAL_INFO_PAYLOAD_FAULT &&
+            queued->info.fault.addr == frame_address;
+}
+
+static int test_bad_frame_info_priority_and_handler(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture);
+    const struct signal_action action = {
+        .handler = HANDLER_TWO,
+        .flags = SA_SIGINFO_ | SA_NODEFER_,
+        .mask = sig_mask(SIGUSR2_),
+    };
+    fixture.sighand.action[SIGSEGV_] = action;
+    queue_signal(&fixture.task, SIGUSR1_);
+
+    const qword_t first_address = UINT64_C(0x00007abc12345670);
+    report_bad_frame(&fixture, first_address);
+    struct sigqueue *first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(fixture.task.pending ==
+                    (sig_mask(SIGSEGV_) | sig_mask(SIGUSR1_)) &&
+            list_size(&fixture.task.queue) == 2 &&
+            queued_bad_frame_matches(first, first_address) &&
+            memcmp(&fixture.sighand.action[SIGSEGV_],
+                    &action, sizeof(action)) == 0 &&
+            sighand_is_unlocked(&fixture.sighand),
+            "坏帧携带精确信息并抢占已有异步信号且保留自定义 handler");
+
+    const qword_t second_address = UINT64_C(0x00007abc87654320);
+    report_bad_frame(&fixture, second_address);
+    first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(list_size(&fixture.task.queue) == 2 &&
+            queued_bad_frame_matches(first, second_address),
+            "重复坏帧合并 SIGSEGV 时更新精确故障地址");
+
+    destroy_fixture(&fixture);
+    return 0;
+}
+
+static int test_bad_frame_resets_blocked_or_ignored_handler(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture);
+    fixture.task.blocked = sig_mask(SIGSEGV_) | sig_mask(SIGUSR2_);
+    fixture.sighand.action[SIGSEGV_] = (struct signal_action) {
+        .handler = HANDLER_TWO,
+        .flags = SA_SIGINFO_,
+        .mask = sig_mask(SIGALRM_),
+    };
+    report_bad_frame(&fixture, UINT64_C(0x00007abc11112220));
+    struct sigqueue *first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(fixture.task.blocked == sig_mask(SIGUSR2_) &&
+            fixture.sighand.action[SIGSEGV_].handler == SIG_DFL_ &&
+            fixture.sighand.action[SIGSEGV_].flags == 0 &&
+            queued_bad_frame_matches(first,
+                    UINT64_C(0x00007abc11112220)),
+            "被阻塞的 SIGSEGV 重置默认动作并解除阻塞");
+    destroy_fixture(&fixture);
+
+    init_fixture(&fixture);
+    fixture.sighand.action[SIGSEGV_] = (struct signal_action) {
+        .handler = SIG_IGN_,
+        .flags = SA_NODEFER_,
+        .mask = sig_mask(SIGALRM_),
+    };
+    report_bad_frame(&fixture, UINT64_C(0x00007abc33334440));
+    first = list_first_entry(
+            &fixture.task.queue, struct sigqueue, queue);
+    CHECK(fixture.sighand.action[SIGSEGV_].handler == SIG_DFL_ &&
+            fixture.sighand.action[SIGSEGV_].flags == 0 &&
+            queued_bad_frame_matches(first,
+                    UINT64_C(0x00007abc33334440)),
+            "被忽略的 SIGSEGV 重置默认动作并强制排队");
+    destroy_fixture(&fixture);
+    return 0;
+}
+
 int main(void) {
     if (test_idle_and_blocked_pending() != 0)
         return 1;
@@ -643,6 +868,14 @@ int main(void) {
     if (test_default_stop_and_terminate() != 0)
         return 1;
     if (test_ptrace_stop_restarts_selection() != 0)
+        return 1;
+    if (test_restore_valid_and_disabled_altstack() != 0)
+        return 1;
+    if (test_restore_rejects_invalid_altstack_only() != 0)
+        return 1;
+    if (test_bad_frame_info_priority_and_handler() != 0)
+        return 1;
+    if (test_bad_frame_resets_blocked_or_ignored_handler() != 0)
         return 1;
     return 0;
 }

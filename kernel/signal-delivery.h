@@ -21,6 +21,9 @@ enum signal_delivery_disposition signal_disposition_locked(
 // 下列函数调用前后均持有 current->sighand->lock；ptrace 等待期间可暂时释放。
 void signal_force_sigsegv_locked(
         struct sighand *sighand, int failed_signal);
+void signal_force_sigsegv_info_locked(
+        struct sighand *sighand, int failed_signal,
+        const struct siginfo_ *info);
 void signal_ptrace_stop_locked(
         int signal, const struct siginfo_ *info);
 
