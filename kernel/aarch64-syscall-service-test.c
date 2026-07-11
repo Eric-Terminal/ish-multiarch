@@ -58,10 +58,13 @@ struct io_probe {
 
 struct kernel_probe {
     char last_path[MAX_PATH];
+    char last_stat_path[MAX_PATH];
     int last_flags;
     int last_mode;
     unsigned opens;
     unsigned opened_closes;
+    unsigned stat_calls;
+    unsigned fstat_calls;
     struct statbuf stat;
 };
 
@@ -269,21 +272,41 @@ static struct fd *probe_open(struct mount *mount,
 
 static int probe_stat(struct mount *mount,
         const char *path, struct statbuf *stat) {
-    (void) path;
     struct kernel_probe *probe = mount->data;
-    *stat = (struct statbuf) {
-        .inode = 1,
-        .mode = S_IFDIR | 0777,
-        .uid = probe->stat.uid,
-        .gid = probe->stat.gid,
-    };
+    probe->stat_calls++;
+    strcpy(probe->last_stat_path, path);
+    if (strcmp(path, "/work/metadata") == 0 ||
+            strcmp(path, "/work/link") == 0) {
+        *stat = probe->stat;
+    } else {
+        *stat = (struct statbuf) {
+            .inode = 1,
+            .mode = S_IFDIR | 0777,
+            .uid = probe->stat.uid,
+            .gid = probe->stat.gid,
+        };
+    }
     return 0;
 }
 
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct fd_state *state = fd->data;
+    state->kernel->fstat_calls++;
     *stat = state->kernel->stat;
     return 0;
+}
+
+static ssize_t probe_readlink(struct mount *mount,
+        const char *path, char *buffer, size_t size) {
+    (void) mount;
+    if (strcmp(path, "/work/link") != 0)
+        return _EINVAL;
+    static const char target[] = "metadata";
+    size_t length = sizeof(target) - 1;
+    if (length > size)
+        length = size;
+    memcpy(buffer, target, length);
+    return (ssize_t) length;
 }
 
 static int probe_getpath(struct fd *fd, char *buffer) {
@@ -294,6 +317,7 @@ static int probe_getpath(struct fd *fd, char *buffer) {
 
 static const struct fs_ops probe_fs = {
     .open = probe_open,
+    .readlink = probe_readlink,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -711,6 +735,186 @@ int main(void) {
             USER_BASE + stat_offset, 0, 0);
     CHECK(result == encoded_error(_EBADF) && memory.write_calls == 0,
             "fstat 的 fd 错误优先于 guest 写回故障");
+
+    // newfstatat 复用 task 路径语义，并输出同一份 AArch64 stat wire ABI。
+    const size_t metadata_offset = 0x6000;
+    const size_t metadata_stat_offset = 0x7003;
+    static const char metadata_path[] = "metadata";
+    memcpy(memory.bytes + metadata_offset,
+            metadata_path, sizeof(metadata_path));
+    memset(memory.bytes + metadata_stat_offset - 1,
+            0xa5, sizeof(expected_stat) + 2);
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + metadata_offset + sizeof(metadata_path);
+    unsigned stat_calls_before = kernel.stat_calls;
+    unsigned fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79,
+            UINT64_C(0x12345678ffffff9c), USER_BASE + metadata_offset,
+            USER_BASE + metadata_stat_offset,
+            UINT64_C(0xfacefeed00004800));
+    CHECK(result == 0 &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0 &&
+            kernel.stat_calls == stat_calls_before + 1 &&
+            kernel.fstat_calls == fstat_calls_before,
+            "newfstatat 解码 dirfd、NO_AUTOMOUNT 与同步提示并使用目标 cwd");
+    CHECK(memory.read_calls == sizeof(metadata_path) &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_stat),
+            "newfstatat 在路径 NUL 处停止并一次写回 stat");
+    CHECK(memory.bytes[metadata_stat_offset - 1] == 0xa5 &&
+            memory.bytes[metadata_stat_offset + sizeof(expected_stat)] == 0xa5 &&
+            memcmp(memory.bytes + metadata_stat_offset,
+                    expected_stat, sizeof(expected_stat)) == 0,
+            "newfstatat 的未对齐 128 字节结果匹配独立 ABI 向量");
+
+    static const char link_path[] = "link";
+    memcpy(memory.bytes + metadata_offset, link_path, sizeof(link_path));
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, AT_FDCWD_,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset,
+            0);
+    CHECK(result == 0 &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0,
+            "newfstatat 默认跟随末尾符号链接");
+    CHECK(kernel.stat_calls > stat_calls_before,
+            "newfstatat 跟随链接时必须执行底层 stat");
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, AT_FDCWD_,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset,
+            UINT64_C(0xdeadbeef00000100));
+    CHECK(result == 0 && strcmp(kernel.last_stat_path, "/work/link") == 0,
+            "newfstatat 的 wire NOFOLLOW 只作用于末尾链接");
+    CHECK(kernel.stat_calls > stat_calls_before,
+            "newfstatat 不跟随链接时必须执行底层 stat");
+
+    memory.bytes[metadata_offset] = '\0';
+    memset(memory.bytes + metadata_stat_offset,
+            0xa5, sizeof(expected_stat));
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79,
+            UINT64_C(0x8765432100000000), USER_BASE + metadata_offset,
+            USER_BASE + metadata_stat_offset, UINT64_C(0x1000));
+    CHECK(result == 0 && memory.read_calls == 1 &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_stat) &&
+            kernel.stat_calls == stat_calls_before &&
+            kernel.fstat_calls == fstat_calls_before + 1 &&
+            memcmp(memory.bytes + metadata_stat_offset,
+                    expected_stat, sizeof(expected_stat)) == 0,
+            "newfstatat 的 EMPTY_PATH 可查询普通文件 fd");
+
+    memset(memory.bytes + metadata_stat_offset,
+            0xa5, sizeof(expected_stat));
+    reset_user_access(&memory);
+    fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, 0, 0,
+            USER_BASE + metadata_stat_offset, UINT64_C(0x1000));
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_stat) &&
+            kernel.fstat_calls == fstat_calls_before + 1 &&
+            memcmp(memory.bytes + metadata_stat_offset,
+                    expected_stat, sizeof(expected_stat)) == 0,
+            "newfstatat 接受 NULL 与 EMPTY_PATH 的现代 Linux 组合");
+
+    memset(memory.bytes + metadata_stat_offset,
+            0xa5, sizeof(expected_stat));
+    reset_user_access(&memory);
+    fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79,
+            UINT64_C(0x12345678ffffff9c), 0,
+            USER_BASE + metadata_stat_offset, UINT64_C(0x1000));
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 1 &&
+            kernel.fstat_calls == fstat_calls_before + 1 &&
+            memcmp(memory.bytes + metadata_stat_offset,
+                    expected_stat, sizeof(expected_stat)) == 0,
+            "newfstatat 的 NULL 与 EMPTY_PATH 可查询目标 cwd");
+
+    memset(memory.bytes + metadata_stat_offset,
+            0xa5, sizeof(expected_stat));
+    reset_user_access(&memory);
+    fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, 0, 0,
+            USER_BASE + metadata_stat_offset, UINT64_C(0x80001000));
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_stat) &&
+            kernel.fstat_calls == fstat_calls_before + 1 &&
+            memcmp(memory.bytes + metadata_stat_offset,
+                    expected_stat, sizeof(expected_stat)) == 0,
+            "newfstatat 的非负 fd 空名称快路忽略其余 flags");
+
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    fstat_calls_before = kernel.fstat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, 99,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset, 0);
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            memory.write_calls == 0 && kernel.stat_calls == stat_calls_before &&
+            kernel.fstat_calls == fstat_calls_before,
+            "newfstatat 空路径无 EMPTY 时优先返回 ENOENT");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + metadata_offset;
+    result = invoke(&fixture, &memory, &fault, 79, 99,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset,
+            UINT64_C(0x80000000));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE,
+            "newfstatat 尝试复制路径后由未知 flags 决定最终错误");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + metadata_offset;
+    result = invoke(&fixture, &memory, &fault, 79, 99,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "newfstatat 的合法 flags 保持 pathname 错误优先于 dirfd");
+
+    memcpy(memory.bytes + metadata_offset,
+            metadata_path, sizeof(metadata_path));
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, AT_FDCWD_,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset,
+            UINT64_C(0x80000000));
+    CHECK(result == encoded_error(_EINVAL) &&
+            memory.read_calls == sizeof(metadata_path) &&
+            memory.write_calls == 0 && kernel.stat_calls == stat_calls_before,
+            "newfstatat 对合法路径拒绝未知 wire flags");
+
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + metadata_stat_offset;
+    stat_calls_before = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, AT_FDCWD_,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            kernel.stat_calls == stat_calls_before + 1 &&
+            memory.write_calls == 1 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "newfstatat 在路径查询成功后保持输出故障");
+
+    reset_user_access(&memory);
+    stat_calls_before = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 79, 99,
+            USER_BASE + metadata_offset, USER_BASE + metadata_stat_offset, 0);
+    CHECK(result == encoded_error(_EBADF) &&
+            memory.read_calls == sizeof(metadata_path) &&
+            memory.write_calls == 0 && kernel.stat_calls == stat_calls_before,
+            "newfstatat 相对路径在复制后拒绝无效 dirfd");
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 79, 0, 0,
+            USER_BASE + metadata_stat_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1,
+            "newfstatat 的 NULL 路径需要 EMPTY_PATH");
 
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 999, 0, 0, 0, 0);

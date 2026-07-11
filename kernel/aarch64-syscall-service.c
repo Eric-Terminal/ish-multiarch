@@ -21,6 +21,7 @@ enum aarch64_linux_file_syscall {
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
+    AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
 };
 
@@ -221,6 +222,61 @@ static struct aarch64_linux_stat pack_stat(const struct statbuf *source) {
     };
 }
 
+static qword_t copy_stat_to_user(
+        const struct guest_linux_syscall_context *context,
+        const struct statbuf *host_stat, qword_t address,
+        struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_stat guest_stat = pack_stat(host_stat);
+    dword_t size = sizeof(guest_stat);
+    if (!user_range_fits(address, size))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &guest_stat, size, fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
+static qword_t dispatch_newfstatat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t raw_flags = (dword_t) syscall->arguments[3];
+    int flags = (int) (sdword_t) raw_flags;
+    fd_t dirfd = syscall_fd(syscall->arguments[0]);
+    char path[MAX_PATH];
+    qword_t path_error = 0;
+    if (syscall->arguments[1] == 0 && (raw_flags & AT_EMPTY_PATH_)) {
+        path[0] = '\0';
+    } else {
+        path_error = copy_path_from_user(
+                context, syscall->arguments[1], path, fault);
+    }
+
+    struct statbuf host_stat;
+    // Linux 对非负 fd 的空名称走 fstat 快路；该分支不消费其余 flags。
+    if ((sqword_t) path_error >= 0 && path[0] == '\0' &&
+            (raw_flags & AT_EMPTY_PATH_) && dirfd >= 0) {
+        int error = file_fstat_task(task, dirfd, &host_stat);
+        if (error < 0)
+            return syscall_result(error);
+        return copy_stat_to_user(context, &host_stat,
+                syscall->arguments[2], fault);
+    }
+    if (flags & ~AT_STATAT_SUPPORTED_FLAGS_) {
+        *fault = (struct guest_linux_user_fault) {0};
+        return syscall_result(_EINVAL);
+    }
+    if ((sqword_t) path_error < 0)
+        return path_error;
+
+    int error = file_statat_task(task, dirfd, path, flags, &host_stat);
+    if (error < 0)
+        return syscall_result(error);
+    return copy_stat_to_user(context, &host_stat,
+            syscall->arguments[2], fault);
+}
+
 static qword_t dispatch_fstat(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -230,16 +286,8 @@ static qword_t dispatch_fstat(
             task, syscall_fd(syscall->arguments[0]), &host_stat);
     if (error < 0)
         return syscall_result(error);
-    struct aarch64_linux_stat guest_stat = pack_stat(&host_stat);
-    dword_t size = sizeof(guest_stat);
-    if (!user_range_fits(syscall->arguments[1], size))
-        return user_range_error(fault, syscall->arguments[1],
-                GUEST_MEMORY_WRITE);
-    assert(context->user.write != NULL);
-    if (!context->user.write(context->user.opaque,
-            syscall->arguments[1], &guest_stat, size, fault))
-        return syscall_result(_EFAULT);
-    return 0;
+    return copy_stat_to_user(context, &host_stat,
+            syscall->arguments[1], fault);
 }
 
 static qword_t dispatch_syscall(
@@ -263,6 +311,8 @@ static qword_t dispatch_syscall(
             return dispatch_read(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITE:
             return dispatch_write(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_NEWFSTATAT:
+            return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
         default:

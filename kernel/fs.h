@@ -62,6 +62,8 @@ struct attr {
 #define AT_STATX_FORCE_SYNC_ 0x2000
 #define AT_STATX_DONT_SYNC_ 0x4000
 #define AT_STATX_SYNC_TYPE_ (AT_STATX_FORCE_SYNC_ | AT_STATX_DONT_SYNC_)
+#define AT_STATAT_SUPPORTED_FLAGS_ (AT_SYMLINK_NOFOLLOW_ | \
+        AT_NO_AUTOMOUNT_ | AT_EMPTY_PATH_ | AT_STATX_SYNC_TYPE_)
 
 struct fd *generic_open(const char *path, int flags, int mode);
 struct fd *generic_openat_task(struct task *task, struct fd *at,

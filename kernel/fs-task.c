@@ -70,9 +70,7 @@ int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
 int file_statat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, struct statbuf *stat) {
     memset(stat, 0, sizeof(*stat));
-    const int supported_flags = AT_SYMLINK_NOFOLLOW_ |
-            AT_NO_AUTOMOUNT_ | AT_EMPTY_PATH_ | AT_STATX_SYNC_TYPE_;
-    if (flags & ~supported_flags)
+    if (flags & ~AT_STATAT_SUPPORTED_FLAGS_)
         return _EINVAL;
     if (path[0] == '\0') {
         if (!(flags & AT_EMPTY_PATH_))
