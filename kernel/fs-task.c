@@ -332,3 +332,46 @@ int file_mkdirat_task(struct task *task, fd_t dirfd,
         fd_close(at);
     return result;
 }
+
+int file_renameat_task(struct task *task,
+        fd_t source_dirfd, const char *source,
+        fd_t destination_dirfd, const char *destination) {
+    if (source[0] == '\0' || destination[0] == '\0')
+        return _ENOENT;
+
+    bool source_retained =
+            source[0] != '/' && source_dirfd != AT_FDCWD_;
+    struct fd *source_at = source_retained ?
+            f_get_task_retain(task, source_dirfd) : AT_PWD;
+    if (source_at == NULL)
+        return _EBADF;
+    if (source_at != AT_PWD && !S_ISDIR(source_at->type)) {
+        fd_close(source_at);
+        return _ENOTDIR;
+    }
+
+    bool destination_retained =
+            destination[0] != '/' && destination_dirfd != AT_FDCWD_;
+    struct fd *destination_at = destination_retained ?
+            f_get_task_retain(task, destination_dirfd) : AT_PWD;
+    if (destination_at == NULL) {
+        if (source_retained)
+            fd_close(source_at);
+        return _EBADF;
+    }
+    if (destination_at != AT_PWD && !S_ISDIR(destination_at->type)) {
+        if (destination_retained)
+            fd_close(destination_at);
+        if (source_retained)
+            fd_close(source_at);
+        return _ENOTDIR;
+    }
+
+    int result = generic_renameat_task(task,
+            source_at, source, destination_at, destination);
+    if (destination_retained)
+        fd_close(destination_at);
+    if (source_retained)
+        fd_close(source_at);
+    return result;
+}

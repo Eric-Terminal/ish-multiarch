@@ -204,13 +204,17 @@ int generic_unlinkat(struct fd *at, const char *path_raw) {
     return generic_unlinkat_task(current, at, path_raw);
 }
 
-int generic_renameat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw) {
+int generic_renameat_task(struct task *task,
+        struct fd *src_at, const char *src_raw,
+        struct fd *dst_at, const char *dst_raw) {
     char src[MAX_PATH];
-    int err = path_normalize(src_at, src_raw, src, N_SYMLINK_NOFOLLOW);
+    int err = path_normalize_task(
+            task, src_at, src_raw, src, N_SYMLINK_NOFOLLOW);
     if (err < 0)
         return err;
     char dst[MAX_PATH];
-    err = path_normalize(dst_at, dst_raw, dst, N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
+    err = path_normalize_task(task, dst_at, dst_raw, dst,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
     if (err < 0)
         return err;
     if (contains_mount_point(src))
@@ -226,6 +230,12 @@ int generic_renameat(struct fd *src_at, const char *src_raw, struct fd *dst_at, 
     mount_release(mount);
     mount_release(dst_mount);
     return err;
+}
+
+int generic_renameat(struct fd *src_at, const char *src_raw,
+        struct fd *dst_at, const char *dst_raw) {
+    return generic_renameat_task(
+            current, src_at, src_raw, dst_at, dst_raw);
 }
 
 int generic_symlinkat(const char *target, struct fd *at, const char *link_raw) {

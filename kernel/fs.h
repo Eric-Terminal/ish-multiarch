@@ -61,6 +61,9 @@ int file_unlinkat_task(struct task *task, fd_t dirfd,
         const char *path, bool remove_directory);
 int file_mkdirat_task(struct task *task, fd_t dirfd,
         const char *path, mode_t_ mode);
+int file_renameat_task(struct task *task,
+        fd_t source_dirfd, const char *source,
+        fd_t destination_dirfd, const char *destination);
 
 #define MAX_PATH 4096
 #define MAX_NAME 256
@@ -109,6 +112,9 @@ int generic_rmdirat_task(struct task *task,
         struct fd *at, const char *path);
 int generic_rmdirat(struct fd *at, const char *path);
 int generic_renameat(struct fd *src_at, const char *src, struct fd *dst_at, const char *dst);
+int generic_renameat_task(struct task *task,
+        struct fd *src_at, const char *src,
+        struct fd *dst_at, const char *dst);
 int generic_symlinkat(const char *target, struct fd *at, const char *link);
 int generic_mknodat(struct fd *at, const char *path, mode_t_ mode, dev_t_ dev);
 int generic_seek(struct fd *fd, off_t_ off, int whence, size_t size);

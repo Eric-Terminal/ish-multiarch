@@ -24,6 +24,8 @@ struct open_probe {
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
     char last_mkdir_path[MAX_PATH];
+    char last_rename_source[MAX_PATH];
+    char last_rename_destination[MAX_PATH];
     int last_flags;
     int last_mode;
     int last_mkdir_mode;
@@ -32,6 +34,7 @@ struct open_probe {
     unsigned unlinks;
     unsigned rmdirs;
     unsigned mkdirs;
+    unsigned renames;
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
@@ -172,12 +175,22 @@ static int probe_mkdir(
     return 0;
 }
 
+static int probe_rename(struct mount *mount,
+        const char *source, const char *destination) {
+    struct open_probe *probe = mount->data;
+    probe->renames++;
+    strcpy(probe->last_rename_source, source);
+    strcpy(probe->last_rename_destination, destination);
+    return 0;
+}
+
 static const struct fs_ops probe_fs = {
     .open = probe_open,
     .readlink = probe_readlink,
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
+    .rename = probe_rename,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -521,6 +534,51 @@ int main(void) {
             strcmp(probe.last_mkdir_path, "/decoy/compat") == 0 &&
             probe.last_mkdir_mode == 0701,
             "兼容 mkdirat 入口仍使用 current 的 cwd");
+
+    CHECK(file_renameat_task(&target.task, 99, "",
+            99, "destination") == _ENOENT && probe.renames == 0,
+            "renameat 空源路径优先返回 ENOENT");
+    CHECK(file_renameat_task(&target.task, 99, "source",
+            99, "") == _ENOENT && probe.renames == 0,
+            "renameat 空目标路径优先于 dirfd 检查");
+    CHECK(file_renameat_task(&target.task, AT_FDCWD_, "source",
+            AT_FDCWD_, "destination") == 0 && probe.renames == 1 &&
+            strcmp(probe.last_rename_source, "/target/source") == 0 &&
+            strcmp(probe.last_rename_destination,
+                    "/target/destination") == 0,
+            "renameat 的两端均使用目标任务 cwd");
+    CHECK(file_renameat_task(&target.task, 0, "source",
+            AT_FDCWD_, "destination") == 0 && probe.renames == 2 &&
+            strcmp(probe.last_rename_source, "/explicit/source") == 0 &&
+            strcmp(probe.last_rename_destination,
+                    "/target/destination") == 0,
+            "renameat 独立解析两端 dirfd");
+    CHECK(file_renameat_task(&target.task, 99, "source",
+            AT_FDCWD_, "destination") == _EBADF && probe.renames == 2,
+            "renameat 拒绝无效源 dirfd");
+    CHECK(file_renameat_task(&target.task, AT_FDCWD_, "source",
+            99, "destination") == _EBADF && probe.renames == 2,
+            "renameat 拒绝无效目标 dirfd");
+    CHECK(file_renameat_task(&target.task, cwd_fd, "source",
+            AT_FDCWD_, "destination") == _ENOTDIR &&
+            probe.renames == 2,
+            "renameat 拒绝普通文件源 dirfd");
+    CHECK(file_renameat_task(&target.task, AT_FDCWD_, "source",
+            cwd_fd, "destination") == _ENOTDIR &&
+            probe.renames == 2,
+            "renameat 拒绝普通文件目标 dirfd");
+    CHECK(file_renameat_task(&target.task, 99, "/source",
+            98, "/destination") == 0 && probe.renames == 3 &&
+            strcmp(probe.last_rename_source, "/sandbox/source") == 0 &&
+            strcmp(probe.last_rename_destination,
+                    "/sandbox/destination") == 0,
+            "renameat 绝对路径使用目标 root 并忽略两端 dirfd");
+    CHECK(generic_renameat(AT_PWD, "source",
+            AT_PWD, "destination") == 0 && probe.renames == 4 &&
+            strcmp(probe.last_rename_source, "/decoy/source") == 0 &&
+            strcmp(probe.last_rename_destination,
+                    "/decoy/destination") == 0,
+            "兼容 renameat 入口仍使用 current 的 cwd");
 
     char cwd[MAX_PATH];
     opens_before = probe.opens;

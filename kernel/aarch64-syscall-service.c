@@ -53,6 +53,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_IOCTL = 29,
     AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
+    AARCH64_LINUX_SYS_RENAMEAT = 38,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
     AARCH64_LINUX_SYS_OPENAT = 56,
@@ -87,6 +88,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_WAIT4 = 260,
+    AARCH64_LINUX_SYS_RENAMEAT2 = 276,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -497,6 +499,28 @@ static qword_t dispatch_mkdirat(
     return syscall_result(file_mkdirat_task(task,
             syscall_fd(syscall->arguments[0]), path,
             (mode_t_) (dword_t) syscall->arguments[2]));
+}
+
+static qword_t dispatch_renameat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool has_flags) {
+    if (has_flags && (dword_t) syscall->arguments[4] != 0)
+        return syscall_result(_EINVAL);
+    char source[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], source, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    char destination[MAX_PATH];
+    copied = copy_path_from_user(
+            context, syscall->arguments[3], destination, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_renameat_task(task,
+            syscall_fd(syscall->arguments[0]), source,
+            syscall_fd(syscall->arguments[2]), destination));
 }
 
 static qword_t dispatch_chdir(
@@ -1277,6 +1301,9 @@ static qword_t dispatch_syscall(
             return dispatch_mkdirat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNLINKAT:
             return dispatch_unlinkat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RENAMEAT:
+            return dispatch_renameat(
+                    context, syscall, task, fault, false);
         case AARCH64_LINUX_SYS_CHDIR:
             return dispatch_chdir(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FCHDIR:
@@ -1375,6 +1402,9 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_WAIT4:
             return aarch64_linux_dispatch_wait4(
                     context, syscall, fault);
+        case AARCH64_LINUX_SYS_RENAMEAT2:
+            return dispatch_renameat(
+                    context, syscall, task, fault, true);
         default:
             return syscall_result(_ENOSYS);
     }

@@ -69,6 +69,8 @@ struct kernel_probe {
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
     char last_mkdir_path[MAX_PATH];
+    char last_rename_source[MAX_PATH];
+    char last_rename_destination[MAX_PATH];
     int last_flags;
     int last_mode;
     int last_mkdir_mode;
@@ -80,6 +82,7 @@ struct kernel_probe {
     unsigned unlink_calls;
     unsigned rmdir_calls;
     unsigned mkdir_calls;
+    unsigned rename_calls;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
     dword_t ioctl_input;
@@ -411,6 +414,15 @@ static int probe_mkdir(
     return 0;
 }
 
+static int probe_rename(struct mount *mount,
+        const char *source, const char *destination) {
+    struct kernel_probe *probe = mount->data;
+    probe->rename_calls++;
+    strcpy(probe->last_rename_source, source);
+    strcpy(probe->last_rename_destination, destination);
+    return 0;
+}
+
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct fd_state *state = fd->data;
     strcpy(buffer, state->path);
@@ -423,6 +435,7 @@ static const struct fs_ops probe_fs = {
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
+    .rename = probe_rename,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -1033,6 +1046,70 @@ int main(void) {
             strcmp(kernel.last_mkdir_path, "/absolute-directory") == 0 &&
             kernel.last_mkdir_mode == 0700,
             "mkdirat 绝对路径从目标 root 解析并忽略无效 dirfd");
+
+    const size_t rename_destination_offset = path_offset + 0x100;
+    static const char rename_source[] = "rename-source";
+    static const char rename_destination[] = "rename-destination";
+    memcpy(memory.bytes + path_offset,
+            rename_source, sizeof(rename_source));
+    memcpy(memory.bytes + rename_destination_offset,
+            rename_destination, sizeof(rename_destination));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 38,
+            UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
+            UINT64_C(0xabcdef01ffffff9c),
+            USER_BASE + rename_destination_offset);
+    CHECK(result == 0 && kernel.rename_calls == 1 &&
+            strcmp(kernel.last_rename_source,
+                    "/work/rename-source") == 0 &&
+            strcmp(kernel.last_rename_destination,
+                    "/work/rename-destination") == 0 &&
+            memory.read_calls ==
+                    sizeof(rename_source) + sizeof(rename_destination) &&
+            memory.max_read_size == 1,
+            "renameat 解码两端 64 位参数并使用目标 cwd");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset;
+    result = invoke_five(&fixture, &memory, &fault, 276,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset,
+            UINT64_C(0xabcdef0100000001));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            kernel.rename_calls == 1,
+            "renameat2 按 flags 低 32 位在访问路径前拒绝未知位");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + rename_destination_offset + 4;
+    result = invoke_five(&fixture, &memory, &fault, 276,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory.read_calls == sizeof(rename_source) + 5 &&
+            memory.read_bytes == sizeof(rename_source) + 4 &&
+            kernel.rename_calls == 1 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "renameat2 保持目标路径的精确 guest fault 且不重命名");
+
+    static const char rename_absolute_source[] = "/absolute-source";
+    static const char rename_absolute_destination[] =
+            "/absolute-destination";
+    memcpy(memory.bytes + path_offset,
+            rename_absolute_source, sizeof(rename_absolute_source));
+    memcpy(memory.bytes + rename_destination_offset,
+            rename_absolute_destination,
+            sizeof(rename_absolute_destination));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 276,
+            99, USER_BASE + path_offset,
+            98, USER_BASE + rename_destination_offset, 0);
+    CHECK(result == 0 && kernel.rename_calls == 2 &&
+            strcmp(kernel.last_rename_source, "/absolute-source") == 0 &&
+            strcmp(kernel.last_rename_destination,
+                    "/absolute-destination") == 0,
+            "renameat2 的绝对路径从目标 root 解析并忽略两端 dirfd");
 
     reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + path_offset;
