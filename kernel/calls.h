@@ -98,6 +98,8 @@ struct pollfd_ {
     word_t events;
     word_t revents;
 };
+sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
+        size_t nfds, struct timespec *timeout);
 dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout);
 dword_t sys_select(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t exceptfds_addr, addr_t timeout_addr);
 dword_t sys_pselect(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t exceptfds_addr, addr_t timeout_addr, addr_t sigmask_addr);

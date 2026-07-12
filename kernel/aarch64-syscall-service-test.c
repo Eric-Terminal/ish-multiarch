@@ -4,10 +4,13 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "fs/poll.h"
 #include "fs/tty.h"
 #include "guest/aarch64/linux-signal-abi.h"
+#include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/resource.h"
@@ -56,6 +59,7 @@ struct io_probe {
     unsigned write_error_call;
     int read_error;
     int write_error;
+    int poll_events;
 };
 
 struct kernel_probe {
@@ -249,6 +253,11 @@ static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
     return (ssize_t) copied;
 }
 
+static int probe_poll(struct fd *fd) {
+    struct fd_state *state = fd->data;
+    return state->io->poll_events;
+}
+
 static int probe_close(struct fd *fd) {
     struct fd_state *state = fd->data;
     if (state->allocated) {
@@ -296,6 +305,7 @@ static int probe_ioctl(struct fd *fd, int command, void *argument) {
 static const struct fd_ops probe_fd_ops = {
     .read = probe_read,
     .write = probe_write,
+    .poll = probe_poll,
     .ioctl_size = probe_ioctl_size,
     .ioctl = probe_ioctl,
     .close = probe_close,
@@ -438,6 +448,9 @@ static bool init_fixture(struct task_fixture *fixture,
     lock_init(&fixture->group.lock);
     fixture->group.limits[RLIMIT_NOFILE_] = (struct rlimit_) {8, 8};
     fixture->task.group = &fixture->group;
+    fixture->task.sighand = sighand_new();
+    if (fixture->task.sighand == NULL)
+        return false;
     fixture->task.files = fdtable_new(1);
     if (IS_ERR(fixture->task.files))
         return false;
@@ -468,6 +481,7 @@ static int destroy_fixture(struct task_fixture *fixture) {
     fdtable_release(fixture->task.files);
     fd_close(fixture->fs.pwd);
     fd_close(fixture->root);
+    sighand_release(fixture->task.sighand);
     current = NULL;
     mount_release(fixture->mount);
     lock(&mounts_lock);
@@ -476,10 +490,9 @@ static int destroy_fixture(struct task_fixture *fixture) {
     return error;
 }
 
-static qword_t invoke(struct task_fixture *fixture,
+static qword_t invoke_arguments(struct task_fixture *fixture,
         struct user_memory *memory, struct guest_linux_user_fault *fault,
-        qword_t number, qword_t argument0, qword_t argument1,
-        qword_t argument2, qword_t argument3) {
+        qword_t number, const qword_t arguments[6]) {
     fixture->completion.disposition = GUEST_LINUX_SYSCALL_RETURN;
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = ish_aarch64_linux_syscall_service.runtime_opaque,
@@ -491,12 +504,32 @@ static qword_t invoke(struct task_fixture *fixture,
             .write = write_user,
         },
     };
-    const struct guest_linux_syscall syscall = {
+    struct guest_linux_syscall syscall = {
         .number = number,
-        .arguments = {argument0, argument1, argument2, argument3},
     };
+    memcpy(syscall.arguments, arguments, sizeof(syscall.arguments));
     return ish_aarch64_linux_syscall_service.dispatch(
             &context, &syscall, fault);
+}
+
+static qword_t invoke(struct task_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t number, qword_t argument0, qword_t argument1,
+        qword_t argument2, qword_t argument3) {
+    const qword_t arguments[6] = {
+        argument0, argument1, argument2, argument3, 0, 0,
+    };
+    return invoke_arguments(fixture, memory, fault, number, arguments);
+}
+
+static qword_t invoke_five(struct task_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t number, qword_t argument0, qword_t argument1,
+        qword_t argument2, qword_t argument3, qword_t argument4) {
+    const qword_t arguments[6] = {
+        argument0, argument1, argument2, argument3, argument4, 0,
+    };
+    return invoke_arguments(fixture, memory, fault, number, arguments);
 }
 
 static const byte_t expected_stat[128] = {
@@ -718,6 +751,162 @@ int main(void) {
             memory.write_calls == 0,
             "输出型 ioctl 的后端错误优先于 guest 写回故障");
     kernel.ioctl_result = 0;
+
+    // ppoll 使用 8 字节 pollfd、16 字节 timespec 与 64 位临时信号掩码。
+    const size_t poll_offset = 0x300;
+    const size_t poll_timeout_offset = 0x380;
+    const size_t poll_mask_offset = 0x3a0;
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 9, UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            memory.write_calls == 0,
+            "ppoll 在访问任何 guest 参数前执行 RLIMIT_NOFILE 检查");
+
+    struct aarch64_linux_timespec poll_timeout = {
+        .sec = 0,
+        .nsec = INT64_C(1000000000),
+    };
+    memcpy(memory.bytes + poll_timeout_offset,
+            &poll_timeout, sizeof(poll_timeout));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            0, UINT64_MAX);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            memory.read_bytes == sizeof(poll_timeout) &&
+            memory.write_calls == 0,
+            "ppoll 拒绝十亿纳秒且空掩码忽略 sigsetsize");
+    poll_timeout.sec = -1;
+    poll_timeout.nsec = 0;
+    memcpy(memory.bytes + poll_timeout_offset,
+            &poll_timeout, sizeof(poll_timeout));
+    reset_user_access(&memory);
+    CHECK(invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            0, 0) == encoded_error(_EINVAL),
+            "ppoll 拒绝负的 64 位秒数");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + poll_timeout_offset + 8;
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            0, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "ppoll 保持 16 字节 timespec 的精确读取故障");
+
+    poll_timeout = (struct aarch64_linux_timespec) {0};
+    memcpy(memory.bytes + poll_timeout_offset,
+            &poll_timeout, sizeof(poll_timeout));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            USER_BASE + poll_mask_offset,
+            UINT64_C(0x1234567800000008));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            memory.read_bytes == sizeof(poll_timeout),
+            "ppoll 对非空掩码按完整 64 位检查 sigsetsize");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + poll_mask_offset + 4;
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            USER_BASE + poll_mask_offset, sizeof(sigset_t_));
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 2 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "ppoll 在读取 pollfd 前传播信号掩码故障");
+
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            0, UINT64_MAX);
+    CHECK(result == 0 && memory.read_calls == 1 &&
+            memory.write_calls == 0,
+            "零 nfds 的 ppoll 忽略 pollfd 地址并执行零超时");
+
+    struct pollfd_ pollfds[4] = {
+        {.fd = 0, .events = POLL_READ, .revents = UINT16_MAX},
+        {.fd = 0, .events = POLL_READ, .revents = UINT16_MAX},
+        {.fd = 0, .events = POLL_WRITE, .revents = UINT16_MAX},
+        {.fd = -1, .events = POLL_READ, .revents = UINT16_MAX},
+    };
+    memcpy(memory.bytes + poll_offset, pollfds, sizeof(pollfds));
+    io.poll_events = POLL_READ;
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            USER_BASE + poll_offset, array_size(pollfds),
+            USER_BASE + poll_timeout_offset, 0, UINT64_MAX);
+    memcpy(pollfds, memory.bytes + poll_offset, sizeof(pollfds));
+    CHECK(result == 2 && memory.read_calls == 2 &&
+            memory.read_bytes == sizeof(poll_timeout) + sizeof(pollfds) &&
+            memory.write_calls == 1 &&
+            pollfds[0].revents == POLL_READ &&
+            pollfds[1].revents == POLL_READ &&
+            pollfds[2].revents == 0 && pollfds[3].revents == 0,
+            "ppoll 合并重复 fd 监听并按每个就绪 pollfd 计数");
+
+    struct pollfd_ invalid_pollfd = {
+        .fd = 99,
+        .events = POLL_READ,
+        .revents = UINT16_MAX,
+    };
+    memcpy(memory.bytes + poll_offset,
+            &invalid_pollfd, sizeof(invalid_pollfd));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            USER_BASE + poll_offset, 1, 0, 0, 0);
+    memcpy(&invalid_pollfd, memory.bytes + poll_offset,
+            sizeof(invalid_pollfd));
+    CHECK(result == 1 && invalid_pollfd.revents == POLL_NVAL &&
+            memory.read_calls == 1 && memory.write_calls == 1,
+            "ppoll 的无效 fd 在无限超时下立即返回 POLLNVAL");
+
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 3, 1, 0, 0, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 0 &&
+            memory.write_calls == 0 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX - 3 &&
+            fault.access == GUEST_MEMORY_READ,
+            "ppoll 拒绝跨越用户上限的 pollfd 数组");
+
+    pollfds[0] = (struct pollfd_) {
+        .fd = 0,
+        .events = POLL_READ,
+        .revents = UINT16_MAX,
+    };
+    memcpy(memory.bytes + poll_offset, pollfds, sizeof(pollfds[0]));
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + poll_offset + 6;
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            USER_BASE + poll_offset, 1,
+            USER_BASE + poll_timeout_offset, 0, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 1 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "ppoll 在等待完成后传播 pollfd 部分写回故障");
+
+    const sigset_t_ high_signal_bit = sig_mask(NUM_SIGS);
+    sigset_t_ poll_mask = high_signal_bit | sig_mask(SIGUSR2_) |
+            sig_mask(SIGKILL_) | sig_mask(SIGSTOP_);
+    memcpy(memory.bytes + poll_mask_offset, &poll_mask, sizeof(poll_mask));
+    memcpy(memory.bytes + poll_offset, pollfds, sizeof(pollfds[0]));
+    fixture.task.blocked = sig_mask(SIGUSR1_);
+    fixture.task.has_saved_mask = false;
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            USER_BASE + poll_offset, 1,
+            USER_BASE + poll_timeout_offset,
+            USER_BASE + poll_mask_offset, sizeof(sigset_t_));
+    CHECK(result == 1 && fixture.task.has_saved_mask &&
+            fixture.task.saved_mask == sig_mask(SIGUSR1_) &&
+            fixture.task.blocked == (high_signal_bit | sig_mask(SIGUSR2_)),
+            "ppoll 临时安装目标任务掩码并保持不可阻塞信号规则");
+    fixture.task.blocked = fixture.task.saved_mask;
+    fixture.task.has_saved_mask = false;
 
     static const char plain_path[] = "plain";
     memcpy(memory.bytes + path_offset, plain_path, sizeof(plain_path));

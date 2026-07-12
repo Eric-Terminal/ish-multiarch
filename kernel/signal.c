@@ -732,10 +732,14 @@ static void sigmask_set_temp_unlocked(
     sigmask_set(task, mask);
 }
 
+void sigmask_set_temp_task(struct task *task, sigset_t_ mask) {
+    lock(&task->sighand->lock);
+    sigmask_set_temp_unlocked(task, mask);
+    unlock(&task->sighand->lock);
+}
+
 void sigmask_set_temp(sigset_t_ mask) {
-    lock(&current->sighand->lock);
-    sigmask_set_temp_unlocked(current, mask);
-    unlock(&current->sighand->lock);
+    sigmask_set_temp_task(current, mask);
 }
 
 int_t task_sigsuspend(struct task *task, sigset_t_ mask) {

@@ -122,58 +122,53 @@ dword_t sys_select(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t 
 struct poll_context {
     struct pollfd_ *polls;
     struct fd **files;
-    int nfds;
+    size_t nfds;
 };
 #define POLL_ALWAYS_LISTENING (POLL_ERR|POLL_HUP|POLL_NVAL)
 static int poll_event_callback(void *context, int types, union poll_fd_info info) {
     struct poll_context *c = context;
     struct pollfd_ *polls = c->polls;
-    int nfds = c->nfds;
+    size_t nfds = c->nfds;
     int res = 0;
-    for (int i = 0; i < nfds; i++) {
+    for (size_t i = 0; i < nfds; i++) {
         if (c->files[i] == info.ptr) {
             polls[i].revents = types & (polls[i].events | POLL_ALWAYS_LISTENING);
-            res = 1;
+            if (polls[i].revents != 0)
+                res = 1;
         }
     }
     return res;
 }
-dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout) {
-    STRACE("poll(0x%x, %d, %d)", fds, nfds, timeout);
-    struct pollfd_ polls[nfds];
-    if (fds != 0 || nfds != 0)
-        if (user_read(fds, polls, sizeof(struct pollfd_) * nfds))
-            return _EFAULT;
+
+sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
+        size_t nfds, struct timespec *timeout) {
+    assert(task != NULL && task == current && task->sighand != NULL);
+    struct fd **files = calloc(nfds, sizeof(*files));
+    if (nfds != 0 && files == NULL)
+        return _ENOMEM;
     struct poll *poll = poll_create();
-    if (IS_ERR(poll))
+    if (IS_ERR(poll)) {
+        free(files);
         return PTR_ERR(poll);
+    }
 
-    for (unsigned i = 0; i < nfds; i++)
-        STRACE(" {%d, %#x}", polls[i].fd, polls[i].events);
-    STRACE("...\n");
-
-    struct fd *files[nfds];
-    for (unsigned i = 0; i < nfds; i++) {
-        files[i] = f_get(polls[i].fd);
-        if (files[i] != NULL)
-            // FIXME it might have been closed by now by another thread
-            fd_retain(files[i]);
-        // clear revents, which is reused to mark whether a pollfd has been added or not
+    for (size_t i = 0; i < nfds; i++) {
+        files[i] = polls[i].fd < 0 ? NULL :
+                f_get_task_retain(task, polls[i].fd);
+        // revents 在构建阶段复用为“已合并”标记。
         polls[i].revents = 0;
     }
 
-    // convert polls array into poll_add_fd calls
-    // FIXME this is quadratic
-    for (unsigned i = 0; i < nfds; i++) {
+    int error = 0;
+    for (size_t i = 0; i < nfds; i++) {
         if (polls[i].fd < 0 || polls[i].revents)
             continue;
 
-        // if the same fd is listed more than once, merge the events bits together
         int events = polls[i].events;
         polls[i].revents = 1;
         if (files[i] == NULL)
             continue;
-        for (unsigned j = 0; j < nfds; j++) {
+        for (size_t j = 0; j < nfds; j++) {
             if (polls[j].revents)
                 continue;
             if (files[i] == files[j]) {
@@ -182,36 +177,79 @@ dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout) {
             }
         }
 
-        poll_add_fd(poll, files[i], events | POLL_ALWAYS_LISTENING, (union poll_fd_info) (void *) files[i]);
+        error = poll_add_fd(poll, files[i],
+                events | POLL_ALWAYS_LISTENING,
+                (union poll_fd_info) (void *) files[i]);
+        if (error < 0)
+            goto out;
     }
 
-    for (unsigned i = 0; i < nfds; i++) {
+    int invalid = 0;
+    for (size_t i = 0; i < nfds; i++) {
         polls[i].revents = 0;
-        if (polls[i].fd >= 0 && files[i] == NULL)
+        if (polls[i].fd >= 0 && files[i] == NULL) {
             polls[i].revents = POLL_NVAL;
+            invalid++;
+        }
     }
     struct poll_context context = {polls, files, nfds};
+    struct timespec immediate = {0};
+    if (invalid != 0)
+        timeout = &immediate;
+    error = poll_wait(poll, poll_event_callback, &context, timeout);
+    if (error >= 0) {
+        error = 0;
+        for (size_t i = 0; i < nfds; i++)
+            if (polls[i].revents != 0)
+                error++;
+    }
+
+out:
+    poll_destroy(poll);
+    for (size_t i = 0; i < nfds; i++)
+        if (files[i] != NULL)
+            fd_close(files[i]);
+    free(files);
+    return error;
+}
+
+dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout) {
+    STRACE("poll(0x%x, %d, %d)", fds, nfds, timeout);
+    if ((qword_t) nfds > rlimit_task(current, RLIMIT_NOFILE_) ||
+            nfds > UINT32_MAX / sizeof(struct pollfd_))
+        return (dword_t) _EINVAL;
+    struct pollfd_ *polls = malloc(sizeof(*polls) * nfds);
+    if (nfds != 0 && polls == NULL)
+        return (dword_t) _ENOMEM;
+    if (nfds != 0 && user_read(fds, polls, sizeof(*polls) * nfds)) {
+        free(polls);
+        return (dword_t) _EFAULT;
+    }
+    for (unsigned i = 0; i < nfds; i++)
+        STRACE(" {%d, %#x}", polls[i].fd, polls[i].events);
+    STRACE("...\n");
+
     struct timespec timeout_ts;
     if (timeout >= 0) {
         timeout_ts.tv_sec = timeout / 1000;
         timeout_ts.tv_nsec = (timeout % 1000) * 1000000;
     }
-    int res = poll_wait(poll, poll_event_callback, &context, timeout < 0 ? NULL : &timeout_ts);
-    poll_destroy(poll);
-    for (unsigned i = 0; i < nfds; i++) {
-        if (files[i] != NULL)
-            fd_close(files[i]);
-    }
+    sqword_t res = file_poll_task(current, polls, nfds,
+            timeout < 0 ? NULL : &timeout_ts);
     STRACE("%d end poll", current->pid);
     for (unsigned i = 0; i < nfds; i++)
         STRACE(" {%d, %#x}", polls[i].fd, polls[i].revents);
 
-    if (res < 0)
-        return res;
-    if (fds != 0 || nfds != 0)
-        if (user_write(fds, polls, sizeof(struct pollfd_) * nfds))
-            return _EFAULT;
-    return res;
+    if (res < 0) {
+        free(polls);
+        return (dword_t) res;
+    }
+    if (nfds != 0 && user_write(fds, polls, sizeof(*polls) * nfds)) {
+        free(polls);
+        return (dword_t) _EFAULT;
+    }
+    free(polls);
+    return (dword_t) res;
 }
 
 dword_t sys_pselect(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t exceptfds_addr, addr_t timeout_addr, addr_t sigmask_addr) {

@@ -1,10 +1,12 @@
 #include <assert.h>
 #include <string.h>
+#include <time.h>
 
 #include "fs/fd.h"
 #include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
+#include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-fd-service.h"
@@ -61,6 +63,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_READV = 65,
     AARCH64_LINUX_SYS_WRITEV = 66,
+    AARCH64_LINUX_SYS_PPOLL = 73,
     AARCH64_LINUX_SYS_READLINKAT = 78,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
@@ -86,6 +89,11 @@ enum aarch64_linux_syscall_number {
 
 _Static_assert(sizeof(guest_addr_t) == 4,
         "AArch64 系统调用后端必须在官方 i386 内核类型域中编译");
+_Static_assert(sizeof(struct pollfd_) == 8 &&
+        __builtin_offsetof(struct pollfd_, fd) == 0 &&
+        __builtin_offsetof(struct pollfd_, events) == 4 &&
+        __builtin_offsetof(struct pollfd_, revents) == 6,
+        "AArch64 pollfd 必须保持 8 字节 Linux wire 布局");
 
 static qword_t syscall_result(sqword_t result) {
     return (qword_t) result;
@@ -606,6 +614,98 @@ static qword_t dispatch_ioctl(
     }
     free(buffer);
     fd_close(fd);
+    return syscall_result(result);
+}
+
+static struct timespec ppoll_host_timeout(
+        struct aarch64_linux_timespec timeout) {
+    sqword_t seconds = timeout.sec;
+    // watchOS arm64_32 的 time_t 为 32 位，超长等待以宿主最大单次时长执行。
+    if (sizeof(time_t) == sizeof(int32_t) && seconds > INT32_MAX)
+        seconds = INT32_MAX;
+    return (struct timespec) {
+        .tv_sec = (time_t) seconds,
+        .tv_nsec = (long) timeout.nsec,
+    };
+}
+
+static qword_t dispatch_ppoll(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t nfds = syscall->arguments[1];
+    if (nfds > rlimit_task(task, RLIMIT_NOFILE_) ||
+            nfds > UINT32_MAX / sizeof(struct pollfd_))
+        return syscall_result(_EINVAL);
+
+    struct timespec timeout;
+    struct timespec *timeout_pointer = NULL;
+    if (syscall->arguments[2] != 0) {
+        struct aarch64_linux_timespec wire;
+        if (!aarch64_user_range_fits(
+                syscall->arguments[2], sizeof(wire)))
+            return user_range_error(
+                    fault, syscall->arguments[2], GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[2], &wire, sizeof(wire), fault))
+            return syscall_result(_EFAULT);
+        if (wire.sec < 0 || wire.nsec < 0 ||
+                wire.nsec >= INT64_C(1000000000))
+            return syscall_result(_EINVAL);
+        timeout = ppoll_host_timeout(wire);
+        timeout_pointer = &timeout;
+    }
+
+    sigset_t_ mask = 0;
+    if (syscall->arguments[3] != 0) {
+        if (syscall->arguments[4] != sizeof(mask))
+            return syscall_result(_EINVAL);
+        if (!aarch64_user_range_fits(
+                syscall->arguments[3], sizeof(mask)))
+            return user_range_error(
+                    fault, syscall->arguments[3], GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[3], &mask, sizeof(mask), fault))
+            return syscall_result(_EFAULT);
+    }
+
+    size_t byte_count = (size_t) nfds * sizeof(struct pollfd_);
+    struct pollfd_ *polls = byte_count == 0 ? NULL : malloc(byte_count);
+    if (byte_count != 0 && polls == NULL)
+        return syscall_result(_ENOMEM);
+    if (byte_count != 0) {
+        if (!aarch64_user_range_fits(syscall->arguments[0], byte_count)) {
+            free(polls);
+            return user_range_error(
+                    fault, syscall->arguments[0], GUEST_MEMORY_READ);
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[0], polls, (dword_t) byte_count, fault)) {
+            free(polls);
+            return syscall_result(_EFAULT);
+        }
+    }
+
+    if (syscall->arguments[3] != 0)
+        sigmask_set_temp_task(task, mask);
+    sqword_t result = file_poll_task(
+            task, polls, (size_t) nfds, timeout_pointer);
+    if (result >= 0 && byte_count != 0) {
+        if (!aarch64_user_range_fits(syscall->arguments[0], byte_count)) {
+            free(polls);
+            return user_range_error(
+                    fault, syscall->arguments[0], GUEST_MEMORY_WRITE);
+        }
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                syscall->arguments[0], polls,
+                (dword_t) byte_count, fault))
+            result = _EFAULT;
+    }
+    free(polls);
     return syscall_result(result);
 }
 
@@ -1188,6 +1288,8 @@ static qword_t dispatch_syscall(
             return dispatch_readv(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITEV:
             return dispatch_writev(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_PPOLL:
+            return dispatch_ppoll(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_READLINKAT:
             return dispatch_readlinkat(
                     context, syscall, task, fault);
