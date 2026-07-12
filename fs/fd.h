@@ -139,8 +139,8 @@ struct fd_ops {
     ssize_t (*pwrite)(struct fd *fd, const void *buf, size_t bufsize, off_t off);
     off_t_ (*lseek)(struct fd *fd, off_t_ off, int whence);
 
-    // Reads a directory entry from the stream
-    // required for directories
+    // 调用者必须持有 fd->lock；实现不得重复获取同一把锁。
+    // 目录描述符必须提供该操作。
     int (*readdir)(struct fd *fd, struct dir_entry *entry);
     // Return an opaque value representing the current point in the directory stream
     // optional, fd->offset will be used instead

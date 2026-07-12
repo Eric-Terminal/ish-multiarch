@@ -12,6 +12,11 @@
 #include <sqlite3.h>
 
 struct task;
+struct dir_entry;
+
+// 回调在目标 fd 的位置锁内执行：返回正记录长度表示已提交，负值表示需要回滚。
+typedef sqword_t (*file_dirent_emit_t)(void *opaque,
+        const struct dir_entry *entry, unsigned long next_position);
 
 struct fs_info {
     atomic_uint refcount;
@@ -30,6 +35,8 @@ void fs_chdir(struct fs_info *fs, struct fd *pwd);
 ssize_t file_read_task(struct task *task, fd_t fd, void *buffer, size_t size);
 ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t size);
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size);
+sqword_t file_getdents_task(struct task *task, fd_t fd,
+        file_dirent_emit_t emit, void *opaque);
 int file_write_check_task(struct task *task, fd_t fd);
 int file_write_check_fd(struct fd *fd);
 int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);

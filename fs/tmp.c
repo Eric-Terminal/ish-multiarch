@@ -446,12 +446,11 @@ static off_t_ tmpfs_lseek(struct fd *fd, off_t_ off, int whence) {
 
 static int tmpfs_readdir(struct fd *fd, struct dir_entry *entry) {
     struct tmp_dirent *parent = fd->tmpfs.dirent;
-    int res = _ENOTDIR;
     if (!S_ISDIR(parent->inode->stat.mode))
-        goto out;
+        return _ENOTDIR;
 
-    lock(&fd->lock);
     lock(&parent->lock);
+    int res;
     struct tmp_dirent *dirent = fd->tmpfs.dir_pos;
     if (dirent == NULL) {
         res = 0;
@@ -468,7 +467,6 @@ static int tmpfs_readdir(struct fd *fd, struct dir_entry *entry) {
 
 out:
     unlock(&parent->lock);
-    unlock(&fd->lock);
     return res;
 }
 

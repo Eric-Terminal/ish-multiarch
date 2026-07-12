@@ -6,14 +6,15 @@
 #include "kernel/fs.h"
 #include "fs/fd.h"
 
-static unsigned long fd_telldir(struct fd *fd) {
+// 调用者持有 fd->lock，保证读取、输出与必要的游标回滚不可被 lseek 穿插。
+static unsigned long fd_telldir_locked(struct fd *fd) {
     unsigned long off = fd->offset;
     if (fd->ops->telldir)
         off = fd->ops->telldir(fd);
     return off;
 }
 
-static void fd_seekdir(struct fd *fd, unsigned long off) {
+static void fd_seekdir_locked(struct fd *fd, unsigned long off) {
     fd->offset = off;
     if (fd->ops->seekdir)
         fd->ops->seekdir(fd, off);
@@ -56,52 +57,85 @@ size_t fill_dirent_64(void *dirent_data, ino_t inode, off_t_ offset, const char 
     return dirent->reclen;
 }
 
+sqword_t file_getdents_task(struct task *task, fd_t fd_number,
+        file_dirent_emit_t emit, void *opaque) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    if (!S_ISDIR(fd->type) || fd->ops->readdir == NULL) {
+        fd_close(fd);
+        return _ENOTDIR;
+    }
+
+    sqword_t completed = 0;
+    lock(&fd->lock);
+    while (true) {
+        unsigned long before = fd_telldir_locked(fd);
+        struct dir_entry entry;
+        int error = fd->ops->readdir(fd, &entry);
+        if (error <= 0) {
+            if (error < 0) {
+                fd_seekdir_locked(fd, before);
+                if (completed == 0)
+                    completed = error;
+            }
+            break;
+        }
+
+        unsigned long next = fd_telldir_locked(fd);
+        sqword_t emitted = emit(opaque, &entry, next);
+        assert(emitted != 0);
+        if (emitted < 0) {
+            fd_seekdir_locked(fd, before);
+            if (completed == 0)
+                completed = emitted;
+            break;
+        }
+        completed += emitted;
+    }
+    unlock(&fd->lock);
+    fd_close(fd);
+    return completed;
+}
+
+struct legacy_getdents_context {
+    addr_t address;
+    dword_t remaining;
+    size_t (*fill)(void *, ino_t, off_t_, const char *, int);
+    unsigned printed;
+};
+
+static sqword_t emit_legacy_dirent(void *opaque,
+        const struct dir_entry *entry, unsigned long next_position) {
+    struct legacy_getdents_context *context = opaque;
+    byte_t data[sizeof(struct linux_dirent64_) + NAME_MAX + 4];
+    size_t length = context->fill(data, entry->inode,
+            (off_t_) next_position, entry->name, 0);
+    if (length > context->remaining)
+        return _EINVAL;
+    if (context->printed < 20) {
+        STRACE(" {inode=%llu, offset=%lu, name=%s, type=0, reclen=%zu}",
+                (unsigned long long) entry->inode, next_position,
+                entry->name, length);
+        context->printed++;
+    }
+    if (user_write(context->address, data, length))
+        return _EFAULT;
+    context->address += length;
+    context->remaining -= length;
+    return (sqword_t) length;
+}
+
 int_t sys_getdents_common(fd_t f, addr_t dirents, dword_t count,
         size_t (*fill_dirent)(void *, ino_t, off_t_, const char *, int)) {
     STRACE("getdents(%d, %#x, %#x)", f, dirents, count);
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    if (!S_ISDIR(fd->type) || fd->ops->readdir == NULL)
-        return _ENOTDIR;
-
-    dword_t orig_count = count;
-
-    long ptr;
-    int err;
-    int printed = 0;
-    while (true) {
-        ptr = fd_telldir(fd);
-        struct dir_entry entry;
-        err = fd->ops->readdir(fd, &entry);
-        if (err < 0)
-            return err;
-        if (err == 0)
-            break;
-
-        size_t max_reclen = sizeof(struct linux_dirent64_) + strlen(entry.name) + 4;
-        char dirent_data[max_reclen];
-        ino_t inode = entry.inode;
-        off_t_ offset = fd_telldir(fd);
-        const char *name = entry.name;
-        int type = 0;
-        size_t reclen = fill_dirent(dirent_data, inode, offset, name, type);
-        if (printed < 20) {
-            STRACE(" {inode=%d, offset=%d, name=%s, type=%d, reclen=%d}",
-                    inode, offset, name, type, reclen);
-            printed++;
-        }
-
-        if (reclen > count)
-            break;
-        if (user_write(dirents, dirent_data, reclen))
-            return _EFAULT;
-        dirents += reclen;
-        count -= reclen;
-    }
-
-    fd_seekdir(fd, ptr);
-    return orig_count - count;
+    struct legacy_getdents_context context = {
+        .address = dirents,
+        .remaining = count,
+        .fill = fill_dirent,
+    };
+    return (int_t) file_getdents_task(
+            current, f, emit_legacy_dirent, &context);
 }
 
 int_t sys_getdents(fd_t f, addr_t dirents, uint_t count) {
@@ -111,4 +145,3 @@ int_t sys_getdents(fd_t f, addr_t dirents, uint_t count) {
 int_t sys_getdents64(fd_t f, addr_t dirents, uint_t count) {
     return sys_getdents_common(f, dirents, count, fill_dirent_64);
 }
-

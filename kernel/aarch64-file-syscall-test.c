@@ -34,7 +34,9 @@ struct user_memory {
     dword_t max_write_size;
     struct task *replacement_task;
     struct fd *replacement_fd;
+    fd_t replacement_number;
     qword_t replace_on_read;
+    qword_t replace_on_write;
     bool replacement_installed;
 };
 
@@ -46,6 +48,20 @@ struct io_probe {
     size_t write_requests[4];
     unsigned write_error_call;
     int write_error;
+};
+
+#define DIRECTORY_PROBE_CAPACITY 4
+
+struct directory_probe {
+    const char *names[DIRECTORY_PROBE_CAPACITY];
+    qword_t inodes[DIRECTORY_PROBE_CAPACITY];
+    size_t count;
+    size_t position;
+    size_t error_position;
+    int error;
+    unsigned read_calls;
+    unsigned seek_calls;
+    unsigned close_calls;
 };
 
 struct syscall_fixture {
@@ -77,9 +93,11 @@ static bool read_user(void *opaque, qword_t address,
     struct user_memory *memory = opaque;
     if (memory->replacement_fd != NULL &&
             address == memory->replace_on_read) {
-        assert(f_close_task(memory->replacement_task, 0) == 0);
+        assert(f_close_task(memory->replacement_task,
+                memory->replacement_number) == 0);
         assert(f_install_task(memory->replacement_task,
-                memory->replacement_fd, 0) == 0);
+                memory->replacement_fd, 0) ==
+                memory->replacement_number);
         memory->replacement_fd = NULL;
         memory->replacement_installed = true;
     }
@@ -114,6 +132,16 @@ static bool write_user(void *opaque, qword_t address,
         const void *source, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct user_memory *memory = opaque;
+    if (memory->replacement_fd != NULL &&
+            address == memory->replace_on_write) {
+        assert(f_close_task(memory->replacement_task,
+                memory->replacement_number) == 0);
+        assert(f_install_task(memory->replacement_task,
+                memory->replacement_fd, 0) ==
+                memory->replacement_number);
+        memory->replacement_fd = NULL;
+        memory->replacement_installed = true;
+    }
     memory->write_calls++;
     if (size > memory->max_write_size)
         memory->max_write_size = size;
@@ -148,6 +176,10 @@ static void reset_user(struct user_memory *memory) {
     memory->write_calls = 0;
     memory->max_read_size = 0;
     memory->max_write_size = 0;
+    memory->replacement_number = 0;
+    memory->replace_on_read = UINT64_MAX;
+    memory->replace_on_write = UINT64_MAX;
+    memory->replacement_installed = false;
 }
 
 static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
@@ -170,6 +202,56 @@ static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
 static const struct fd_ops probe_fd_ops = {
     .write = probe_write,
 };
+
+static int directory_readdir(struct fd *fd, struct dir_entry *entry) {
+    struct directory_probe *probe = fd->data;
+    probe->read_calls++;
+    if (probe->error != 0 &&
+            probe->position == probe->error_position)
+        return probe->error;
+    if (probe->position == probe->count)
+        return 0;
+    assert(probe->position < probe->count);
+    entry->inode = probe->inodes[probe->position];
+    strcpy(entry->name, probe->names[probe->position]);
+    probe->position++;
+    return 1;
+}
+
+static unsigned long directory_telldir(struct fd *fd) {
+    struct directory_probe *probe = fd->data;
+    return (unsigned long) probe->position;
+}
+
+static void directory_seekdir(struct fd *fd, unsigned long position) {
+    struct directory_probe *probe = fd->data;
+    assert(position <= probe->count);
+    probe->seek_calls++;
+    probe->position = (size_t) position;
+}
+
+static int directory_close(struct fd *fd) {
+    struct directory_probe *probe = fd->data;
+    probe->close_calls++;
+    return 0;
+}
+
+static const struct fd_ops directory_fd_ops = {
+    .readdir = directory_readdir,
+    .telldir = directory_telldir,
+    .seekdir = directory_seekdir,
+    .close = directory_close,
+};
+
+static struct fd *create_directory_fd(struct directory_probe *probe) {
+    struct fd *fd = fd_create(&directory_fd_ops);
+    if (fd == NULL)
+        return NULL;
+    fd->data = probe;
+    fd->type = S_IFDIR;
+    fd->flags = O_RDONLY_;
+    return fd;
+}
 
 static void reset_io(struct io_probe *probe) {
     probe->written_size = 0;
@@ -532,6 +614,199 @@ int main(void) {
             "writev 对 eventfd 保持单次八字节写入语义");
     CHECK(f_close_task(&fixture.task, event_fd) == 0,
             "eventfd 测试描述符清理成功");
+
+    const size_t directory_offset = 0x5000;
+    char maximum_name[NAME_MAX + 1];
+    memset(maximum_name, 'x', NAME_MAX);
+    maximum_name[NAME_MAX] = '\0';
+    struct directory_probe directory = {
+        .names = {"a", "second", maximum_name},
+        .inodes = {UINT64_C(0x1020304050607080), 22, 33},
+        .count = 3,
+    };
+    struct fd *directory_object = create_directory_fd(&directory);
+    CHECK(directory_object != NULL, "目录探针描述符创建成功");
+    fd_t directory_fd = f_install_task(
+            &fixture.task, directory_object, 0);
+    CHECK(directory_fd == 1, "目录探针安装到空闲描述符");
+
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, 99,
+            UINT64_MAX, UINT64_MAX);
+    CHECK(result == encoded_error(_EBADF) && memory.write_calls == 0,
+            "getdents64 的无效 fd 优先于 guest 地址错误");
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, 0,
+            UINT64_MAX, UINT64_MAX);
+    CHECK(result == encoded_error(_ENOTDIR) && memory.write_calls == 0,
+            "getdents64 的非目录错误不访问 guest 缓冲区");
+
+    memset(memory.bytes + directory_offset, 0xa5, 32);
+    directory.position = 0;
+    directory.seek_calls = 0;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 23);
+    CHECK(result == encoded_error(_EINVAL) &&
+            directory.position == 0 && directory.seek_calls == 1 &&
+            memory.write_calls == 0,
+            "首条目录记录差一字节时返回 EINVAL 并回滚游标");
+    for (size_t index = 0; index < 32; index++)
+        CHECK(memory.bytes[directory_offset + index] == 0xa5,
+                "容量不足不修改 guest 哨兵");
+
+    memset(memory.bytes + directory_offset, 0xa5, 40);
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 24);
+    struct aarch64_linux_dirent64 *first =
+            (void *) (memory.bytes + directory_offset);
+    CHECK(result == 24 && directory.position == 1 &&
+            memory.write_calls == 1 && first->inode == directory.inodes[0] &&
+            first->next_offset == 1 && first->length == 24 &&
+            first->type == 0 && strcmp(first->name, "a") == 0,
+            "短名称目录记录使用 24 字节线格式和下一位置 cookie");
+    for (size_t index = 21; index < 24; index++)
+        CHECK(memory.bytes[directory_offset + index] == 0,
+                "短记录尾部 padding 已清零");
+    CHECK(memory.bytes[directory_offset + 24] == 0xa5,
+            "精确容量不越过 guest 输出边界");
+
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 32);
+    struct aarch64_linux_dirent64 *second =
+            (void *) (memory.bytes + directory_offset);
+    CHECK(result == 32 && directory.position == 2 &&
+            second->inode == directory.inodes[1] &&
+            second->next_offset == 2 && second->length == 32 &&
+            strcmp(second->name, "second") == 0,
+            "容量不足后重试从未消费的第二条记录继续");
+
+    memset(memory.bytes + directory_offset, 0xa5, 336);
+    directory.position = 0;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset,
+            UINT64_C(0x12345678ffffffff));
+    first = (void *) (memory.bytes + directory_offset);
+    second = (void *) (memory.bytes + directory_offset + 24);
+    struct aarch64_linux_dirent64 *third =
+            (void *) (memory.bytes + directory_offset + 56);
+    CHECK(result == 336 && directory.position == 3 &&
+            memory.write_calls == 3 && first->length == 24 &&
+            second->length == 32 && third->length == 280 &&
+            third->next_offset == 3 && strcmp(third->name, maximum_name) == 0,
+            "低 32 位最大容量不分配巨型缓冲并输出三条记录");
+    for (size_t index = 50; index < 56; index++)
+        CHECK(memory.bytes[directory_offset + index] == 0,
+                "第二条记录的对齐 padding 已清零");
+    for (size_t index = 331; index < 336; index++)
+        CHECK(memory.bytes[directory_offset + index] == 0,
+                "最大名称记录的对齐 padding 已清零");
+
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && directory.position == 3 &&
+            memory.write_calls == 0,
+            "目录 EOF 不访问无效 guest 指针");
+    reset_user(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 61, directory_fd,
+            UINT64_MAX, UINT64_MAX) == 0 && memory.write_calls == 0,
+            "重复读取目录 EOF 仍稳定返回零");
+
+    directory.position = 0;
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + directory_offset + 10;
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 336);
+    CHECK(result == encoded_error(_EFAULT) && directory.position == 0 &&
+            memory.write_calls == 1 && fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "首条记录部分写 fault 返回 EFAULT 并回滚当前游标");
+
+    directory.position = 0;
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + directory_offset + 24 + 5;
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 336);
+    CHECK(result == 24 && directory.position == 1 &&
+            memory.write_calls == 2 && fault.address == memory.fail_write_at,
+            "第二条记录写 fault 优先返回完整前缀并回滚失败条目");
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 32);
+    second = (void *) (memory.bytes + directory_offset);
+    CHECK(result == 32 && directory.position == 2 &&
+            strcmp(second->name, "second") == 0,
+            "写 fault 后的下一次调用重新输出失败条目");
+
+    directory.position = 0;
+    directory.error_position = 0;
+    directory.error = _EIO;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 336);
+    CHECK(result == encoded_error(_EIO) && directory.position == 0 &&
+            memory.write_calls == 0,
+            "首条记录前的后端错误原样传播并保持游标");
+    directory.error_position = 1;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 336);
+    CHECK(result == 24 && directory.position == 1 &&
+            memory.write_calls == 1,
+            "已有记录后的后端错误返回完整前缀");
+    directory.error = 0;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 32);
+    second = (void *) (memory.bytes + directory_offset);
+    CHECK(result == 32 && directory.position == 2 &&
+            strcmp(second->name, "second") == 0,
+            "后端错误解除后从失败位置继续读取");
+
+    directory.position = 0;
+    reset_user(&memory);
+    qword_t crossing_address =
+            AARCH64_LINUX_USER_ADDRESS_MAX - UINT64_C(10);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            crossing_address, 24);
+    CHECK(result == encoded_error(_EFAULT) && directory.position == 0 &&
+            memory.write_calls == 0 && fault.address == crossing_address &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "目录记录跨越 AArch64 用户地址上限时在回调前回滚");
+
+    struct directory_probe replacement_directory = {
+        .names = {"new"},
+        .inodes = {44},
+        .count = 1,
+    };
+    struct fd *directory_replacement =
+            create_directory_fd(&replacement_directory);
+    CHECK(directory_replacement != NULL,
+            "目录 fd 复用测试替代对象创建成功");
+    directory.position = 0;
+    reset_user(&memory);
+    memory.replacement_task = &fixture.task;
+    memory.replacement_fd = directory_replacement;
+    memory.replacement_number = directory_fd;
+    memory.replace_on_write = USER_BASE + directory_offset;
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 24);
+    CHECK(result == 24 && memory.replacement_installed &&
+            directory.close_calls == 1 && directory.position == 1,
+            "guest 写回期间 close 与复用不会替换本次 retained 目录对象");
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 61, directory_fd,
+            USER_BASE + directory_offset, 24);
+    struct aarch64_linux_dirent64 *replacement_entry =
+            (void *) (memory.bytes + directory_offset);
+    CHECK(result == 24 && replacement_directory.position == 1 &&
+            strcmp(replacement_entry->name, "new") == 0,
+            "下一次 getdents64 才观察到复用后的新目录对象");
 
     struct io_probe replacement_io = {0};
     struct fd *replacement = fd_create(&probe_fd_ops);

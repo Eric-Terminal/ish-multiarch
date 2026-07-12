@@ -14,6 +14,27 @@ _Static_assert(sizeof(struct aarch64_linux_iovec) == 16 &&
         __builtin_offsetof(struct aarch64_linux_iovec, length) == 8,
         "AArch64 Linux iovec ABI 必须固定为两个连续 qword");
 
+#define AARCH64_LINUX_DIRENT64_NAME_OFFSET 19
+#define AARCH64_LINUX_DIRENT64_ALIGNMENT 8
+#define AARCH64_LINUX_DIRENT64_MAX_SIZE 280
+
+struct aarch64_linux_dirent64 {
+    qword_t inode;
+    sqword_t next_offset;
+    word_t length;
+    byte_t type;
+    char name[];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct aarch64_linux_dirent64) ==
+        AARCH64_LINUX_DIRENT64_NAME_OFFSET &&
+        __builtin_offsetof(struct aarch64_linux_dirent64, inode) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_dirent64, next_offset) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_dirent64, length) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_dirent64, type) == 18 &&
+        __builtin_offsetof(struct aarch64_linux_dirent64, name) == 19,
+        "AArch64 Linux dirent64 字段偏移必须与内核 ABI 一致");
+
 struct aarch64_linux_stat {
     qword_t dev;
     qword_t ino;

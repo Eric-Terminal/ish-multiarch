@@ -42,6 +42,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETCWD = 17,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
+    AARCH64_LINUX_SYS_GETDENTS64 = 61,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_WRITEV = 66,
@@ -650,6 +651,63 @@ static qword_t dispatch_getgroups(
     return task->ngroups;
 }
 
+struct aarch64_getdents_context {
+    const struct guest_linux_syscall_context *syscall;
+    struct guest_linux_user_fault *fault;
+    qword_t address;
+    dword_t remaining;
+};
+
+static sqword_t emit_aarch64_dirent(void *opaque,
+        const struct dir_entry *entry, unsigned long next_position) {
+    struct aarch64_getdents_context *context = opaque;
+    size_t name_size = strlen(entry->name) + 1;
+    size_t unaligned = AARCH64_LINUX_DIRENT64_NAME_OFFSET + name_size;
+    const size_t alignment = AARCH64_LINUX_DIRENT64_ALIGNMENT;
+    dword_t length = (dword_t) ((unaligned + alignment - 1) &
+            ~(alignment - 1));
+    assert(length <= AARCH64_LINUX_DIRENT64_MAX_SIZE);
+    if (length > context->remaining)
+        return _EINVAL;
+
+    byte_t record[AARCH64_LINUX_DIRENT64_MAX_SIZE] = {0};
+    struct aarch64_linux_dirent64 *wire = (void *) record;
+    wire->inode = entry->inode;
+    wire->next_offset = (sqword_t) (qword_t) next_position;
+    wire->length = (word_t) length;
+    wire->type = 0;
+    memcpy(record + AARCH64_LINUX_DIRENT64_NAME_OFFSET,
+            entry->name, name_size);
+
+    if (!aarch64_user_range_fits(context->address, length)) {
+        user_range_error(context->fault, context->address,
+                GUEST_MEMORY_WRITE);
+        return _EFAULT;
+    }
+    assert(context->syscall->user.write != NULL);
+    if (!context->syscall->user.write(context->syscall->user.opaque,
+            context->address, record, length, context->fault))
+        return _EFAULT;
+    context->address += length;
+    context->remaining -= length;
+    return (sqword_t) length;
+}
+
+static qword_t dispatch_getdents64(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct aarch64_getdents_context output = {
+        .syscall = context,
+        .fault = fault,
+        .address = syscall->arguments[1],
+        .remaining = (dword_t) syscall->arguments[2],
+    };
+    return syscall_result(file_getdents_task(task,
+            syscall_fd(syscall->arguments[0]),
+            emit_aarch64_dirent, &output));
+}
+
 static qword_t dispatch_rt_sigprocmask(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -843,6 +901,9 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_CLOSE:
             return syscall_result(f_close_task(
                     task, syscall_fd(syscall->arguments[0])));
+        case AARCH64_LINUX_SYS_GETDENTS64:
+            return dispatch_getdents64(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_READ:
             return dispatch_read(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITE:
