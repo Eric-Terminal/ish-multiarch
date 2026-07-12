@@ -61,12 +61,12 @@ int main(void) {
             TEST_CLONE_THREAD;
     parent.aarch64_process =
             (struct aarch64_linux_process *) (uintptr_t) 0x1234;
-    CHECK(sys_clone(shared_flags, 0, 0, 0, 0) == (dword_t) _ENOSYS &&
+    CHECK(sys_clone(shared_flags, 0, 0, 0, 0) == (dword_t) _EINVAL &&
             list_size(&group.threads) == 1 &&
             list_empty(&parent.children) && parent.mm->refcount == 1 &&
             files.refcount == 1 && fs.refcount == 1 &&
             sighand.refcount == 1,
-            "AArch64 clone 在分配或共享资源前关闭失败");
+            "AArch64 clone 在分配或共享资源前拒绝非纯 fork 标志");
     parent.aarch64_process = NULL;
     static const struct {
         dword_t flags;

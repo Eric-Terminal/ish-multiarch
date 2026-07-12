@@ -2,6 +2,7 @@
 #include <string.h>
 #include "kernel/task.h"
 #include "fs/fd.h"
+#include "guest/aarch64/linux-process.h"
 #include "kernel/calls.h"
 #include "fs/tty.h"
 #include "kernel/mm.h"
@@ -168,14 +169,38 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
         return _EINVAL;
     if (flags & CLONE_THREAD_ && !(flags & CLONE_SIGHAND_))
         return _EINVAL;
-    // opaque AArch64 CPU/页表尚无可共享或可复制的 clone 事务。
-    if (task_has_aarch64_process(current))
-        return _ENOSYS;
+    bool is_aarch64 = task_has_aarch64_process(current);
+    if (is_aarch64 && (flags != SIGCHLD_ || stack != 0))
+        return _EINVAL;
 
     struct task *task = task_create_(current);
     if (task == NULL)
         return _ENOMEM;
     pid_t_ pid = task->pid;
+
+    if (is_aarch64) {
+        // copy_task 会在末尾发布 PID；opaque process 必须在此之前完整接入。
+        const struct aarch64_linux_process_fork_config process_config = {
+            .tid = pid,
+            .task_opaque = task,
+        };
+        struct aarch64_linux_process_error process_error;
+        struct aarch64_linux_process *process =
+                aarch64_linux_process_fork(
+                        current->aarch64_process,
+                        &process_config, &process_error);
+        if (process == NULL) {
+            task_abort_create(task);
+            return process_error.stage ==
+                    AARCH64_LINUX_PROCESS_ERROR_ALLOCATION ?
+                    _ENOMEM : _EINVAL;
+        }
+        if (!task_attach_aarch64_process(task, process)) {
+            aarch64_linux_process_destroy(process);
+            task_abort_create(task);
+            return _EINVAL;
+        }
+    }
 
     struct vfork_info vfork;
     if (flags & CLONE_VFORK_) {
