@@ -54,6 +54,11 @@ static void make_expected(const struct guest_linux_signal_info *info,
             put_dword(expected, 24, (dword_t) info->sigsys.syscall);
             put_dword(expected, 28, info->sigsys.architecture);
             break;
+        case GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE:
+            put_dword(expected, 16, (dword_t) info->queue.pid);
+            put_dword(expected, 20, info->queue.uid);
+            put_qword(expected, 24, info->queue.value);
+            break;
         case GUEST_LINUX_SIGNAL_PAYLOAD_NONE:
         default:
             break;
@@ -107,7 +112,16 @@ int main(void) {
             },
         },
         {
-            .signal = 12, .error = -7, .code = -8,
+            .signal = 12, .error = -7, .code = -1,
+            .payload_kind = GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE,
+            .queue = {
+                .pid = -1357,
+                .uid = UINT32_C(0x89abcdef),
+                .value = UINT64_C(0xfedcba9876543210),
+            },
+        },
+        {
+            .signal = 13, .error = -8, .code = -9,
             .payload_kind = UINT32_MAX,
         },
     };
@@ -120,5 +134,26 @@ int main(void) {
         CHECK(memcmp(&wire, expected, sizeof(expected)) == 0,
                 "完整 128 字节 wire 与固定 payload 偏移一致");
     }
+
+    struct aarch64_linux_siginfo queue_wire = {
+        .signo = 63,
+        .error = -11,
+        .code = -1,
+        .reserved = UINT32_MAX,
+        .queue = {
+            .pid = -9753,
+            .uid = UINT32_C(0xa1b2c3d4),
+            .value = UINT64_C(0x0123456789abcdef),
+        },
+    };
+    struct guest_linux_signal_info unpacked =
+            aarch64_linux_unpack_sigqueueinfo(32, &queue_wire);
+    CHECK(unpacked.signal == 32 && unpacked.error == -11 &&
+            unpacked.code == -1 &&
+            unpacked.payload_kind == GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE &&
+            unpacked.queue.pid == -9753 &&
+            unpacked.queue.uid == UINT32_C(0xa1b2c3d4) &&
+            unpacked.queue.value == UINT64_C(0x0123456789abcdef),
+            "AArch64 queue 解包忽略 wire signo 并保留完整 64 位 sigval");
     return 0;
 }

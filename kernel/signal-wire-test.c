@@ -10,6 +10,7 @@
 #define TEST_SIGALRM 14
 #define TEST_SIGSYS 31
 #define TEST_SI_USER 0
+#define TEST_SI_QUEUE -1
 #define TEST_SI_TIMER -2
 #define TEST_SI_KERNEL 128
 #define TEST_SEGV_MAPERR 1
@@ -63,6 +64,39 @@ int main(void) {
     wire = pack_i386_siginfo(&kill);
     CHECK(memcmp(&wire, &expected_kill, sizeof(wire)) == 0,
             "kill payload 使用 i386 固定偏移");
+
+    const struct siginfo_ queued = {
+        .sig = TEST_SIGUSR2,
+        .sig_errno = -7,
+        .code = TEST_SI_QUEUE,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_QUEUE,
+        .queue = {
+            .pid = -2468,
+            .uid = UINT32_C(0x89abcdef),
+            .value = UINT64_C(0x1122334455667788),
+        },
+    };
+    const struct i386_siginfo expected_queue = {
+        .sig = TEST_SIGUSR2,
+        .sig_errno = -7,
+        .code = TEST_SI_QUEUE,
+        .queue = {
+            .pid = -2468,
+            .uid = UINT32_C(0x89abcdef),
+            .value = UINT32_C(0x55667788),
+        },
+    };
+    wire = pack_i386_siginfo(&queued);
+    struct siginfo_ unpacked = unpack_i386_sigqueueinfo(
+            TEST_SIGUSR1, &expected_queue);
+    CHECK(memcmp(&wire, &expected_queue, sizeof(wire)) == 0 &&
+            unpacked.sig == TEST_SIGUSR1 &&
+            unpacked.sig_errno == -7 && unpacked.code == TEST_SI_QUEUE &&
+            unpacked.payload_kind == SIGNAL_INFO_PAYLOAD_QUEUE &&
+            unpacked.queue.pid == -2468 &&
+            unpacked.queue.uid == UINT32_C(0x89abcdef) &&
+            unpacked.queue.value == UINT64_C(0x55667788),
+            "i386 queue wire 使用系统调用信号号并把 sigval 限定为 32 位");
 
     const struct siginfo_ timer = {
         .sig = TEST_SIGALRM,

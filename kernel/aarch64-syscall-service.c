@@ -8,6 +8,7 @@
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-process-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
+#include "guest/aarch64/linux-signal-info.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
@@ -92,6 +93,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
+    AARCH64_LINUX_SYS_RT_SIGQUEUEINFO = 138,
     AARCH64_LINUX_SYS_GETGROUPS = 158,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
@@ -104,6 +106,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_CONNECT = 203,
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
+    AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO = 240,
     AARCH64_LINUX_SYS_WAIT4 = 260,
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
     AARCH64_LINUX_SYS_PREADV2 = 286,
@@ -1693,6 +1696,53 @@ static qword_t dispatch_rt_sigpending(
     return 0;
 }
 
+static struct siginfo_ import_aarch64_sigqueueinfo(
+        const struct guest_linux_signal_info *info) {
+    assert(info->payload_kind == GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE);
+    return (struct siginfo_) {
+        .sig = info->signal,
+        .sig_errno = info->error,
+        .code = info->code,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_QUEUE,
+        .queue = {
+            .pid = info->queue.pid,
+            .uid = info->queue.uid,
+            .value = info->queue.value,
+        },
+    };
+}
+
+static qword_t dispatch_rt_sigqueueinfo(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault, bool thread_directed) {
+    qword_t address = syscall->arguments[thread_directed ? 3 : 2];
+    if (!aarch64_user_range_fits(
+            address, sizeof(struct aarch64_linux_siginfo)))
+        return user_range_error(fault, address, GUEST_MEMORY_READ);
+
+    struct aarch64_linux_siginfo wire;
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            address, &wire, sizeof(wire), fault))
+        return syscall_result(_EFAULT);
+
+    int signal = (sdword_t) (dword_t)
+            syscall->arguments[thread_directed ? 2 : 1];
+    struct guest_linux_signal_info imported =
+            aarch64_linux_unpack_sigqueueinfo(signal, &wire);
+    struct siginfo_ info = import_aarch64_sigqueueinfo(&imported);
+    int error = thread_directed ?
+            task_rt_tgsigqueueinfo(
+                    syscall_pid(syscall->arguments[0]),
+                    syscall_pid(syscall->arguments[1]),
+                    signal, &info) :
+            task_rt_sigqueueinfo(
+                    syscall_pid(syscall->arguments[0]),
+                    signal, &info);
+    return syscall_result(error);
+}
+
 static struct signal_action unpack_aarch64_sigaction(
         const struct aarch64_linux_sigaction *wire) {
     return (struct signal_action) {
@@ -1883,6 +1933,9 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_RT_SIGPENDING:
             return dispatch_rt_sigpending(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_SIGQUEUEINFO:
+            return dispatch_rt_sigqueueinfo(
+                    context, syscall, fault, false);
         case AARCH64_LINUX_SYS_GETGROUPS:
             return dispatch_getgroups(
                     context, syscall, task, fault);
@@ -1921,6 +1974,9 @@ static qword_t dispatch_syscall(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_EXECVE:
             return dispatch_execve(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO:
+            return dispatch_rt_sigqueueinfo(
+                    context, syscall, fault, true);
         case AARCH64_LINUX_SYS_WAIT4:
             return aarch64_linux_dispatch_wait4(
                     context, syscall, fault);

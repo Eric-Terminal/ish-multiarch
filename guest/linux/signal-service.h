@@ -16,6 +16,7 @@ enum guest_linux_signal_payload_kind {
     GUEST_LINUX_SIGNAL_PAYLOAD_CHILD,
     GUEST_LINUX_SIGNAL_PAYLOAD_FAULT,
     GUEST_LINUX_SIGNAL_PAYLOAD_SIGSYS,
+    GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE,
 };
 
 struct guest_linux_signal_info {
@@ -28,6 +29,11 @@ struct guest_linux_signal_info {
             sdword_t pid;
             dword_t uid;
         } kill;
+        struct {
+            sdword_t pid;
+            dword_t uid;
+            qword_t value;
+        } queue;
         struct {
             sdword_t timer;
             sdword_t overrun;
@@ -146,6 +152,7 @@ _Static_assert(sizeof(struct guest_linux_signal_info) == 48 &&
         offsetof(struct guest_linux_signal_info, code) == 8 &&
         offsetof(struct guest_linux_signal_info, payload_kind) == 12 &&
         offsetof(struct guest_linux_signal_info, kill) == 16 &&
+        offsetof(struct guest_linux_signal_info, queue.value) == 24 &&
         offsetof(struct guest_linux_signal_info, child.utime) == 32,
         "Linux signal service 信息布局必须与 guest 选择无关");
 _Static_assert(sizeof(struct guest_linux_signal_action) == 32 &&

@@ -168,13 +168,7 @@ static void init_fixture(struct runner_fixture *fixture) {
 }
 
 static void clear_pending(struct task *task) {
-    struct sigqueue *queued, *temporary;
-    list_for_each_entry_safe(&task->queue,
-            queued, temporary, queue) {
-        list_remove(&queued->queue);
-        free(queued);
-    }
-    task->pending = 0;
+    signal_flush_pending(task);
 }
 
 static void destroy_fixture(struct runner_fixture *fixture) {

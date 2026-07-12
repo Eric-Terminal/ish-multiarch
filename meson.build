@@ -134,6 +134,7 @@ if get_option('kernel') == 'ish'
         'kernel/futex.c',
         'kernel/getset.c',
         'kernel/signal.c',
+        'kernel/signal-queue.c',
         'kernel/signal-delivery.c',
         'kernel/signal-wire.c',
         'kernel/signal-altstack.c',
@@ -367,6 +368,12 @@ if get_option('kernel') == 'ish'
             'kernel/signal-lock-test.c',
             dependencies: ish)
         test('signal_lock', signal_lock_test)
+
+        signal_queue_test = executable(
+            'signal_queue_test',
+            'kernel/signal-queue-test.c',
+            dependencies: ish)
+        test('signal_queue', signal_queue_test)
 
         child_exit_policy_test = executable(
             'child_exit_policy_test',

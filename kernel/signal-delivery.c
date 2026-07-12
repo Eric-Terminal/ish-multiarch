@@ -7,6 +7,9 @@
 
 #define SIGNAL_UNBLOCKABLE_MASK \
     (sig_mask(SIGKILL_) | sig_mask(SIGSTOP_))
+#define SIGNAL_SYNCHRONOUS_MASK \
+    (sig_mask(SIGSEGV_) | sig_mask(SIGBUS_) | sig_mask(SIGILL_) | \
+     sig_mask(SIGTRAP_) | sig_mask(SIGFPE_) | sig_mask(SIGSYS_))
 
 static struct sigqueue *find_queued_signal(
         struct task *task, int signal) {
@@ -42,7 +45,61 @@ void signal_dequeue_locked(
     list_remove(&queued->queue);
     if (find_queued_signal(task, signal) == NULL)
         sigset_del(&task->pending, signal);
-    free(queued);
+    signal_queue_release(queued);
+}
+
+bool signal_take_unblocked_locked(struct task *task, sigset_t_ blocked,
+        bool prioritize_sigkill, struct siginfo_ *info) {
+    sigset_t_ available = task->pending & ~blocked;
+    if (available == 0)
+        return false;
+
+    struct sigqueue *queued = signal_select_unblocked_locked(task, blocked);
+    sigset_t_ queued_signals = 0;
+    struct sigqueue *candidate;
+    list_for_each_entry(&task->queue, candidate, queue) {
+        if (!sigset_has(blocked, candidate->info.sig))
+            sigset_add(&queued_signals, candidate->info.sig);
+    }
+    sigset_t_ bit_only = available & ~queued_signals;
+
+    int signal;
+    if (prioritize_sigkill && sigset_has(task->pending, SIGKILL_)) {
+        signal = SIGKILL_;
+    } else if (available & SIGNAL_SYNCHRONOUS_MASK) {
+        signal = __builtin_ctzll(available & SIGNAL_SYNCHRONOUS_MASK) + 1;
+    } else if (queued == NULL) {
+        signal = __builtin_ctzll(bit_only) + 1;
+    } else if (queued->info.sig < SIGRTMIN_) {
+        signal = queued->info.sig;
+    } else {
+        sigset_t_ standard_bit_only =
+                bit_only & (sig_mask(SIGRTMIN_) - 1);
+        if (standard_bit_only != 0) {
+            signal = __builtin_ctzll(standard_bit_only) + 1;
+        } else if (bit_only != 0 &&
+                __builtin_ctzll(bit_only) + 1 < queued->info.sig) {
+            signal = __builtin_ctzll(bit_only) + 1;
+        } else {
+            signal = queued->info.sig;
+        }
+    }
+
+    queued = find_queued_signal(task, signal);
+    if (queued != NULL) {
+        *info = queued->info;
+        signal_dequeue_locked(task, queued);
+        return true;
+    }
+
+    sigset_del(&task->pending, signal);
+    *info = (struct siginfo_) {
+        .sig = signal,
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 0, .uid = 0},
+    };
+    return true;
 }
 
 static void signal_notify_group_stop(
@@ -96,6 +153,12 @@ static struct guest_linux_signal_info export_signal_info(
             exported.sigsys.syscall = info->sigsys.syscall;
             exported.sigsys.architecture = info->sigsys.arch;
             break;
+        case SIGNAL_INFO_PAYLOAD_QUEUE:
+            exported.payload_kind = GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE;
+            exported.queue.pid = info->queue.pid;
+            exported.queue.uid = info->queue.uid;
+            exported.queue.value = info->queue.value;
+            break;
         case SIGNAL_INFO_PAYLOAD_NONE:
         default:
             exported.payload_kind = GUEST_LINUX_SIGNAL_PAYLOAD_NONE;
@@ -124,18 +187,6 @@ static struct guest_linux_signal_delivery make_delivery(
     };
 }
 
-static struct sigqueue *select_signal(
-        struct task *task, sigset_t_ blocked) {
-    // SIGKILL 已经 pending 时不得先把任务停驻或返回用户 handler。
-    if (sigset_has(task->pending, SIGKILL_)) {
-        struct sigqueue *fatal = find_queued_signal(task, SIGKILL_);
-        assert(fatal != NULL);
-        return fatal;
-    }
-
-    return signal_select_unblocked_locked(task, blocked);
-}
-
 static struct guest_linux_signal_poll_result poll_result(
         enum guest_linux_signal_poll_status status, int signal) {
     return (struct guest_linux_signal_poll_result) {
@@ -159,15 +210,14 @@ struct guest_linux_signal_poll_result task_poll_one_signal(
             signal_prepare_delivery_locked(task);
 
     while (true) {
-        struct sigqueue *queued = select_signal(task, selection_mask);
-        if (queued == NULL) {
+        struct siginfo_ info;
+        if (!signal_take_unblocked_locked(
+                task, selection_mask, true, &info)) {
             unlock(&sighand->lock);
             return poll_result(GUEST_LINUX_SIGNAL_POLL_IDLE, 0);
         }
 
-        struct siginfo_ info = queued->info;
         int signal = info.sig;
-        signal_dequeue_locked(task, queued);
 
         if (task->ptrace.traced && signal != SIGKILL_) {
             signal_ptrace_stop_locked(signal, &info);

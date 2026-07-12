@@ -473,14 +473,7 @@ static bool exercise_thread_clone(struct task *parent) {
 }
 
 static void clear_pending_signals(struct task *task) {
-    struct sigqueue *queued;
-    struct sigqueue *temporary;
-    list_for_each_entry_safe(&task->queue,
-            queued, temporary, queue) {
-        list_remove(&queued->queue);
-        free(queued);
-    }
-    task->pending = 0;
+    signal_flush_pending(task);
 }
 
 static void destroy_parent(struct task *parent,

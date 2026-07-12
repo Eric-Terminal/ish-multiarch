@@ -162,6 +162,13 @@ static void store_user_sigaction(struct user_probe *probe,
     memcpy(&probe->bytes[address - USER_BASE], &action, sizeof(action));
 }
 
+static void store_user_siginfo(struct user_probe *probe,
+        qword_t address, struct aarch64_linux_siginfo info) {
+    assert(address >= USER_BASE && address - USER_BASE <=
+            sizeof(probe->bytes) - sizeof(info));
+    memcpy(&probe->bytes[address - USER_BASE], &info, sizeof(info));
+}
+
 static struct aarch64_linux_sigaction load_user_sigaction(
         const struct user_probe *probe, qword_t address) {
     assert(address >= USER_BASE && address - USER_BASE <=
@@ -176,6 +183,7 @@ static struct sigqueue *queue_signal(struct task *task, int signal) {
     assert(queued != NULL);
     *queued = (struct sigqueue) {
         .info.sig = signal,
+        .account = NULL,
     };
     list_add_tail(&task->queue, &queued->queue);
     sigset_add(&task->pending, signal);
@@ -184,9 +192,9 @@ static struct sigqueue *queue_signal(struct task *task, int signal) {
 
 static void remove_queued_signal(struct task *task,
         struct sigqueue *queued) {
-    sigset_del(&task->pending, queued->info.sig);
-    list_remove(&queued->queue);
-    free(queued);
+    lock(&task->sighand->lock);
+    signal_dequeue_locked(task, queued);
+    unlock(&task->sighand->lock);
 }
 
 static qword_t invoke(struct process_fixture *fixture,
@@ -287,6 +295,59 @@ int main(void) {
             UINT64_MAX, UINT64_MAX, UINT64_MAX);
     CHECK(result == (qword_t) (sqword_t) _ENOSYS,
             "gettid 仍由 AArch64 runtime 负责");
+
+    const qword_t siginfo_address = USER_BASE + 7;
+    struct aarch64_linux_siginfo queued_info = {
+        .signo = NUM_SIGS,
+        .error = -9,
+        .code = SI_QUEUE_,
+        .reserved = UINT32_MAX,
+        .queue = {
+            .pid = -2468,
+            .uid = UINT32_C(0x89abcdef),
+            .value = UINT64_C(0xfedcba9876543210),
+        },
+    };
+    reset_user_probe(&probe, 0xa5);
+    store_user_siginfo(&probe, siginfo_address, queued_info);
+    result = invoke(&fixture, &probe, &fault, 138,
+            (qword_t) (sqword_t) -123, SIGRTMIN_, siginfo_address,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX);
+    CHECK(result == (qword_t) (sqword_t) _ESRCH &&
+            probe.reads == 1 && probe.last_read_address == siginfo_address &&
+            probe.last_read_size == sizeof(struct aarch64_linux_siginfo),
+            "AArch64 syscall 138 单次读取完整 128 字节 siginfo 后查找目标");
+
+    queued_info.code = SI_USER_;
+    reset_user_probe(&probe, 0xa5);
+    store_user_siginfo(&probe, siginfo_address, queued_info);
+    result = invoke(&fixture, &probe, &fault, 138,
+            (qword_t) (sqword_t) -123, SIGRTMIN_, siginfo_address,
+            0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EPERM && probe.reads == 1,
+            "AArch64 rt_sigqueueinfo 在目标查找前拒绝未建模 si_code");
+
+    queued_info.code = SI_QUEUE_;
+    reset_user_probe(&probe, 0xa5);
+    store_user_siginfo(&probe, siginfo_address, queued_info);
+    probe.fail_read_at = siginfo_address +
+            sizeof(struct aarch64_linux_siginfo) - 1;
+    result = invoke(&fixture, &probe, &fault, 138,
+            (qword_t) (sqword_t) -123, NUM_SIGS + 1,
+            siginfo_address, 0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EFAULT && probe.reads == 1 &&
+            fault.address == probe.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "AArch64 rt_sigqueueinfo 的完整 wire 读取故障优先于信号校验");
+
+    reset_user_probe(&probe, 0xa5);
+    store_user_siginfo(&probe, siginfo_address, queued_info);
+    result = invoke(&fixture, &probe, &fault, 240,
+            0, 0, SIGRTMIN_, siginfo_address, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL && probe.reads == 1 &&
+            probe.last_read_size == sizeof(struct aarch64_linux_siginfo),
+            "AArch64 syscall 240 先读取 wire 再校验 tgid/tid");
+    reset_user_probe(&probe, 0);
 
     reset_user_probe(&probe, 0x5a);
     fault = (struct guest_linux_user_fault) {

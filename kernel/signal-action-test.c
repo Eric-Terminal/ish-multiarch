@@ -40,12 +40,7 @@ static byte_t load_user_byte(addr_t address) {
 }
 
 static void clear_pending_signals(struct task *task) {
-    struct sigqueue *queued, *queued_tmp;
-    list_for_each_entry_safe(&task->queue, queued, queued_tmp, queue) {
-        list_remove(&queued->queue);
-        free(queued);
-    }
-    task->pending = 0;
+    signal_flush_pending(task);
 }
 
 struct async_signal_sender {
@@ -103,8 +98,35 @@ int main(void) {
     CHECK(map_error == 0 && fill_user_page(0xa5) == 0,
             "映射并初始化用户测试页");
 
+    struct i386_siginfo queued_wire = {
+        .sig = NUM_SIGS,
+        .sig_errno = -7,
+        .code = SI_QUEUE_,
+        .queue = {
+            .pid = -1234,
+            .uid = UINT32_C(0x89abcdef),
+            .value = UINT32_C(0x76543210),
+        },
+    };
+    CHECK(user_put(INPUT_ADDRESS, queued_wire) == 0 &&
+            sys_rt_sigqueueinfo(-123, SIGUSR1_, INPUT_ADDRESS) ==
+                    (dword_t) _ESRCH &&
+            sys_rt_tgsigqueueinfo(0, 0, SIGUSR1_, INPUT_ADDRESS) ==
+                    (dword_t) _EINVAL,
+            "i386 排队信号入口读取完整 wire 后区分目标不存在与非法线程 ID");
+    queued_wire.code = SI_USER_;
+    CHECK(user_put(INPUT_ADDRESS, queued_wire) == 0 &&
+            sys_rt_sigqueueinfo(-123, SIGUSR1_, INPUT_ADDRESS) ==
+                    (dword_t) _EPERM,
+            "i386 排队信号拒绝未建模 si_code 且优先于目标查找");
+
     const addr_t crossing_sigset_address =
             USER_PAGE + PAGE_SIZE - sizeof(dword_t);
+    const addr_t crossing_siginfo_address =
+            USER_PAGE + PAGE_SIZE - sizeof(struct i386_siginfo) + 1;
+    CHECK(sys_rt_sigqueueinfo(-123, NUM_SIGS + 1,
+                    crossing_siginfo_address) == (dword_t) _EFAULT,
+            "i386 rt_sigqueueinfo 在信号号校验前读取全部 128 字节 wire");
     const sigset_t_ process_mask = sig_mask(SIGUSR1_);
     CHECK(user_put(INPUT_ADDRESS, process_mask) == 0,
             "写入进程信号掩码输入");
@@ -683,7 +705,9 @@ int main(void) {
     CHECK(result == (dword_t) _EAGAIN &&
             sigset_has(task.pending, SIGKILL_) &&
             sigset_has(task.pending, SIGSTOP_) &&
-            list_size(&task.queue) == 2,
+            list_size(&task.queue) == 1 &&
+            list_first_entry(&task.queue,
+                    struct sigqueue, queue)->info.sig == SIGSTOP_,
             "sigtimedwait 静默排除且不消费 SIGKILL 与 SIGSTOP");
 
     clear_pending_signals(&task);

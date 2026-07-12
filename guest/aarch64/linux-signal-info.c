@@ -36,9 +36,30 @@ struct aarch64_linux_siginfo aarch64_linux_pack_siginfo(
             wire.sigsys.syscall = info->sigsys.syscall;
             wire.sigsys.architecture = info->sigsys.architecture;
             break;
+        case GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE:
+            wire.queue.pid = info->queue.pid;
+            wire.queue.uid = info->queue.uid;
+            wire.queue.value = info->queue.value;
+            break;
         case GUEST_LINUX_SIGNAL_PAYLOAD_NONE:
         default:
             break;
     }
     return wire;
+}
+
+struct guest_linux_signal_info aarch64_linux_unpack_sigqueueinfo(
+        int signal, const struct aarch64_linux_siginfo *wire) {
+    assert(wire != NULL);
+    return (struct guest_linux_signal_info) {
+        .signal = signal,
+        .error = wire->error,
+        .code = wire->code,
+        .payload_kind = GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE,
+        .queue = {
+            .pid = wire->queue.pid,
+            .uid = wire->queue.uid,
+            .value = wire->queue.value,
+        },
+    };
 }

@@ -80,6 +80,7 @@ _Static_assert(sizeof(struct signal_action) == 32,
 #define SIGRTMAX_  NUM_SIGS
 
 #define SI_USER_ 0
+#define SI_QUEUE_ -1
 #define SI_TIMER_ -2
 #define SI_TKILL_ -6
 #define SI_KERNEL_ 128
@@ -105,7 +106,34 @@ static const struct siginfo_ SIGINFO_NIL = {
 struct sigqueue {
     struct list queue;
     struct siginfo_ info;
+    struct signal_pending_account *account;
 };
+
+enum signal_queue_policy {
+    SIGNAL_QUEUE_FORCE,
+    SIGNAL_QUEUE_LEGACY,
+    SIGNAL_QUEUE_EXPLICIT,
+};
+
+enum signal_enqueue_result {
+    SIGNAL_ENQUEUE_COALESCED,
+    SIGNAL_ENQUEUE_QUEUED,
+    SIGNAL_ENQUEUE_BIT_ONLY,
+};
+
+// 调用方持有目标 sighand 锁；uid 与 limit 必须在拿锁前快照。
+int signal_enqueue_locked(struct task *task, int signal,
+        struct siginfo_ info, enum signal_queue_policy policy,
+        uid_t_ uid, qword_t limit);
+// 释放节点时同步归还其 real UID pending 配额。
+void signal_queue_release(struct sigqueue *queued);
+// 调用方保证队列不被并发修改；所有节点经统一扣账路径释放。
+void signal_flush_pending(struct task *task);
+// 调用方持有 sighand 锁；清空一个信号的节点与 bit-only pending 位。
+void signal_discard_pending_locked(struct task *task, int signal);
+
+// 仅供故障注入测试；SIZE_MAX 表示恢复正常分配。
+void signal_queue_test_fail_allocation_at(size_t index);
 
 // 调用方持有 sighand->lock；普通信号优先，
 // 实时信号按编号与入队顺序选择。
@@ -114,6 +142,9 @@ struct sigqueue *signal_select_unblocked_locked(
 // 删除一个队列节点，并仅在同号节点全部消费后清除 pending 位。
 void signal_dequeue_locked(
         struct task *task, struct sigqueue *queued);
+// 选择并消费一个信号；没有队列节点的 pending 位会生成 Linux 兼容信息。
+bool signal_take_unblocked_locked(struct task *task, sigset_t_ blocked,
+        bool prioritize_sigkill, struct siginfo_ *info);
 
 struct sigevent_ {
     union sigval_ value;
@@ -235,6 +266,13 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
 dword_t sys_kill(pid_t_ pid, dword_t sig);
 dword_t sys_tkill(pid_t_ tid, dword_t sig);
 dword_t sys_tgkill(pid_t_ tgid, pid_t_ tid, dword_t sig);
+int task_rt_sigqueueinfo(pid_t_ pid, int signal,
+        const struct siginfo_ *info);
+int task_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, int signal,
+        const struct siginfo_ *info);
+dword_t sys_rt_sigqueueinfo(pid_t_ pid, dword_t signal, addr_t info_addr);
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid,
+        dword_t signal, addr_t info_addr);
 
 // signal frame structs. There's a good chance this should go in its own header file
 

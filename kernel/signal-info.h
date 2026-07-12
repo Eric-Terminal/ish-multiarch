@@ -10,6 +10,7 @@ enum signal_info_payload_kind {
     SIGNAL_INFO_PAYLOAD_CHILD,
     SIGNAL_INFO_PAYLOAD_FAULT,
     SIGNAL_INFO_PAYLOAD_SIGSYS,
+    SIGNAL_INFO_PAYLOAD_QUEUE,
 };
 
 // 内部事件不得依赖当前 guest ABI；架构边界负责转换为各自的 wire。
@@ -23,6 +24,11 @@ struct siginfo_ {
             sdword_t pid;
             dword_t uid;
         } kill;
+        struct {
+            sdword_t pid;
+            dword_t uid;
+            qword_t value;
+        } queue;
         struct {
             sdword_t pid;
             dword_t uid;
@@ -49,6 +55,7 @@ struct siginfo_ {
 _Static_assert(sizeof(struct siginfo_) == 48 &&
         _Alignof(struct siginfo_) == 8 &&
         __builtin_offsetof(struct siginfo_, payload_kind) == 12 &&
+        __builtin_offsetof(struct siginfo_, queue.value) == 24 &&
         __builtin_offsetof(struct siginfo_, fault.addr) == 16 &&
         __builtin_offsetof(struct siginfo_, child.utime) == 32 &&
         sizeof(((struct siginfo_ *) 0)->fault.addr) == 8 &&
@@ -65,6 +72,11 @@ struct i386_siginfo {
             sdword_t pid;
             dword_t uid;
         } kill;
+        struct {
+            sdword_t pid;
+            dword_t uid;
+            dword_t value;
+        } queue;
         struct {
             sdword_t timer;
             sdword_t overrun;
@@ -97,6 +109,9 @@ _Static_assert(sizeof(struct i386_siginfo) == 128 &&
         __builtin_offsetof(struct i386_siginfo, payload_words) == 12 &&
         __builtin_offsetof(struct i386_siginfo, kill.pid) == 12 &&
         __builtin_offsetof(struct i386_siginfo, kill.uid) == 16 &&
+        __builtin_offsetof(struct i386_siginfo, queue.pid) == 12 &&
+        __builtin_offsetof(struct i386_siginfo, queue.uid) == 16 &&
+        __builtin_offsetof(struct i386_siginfo, queue.value) == 20 &&
         __builtin_offsetof(struct i386_siginfo, timer.timer) == 12 &&
         __builtin_offsetof(struct i386_siginfo, timer.overrun) == 16 &&
         __builtin_offsetof(struct i386_siginfo, timer.value) == 20 &&
@@ -113,6 +128,8 @@ _Static_assert(sizeof(struct i386_siginfo) == 128 &&
         "i386 siginfo wire 布局必须固定为 128 字节");
 
 struct i386_siginfo pack_i386_siginfo(const struct siginfo_ *info);
+struct siginfo_ unpack_i386_sigqueueinfo(
+        int signal, const struct i386_siginfo *wire);
 int write_i386_siginfo(dword_t address, const struct siginfo_ *info);
 
 #endif

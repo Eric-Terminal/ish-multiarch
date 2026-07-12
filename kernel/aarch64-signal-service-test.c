@@ -79,13 +79,7 @@ static void init_fixture(struct signal_fixture *fixture) {
 }
 
 static void clear_pending(struct task *task) {
-    struct sigqueue *queued, *temporary;
-    list_for_each_entry_safe(&task->queue,
-            queued, temporary, queue) {
-        list_remove(&queued->queue);
-        free(queued);
-    }
-    task->pending = 0;
+    signal_flush_pending(task);
 }
 
 static void destroy_fixture(struct signal_fixture *fixture) {
@@ -107,7 +101,10 @@ static void queue_info(struct task *task, struct siginfo_ info) {
     assert(!sigset_has(task->pending, info.sig));
     struct sigqueue *queued = malloc(sizeof(*queued));
     assert(queued != NULL);
-    *queued = (struct sigqueue) {.info = info};
+    *queued = (struct sigqueue) {
+        .info = info,
+        .account = NULL,
+    };
     list_add_tail(&task->queue, &queued->queue);
     sigset_add(&task->pending, info.sig);
 }

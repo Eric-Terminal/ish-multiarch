@@ -65,6 +65,11 @@ struct aarch64_linux_siginfo {
             dword_t uid;
         } kill;
         struct {
+            sdword_t pid;
+            dword_t uid;
+            qword_t value;
+        } queue;
+        struct {
             sdword_t timer;
             sdword_t overrun;
             qword_t value;
@@ -140,6 +145,9 @@ _Static_assert(sizeof(struct aarch64_linux_siginfo) == 128 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, payload) == 16 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, kill.pid) == 16 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, kill.uid) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, queue.pid) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, queue.uid) == 20 &&
+        __builtin_offsetof(struct aarch64_linux_siginfo, queue.value) == 24 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, timer.timer) == 16 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, timer.overrun) == 20 &&
         __builtin_offsetof(struct aarch64_linux_siginfo, timer.value) == 24 &&

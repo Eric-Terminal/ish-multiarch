@@ -52,17 +52,7 @@ enum signal_delivery_disposition signal_disposition_locked(
     }
 }
 
-static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ info) {
-    if (sig < SIGRTMIN_ && sigset_has(task->pending, sig))
-        return;
-
-    struct sigqueue *sigqueue = malloc(sizeof(struct sigqueue));
-    if (sigqueue == NULL)
-        return;
-    sigqueue->info = info;
-    sigqueue->info.sig = sig;
-    list_add_tail(&task->queue, &sigqueue->queue);
-    sigset_add(&task->pending, sig);
+static void wake_signal_task_unlocked(struct task *task, int sig) {
 
     if (sigset_has(task->blocked & ~task->waiting, sig) && signal_is_blockable(sig))
         return;
@@ -95,6 +85,17 @@ retry:
     }
 }
 
+static int deliver_signal_unlocked(struct task *task, int sig,
+        struct siginfo_ info, enum signal_queue_policy policy,
+        uid_t_ uid, rlim_t_ limit) {
+    int result = signal_enqueue_locked(
+            task, sig, info, policy, uid, limit);
+    if (result == SIGNAL_ENQUEUE_QUEUED ||
+            result == SIGNAL_ENQUEUE_BIT_ONLY)
+        wake_signal_task_unlocked(task, sig);
+    return result < 0 ? result : 0;
+}
+
 static void resume_ptrace_stop_for_sigkill(struct task *task, int sig) {
     if (sig != SIGKILL_)
         return;
@@ -104,9 +105,25 @@ static void resume_ptrace_stop_for_sigkill(struct task *task, int sig) {
     unlock(&task->ptrace.lock);
 }
 
+static void resume_group_for_signal(struct task *task, int sig) {
+    if (sig != SIGCONT_ && sig != SIGKILL_)
+        return;
+    lock(&task->group->lock);
+    bool resumed = sig == SIGCONT_ && task->group->stopped;
+    task->group->stopped = false;
+    task->group->stop_code = 0;
+    if (resumed) {
+        task->group->continued = true;
+        task->group->continue_notification_pending = true;
+    }
+    notify(&task->group->stopped_cond);
+    unlock(&task->group->lock);
+}
+
 void deliver_signal(struct task *task, int sig, struct siginfo_ info) {
     lock(&task->sighand->lock);
-    deliver_signal_unlocked(task, sig, info);
+    deliver_signal_unlocked(task, sig, info,
+            SIGNAL_QUEUE_FORCE, task->uid, RLIM_INFINITY_);
     unlock(&task->sighand->lock);
     resume_ptrace_stop_for_sigkill(task, sig);
 }
@@ -118,28 +135,20 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
     if (task->zombie || task->exiting)
         return;
 
+    rlim_t_ limit = sig >= SIGRTMIN_ ?
+            rlimit_task(task, RLIMIT_SIGPENDING_) : RLIM_INFINITY_;
+    uid_t_ uid = task->uid;
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
     if (signal_disposition_locked(sighand, sig) !=
             SIGNAL_DELIVERY_IGNORE ||
             sigset_has(task->blocked, sig)) {
-        deliver_signal_unlocked(task, sig, info);
+        deliver_signal_unlocked(task, sig, info,
+                SIGNAL_QUEUE_LEGACY, uid, limit);
     }
     unlock(&sighand->lock);
     resume_ptrace_stop_for_sigkill(task, sig);
-
-    if (sig == SIGCONT_ || sig == SIGKILL_) {
-        lock(&task->group->lock);
-        bool resumed = sig == SIGCONT_ && task->group->stopped;
-        task->group->stopped = false;
-        task->group->stop_code = 0;
-        if (resumed) {
-            task->group->continued = true;
-            task->group->continue_notification_pending = true;
-        }
-        notify(&task->group->stopped_cond);
-        unlock(&task->group->lock);
-    }
+    resume_group_for_signal(task, sig);
 }
 
 // 调用方持有 pids_lock，动作读取遵循 pids_lock -> sighand->lock。
@@ -211,7 +220,8 @@ bool try_self_signal(int sig) {
             SIGNAL_DELIVERY_IGNORE &&
         !sigset_has(current->blocked, sig);
     if (can_send)
-        deliver_signal_unlocked(current, sig, SIGINFO_NIL);
+        deliver_signal_unlocked(current, sig, SIGINFO_NIL,
+                SIGNAL_QUEUE_FORCE, current->uid, RLIM_INFINITY_);
     unlock(&sighand->lock);
     return can_send;
 }
@@ -318,7 +328,8 @@ static void force_signal_info_locked(
     }
     sigset_del(&current->blocked, signal);
     deliver_signal_unlocked(current, signal,
-            precise_info != NULL ? *precise_info : SIGINFO_NIL);
+            precise_info != NULL ? *precise_info : SIGINFO_NIL,
+            SIGNAL_QUEUE_FORCE, current->uid, RLIM_INFINITY_);
 
     // 同步故障必须先于队列里已有的异步信号处理。
     struct sigqueue *forced;
@@ -334,7 +345,7 @@ static void force_signal_info_locked(
             return;
         }
     }
-    assert(false && "pending 位必须有对应的强制信号队列节点");
+    // 内存耗尽时保留 bit-only 强制信号；后续派送会合成 SI_USER 信息。
 }
 
 static void force_sigsegv_locked(
@@ -487,14 +498,12 @@ void receive_signals(void) {
     sigset_t_ blocked = signal_prepare_delivery_locked(current);
 
     while (true) {
-        struct sigqueue *sigqueue =
-                signal_select_unblocked_locked(current, blocked);
-        if (sigqueue == NULL)
+        struct siginfo_ info;
+        if (!signal_take_unblocked_locked(
+                current, blocked, true, &info))
             break;
 
-        struct siginfo_ info = sigqueue->info;
         int sig = info.sig;
-        signal_dequeue_locked(current, sigqueue);
 
         if (current->ptrace.traced && sig != SIGKILL_) {
             // This notifies the parent, goes to sleep, and waits for the
@@ -618,14 +627,7 @@ static bool signal_action_discards_pending(
 static void discard_group_pending_signal(struct tgroup *group, int sig) {
     struct task *task;
     list_for_each_entry(&group->threads, task, group_links) {
-        sigset_del(&task->pending, sig);
-        struct sigqueue *sigqueue, *tmp;
-        list_for_each_entry_safe(&task->queue, sigqueue, tmp, queue) {
-            if (sigqueue->info.sig == sig) {
-                list_remove(&sigqueue->queue);
-                free(sigqueue);
-            }
-        }
+        signal_discard_pending_locked(task, sig);
     }
 }
 
@@ -889,8 +891,14 @@ static bool dequeue_waited_signal(
         signal_dequeue_locked(task, sigqueue);
         return true;
     }
-    assert(false && "pending 位必须有对应的信号队列节点");
-    return false;
+    sigset_del(&task->pending, selected);
+    *info = (struct siginfo_) {
+        .sig = selected,
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 0, .uid = 0},
+    };
+    return true;
 }
 
 struct sigtimedwait_deadline {
@@ -1010,12 +1018,17 @@ copy_info:
     return info.sig;
 }
 
+static bool signal_task_permitted(
+        const struct task *sender, const struct task *target) {
+    return sender->euid == 0 ||
+            sender->uid == target->uid ||
+            sender->uid == target->suid ||
+            sender->euid == target->uid ||
+            sender->euid == target->suid;
+}
+
 static int kill_task(struct task *task, dword_t sig) {
-    if (!superuser() &&
-            current->uid != task->uid &&
-            current->uid != task->suid &&
-            current->euid != task->uid &&
-            current->euid != task->suid)
+    if (!signal_task_permitted(current, task))
         return _EPERM;
     struct siginfo_ info = {
         .code = SI_USER_,
@@ -1025,6 +1038,126 @@ static int kill_task(struct task *task, dword_t sig) {
     };
     send_signal(task, sig, info);
     return 0;
+}
+
+static int send_explicit_queued_signal(
+        struct task *task, int signal, const struct siginfo_ *info) {
+    if (signal == 0)
+        return 0;
+    if (task->zombie || task->exiting)
+        return 0;
+
+    uid_t_ uid = task->uid;
+    rlim_t_ limit = rlimit_task(task, RLIMIT_SIGPENDING_);
+    struct sighand *sighand = task->sighand;
+    lock(&sighand->lock);
+    int error = 0;
+    if (signal_disposition_locked(sighand, signal) !=
+            SIGNAL_DELIVERY_IGNORE ||
+            sigset_has(task->blocked, signal)) {
+        error = deliver_signal_unlocked(task, signal, *info,
+                SIGNAL_QUEUE_EXPLICIT, uid, limit);
+    }
+    unlock(&sighand->lock);
+    resume_ptrace_stop_for_sigkill(task, signal);
+    resume_group_for_signal(task, signal);
+    if (error < 0)
+        return error;
+    return 0;
+}
+
+static int validate_explicit_queue_info(
+        int signal, const struct siginfo_ *info) {
+    if (signal < 0 || signal > NUM_SIGS)
+        return _EINVAL;
+    if (info == NULL || info->code != SI_QUEUE_ ||
+            info->payload_kind != SIGNAL_INFO_PAYLOAD_QUEUE)
+        return _EPERM;
+    return 0;
+}
+
+int task_rt_sigqueueinfo(pid_t_ pid, int signal,
+        const struct siginfo_ *info) {
+    int error = validate_explicit_queue_info(signal, info);
+    if (error < 0)
+        return error;
+
+    lock(&pids_lock);
+    struct task *found = pid > 0 ? pid_get_task_zombie(pid) : NULL;
+    if (found == NULL) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    if (!signal_task_permitted(current, found)) {
+        unlock(&pids_lock);
+        return _EPERM;
+    }
+    if (signal == 0) {
+        unlock(&pids_lock);
+        return 0;
+    }
+
+    struct tgroup *group = found->group;
+    struct task *target = group->leader;
+    if (target->exiting || target->zombie) {
+        target = NULL;
+        struct task *thread;
+        list_for_each_entry(&group->threads, thread, group_links) {
+            if (!thread->exiting && !thread->zombie) {
+                target = thread;
+                break;
+            }
+        }
+    }
+    // Linux 对已经存在但完全退出的 zombie 仍把发送视为成功。
+    error = target == NULL ? 0 :
+            send_explicit_queued_signal(target, signal, info);
+    unlock(&pids_lock);
+    return error;
+}
+
+int task_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, int signal,
+        const struct siginfo_ *info) {
+    int error = validate_explicit_queue_info(signal, info);
+    if (error < 0)
+        return error;
+    if (tgid <= 0 || tid <= 0)
+        return _EINVAL;
+
+    lock(&pids_lock);
+    struct task *target = pid_get_task(tid);
+    if (target == NULL || target->tgid != tgid) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    if (!signal_task_permitted(current, target)) {
+        unlock(&pids_lock);
+        return _EPERM;
+    }
+    error = send_explicit_queued_signal(target, signal, info);
+    unlock(&pids_lock);
+    return error;
+}
+
+dword_t sys_rt_sigqueueinfo(
+        pid_t_ pid, dword_t signal, addr_t info_addr) {
+    struct i386_siginfo wire;
+    if (user_get(info_addr, wire))
+        return _EFAULT;
+    struct siginfo_ info = unpack_i386_sigqueueinfo(
+            (sdword_t) signal, &wire);
+    return task_rt_sigqueueinfo(pid, (sdword_t) signal, &info);
+}
+
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid,
+        dword_t signal, addr_t info_addr) {
+    struct i386_siginfo wire;
+    if (user_get(info_addr, wire))
+        return _EFAULT;
+    struct siginfo_ info = unpack_i386_sigqueueinfo(
+            (sdword_t) signal, &wire);
+    return task_rt_tgsigqueueinfo(
+            tgid, tid, (sdword_t) signal, &info);
 }
 
 static int kill_group(pid_t_ pgid, dword_t sig) {

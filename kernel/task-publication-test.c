@@ -186,11 +186,7 @@ int main(void) {
     CHECK(trylock(&child->ptrace.lock) == 0,
             "ptrace kill 释放子任务锁");
     unlock(&child->ptrace.lock);
-    struct sigqueue *queued = list_first_entry(
-            &child->queue, struct sigqueue, queue);
-    list_remove(&queued->queue);
-    free(queued);
-    child->pending = 0;
+    signal_flush_pending(child);
     current = NULL;
 
     lock(&pids_lock);

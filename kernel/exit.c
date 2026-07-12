@@ -105,11 +105,7 @@ noreturn void do_exit(int status) {
     // release the sighand
     sighand_release(current->sighand);
     current->sighand = NULL;
-    struct sigqueue *sigqueue, *sigqueue_tmp;
-    list_for_each_entry_safe(&current->queue, sigqueue, sigqueue_tmp, queue) {
-        list_remove(&sigqueue->queue);
-        free(sigqueue);
-    }
+    signal_flush_pending(current);
     struct task *leader = current->group->leader;
 
     // reparent children

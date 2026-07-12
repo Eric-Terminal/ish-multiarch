@@ -34,11 +34,31 @@ struct i386_siginfo pack_i386_siginfo(const struct siginfo_ *info) {
             wire.sigsys.syscall = info->sigsys.syscall;
             wire.sigsys.arch = info->sigsys.arch;
             break;
+        case SIGNAL_INFO_PAYLOAD_QUEUE:
+            wire.queue.pid = info->queue.pid;
+            wire.queue.uid = info->queue.uid;
+            wire.queue.value = (dword_t) info->queue.value;
+            break;
         case SIGNAL_INFO_PAYLOAD_NONE:
         default:
             break;
     }
     return wire;
+}
+
+struct siginfo_ unpack_i386_sigqueueinfo(
+        int signal, const struct i386_siginfo *wire) {
+    return (struct siginfo_) {
+        .sig = signal,
+        .sig_errno = wire->sig_errno,
+        .code = wire->code,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_QUEUE,
+        .queue = {
+            .pid = wire->queue.pid,
+            .uid = wire->queue.uid,
+            .value = wire->queue.value,
+        },
+    };
 }
 
 int write_i386_siginfo(dword_t address, const struct siginfo_ *info) {

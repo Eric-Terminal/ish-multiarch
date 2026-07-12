@@ -308,14 +308,14 @@ static int test_sigkill_releases_ptrace_stop(void) {
     deliver_signal(&fixture.child, SIGKILL_, SIGINFO_NIL);
     CHECK(!fixture.child.ptrace.stopped &&
             sigset_has(fixture.child.pending, SIGKILL_) &&
-            list_size(&fixture.child.queue) == 1,
-            "首次 SIGKILL 解除 ptrace 停顿并进入队列");
+            list_empty(&fixture.child.queue),
+            "首次 SIGKILL 解除 ptrace 停顿并仅设置 pending 位");
 
     fixture.child.ptrace.stopped = true;
     send_signal(&fixture.child, SIGKILL_, SIGINFO_NIL);
     CHECK(!fixture.child.ptrace.stopped &&
             sigset_has(fixture.child.pending, SIGKILL_) &&
-            list_size(&fixture.child.queue) == 1,
+            list_empty(&fixture.child.queue),
             "重复 SIGKILL 即使合并也必须再次解除 ptrace 停顿");
     return 0;
 }
