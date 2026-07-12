@@ -65,7 +65,33 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
     return GUEST_MEMORY_FAULT_NONE;
 }
 
+static bool address_space_read_lock(void *opaque) {
+    struct guest_page_table *table = opaque;
+    if (!atomic_load_explicit(&table->concurrent, memory_order_acquire))
+        return false;
+    assert(pthread_rwlock_rdlock(&table->lock) == 0);
+    return true;
+}
+
+static void address_space_read_unlock(void *opaque, bool locked) {
+    struct guest_page_table *table = opaque;
+    if (locked)
+        assert(pthread_rwlock_unlock(&table->lock) == 0);
+}
+
+static bool address_space_write_lock(void *opaque) {
+    return guest_page_table_write_lock(opaque);
+}
+
+static void address_space_write_unlock(void *opaque, bool locked) {
+    guest_page_table_write_unlock(opaque, locked);
+}
+
 static const struct guest_address_space_ops page_table_ops = {
+    .read_lock = address_space_read_lock,
+    .read_unlock = address_space_read_unlock,
+    .write_lock = address_space_write_lock,
+    .write_unlock = address_space_write_unlock,
     .resolve_page = resolve_page,
 };
 
@@ -103,9 +129,14 @@ bool guest_page_table_init(struct guest_page_table *table,
     *table = (struct guest_page_table) {0};
     if (address_bits <= GUEST_MEMORY_PAGE_BITS || address_bits > 48)
         return false;
-    table->root = clone_calloc(1, sizeof(*table->root));
-    if (table->root == NULL)
+    if (pthread_rwlock_init(&table->lock, NULL) != 0)
         return false;
+    table->root = clone_calloc(1, sizeof(*table->root));
+    if (table->root == NULL) {
+        assert(pthread_rwlock_destroy(&table->lock) == 0);
+        *table = (struct guest_page_table) {0};
+        return false;
+    }
     guest_address_space_init(&table->address_space,
             &page_table_ops, table, address_bits);
     return true;
@@ -136,12 +167,32 @@ static void destroy_level1(struct guest_page_table_node *level1) {
 void guest_page_table_destroy(struct guest_page_table *table) {
     if (table->root == NULL)
         return;
+    assert(pthread_rwlock_wrlock(&table->lock) == 0);
     for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
         if (table->root->entries[i] != NULL)
             destroy_level1(table->root->entries[i]);
     }
     free(table->root);
     table->root = NULL;
+    assert(pthread_rwlock_unlock(&table->lock) == 0);
+    assert(pthread_rwlock_destroy(&table->lock) == 0);
+}
+
+void guest_page_table_enable_concurrency(struct guest_page_table *table) {
+    atomic_store_explicit(&table->concurrent, true, memory_order_release);
+}
+
+bool guest_page_table_write_lock(struct guest_page_table *table) {
+    if (!atomic_load_explicit(&table->concurrent, memory_order_acquire))
+        return false;
+    assert(pthread_rwlock_wrlock(&table->lock) == 0);
+    return true;
+}
+
+void guest_page_table_write_unlock(
+        struct guest_page_table *table, bool locked) {
+    if (locked)
+        assert(pthread_rwlock_unlock(&table->lock) == 0);
 }
 
 static struct guest_page_table_leaf *clone_leaf(
@@ -208,9 +259,12 @@ bool guest_page_table_clone(struct guest_page_table *destination,
     *destination = (struct guest_page_table) {0};
     if (source == NULL || source->root == NULL)
         return false;
+    bool source_locked = address_space_read_lock((void *) source);
     if (!guest_page_table_init(destination,
-            source->address_space.address_bits))
+            source->address_space.address_bits)) {
+        address_space_read_unlock((void *) source, source_locked);
         return false;
+    }
 
     for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
         if (source->root->entries[i] == NULL)
@@ -219,11 +273,13 @@ bool guest_page_table_clone(struct guest_page_table *destination,
                 clone_level1(source->root->entries[i]);
         if (destination->root->entries[i] == NULL) {
             guest_page_table_destroy(destination);
+            address_space_read_unlock((void *) source, source_locked);
             return false;
         }
     }
     destination->address_space.generation =
             source->address_space.generation;
+    address_space_read_unlock((void *) source, source_locked);
     return true;
 }
 

@@ -20,15 +20,24 @@ void guest_tlb_init(struct guest_tlb *tlb,
 void guest_tlb_bind(struct guest_tlb *tlb,
         struct guest_address_space *address_space) {
     assert(address_space != NULL);
+    bool locked = guest_address_space_read_lock(address_space);
     memset(tlb->entries, 0, sizeof(tlb->entries));
     tlb->address_space = address_space;
     tlb->observed_generation = address_space->generation;
+    guest_address_space_read_unlock(address_space, locked);
+}
+
+static void flush_unlocked(struct guest_tlb *tlb) {
+    assert(tlb->address_space != NULL);
+    memset(tlb->entries, 0, sizeof(tlb->entries));
+    tlb->observed_generation = tlb->address_space->generation;
 }
 
 void guest_tlb_flush(struct guest_tlb *tlb) {
     assert(tlb->address_space != NULL);
-    memset(tlb->entries, 0, sizeof(tlb->entries));
-    tlb->observed_generation = tlb->address_space->generation;
+    bool locked = guest_address_space_read_lock(tlb->address_space);
+    flush_unlocked(tlb);
+    guest_address_space_read_unlock(tlb->address_space, locked);
 }
 
 static unsigned guest_tlb_index(guest_addr_t page_base) {
@@ -39,7 +48,7 @@ static unsigned guest_tlb_index(guest_addr_t page_base) {
 static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         guest_addr_t address, enum guest_memory_access access, byte_t **host) {
     if (tlb->observed_generation != tlb->address_space->generation)
-        guest_tlb_flush(tlb);
+        flush_unlocked(tlb);
 
     guest_addr_t page_base = address & ~GUEST_MEMORY_PAGE_MASK;
     struct guest_tlb_entry *entry = &tlb->entries[guest_tlb_index(page_base)];
@@ -56,7 +65,7 @@ static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         return fault;
 
     if (tlb->observed_generation != tlb->address_space->generation)
-        guest_tlb_flush(tlb);
+        flush_unlocked(tlb);
     entry = &tlb->entries[guest_tlb_index(page_base)];
     *entry = (struct guest_tlb_entry) {
         .guest_page = page_base,
@@ -125,31 +134,40 @@ bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         void *destination, size_t size, enum guest_memory_access access,
         struct guest_memory_fault *fault) {
     assert(access == GUEST_MEMORY_READ || access == GUEST_MEMORY_EXECUTE);
+    bool locked = guest_address_space_read_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_access(tlb, address, size, access, chunks, &chunk_count, fault))
+    if (!prepare_access(tlb, address, size,
+            access, chunks, &chunk_count, fault)) {
+        guest_address_space_read_unlock(tlb->address_space, locked);
         return false;
+    }
 
     byte_t *output = destination;
     for (unsigned i = 0; i < chunk_count; i++) {
         memcpy(output, chunks[i].host, chunks[i].size);
         output += chunks[i].size;
     }
+    guest_address_space_read_unlock(tlb->address_space, locked);
     return true;
 }
 
 bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
         const void *source, size_t size, struct guest_memory_fault *fault) {
+    bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
     if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
-            chunks, &chunk_count, fault))
+            chunks, &chunk_count, fault)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
         return false;
+    }
 
     const byte_t *input = source;
     for (unsigned i = 0; i < chunk_count; i++) {
         memcpy(chunks[i].host, input, chunks[i].size);
         input += chunks[i].size;
     }
+    guest_address_space_write_unlock(tlb->address_space, locked);
     return true;
 }

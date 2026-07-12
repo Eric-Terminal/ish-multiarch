@@ -20,13 +20,52 @@ struct test_memory {
     byte_t next[GUEST_MEMORY_PAGE_SIZE];
     byte_t collision[GUEST_MEMORY_PAGE_SIZE];
     unsigned resolutions;
+    unsigned read_locks;
+    unsigned read_unlocks;
+    unsigned read_lock_depth;
+    unsigned write_locks;
+    unsigned write_unlocks;
+    unsigned write_lock_depth;
 };
+
+static bool read_lock(void *opaque) {
+    struct test_memory *memory = opaque;
+    assert(memory->read_lock_depth == 0);
+    memory->read_lock_depth = 1;
+    memory->read_locks++;
+    return true;
+}
+
+static void read_unlock(void *opaque, bool locked) {
+    struct test_memory *memory = opaque;
+    assert(locked);
+    assert(memory->read_lock_depth == 1);
+    memory->read_lock_depth = 0;
+    memory->read_unlocks++;
+}
+
+static bool write_lock(void *opaque) {
+    struct test_memory *memory = opaque;
+    assert(memory->read_lock_depth == 0 && memory->write_lock_depth == 0);
+    memory->write_lock_depth = 1;
+    memory->write_locks++;
+    return true;
+}
+
+static void write_unlock(void *opaque, bool locked) {
+    struct test_memory *memory = opaque;
+    assert(locked);
+    assert(memory->write_lock_depth == 1);
+    memory->write_lock_depth = 0;
+    memory->write_unlocks++;
+}
 
 static enum guest_memory_fault_kind resolve_test_page(void *opaque,
         guest_addr_t page_base, enum guest_memory_access access,
         struct guest_page_view *view) {
     struct test_memory *memory = opaque;
     use(access);
+    assert(memory->read_lock_depth == 1 || memory->write_lock_depth == 1);
     memory->resolutions++;
     for (unsigned i = 0; i < array_size(memory->pages); i++) {
         if (memory->pages[i].address == page_base) {
@@ -41,6 +80,10 @@ static enum guest_memory_fault_kind resolve_test_page(void *opaque,
 }
 
 static const struct guest_address_space_ops test_ops = {
+    .read_lock = read_lock,
+    .read_unlock = read_unlock,
+    .write_lock = write_lock,
+    .write_unlock = write_unlock,
     .resolve_page = resolve_test_page,
 };
 
@@ -160,5 +203,15 @@ int main(void) {
     assert(guest_tlb_read(&tlb, PAGE_NEXT - 2, output, sizeof(output),
             GUEST_MEMORY_READ, &fault));
     assert(memcmp(output, write_value, sizeof(output)) == 0);
+    assert(memory.read_lock_depth == 0 &&
+            memory.read_locks != 0 &&
+            memory.read_locks == memory.read_unlocks &&
+            memory.write_lock_depth == 0 &&
+            memory.write_locks != 0 &&
+            memory.write_locks == memory.write_unlocks &&
+            other_memory.read_lock_depth == 0 &&
+            other_memory.read_locks == other_memory.read_unlocks &&
+            other_memory.write_lock_depth == 0 &&
+            other_memory.write_locks == other_memory.write_unlocks);
     return 0;
 }

@@ -151,7 +151,7 @@ void guest_linux_mm_init(struct guest_linux_mm *memory,
     };
 }
 
-guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
+static guest_addr_t guest_linux_brk_unlocked(struct guest_linux_mm *memory,
         guest_addr_t requested) {
     if (requested == 0)
         return memory->brk;
@@ -184,7 +184,15 @@ guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
     return memory->brk;
 }
 
-qword_t guest_linux_mmap(struct guest_linux_mm *memory,
+guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
+        guest_addr_t requested) {
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    guest_addr_t result = guest_linux_brk_unlocked(memory, requested);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
+}
+
+static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t flags, qword_t fd, qword_t offset) {
     use(fd);
@@ -239,7 +247,17 @@ qword_t guest_linux_mmap(struct guest_linux_mm *memory,
     return linux_error(GUEST_LINUX_ENOMEM);
 }
 
-qword_t guest_linux_munmap(struct guest_linux_mm *memory,
+qword_t guest_linux_mmap(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, qword_t protection,
+        qword_t flags, qword_t fd, qword_t offset) {
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_mmap_unlocked(memory,
+            address, length, protection, flags, fd, offset);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
+}
+
+static qword_t guest_linux_munmap_unlocked(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length) {
     if (((qword_t) address & GUEST_MEMORY_PAGE_MASK) != 0 || length == 0)
         return linux_error(GUEST_LINUX_EINVAL);
@@ -253,7 +271,15 @@ qword_t guest_linux_munmap(struct guest_linux_mm *memory,
     return 0;
 }
 
-qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
+qword_t guest_linux_munmap(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length) {
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_munmap_unlocked(memory, address, length);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
+}
+
+static qword_t guest_linux_mprotect_unlocked(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection) {
     if (((qword_t) address & GUEST_MEMORY_PAGE_MASK) != 0)
         return linux_error(GUEST_LINUX_EINVAL);
@@ -272,4 +298,13 @@ qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
         return linux_error(GUEST_LINUX_ENOMEM);
     assert(result == GUEST_PAGE_TABLE_OK);
     return 0;
+}
+
+qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, qword_t protection) {
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_mprotect_unlocked(
+            memory, address, length, protection);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
 }

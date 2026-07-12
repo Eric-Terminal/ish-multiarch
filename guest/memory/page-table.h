@@ -1,6 +1,9 @@
 #ifndef GUEST_MEMORY_PAGE_TABLE_H
 #define GUEST_MEMORY_PAGE_TABLE_H
 
+#include <pthread.h>
+#include <stdatomic.h>
+
 #include "guest/memory/address-space.h"
 
 enum guest_page_table_result {
@@ -16,6 +19,8 @@ struct guest_page_table_node;
 struct guest_page_table {
     struct guest_address_space address_space;
     struct guest_page_table_node *root;
+    pthread_rwlock_t lock;
+    atomic_bool concurrent;
 };
 
 struct guest_page_range {
@@ -33,6 +38,12 @@ void guest_page_table_test_fail_clone_allocation_at(size_t index);
 size_t guest_page_table_test_clone_allocation_count(void);
 #endif
 void guest_page_table_destroy(struct guest_page_table *table);
+// 共享页表的复合映射变更须持有写锁；单次 TLB 访问会自动加锁。
+// 必须在把页表发布给第二个线程前启用；启用后不再关闭。
+void guest_page_table_enable_concurrency(struct guest_page_table *table);
+bool guest_page_table_write_lock(struct guest_page_table *table);
+void guest_page_table_write_unlock(
+        struct guest_page_table *table, bool locked);
 enum guest_page_table_result guest_page_table_map(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, byte_t **host_page);

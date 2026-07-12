@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <pthread.h>
 #include <string.h>
 
 #include "guest/linux/errno.h"
@@ -9,6 +10,7 @@
 #define BRK_BASE UINT64_C(0x0000600000000000)
 #define BRK_LIMIT (BRK_BASE + 3 * GUEST_MEMORY_PAGE_SIZE)
 #define TOP_PAGE ((UINT64_C(1) << 48) - GUEST_MEMORY_PAGE_SIZE)
+#define CONCURRENCY_ITERATIONS 5000
 
 static qword_t encoded_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
@@ -404,6 +406,64 @@ static void test_brk_with_hole(void) {
     guest_page_table_destroy(&table);
 }
 
+struct concurrency_context {
+    struct guest_page_table *table;
+    guest_addr_t address;
+};
+
+static void *concurrent_reader(void *opaque) {
+    const struct concurrency_context *context = opaque;
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &context->table->address_space);
+    struct guest_memory_fault fault;
+    dword_t value;
+    for (unsigned i = 0; i < CONCURRENCY_ITERATIONS; i++)
+        assert(guest_tlb_read(&tlb, context->address,
+                &value, sizeof(value), GUEST_MEMORY_READ, &fault));
+    return NULL;
+}
+
+static void *concurrent_writer(void *opaque) {
+    const struct concurrency_context *context = opaque;
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &context->table->address_space);
+    struct guest_memory_fault fault;
+    for (dword_t value = 0; value < CONCURRENCY_ITERATIONS; value++)
+        assert(guest_tlb_write(&tlb, context->address,
+                &value, sizeof(value), &fault));
+    return NULL;
+}
+
+static void test_concurrent_access_and_protection(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    guest_page_table_enable_concurrency(&table);
+    struct guest_linux_mm memory;
+    guest_linux_mm_init(&memory, &table, BRK_BASE, BRK_LIMIT);
+    guest_addr_t address = (guest_addr_t) memory.mmap_base;
+    qword_t protection = GUEST_LINUX_PROT_READ |
+            GUEST_LINUX_PROT_WRITE;
+    assert(guest_linux_mmap(&memory, address,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS |
+                    GUEST_LINUX_MAP_FIXED,
+            UINT64_MAX, 0) == address);
+
+    struct concurrency_context context = {&table, address};
+    pthread_t reader;
+    pthread_t writer;
+    assert(pthread_create(&reader, NULL,
+            concurrent_reader, &context) == 0);
+    assert(pthread_create(&writer, NULL,
+            concurrent_writer, &context) == 0);
+    for (unsigned i = 0; i < CONCURRENCY_ITERATIONS; i++)
+        assert(guest_linux_mprotect(&memory, address,
+                GUEST_MEMORY_PAGE_SIZE, protection) == 0);
+    assert(pthread_join(reader, NULL) == 0);
+    assert(pthread_join(writer, NULL) == 0);
+    guest_page_table_destroy(&table);
+}
+
 int main(void) {
     test_growth_and_shrink();
     test_conflict_rollback();
@@ -413,5 +473,6 @@ int main(void) {
     test_mmap_validation();
     test_mprotect_and_munmap();
     test_brk_with_hole();
+    test_concurrent_access_and_protection();
     return 0;
 }

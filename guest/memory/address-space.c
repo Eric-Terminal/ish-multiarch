@@ -7,6 +7,8 @@ void guest_address_space_init(struct guest_address_space *space,
         const struct guest_address_space_ops *ops, void *opaque,
         byte_t address_bits) {
     assert(ops != NULL && ops->resolve_page != NULL);
+    assert((ops->read_lock == NULL) == (ops->read_unlock == NULL));
+    assert((ops->write_lock == NULL) == (ops->write_unlock == NULL));
     assert(address_bits > GUEST_MEMORY_PAGE_BITS);
     assert(address_bits <= sizeof(guest_addr_t) * 8);
     *space = (struct guest_address_space) {
@@ -19,6 +21,28 @@ void guest_address_space_init(struct guest_address_space *space,
 
 void guest_address_space_changed(struct guest_address_space *space) {
     space->generation++;
+}
+
+bool guest_address_space_read_lock(struct guest_address_space *space) {
+    return space->ops->read_lock != NULL &&
+            space->ops->read_lock(space->opaque);
+}
+
+void guest_address_space_read_unlock(
+        struct guest_address_space *space, bool locked) {
+    if (space->ops->read_unlock != NULL)
+        space->ops->read_unlock(space->opaque, locked);
+}
+
+bool guest_address_space_write_lock(struct guest_address_space *space) {
+    return space->ops->write_lock != NULL &&
+            space->ops->write_lock(space->opaque);
+}
+
+void guest_address_space_write_unlock(
+        struct guest_address_space *space, bool locked) {
+    if (space->ops->write_unlock != NULL)
+        space->ops->write_unlock(space->opaque, locked);
 }
 
 bool guest_address_space_contains(const struct guest_address_space *space,

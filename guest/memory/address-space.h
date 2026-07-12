@@ -41,6 +41,11 @@ struct guest_page_view {
 };
 
 struct guest_address_space_ops {
+    // 非空时，TLB 会用这两组回调包住解析与实际 host 内存访问。
+    bool (*read_lock)(void *opaque);
+    void (*read_unlock)(void *opaque, bool locked);
+    bool (*write_lock)(void *opaque);
+    void (*write_unlock)(void *opaque, bool locked);
     enum guest_memory_fault_kind (*resolve_page)(void *opaque,
             guest_addr_t page_base, enum guest_memory_access access,
             struct guest_page_view *view);
@@ -57,6 +62,12 @@ void guest_address_space_init(struct guest_address_space *space,
         const struct guest_address_space_ops *ops, void *opaque,
         byte_t address_bits);
 void guest_address_space_changed(struct guest_address_space *space);
+bool guest_address_space_read_lock(struct guest_address_space *space);
+void guest_address_space_read_unlock(
+        struct guest_address_space *space, bool locked);
+bool guest_address_space_write_lock(struct guest_address_space *space);
+void guest_address_space_write_unlock(
+        struct guest_address_space *space, bool locked);
 bool guest_address_space_contains(const struct guest_address_space *space,
         guest_addr_t address, size_t size);
 enum guest_memory_fault_kind guest_address_space_resolve_page(
