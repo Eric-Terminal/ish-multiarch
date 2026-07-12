@@ -6,6 +6,7 @@
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
+#include "kernel/aarch64-fd-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-wait-service.h"
 #include "kernel/calls.h"
@@ -41,8 +42,12 @@ _Static_assert(AARCH64_LINUX_IOV_TRANSACTION_LIMIT <=
 
 enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETCWD = 17,
+    AARCH64_LINUX_SYS_DUP = 23,
+    AARCH64_LINUX_SYS_DUP3 = 24,
+    AARCH64_LINUX_SYS_FCNTL = 25,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
+    AARCH64_LINUX_SYS_PIPE2 = 59,
     AARCH64_LINUX_SYS_GETDENTS64 = 61,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
@@ -899,11 +904,20 @@ static qword_t dispatch_syscall(
     switch (syscall->number) {
         case AARCH64_LINUX_SYS_GETCWD:
             return dispatch_getcwd(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_DUP:
+            return aarch64_linux_dispatch_dup(syscall, task);
+        case AARCH64_LINUX_SYS_DUP3:
+            return aarch64_linux_dispatch_dup3(syscall, task);
+        case AARCH64_LINUX_SYS_FCNTL:
+            return aarch64_linux_dispatch_fcntl(syscall, task);
         case AARCH64_LINUX_SYS_OPENAT:
             return dispatch_openat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOSE:
             return syscall_result(f_close_task(
                     task, syscall_fd(syscall->arguments[0])));
+        case AARCH64_LINUX_SYS_PIPE2:
+            return aarch64_linux_dispatch_pipe2(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_GETDENTS64:
             return dispatch_getdents64(
                     context, syscall, task, fault);

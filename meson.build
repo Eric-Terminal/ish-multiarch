@@ -148,6 +148,7 @@ if get_option('kernel') == 'ish'
         'kernel/fs-task.c',
         'kernel/aarch64-exec.c',
         'kernel/aarch64-exec-image.c',
+        'kernel/aarch64-fd-service.c',
         'kernel/aarch64-resource-wire.c',
         'kernel/aarch64-task-runner.c',
         'kernel/aarch64-signal-service.c',
@@ -235,6 +236,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-file-syscall-test.c',
             dependencies: ish)
         test('aarch64_file_syscall', aarch64_file_syscall_test)
+
+        aarch64_fd_syscall_test = executable(
+            'aarch64_fd_syscall_test',
+            'kernel/aarch64-fd-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_fd_syscall', aarch64_fd_syscall_test)
 
         aarch64_process_syscall_test = executable(
             'aarch64_process_syscall_test',

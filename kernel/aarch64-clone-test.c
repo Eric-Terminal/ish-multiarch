@@ -18,6 +18,7 @@
 #include "kernel/calls.h"
 #include "kernel/fs.h"
 #include "kernel/mm.h"
+#include "kernel/resource.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
 
@@ -215,6 +216,7 @@ static struct task *make_parent(struct tgroup *group) {
     group->leader = parent;
     group->sid = parent->pid;
     group->pgid = parent->pid;
+    group->limits[RLIMIT_NOFILE_] = (struct rlimit_) {16, 16};
     parent->group = group;
     parent->tgid = parent->pid;
 
@@ -226,13 +228,14 @@ static struct task *make_parent(struct tgroup *group) {
     if (mm == NULL || IS_ERR(files) || fs == NULL ||
             sighand == NULL || metadata == NULL)
         return NULL;
-    files->files[0] = fd_retain(metadata);
+    parent->files = files;
+    if (f_install_task(parent, fd_retain(metadata), 0) != 0)
+        return NULL;
     mm->exefile = fd_retain(metadata);
     fs->root = fd_retain(metadata);
     fs->pwd = fd_retain(metadata);
     fd_close(metadata);
     task_set_mm(parent, mm);
-    parent->files = files;
     parent->fs = fs;
     parent->sighand = sighand;
     task_thread_store(parent, pthread_self());

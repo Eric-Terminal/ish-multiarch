@@ -201,10 +201,19 @@ int create_stdio(const char *file, int major, int minor) {
             return err;
     }
 
-    fd->refcount = 0;
-    current->files->files[0] = fd_retain(fd);
-    current->files->files[1] = fd_retain(fd);
-    current->files->files[2] = fd_retain(fd);
+    for (fd_t number = 0; number < 3; number++) {
+        if (number != 0)
+            fd_retain(fd);
+        fd_t installed = f_install_task(current, fd, 0);
+        if (installed != number) {
+            int error = installed < 0 ? installed : _EBUSY;
+            if (installed >= 0)
+                f_close_task(current, installed);
+            for (fd_t previous = 0; previous < number; previous++)
+                f_close_task(current, previous);
+            return error;
+        }
+    }
     return 0;
 }
 
@@ -218,14 +227,27 @@ static struct fd *open_fd_from_actual_fd(int fd_no) {
     return fd;
 }
 
+static int install_actual_fd(int actual_fd, fd_t guest_fd) {
+    struct fd *fd = open_fd_from_actual_fd(actual_fd);
+    if (fd == NULL)
+        return -1;
+    fd_t installed = f_install_task(current, fd, 0);
+    if (installed != guest_fd) {
+        if (installed >= 0)
+            f_close_task(current, installed);
+        return -1;
+    }
+    return 0;
+}
+
 int create_piped_stdio(void) {
-    if (!(current->files->files[0] = open_fd_from_actual_fd(STDIN_FILENO))) {
+    if (install_actual_fd(STDIN_FILENO, 0) < 0) {
         return -1;
     }
-    if (!(current->files->files[1] = open_fd_from_actual_fd(STDOUT_FILENO))) {
+    if (install_actual_fd(STDOUT_FILENO, 1) < 0) {
         return -1;
     }
-    if (!(current->files->files[2] = open_fd_from_actual_fd(STDERR_FILENO))) {
+    if (install_actual_fd(STDERR_FILENO, 2) < 0) {
         return -1;
     }
     return 0;

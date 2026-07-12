@@ -62,6 +62,7 @@ struct fdtable *fdtable_new(int size) {
     fdt->size = 0;
     fdt->files = NULL;
     fdt->cloexec = NULL;
+    fdt->generations = NULL;
     lock_init(&fdt->lock);
     int err = fdtable_resize(fdt, size);
     if (err < 0) {
@@ -81,6 +82,7 @@ void fdtable_release(struct fdtable *table) {
             fdtable_close(table, f);
         free(table->files);
         free(table->cloexec);
+        free(table->generations);
         unlock(&table->lock);
         free(table);
     } else {
@@ -108,10 +110,22 @@ static int fdtable_resize(struct fdtable *table, unsigned size) {
     if (table->cloexec)
         memcpy(cloexec, table->cloexec, BITS_SIZE(table->size));
 
+    qword_t *generations = calloc(size, sizeof(*generations));
+    if (generations == NULL) {
+        free(cloexec);
+        free(files);
+        return _ENOMEM;
+    }
+    if (table->generations)
+        memcpy(generations, table->generations,
+                sizeof(*generations) * table->size);
+
     free(table->files);
     table->files = files;
     free(table->cloexec);
     table->cloexec = cloexec;
+    free(table->generations);
+    table->generations = generations;
     table->size = size;
     return 0;
 }
@@ -129,6 +143,8 @@ struct fdtable *fdtable_copy(struct fdtable *table) {
         if (new_table->files[f])
             new_table->files[f]->refcount++;
     memcpy(new_table->cloexec, table->cloexec, BITS_SIZE(size));
+    memcpy(new_table->generations, table->generations,
+            sizeof(*table->generations) * size);
     unlock(&table->lock);
     return new_table;
 }
@@ -171,7 +187,8 @@ struct fd *f_get(fd_t f) {
     return f_get_task(current, f);
 }
 
-static fd_t f_install_start(struct task *task, struct fd *fd, fd_t start) {
+static fd_t f_install_start(struct task *task, struct fd *fd,
+        fd_t start, qword_t *generation) {
     assert(start >= 0);
     struct fdtable *table = task->files;
     unsigned size = rlimit_task(task, RLIMIT_NOFILE_);
@@ -191,16 +208,20 @@ static fd_t f_install_start(struct task *task, struct fd *fd, fd_t start) {
     if (f >= 0) {
         table->files[f] = fd;
         bit_clear(f, table->cloexec);
+        table->generations[f]++;
+        if (generation != NULL)
+            *generation = table->generations[f];
     } else {
         fd_close(fd);
     }
     return f;
 }
 
-fd_t f_install_task(struct task *task, struct fd *fd, int flags) {
+fd_t f_install_task_tracked(struct task *task, struct fd *fd,
+        int flags, qword_t *generation) {
     struct fdtable *table = task->files;
     lock(&table->lock);
-    fd_t f = f_install_start(task, fd, 0);
+    fd_t f = f_install_start(task, fd, 0, generation);
     if (f >= 0) {
         if (flags & O_CLOEXEC_)
             bit_set(f, table->cloexec);
@@ -209,6 +230,10 @@ fd_t f_install_task(struct task *task, struct fd *fd, int flags) {
     }
     unlock(&table->lock);
     return f;
+}
+
+fd_t f_install_task(struct task *task, struct fd *fd, int flags) {
+    return f_install_task_tracked(task, fd, flags, NULL);
 }
 
 fd_t f_install(struct fd *fd, int flags) {
@@ -235,6 +260,20 @@ int f_close_task(struct task *task, fd_t f) {
     return err;
 }
 
+bool f_close_task_if_matches(
+        struct task *task, fd_t f, struct fd *expected,
+        qword_t generation) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    struct fd *actual = fdtable_get(table, f);
+    bool matches = actual != NULL && actual == expected &&
+            table->generations[f] == generation;
+    if (matches)
+        fdtable_close(table, f);
+    unlock(&table->lock);
+    return matches;
+}
+
 int f_close(fd_t f) {
     return f_close_task(current, f);
 }
@@ -252,12 +291,6 @@ void fdtable_do_cloexec(struct fdtable *table) {
     unlock(&table->lock);
 }
 
-#define F_DUPFD_ 0
-#define F_GETFD_ 1
-#define F_SETFD_ 2
-#define F_GETFL_ 3
-#define F_SETFL_ 4
-
 #define F_GETLK_ 5
 #define F_SETLK_ 6
 #define F_SETLKW_ 7
@@ -265,36 +298,140 @@ void fdtable_do_cloexec(struct fdtable *table) {
 #define F_SETLK64_ 13
 #define F_SETLKW64_ 14
 
-#define F_DUPFD_CLOEXEC_ 1030
+fd_t f_dupfd_task(struct task *task, fd_t old_fd,
+        fd_t minimum, int flags) {
+    if (flags & ~O_CLOEXEC_)
+        return _EINVAL;
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, old_fd);
+    if (fd == NULL) {
+        unlock(&table->lock);
+        return _EBADF;
+    }
+    if (minimum < 0 || (rlim_t_) minimum >=
+            rlimit_task(task, RLIMIT_NOFILE_)) {
+        unlock(&table->lock);
+        return _EINVAL;
+    }
+
+    fd_retain(fd);
+    fd_t duplicated = f_install_start(task, fd, minimum, NULL);
+    if (duplicated >= 0 && (flags & O_CLOEXEC_))
+        bit_set(duplicated, table->cloexec);
+    unlock(&table->lock);
+    return duplicated;
+}
+
+static fd_t f_dup_to_task(struct task *task, fd_t old_fd,
+        fd_t new_fd, int flags, bool reject_same) {
+    if (flags & ~O_CLOEXEC_)
+        return _EINVAL;
+    if (reject_same && old_fd == new_fd)
+        return _EINVAL;
+
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    if (new_fd < 0 || (rlim_t_) new_fd >=
+            rlimit_task(task, RLIMIT_NOFILE_)) {
+        unlock(&table->lock);
+        return _EBADF;
+    }
+    struct fd *fd = fdtable_get(table, old_fd);
+    if (fd == NULL) {
+        unlock(&table->lock);
+        return _EBADF;
+    }
+    if (old_fd == new_fd) {
+        unlock(&table->lock);
+        return new_fd;
+    }
+
+    int error = fdtable_expand(task, new_fd);
+    if (error < 0) {
+        unlock(&table->lock);
+        return error;
+    }
+    fd_retain(fd);
+    if (fdtable_get(table, new_fd) != NULL)
+        fdtable_close(table, new_fd);
+    table->files[new_fd] = fd;
+    table->generations[new_fd]++;
+    if (flags & O_CLOEXEC_)
+        bit_set(new_fd, table->cloexec);
+    else
+        bit_clear(new_fd, table->cloexec);
+    unlock(&table->lock);
+    return new_fd;
+}
+
+fd_t f_dup2_task(struct task *task, fd_t old_fd, fd_t new_fd) {
+    return f_dup_to_task(task, old_fd, new_fd, 0, false);
+}
+
+fd_t f_dup3_task(struct task *task, fd_t old_fd,
+        fd_t new_fd, int flags) {
+    return f_dup_to_task(task, old_fd, new_fd, flags, true);
+}
+
+int f_getfd_task(struct task *task, fd_t fd) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    if (fdtable_get(table, fd) == NULL) {
+        unlock(&table->lock);
+        return _EBADF;
+    }
+    int flags = bit_test(fd, table->cloexec) ? FD_CLOEXEC_ : 0;
+    unlock(&table->lock);
+    return flags;
+}
+
+int f_setfd_task(struct task *task, fd_t fd, int flags) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    if (fdtable_get(table, fd) == NULL) {
+        unlock(&table->lock);
+        return _EBADF;
+    }
+    if (flags & FD_CLOEXEC_)
+        bit_set(fd, table->cloexec);
+    else
+        bit_clear(fd, table->cloexec);
+    unlock(&table->lock);
+    return 0;
+}
+
+int f_getfl_task(struct task *task, fd_t fd_number) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    int flags = fd_getflags(fd);
+    fd_close(fd);
+    return flags;
+}
+
+int f_setfl_task(struct task *task, fd_t fd_number, int flags) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    int error = fd_setflags(fd, flags);
+    fd_close(fd);
+    return error;
+}
 
 dword_t sys_dup(fd_t f) {
     STRACE("dup(%d)", f);
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    fd->refcount++;
-    return f_install(fd, 0);
+    return f_dupfd_task(current, f, 0, 0);
 }
 
 dword_t sys_dup3(fd_t f, fd_t new_f, int_t flags) {
     STRACE("dup3(%d, %d, %d)", f, new_f, flags);
-    struct fdtable *table = current->files;
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    int err = fdtable_expand(current, new_f);
-    if (err < 0)
-        return err;
-    fd_retain(fd);
-    f_close(new_f);
-    table->files[new_f] = fd;
-    if (flags & O_CLOEXEC_)
-        bit_set(new_f, table->cloexec);
-    return new_f;
+    return f_dup3_task(current, f, new_f, flags);
 }
 
 dword_t sys_dup2(fd_t f, fd_t new_f) {
-    return sys_dup3(f, new_f, 0);
+    STRACE("dup2(%d, %d)", f, new_f);
+    return f_dup2_task(current, f, new_f);
 }
 
 int fd_getflags(struct fd *fd) {
@@ -312,44 +449,37 @@ int fd_setflags(struct fd *fd, int flags) {
 }
 
 dword_t sys_fcntl(fd_t f, dword_t cmd, dword_t arg) {
-    struct fdtable *table = current->files;
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
     struct flock32_ flock32;
     struct flock_ flock;
-    fd_t new_f;
     int err;
     switch (cmd) {
         case F_DUPFD_:
             STRACE("fcntl(%d, F_DUPFD, %d)", f, arg);
-            fd->refcount++;
-            return f_install_start(current, fd, arg);
+            return f_dupfd_task(current, f, (fd_t) arg, 0);
 
         case F_DUPFD_CLOEXEC_:
             STRACE("fcntl(%d, F_DUPFD_CLOEXEC, %d)", f, arg);
-            fd->refcount++;
-            new_f = f_install_start(current, fd, arg);
-            bit_set(new_f, table->cloexec);
-            return new_f;
+            return f_dupfd_task(current, f, (fd_t) arg, O_CLOEXEC_);
 
         case F_GETFD_:
             STRACE("fcntl(%d, F_GETFD)", f);
-            return bit_test(f, table->cloexec);
+            return f_getfd_task(current, f);
         case F_SETFD_:
             STRACE("fcntl(%d, F_SETFD, 0x%x)", f, arg);
-            if (arg & 1)
-                bit_set(f, table->cloexec);
-            else
-                bit_clear(f, table->cloexec);
-            return 0;
+            return f_setfd_task(current, f, arg);
 
         case F_GETFL_:
             STRACE("fcntl(%d, F_GETFL)", f);
-            return fd_getflags(fd);
+            return f_getfl_task(current, f);
         case F_SETFL_:
             STRACE("fcntl(%d, F_SETFL, %#x)", f, arg);
-            return fd_setflags(fd, arg);
+            return f_setfl_task(current, f, arg);
+    }
+
+    struct fd *fd = f_get(f);
+    if (fd == NULL)
+        return _EBADF;
+    switch (cmd) {
 
         case F_GETLK_:
             STRACE("fcntl(%d, F_GETLK, %#x)", f, arg);

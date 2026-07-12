@@ -99,6 +99,57 @@ int main(void) {
     CHECK(target_task.files->files[3] == NULL, "显式关闭清除目标表项");
     CHECK(closed_fds == before_close + 1, "显式关闭释放目标表持有的引用");
 
+    before_close = closed_fds;
+    CHECK(f_dupfd_task(&target_task, 0, 1, 0) == 1,
+            "F_DUPFD 从指定下界选择最低空槽");
+    CHECK(f_get_task(&target_task, 1) == target_fds[0] &&
+            f_getfd_task(&target_task, 1) == 0,
+            "普通复制共享文件对象并清除描述符 CLOEXEC");
+    CHECK(f_setfd_task(&target_task, 1, FD_CLOEXEC_) == 0 &&
+            f_getfd_task(&target_task, 1) == FD_CLOEXEC_ &&
+            f_getfd_task(&target_task, 0) == 0,
+            "描述符 flags 只属于各自表项");
+    CHECK(f_dup3_task(&target_task, 0, 3, O_CLOEXEC_) == 3 &&
+            f_get_task(&target_task, 3) == target_fds[0] &&
+            f_getfd_task(&target_task, 3) == FD_CLOEXEC_,
+            "dup3 精确安装目标并设置 CLOEXEC");
+    CHECK(f_dup3_task(&target_task, 0, 0, 0) == _EINVAL,
+            "dup3 拒绝相同源与目标");
+    CHECK(f_dup3_task(&target_task, 99, 3, O_NONBLOCK_) == _EINVAL,
+            "dup3 的非法 flags 优先于无效源描述符");
+    CHECK(f_dup3_task(&target_task, 99, 4, 0) == _EBADF,
+            "dup3 的越界目标返回 EBADF");
+    CHECK(f_dupfd_task(&target_task, 99, -1, 0) == _EBADF,
+            "F_DUPFD 先验证源描述符");
+    CHECK(f_dupfd_task(&target_task, 0, -1, 0) == _EINVAL &&
+            f_dupfd_task(&target_task, 0, 4, 0) == _EINVAL,
+            "F_DUPFD 拒绝负下界与 NOFILE 边界");
+    CHECK(f_dupfd_task(&target_task, 0, 0, 0) == _EMFILE,
+            "描述符表没有空槽时复制返回 EMFILE");
+    CHECK(f_setfd_task(&target_task, 2, FD_CLOEXEC_) == 0,
+            "替换测试先标记目标描述符");
+    CHECK(f_dup3_task(&target_task, 0, 2, 0) == 2 &&
+            f_get_task(&target_task, 2) == target_fds[0] &&
+            f_getfd_task(&target_task, 2) == 0 &&
+            closed_fds == before_close + 1,
+            "dup3 原子替换目标、清除 CLOEXEC 并只关闭旧对象一次");
+    CHECK(f_dup2_task(&target_task, 0, 0) == 0,
+            "dup2 对有效同号描述符保持原项");
+    CHECK(f_setfl_task(&target_task, 0,
+            O_APPEND_ | O_NONBLOCK_) == 0 &&
+            (f_getfl_task(&target_task, 1) &
+                    (O_APPEND_ | O_NONBLOCK_)) ==
+                    (O_APPEND_ | O_NONBLOCK_),
+            "复制项共享 open-file-description 状态 flags");
+    CHECK(f_getfd_task(&target_task, 99) == _EBADF &&
+            f_setfd_task(&target_task, 99, 0) == _EBADF &&
+            f_getfl_task(&target_task, 99) == _EBADF,
+            "标志操作统一拒绝无效描述符");
+    CHECK(f_close_task(&target_task, 3) == 0 &&
+            f_close_task(&target_task, 1) == 0 &&
+            closed_fds == before_close + 1,
+            "清理复制项不会提前关闭仍由源表项持有的对象");
+
     struct fd *current_fd = fd_create(&test_fd_ops);
     CHECK(current_fd != NULL, "当前任务测试 fd 创建成功");
     CHECK(f_install(current_fd, O_CLOEXEC_) == 0, "兼容安装使用当前任务");

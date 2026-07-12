@@ -120,6 +120,15 @@ int fd_close(struct fd *fd);
 int fd_getflags(struct fd *fd);
 int fd_setflags(struct fd *fd, int flags);
 
+// Linux fcntl 命令值；架构服务只应复用无指针的公共语义。
+#define F_DUPFD_ 0
+#define F_GETFD_ 1
+#define F_SETFD_ 2
+#define F_GETFL_ 3
+#define F_SETFL_ 4
+#define F_DUPFD_CLOEXEC_ 1030
+#define FD_CLOEXEC_ 1
+
 #define NAME_MAX 255
 struct dir_entry {
     qword_t inode;
@@ -175,6 +184,7 @@ struct fdtable {
     unsigned size;
     struct fd **files;
     bits_t *cloexec;
+    qword_t *generations;
     lock_t lock;
 };
 
@@ -193,8 +203,26 @@ struct fd *f_get_task_retain(struct task *task, fd_t f);
 struct fd *f_get(fd_t f);
 // 接管 fd 引用：成功时交给目标表，失败时销毁；flags 只处理 O_CLOEXEC 与 O_NONBLOCK。
 fd_t f_install_task(struct task *task, struct fd *fd, int flags);
+// tracked 版本额外返回本次安装的槽位代数，供跨回调的精确失败回滚使用。
+fd_t f_install_task_tracked(struct task *task, struct fd *fd,
+        int flags, qword_t *generation);
 fd_t f_install(struct fd *fd, int flags);
 int f_close_task(struct task *task, fd_t f);
 int f_close(fd_t f);
+// 指针与安装代数都吻合时才关闭，避免同对象 ABA 复用误伤新表项。
+bool f_close_task_if_matches(
+        struct task *task, fd_t f, struct fd *expected,
+        qword_t generation);
+
+// 复制操作只修改目标 task 的描述符表，不改变共享文件对象的状态 flags。
+fd_t f_dupfd_task(struct task *task, fd_t old_fd,
+        fd_t minimum, int flags);
+fd_t f_dup2_task(struct task *task, fd_t old_fd, fd_t new_fd);
+fd_t f_dup3_task(struct task *task, fd_t old_fd,
+        fd_t new_fd, int flags);
+int f_getfd_task(struct task *task, fd_t fd);
+int f_setfd_task(struct task *task, fd_t fd, int flags);
+int f_getfl_task(struct task *task, fd_t fd);
+int f_setfl_task(struct task *task, fd_t fd, int flags);
 
 #endif
