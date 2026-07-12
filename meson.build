@@ -264,6 +264,13 @@ if get_option('kernel') == 'ish'
         test('aarch64_nanosleep_syscall',
             aarch64_nanosleep_syscall_test)
 
+        aarch64_clock_gettime_syscall_test = executable(
+            'aarch64_clock_gettime_syscall_test',
+            'kernel/aarch64-clock-gettime-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_clock_gettime_syscall',
+            aarch64_clock_gettime_syscall_test)
+
         aarch64_clone_test = executable(
             'aarch64_clone_test',
             'kernel/aarch64-clone-test.c',

@@ -1,12 +1,22 @@
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
 #include <assert.h>
 #include <limits.h>
 #include <stdint.h>
+#include <time.h>
 
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+#endif
+
+#include "fs/fd.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-time-service.h"
 #include "kernel/errno.h"
+#include "kernel/resource.h"
 #include "kernel/task.h"
 #include "util/timer.h"
 
@@ -70,6 +80,103 @@ static qword_t write_guest_timespec(
             address, &wire, sizeof(wire), fault))
         return time_result(_EFAULT);
     return 0;
+}
+
+static struct timer_time cpu_time_now(void) {
+    struct rusage_ usage = rusage_get_current();
+    uint64_t microseconds = (uint64_t) usage.utime.usec + usage.stime.usec;
+    return (struct timer_time) {
+        .sec = (int64_t) usage.utime.sec + usage.stime.sec +
+                (int64_t) (microseconds / UINT64_C(1000000)),
+        .nsec = (int64_t) (microseconds % UINT64_C(1000000)) *
+                INT64_C(1000),
+    };
+}
+
+static int boottime_now(struct timer_time *time) {
+#ifdef __APPLE__
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS)
+        return _EINVAL;
+
+    // 拆分商与余数，避免 arm64_32 链接 128 位除法运行库。
+    uint64_t ticks = mach_continuous_time();
+    uint64_t tick_quotient = ticks / timebase.denom;
+    uint64_t fractional_nanoseconds = ticks % timebase.denom *
+            timebase.numer / timebase.denom;
+    uint64_t scaled_remainder = tick_quotient %
+            UINT64_C(1000000000) * timebase.numer;
+    uint64_t seconds;
+    if (__builtin_mul_overflow(
+                tick_quotient / UINT64_C(1000000000),
+                timebase.numer, &seconds))
+        return _EOVERFLOW;
+    uint64_t nanoseconds = scaled_remainder % UINT64_C(1000000000) +
+            fractional_nanoseconds;
+    uint64_t carry = scaled_remainder / UINT64_C(1000000000) +
+            nanoseconds / UINT64_C(1000000000);
+    if (seconds > INT64_MAX || carry > (uint64_t) INT64_MAX - seconds)
+        return _EOVERFLOW;
+    seconds += carry;
+    nanoseconds %= UINT64_C(1000000000);
+    *time = (struct timer_time) {
+        .sec = (int64_t) seconds,
+        .nsec = (int64_t) nanoseconds,
+    };
+    return 0;
+#else
+    struct timespec value;
+    if (clock_gettime(CLOCK_BOOTTIME, &value) < 0)
+        return errno_map();
+    *time = timer_time_from_timespec(value);
+    return 0;
+#endif
+}
+
+static int clock_time_now(sdword_t clock, struct timer_time *time) {
+    clockid_t host_clock;
+    switch (clock) {
+        case CLOCK_REALTIME_:
+        case CLOCK_REALTIME_COARSE_:
+        case CLOCK_REALTIME_ALARM_:
+            host_clock = CLOCK_REALTIME;
+            break;
+        case CLOCK_MONOTONIC_:
+        case CLOCK_MONOTONIC_COARSE_:
+            host_clock = CLOCK_MONOTONIC;
+            break;
+        case CLOCK_MONOTONIC_RAW_:
+            host_clock = CLOCK_MONOTONIC_RAW;
+            break;
+        case CLOCK_PROCESS_CPUTIME_ID_:
+        case CLOCK_THREAD_CPUTIME_ID_:
+            *time = cpu_time_now();
+            return 0;
+        case CLOCK_BOOTTIME_:
+        case CLOCK_BOOTTIME_ALARM_:
+            return boottime_now(time);
+        default:
+            return _EINVAL;
+    }
+
+    struct timespec value;
+    if (clock_gettime(host_clock, &value) < 0)
+        return errno_map();
+    *time = timer_time_from_timespec(value);
+    return 0;
+}
+
+qword_t aarch64_linux_dispatch_clock_gettime(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    struct timer_time time;
+    int error = clock_time_now(
+            (sdword_t) (dword_t) syscall->arguments[0], &time);
+    if (error < 0)
+        return time_result(error);
+    return write_guest_timespec(
+            context, syscall->arguments[1], time, fault);
 }
 
 static struct timer_time monotonic_now(void) {

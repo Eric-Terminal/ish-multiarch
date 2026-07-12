@@ -59,6 +59,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
+    AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
     AARCH64_LINUX_SYS_RT_SIGSUSPEND = 133,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
@@ -973,6 +974,9 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_NANOSLEEP:
             return aarch64_linux_dispatch_nanosleep(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_CLOCK_GETTIME:
+            return aarch64_linux_dispatch_clock_gettime(
+                    context, syscall, fault);
         case AARCH64_LINUX_SYS_SIGALTSTACK:
             return dispatch_sigaltstack(
                     context, syscall, task, fault);
