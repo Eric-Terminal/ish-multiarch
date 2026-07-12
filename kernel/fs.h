@@ -45,6 +45,8 @@ int file_statat_task(struct task *task, fd_t dirfd, const char *path,
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
+int file_unlinkat_task(struct task *task, fd_t dirfd,
+        const char *path, bool remove_directory);
 
 #define MAX_PATH 4096
 #define MAX_NAME 256
@@ -74,6 +76,7 @@ struct attr {
 #define AT_STATX_SYNC_TYPE_ (AT_STATX_FORCE_SYNC_ | AT_STATX_DONT_SYNC_)
 #define AT_STATAT_SUPPORTED_FLAGS_ (AT_SYMLINK_NOFOLLOW_ | \
         AT_NO_AUTOMOUNT_ | AT_EMPTY_PATH_ | AT_STATX_SYNC_TYPE_)
+#define AT_REMOVEDIR_ 0x200
 
 struct fd *generic_open(const char *path, int flags, int mode);
 struct fd *generic_open_exec(const char *path);
@@ -84,7 +87,11 @@ struct fd *generic_openat_exec_task(struct task *task,
 struct fd *generic_openat(struct fd *at, const char *path, int flags, int mode);
 int generic_getpath(struct fd *fd, char *buf);
 int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw);
+int generic_unlinkat_task(struct task *task,
+        struct fd *at, const char *path);
 int generic_unlinkat(struct fd *at, const char *path);
+int generic_rmdirat_task(struct task *task,
+        struct fd *at, const char *path);
 int generic_rmdirat(struct fd *at, const char *path);
 int generic_renameat(struct fd *src_at, const char *src, struct fd *dst_at, const char *dst);
 int generic_symlinkat(const char *target, struct fd *at, const char *link);

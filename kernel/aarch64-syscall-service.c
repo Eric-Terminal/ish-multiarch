@@ -47,6 +47,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_DUP = 23,
     AARCH64_LINUX_SYS_DUP3 = 24,
     AARCH64_LINUX_SYS_FCNTL = 25,
+    AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_PIPE2 = 59,
@@ -366,6 +367,23 @@ static qword_t dispatch_openat(
     mode_t_ mode = (mode_t_) (word_t) syscall->arguments[3];
     return syscall_result(file_openat_task(task,
             syscall_fd(syscall->arguments[0]), path, flags, mode));
+}
+
+static qword_t dispatch_unlinkat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t raw_flags = (dword_t) syscall->arguments[2];
+    if (raw_flags & ~(dword_t) AT_REMOVEDIR_)
+        return syscall_result(_EINVAL);
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_unlinkat_task(task,
+            syscall_fd(syscall->arguments[0]), path,
+            raw_flags == AT_REMOVEDIR_));
 }
 
 static qword_t dispatch_read(
@@ -914,6 +932,8 @@ static qword_t dispatch_syscall(
             return aarch64_linux_dispatch_dup3(syscall, task);
         case AARCH64_LINUX_SYS_FCNTL:
             return aarch64_linux_dispatch_fcntl(syscall, task);
+        case AARCH64_LINUX_SYS_UNLINKAT:
+            return dispatch_unlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_OPENAT:
             return dispatch_openat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOSE:

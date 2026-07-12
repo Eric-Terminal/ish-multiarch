@@ -177,9 +177,12 @@ int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, co
     return err;
 }
 
-int generic_unlinkat(struct fd *at, const char *path_raw) {
+int generic_unlinkat_task(struct task *task,
+        struct fd *at, const char *path_raw) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, N_SYMLINK_NOFOLLOW);
+    int err = path_normalize_task(
+            task, at, path_raw, path,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
@@ -188,6 +191,10 @@ int generic_unlinkat(struct fd *at, const char *path_raw) {
         err = mount->fs->unlink(mount, path);
     mount_release(mount);
     return err;
+}
+
+int generic_unlinkat(struct fd *at, const char *path_raw) {
+    return generic_unlinkat_task(current, at, path_raw);
 }
 
 int generic_renameat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw) {
@@ -297,9 +304,11 @@ int generic_mkdirat(struct fd *at, const char *path_raw, mode_t_ mode) {
     return err;
 }
 
-int generic_rmdirat(struct fd *at, const char *path_raw) {
+int generic_rmdirat_task(struct task *task,
+        struct fd *at, const char *path_raw) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, N_SYMLINK_FOLLOW | N_PARENT_DIR_WRITE);
+    int err = path_normalize_task(task, at, path_raw, path,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
     if (err < 0)
         return err;
     if (contains_mount_point(path))
@@ -310,6 +319,10 @@ int generic_rmdirat(struct fd *at, const char *path_raw) {
         err = mount->fs->rmdir(mount, path);
     mount_release(mount);
     return err;
+}
+
+int generic_rmdirat(struct fd *at, const char *path_raw) {
+    return generic_rmdirat_task(current, at, path_raw);
 }
 
 int generic_seek(struct fd *fd, off_t_ off, int whence, size_t size) {

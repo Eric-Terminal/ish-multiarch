@@ -123,7 +123,6 @@ dword_t sys_link(addr_t src_addr, addr_t dst_addr) {
     return sys_linkat(AT_FDCWD_, src_addr, AT_FDCWD_, dst_addr);
 }
 
-#define AT_REMOVEDIR_ 0x200
 dword_t sys_unlinkat(fd_t at_f, addr_t path_addr, int_t flags) {
     char path[MAX_PATH];
     if (user_read_string(path_addr, path, sizeof(path)))

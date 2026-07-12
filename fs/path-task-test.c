@@ -21,10 +21,14 @@ struct open_probe {
     char last_path[MAX_PATH];
     char last_stat_path[MAX_PATH];
     char last_fstat_path[MAX_PATH];
+    char last_unlink_path[MAX_PATH];
+    char last_rmdir_path[MAX_PATH];
     int last_flags;
     int last_mode;
     unsigned opens;
     unsigned closes;
+    unsigned unlinks;
+    unsigned rmdirs;
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
@@ -140,9 +144,25 @@ static ssize_t probe_readlink(struct mount *mount,
     return (ssize_t) length;
 }
 
+static int probe_unlink(struct mount *mount, const char *path) {
+    struct open_probe *probe = mount->data;
+    probe->unlinks++;
+    strcpy(probe->last_unlink_path, path);
+    return 0;
+}
+
+static int probe_rmdir(struct mount *mount, const char *path) {
+    struct open_probe *probe = mount->data;
+    probe->rmdirs++;
+    strcpy(probe->last_rmdir_path, path);
+    return 0;
+}
+
 static const struct fs_ops probe_fs = {
     .open = probe_open,
     .readlink = probe_readlink,
+    .unlink = probe_unlink,
+    .rmdir = probe_rmdir,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -403,6 +423,41 @@ int main(void) {
     struct fd *denied = generic_openat(AT_PWD, "denied", O_RDONLY_, 0);
     CHECK(IS_ERR(denied) && PTR_ERR(denied) == _EACCES,
             "兼容 generic_openat 仍按 current 凭据检查权限");
+
+    CHECK(file_unlinkat_task(&target.task, 99, "", false) == _ENOENT &&
+            probe.unlinks == 0, "unlinkat 空路径优先返回 ENOENT");
+    CHECK(file_unlinkat_task(
+            &target.task, AT_FDCWD_, "victim", false) == 0 &&
+            strcmp(probe.last_unlink_path, "/target/victim") == 0,
+            "unlinkat 相对路径使用目标任务 cwd");
+    CHECK(file_unlinkat_task(&target.task, 0, "nested", false) == 0 &&
+            strcmp(probe.last_unlink_path, "/explicit/nested") == 0,
+            "unlinkat 相对路径使用目标任务显式 dirfd");
+    CHECK(file_unlinkat_task(
+            &target.task, 99, "relative", false) == _EBADF &&
+            probe.unlinks == 2,
+            "unlinkat 相对路径拒绝目标任务的无效 dirfd");
+    CHECK(file_unlinkat_task(
+            &target.task, cwd_fd, "child", false) == _ENOTDIR &&
+            probe.unlinks == 2,
+            "unlinkat 相对路径拒绝普通文件 dirfd");
+    CHECK(file_unlinkat_task(
+            &target.task, 99, "/absolute", false) == 0 &&
+            strcmp(probe.last_unlink_path, "/sandbox/absolute") == 0,
+            "unlinkat 绝对路径使用目标 root 并忽略无效 dirfd");
+    CHECK(file_unlinkat_task(&target.task, AT_FDCWD_,
+            "directory", true) == 0 && probe.rmdirs == 1 &&
+            strcmp(probe.last_rmdir_path, "/target/directory") == 0,
+            "unlinkat 的 REMOVEDIR 路径只调用目录删除操作");
+    CHECK(file_unlinkat_task(
+            &target.task, AT_FDCWD_, "link", true) == 0 &&
+            probe.rmdirs == 2 &&
+            strcmp(probe.last_rmdir_path, "/target/link") == 0,
+            "unlinkat 的 REMOVEDIR 不跟随末尾符号链接");
+    CHECK(generic_unlinkat(AT_PWD, "compat") == 0 &&
+            probe.unlinks == 4 &&
+            strcmp(probe.last_unlink_path, "/decoy/compat") == 0,
+            "兼容 unlinkat 入口仍使用 current 的 cwd");
 
     current = NULL;
     fdtable_release(decoy.task.files);

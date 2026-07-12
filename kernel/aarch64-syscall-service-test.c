@@ -59,12 +59,16 @@ struct io_probe {
 struct kernel_probe {
     char last_path[MAX_PATH];
     char last_stat_path[MAX_PATH];
+    char last_unlink_path[MAX_PATH];
+    char last_rmdir_path[MAX_PATH];
     int last_flags;
     int last_mode;
     unsigned opens;
     unsigned opened_closes;
     unsigned stat_calls;
     unsigned fstat_calls;
+    unsigned unlink_calls;
+    unsigned rmdir_calls;
     struct statbuf stat;
 };
 
@@ -310,6 +314,20 @@ static ssize_t probe_readlink(struct mount *mount,
     return (ssize_t) length;
 }
 
+static int probe_unlink(struct mount *mount, const char *path) {
+    struct kernel_probe *probe = mount->data;
+    probe->unlink_calls++;
+    strcpy(probe->last_unlink_path, path);
+    return 0;
+}
+
+static int probe_rmdir(struct mount *mount, const char *path) {
+    struct kernel_probe *probe = mount->data;
+    probe->rmdir_calls++;
+    strcpy(probe->last_rmdir_path, path);
+    return 0;
+}
+
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct fd_state *state = fd->data;
     strcpy(buffer, state->path);
@@ -319,6 +337,8 @@ static int probe_getpath(struct fd *fd, char *buffer) {
 static const struct fs_ops probe_fs = {
     .open = probe_open,
     .readlink = probe_readlink,
+    .unlink = probe_unlink,
+    .rmdir = probe_rmdir,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -553,6 +573,86 @@ int main(void) {
             memory.read_calls == MAX_PATH && memory.read_bytes == MAX_PATH &&
             kernel.opens == opens_before,
             "前 4096 字节无 NUL 时返回 ENAMETOOLONG");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset;
+    result = invoke(&fixture, &memory, &fault, 35, AT_FDCWD_,
+            USER_BASE + path_offset, UINT64_C(0xabcdef0100000001), 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            kernel.unlink_calls == 0 && kernel.rmdir_calls == 0,
+            "unlinkat 按 flags 低 32 位在访问路径前拒绝未知位");
+
+    static const char removed_path[] = "removed";
+    memcpy(memory.bytes + path_offset, removed_path, sizeof(removed_path));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + sizeof(removed_path);
+    result = invoke(&fixture, &memory, &fault, 35,
+            UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
+            UINT64_C(0xfeedface00000000), 0);
+    CHECK(result == 0 && kernel.unlink_calls == 1 &&
+            strcmp(kernel.last_unlink_path, "/work/removed") == 0 &&
+            memory.read_calls == sizeof(removed_path) &&
+            memory.read_bytes == sizeof(removed_path) &&
+            memory.max_read_size == 1,
+            "unlinkat 忽略参数高位并从目标 cwd 删除普通路径");
+
+    static const char directory_path[] = "directory";
+    memcpy(memory.bytes + path_offset,
+            directory_path, sizeof(directory_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 35, AT_FDCWD_,
+            USER_BASE + path_offset,
+            UINT64_C(0xabcdef0100000200), 0);
+    CHECK(result == 0 && kernel.rmdir_calls == 1 &&
+            kernel.unlink_calls == 1 &&
+            strcmp(kernel.last_rmdir_path, "/work/directory") == 0,
+            "unlinkat 的 REMOVEDIR 只调用目录删除操作");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 35, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            kernel.unlink_calls == 1,
+            "unlinkat 空路径在检查 dirfd 前返回 ENOENT");
+
+    static const char relative_path[] = "relative";
+    memcpy(memory.bytes + path_offset,
+            relative_path, sizeof(relative_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 35, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_EBADF) &&
+            memory.read_calls == sizeof(relative_path) &&
+            kernel.unlink_calls == 1,
+            "unlinkat 复制相对路径后拒绝无效 dirfd");
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 35, 0,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_ENOTDIR) && kernel.unlink_calls == 1,
+            "unlinkat 拒绝指向普通文件的 dirfd");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + 2;
+    result = invoke(&fixture, &memory, &fault, 35, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_EFAULT) && kernel.unlink_calls == 1 &&
+            memory.read_calls == 3 && memory.read_bytes == 2 &&
+            memory.max_read_size == 1 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "unlinkat 路径故障保持精确 guest fault 且不删除文件");
+
+    static const char absolute_path[] = "/absolute";
+    memcpy(memory.bytes + path_offset,
+            absolute_path, sizeof(absolute_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 35, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == 0 && kernel.unlink_calls == 2 &&
+            strcmp(kernel.last_unlink_path, "/absolute") == 0,
+            "unlinkat 绝对路径从目标 root 解析并忽略无效 dirfd");
 
     // write 固定按 4096 字节分块，并保留 Linux 的部分完成结果。
     const size_t io_offset = 0x2000;

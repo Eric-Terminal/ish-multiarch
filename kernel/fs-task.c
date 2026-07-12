@@ -162,3 +162,25 @@ fd_t file_openat_task(struct task *task, fd_t dirfd,
         return (fd_t) PTR_ERR(fd);
     return f_install_task(task, fd, flags);
 }
+
+int file_unlinkat_task(struct task *task, fd_t dirfd,
+        const char *path, bool remove_directory) {
+    if (path[0] == '\0')
+        return _ENOENT;
+
+    // 绝对路径从目标任务根目录解析，不检查传入的 dirfd。
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = retained ? f_get_task_retain(task, dirfd) : AT_PWD;
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    int result = remove_directory ?
+            generic_rmdirat_task(task, at, path) :
+            generic_unlinkat_task(task, at, path);
+    if (retained)
+        fd_close(at);
+    return result;
+}
