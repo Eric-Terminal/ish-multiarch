@@ -1,5 +1,7 @@
 #include <assert.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "guest/linux/errno.h"
@@ -480,6 +482,150 @@ static void test_madvise(void) {
     guest_page_table_destroy(&table);
 }
 
+static void test_membarrier_commands_and_lifecycle(void) {
+    struct guest_page_table source_table;
+    struct guest_page_table early_copy_table;
+    struct guest_page_table registered_copy_table;
+    struct guest_page_table fresh_table;
+    assert(guest_page_table_init(&source_table, 48));
+    struct guest_linux_mm source;
+    guest_linux_mm_init(&source, &source_table, BRK_BASE, BRK_LIMIT);
+
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_QUERY, 0) ==
+            GUEST_LINUX_MEMBARRIER_SUPPORTED_COMMANDS);
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_QUERY, 1) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 1) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_membarrier(&source, 1, 0) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED |
+                    GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+            0) == encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_membarrier(&source, -1, 0) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) == 0);
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) ==
+            encoded_error(GUEST_LINUX_EPERM));
+
+    struct guest_linux_mm early_copy;
+    assert(guest_linux_mm_clone(
+            &early_copy, &early_copy_table, &source));
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0) == 0);
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0) == 0);
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) ==
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED);
+    assert(guest_linux_membarrier(&source,
+            GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) == 0);
+    assert(guest_linux_membarrier(&early_copy,
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) == 0);
+
+    struct guest_linux_mm registered_copy;
+    assert(guest_linux_mm_clone(
+            &registered_copy, &registered_copy_table, &source));
+    assert(guest_linux_membarrier(&registered_copy,
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) ==
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED);
+    assert(guest_linux_membarrier(&registered_copy,
+            GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) == 0);
+
+    assert(guest_page_table_init(&fresh_table, 48));
+    struct guest_linux_mm fresh;
+    // exec 通过 runtime 初始化全新 mm，不能继承旧映像的注册状态。
+    guest_linux_mm_init(&fresh, &fresh_table, BRK_BASE, BRK_LIMIT);
+    assert(guest_linux_membarrier(&fresh,
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) == 0);
+
+    guest_page_table_destroy(&fresh_table);
+    guest_page_table_destroy(&registered_copy_table);
+    guest_page_table_destroy(&early_copy_table);
+    guest_page_table_destroy(&source_table);
+}
+
+struct membarrier_drain_context {
+    struct guest_linux_mm *memory;
+    atomic_bool reader_locked;
+    atomic_bool release_reader;
+    atomic_bool barrier_started;
+    atomic_bool barrier_returned;
+};
+
+static void *hold_membarrier_read_lock(void *opaque) {
+    struct membarrier_drain_context *context = opaque;
+    bool locked = guest_page_table_read_lock(
+            context->memory->page_table);
+    assert(locked);
+    atomic_store_explicit(
+            &context->reader_locked, true, memory_order_release);
+    while (!atomic_load_explicit(
+            &context->release_reader, memory_order_acquire))
+        sched_yield();
+    guest_page_table_read_unlock(context->memory->page_table, locked);
+    return NULL;
+}
+
+static void *run_private_membarrier(void *opaque) {
+    struct membarrier_drain_context *context = opaque;
+    atomic_store_explicit(
+            &context->barrier_started, true, memory_order_release);
+    assert(guest_linux_membarrier(context->memory,
+            GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) == 0);
+    atomic_store_explicit(
+            &context->barrier_returned, true, memory_order_release);
+    return NULL;
+}
+
+static void test_membarrier_drains_concurrent_access(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    guest_page_table_enable_concurrency(&table);
+    struct guest_linux_mm memory;
+    guest_linux_mm_init(&memory, &table, BRK_BASE, BRK_LIMIT);
+    assert(guest_linux_membarrier(&memory,
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0) == 0);
+
+    struct membarrier_drain_context context = {
+        .memory = &memory,
+    };
+    atomic_init(&context.reader_locked, false);
+    atomic_init(&context.release_reader, false);
+    atomic_init(&context.barrier_started, false);
+    atomic_init(&context.barrier_returned, false);
+    pthread_t reader;
+    pthread_t barrier;
+    assert(pthread_create(&reader, NULL,
+            hold_membarrier_read_lock, &context) == 0);
+    while (!atomic_load_explicit(
+            &context.reader_locked, memory_order_acquire))
+        sched_yield();
+    assert(pthread_create(&barrier, NULL,
+            run_private_membarrier, &context) == 0);
+    while (!atomic_load_explicit(
+            &context.barrier_started, memory_order_acquire))
+        sched_yield();
+    for (unsigned attempt = 0; attempt < 100; attempt++)
+        sched_yield();
+    assert(!atomic_load_explicit(
+            &context.barrier_returned, memory_order_acquire));
+
+    atomic_store_explicit(
+            &context.release_reader, true, memory_order_release);
+    assert(pthread_join(reader, NULL) == 0);
+    assert(pthread_join(barrier, NULL) == 0);
+    assert(atomic_load_explicit(
+            &context.barrier_returned, memory_order_acquire));
+    guest_page_table_destroy(&table);
+}
+
 struct concurrency_context {
     struct guest_page_table *table;
     guest_addr_t address;
@@ -548,6 +694,8 @@ int main(void) {
     test_mprotect_and_munmap();
     test_brk_with_hole();
     test_madvise();
+    test_membarrier_commands_and_lifecycle();
+    test_membarrier_drains_concurrent_access();
     test_concurrent_access_and_protection();
     return 0;
 }

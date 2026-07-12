@@ -30,6 +30,7 @@
 #define AARCH64_LINUX_SYS_MPROTECT 226
 #define AARCH64_LINUX_SYS_MADVISE 233
 #define AARCH64_LINUX_SYS_WAIT4 260
+#define AARCH64_LINUX_SYS_MEMBARRIER 283
 #define AARCH64_LINUX_SYS_PREADV2 286
 #define AARCH64_LINUX_SYS_PWRITEV2 287
 static qword_t linux_error(unsigned error) {
@@ -413,6 +414,10 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = guest_linux_madvise(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],
                 (dword_t) syscall.arguments[2]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MEMBARRIER) {
+        result.return_value = guest_linux_membarrier(runtime->memory,
+                (sdword_t) (dword_t) syscall.arguments[0],
+                (dword_t) syscall.arguments[1]);
     } else {
         struct service_dispatch_result service = dispatch_service(
                 &syscall, tlb, runtime->services, task,

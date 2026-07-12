@@ -168,6 +168,40 @@ bool guest_linux_mm_clone(struct guest_linux_mm *destination,
     return result;
 }
 
+qword_t guest_linux_membarrier(struct guest_linux_mm *memory,
+        sdword_t command, dword_t flags) {
+    assert(memory != NULL && memory->page_table != NULL);
+    if (flags != 0)
+        return linux_error(GUEST_LINUX_EINVAL);
+    if (command == GUEST_LINUX_MEMBARRIER_CMD_QUERY)
+        return GUEST_LINUX_MEMBARRIER_SUPPORTED_COMMANDS;
+    if (command != GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED &&
+            command !=
+                    GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED &&
+            command != GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS)
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    // 所有并发 guest 访存都经过这把锁，独占事务形成同一 mm 的全序切面。
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result;
+    if (command ==
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) {
+        memory->membarrier_registrations |=
+                GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+        result = 0;
+    } else if (command ==
+            GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS) {
+        result = memory->membarrier_registrations;
+    } else if ((memory->membarrier_registrations &
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) == 0) {
+        result = linux_error(GUEST_LINUX_EPERM);
+    } else {
+        result = 0;
+    }
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
+}
+
 static guest_addr_t guest_linux_brk_unlocked(struct guest_linux_mm *memory,
         guest_addr_t requested) {
     if (requested == 0)

@@ -154,6 +154,58 @@ int main(void) {
     assert(sink.calls == 1);
     assert(memcmp(sink.data, message, sink.size) == 0);
 
+    cpu.x[8] = 283;
+    cpu.x[0] = UINT64_C(0xa5a5a5a500000000) |
+            GUEST_LINUX_MEMBARRIER_CMD_QUERY;
+    cpu.x[1] = UINT64_C(0x5a5a5a5a00000000);
+    cpu.x[2] = UINT64_MAX;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == GUEST_LINUX_MEMBARRIER_SUPPORTED_COMMANDS);
+    assert(sink.calls == 1);
+
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_QUERY;
+    cpu.x[1] = UINT64_C(0xa5a5a5a500000001);
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+    cpu.x[1] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EPERM));
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+
+    cpu.x[0] = UINT64_C(0x1234567800000000) |
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+    cpu.x[1] = UINT64_C(0x8765432100000000);
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS;
+    cpu.x[1] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] ==
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED);
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+    cpu.x[0] = 1;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+    cpu.x[0] = GUEST_LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED |
+            GUEST_LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+    assert(sink.calls == 1);
+
     sink = (struct test_sink) {0};
     cpu.x[8] = 64;
     cpu.x[0] = 1;
