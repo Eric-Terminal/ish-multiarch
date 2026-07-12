@@ -150,11 +150,12 @@
             .else
                 uxtb w8, ecx
             .endif
-            tst w8, 31
+            ands w12, w8, 31
             b.eq 1f
+            ubfx w11, _tmp, 31, 1
             mov w9, 32
-            sub w9, w9, w8
-            sub w8, w8, 1 /* shift by one less */
+            sub w9, w9, w12
+            sub w8, w12, 1 /* shift by one less */
             .ifc \op,shrd
                 lsr w8, _tmp, w8
                 # and by one more
@@ -170,6 +171,12 @@
             .endif
             orr _tmp, w8, w9
             strb w10, [_cpu, CPU_cf]
+            # 只有单步移位定义 OF：移位前后符号不同即置位。
+            cmp w12, 1
+            b.ne 2f
+            eor w11, w11, _tmp, lsr 31
+            strb w11, [_cpu, CPU_of]
+        2:
             setf_zsp
         1:
             .ifc \arg,imm
