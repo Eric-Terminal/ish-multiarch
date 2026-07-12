@@ -18,7 +18,8 @@ const struct fd_ops socket_fdops;
 
 static lock_t peer_lock = LOCK_INITIALIZER;
 
-static fd_t sock_fd_create(int sock_fd, int domain, int type, int protocol) {
+static fd_t sock_fd_create_task(struct task *task,
+        int sock_fd, int domain, int type, int protocol) {
     struct fd *fd = adhoc_fd_create(&socket_fdops);
     if (fd == NULL)
         return _ENOMEM;
@@ -31,11 +32,11 @@ static fd_t sock_fd_create(int sock_fd, int domain, int type, int protocol) {
         cond_init(&fd->socket.unix_got_peer);
         list_init(&fd->socket.unix_scm);
     }
-    return f_install(fd, type & ~SOCKET_TYPE_MASK);
+    return f_install_task(task, fd, type & ~SOCKET_TYPE_MASK);
 }
 
-int_t sys_socket(dword_t domain, dword_t type, dword_t protocol) {
-    STRACE("socket(%d, %d, %d)", domain, type, protocol);
+int_t socket_create_task(struct task *task,
+        dword_t domain, dword_t type, dword_t protocol) {
     int real_domain = sock_family_to_real(domain);
     if (real_domain < 0)
         return _EINVAL;
@@ -60,10 +61,15 @@ int_t sys_socket(dword_t domain, dword_t type, dword_t protocol) {
     }
 #endif
 
-    fd_t f = sock_fd_create(sock, domain, type, protocol);
+    fd_t f = sock_fd_create_task(task, sock, domain, type, protocol);
     if (f < 0)
         close(sock);
     return f;
+}
+
+int_t sys_socket(dword_t domain, dword_t type, dword_t protocol) {
+    STRACE("socket(%d, %d, %d)", domain, type, protocol);
+    return socket_create_task(current, domain, type, protocol);
 }
 
 static void inode_release_if_exist(struct inode_data *inode) {
@@ -71,11 +77,20 @@ static void inode_release_if_exist(struct inode_data *inode) {
         inode_release(inode);
 }
 
-static struct fd *sock_getfd(fd_t sock_fd) {
-    struct fd *sock = f_get(sock_fd);
+static struct fd *sock_getfd_task(
+        struct task *task, fd_t sock_fd) {
+    struct fd *sock = f_get_task(task, sock_fd);
     if (sock == NULL || sock->ops != &socket_fdops)
         return NULL;
     return sock;
+}
+
+static struct fd *sock_getfd(fd_t sock_fd) {
+    return sock_getfd_task(current, sock_fd);
+}
+
+int socket_check_fd_task(struct task *task, fd_t sock_fd) {
+    return sock_getfd_task(task, sock_fd) != NULL ? 0 : _EBADF;
 }
 
 static uint32_t unix_socket_next_id(void) {
@@ -223,15 +238,14 @@ static void unix_abstract_release(struct unix_abstract *name) {
 
 const char *sock_tmp_prefix = "/tmp/ishsock";
 
-static int sockaddr_read_bind(addr_t sockaddr_addr, void *sockaddr, uint_t *sockaddr_len, struct fd *bind_fd) {
+static int sockaddr_prepare(
+        void *sockaddr, uint_t *sockaddr_len, struct fd *bind_fd) {
     // Make sure we can read things without overflowing buffers
     if (*sockaddr_len < 2)
         return _EINVAL;
     if (*sockaddr_len > sizeof(struct sockaddr_max_))
         return _EINVAL;
 
-    if (user_read(sockaddr_addr, sockaddr, *sockaddr_len))
-        return _EFAULT;
     struct sockaddr *real_addr = sockaddr;
     struct sockaddr_ *fake_addr = sockaddr;
     real_addr->sa_family = sock_family_to_real(fake_addr->family);
@@ -286,6 +300,16 @@ static int sockaddr_read_bind(addr_t sockaddr_addr, void *sockaddr, uint_t *sock
             return _EINVAL;
     }
     return 0;
+}
+
+static int sockaddr_read_bind(addr_t sockaddr_addr, void *sockaddr,
+        uint_t *sockaddr_len, struct fd *bind_fd) {
+    if (*sockaddr_len < 2 ||
+            *sockaddr_len > sizeof(struct sockaddr_max_))
+        return _EINVAL;
+    if (user_read(sockaddr_addr, sockaddr, *sockaddr_len))
+        return _EFAULT;
+    return sockaddr_prepare(sockaddr, sockaddr_len, bind_fd);
 }
 
 static int sockaddr_read(addr_t sockaddr_addr, void *sockaddr, uint_t *sockaddr_len) {
@@ -353,17 +377,13 @@ static void fill_cred(struct ucred_ *cred) {
     cred->gid = current->egid;
 }
 
-int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
-    STRACE("connect(%d, 0x%x, %d)", sock_fd, sockaddr_addr, sockaddr_len);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    struct sockaddr_max_ sockaddr;
-    int err = sockaddr_read(sockaddr_addr, &sockaddr, &sockaddr_len);
+static int socket_connect_prepared(
+        struct fd *sock, void *sockaddr, uint_t sockaddr_len) {
+    int err = sockaddr_prepare(sockaddr, &sockaddr_len, NULL);
     if (err < 0)
         return err;
 
-    err = connect(sock->real_fd, (void *) &sockaddr, sockaddr_len);
+    err = connect(sock->real_fd, sockaddr, sockaddr_len);
     if (err < 0)
         return errno_map();
 
@@ -382,6 +402,33 @@ int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
     }
 
     return err;
+}
+
+int_t socket_connect_task(struct task *task, fd_t sock_fd,
+        const void *address, size_t address_length) {
+    struct fd *sock = sock_getfd_task(task, sock_fd);
+    if (sock == NULL)
+        return _EBADF;
+    if (address_length < 2 ||
+            address_length > sizeof(struct sockaddr_max_))
+        return _EINVAL;
+    struct sockaddr_max_ sockaddr = {0};
+    memcpy(&sockaddr, address, address_length);
+    return socket_connect_prepared(
+            sock, &sockaddr, (uint_t) address_length);
+}
+
+int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
+    STRACE("connect(%d, 0x%x, %d)", sock_fd, sockaddr_addr, sockaddr_len);
+    struct fd *sock = sock_getfd(sock_fd);
+    if (sock == NULL)
+        return _EBADF;
+    if (sockaddr_len < 2 || sockaddr_len > sizeof(struct sockaddr_max_))
+        return _EINVAL;
+    struct sockaddr_max_ sockaddr = {0};
+    if (user_read(sockaddr_addr, &sockaddr, sockaddr_len))
+        return _EFAULT;
+    return socket_connect_prepared(sock, &sockaddr, sockaddr_len);
 }
 
 int_t sys_listen(fd_t sock_fd, int_t backlog) {
@@ -428,7 +475,7 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
             return _EFAULT;
     }
 
-    fd_t client_f = sock_fd_create(client,
+    fd_t client_f = sock_fd_create_task(current, client,
             sock->socket.domain, sock->socket.type, sock->socket.protocol);
     if (client_f < 0)
         close(client);
@@ -536,12 +583,14 @@ int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sock
 
     lock(&peer_lock);
     int fake_sockets[2];
-    err = fake_sockets[0] = sock_fd_create(sockets[0], domain, type, protocol);
+    err = fake_sockets[0] = sock_fd_create_task(
+            current, sockets[0], domain, type, protocol);
     if (fake_sockets[0] < 0) {
         unlock(&peer_lock);
         goto close_sockets;
     }
-    err = fake_sockets[1] = sock_fd_create(sockets[1], domain, type, protocol);
+    err = fake_sockets[1] = sock_fd_create_task(
+            current, sockets[1], domain, type, protocol);
     if (fake_sockets[1] < 0) {
         unlock(&peer_lock);
         goto close_fake_0;

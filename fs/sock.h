@@ -12,8 +12,13 @@
 int_t sys_socketcall(dword_t call_num, addr_t args_addr);
 
 int_t sys_socket(dword_t domain, dword_t type, dword_t protocol);
+int_t socket_create_task(struct task *task,
+        dword_t domain, dword_t type, dword_t protocol);
+int socket_check_fd_task(struct task *task, fd_t sock_fd);
 int_t sys_bind(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len);
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len);
+int_t socket_connect_task(struct task *task, fd_t sock_fd,
+        const void *address, size_t address_length);
 int_t sys_listen(fd_t sock_fd, int_t backlog);
 int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr);
 int_t sys_getsockname(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr);

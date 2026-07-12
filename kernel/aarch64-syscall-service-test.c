@@ -627,12 +627,100 @@ int main(void) {
                     encoded_error(_EINVAL),
             "tgkill 拒绝低 32 位为零的 TGID");
 
+    qword_t result = invoke(&fixture, &memory, &fault, 198,
+            UINT64_C(0xabcdef0100000002),
+            UINT64_C(0x1234567800080001), 0, 0);
+    struct fd *network_socket = f_get_task(&fixture.task, 1);
+    CHECK(result == 1 && network_socket != NULL &&
+            network_socket->real_fd >= 0 &&
+            bit_test(1, fixture.task.files->cloexec),
+            "socket 按低 32 位创建 IPv4 流并设置 CLOEXEC");
+
+    const size_t socket_address_offset = 0x80;
+    struct sockaddr_ invalid_socket_address = {
+        .family = UINT16_C(0x7fff),
+    };
+    memcpy(memory.bytes + socket_address_offset,
+            &invalid_socket_address, sizeof(invalid_socket_address));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + socket_address_offset;
+    result = invoke(&fixture, &memory, &fault, 203, 99,
+            USER_BASE + socket_address_offset,
+            sizeof(invalid_socket_address), 0);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0,
+            "connect 在访问地址前拒绝非套接字 fd");
+    result = invoke(&fixture, &memory, &fault, 203, 1,
+            USER_BASE + socket_address_offset, 1, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,
+            "connect 在访问地址前拒绝过短 sockaddr");
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 203, 1,
+            USER_BASE + socket_address_offset,
+            sizeof(invalid_socket_address), 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            memory.read_bytes == sizeof(invalid_socket_address),
+            "connect 复制固定宽度 sockaddr 后拒绝未知地址族");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + socket_address_offset + 3;
+    result = invoke(&fixture, &memory, &fault, 203, 1,
+            USER_BASE + socket_address_offset,
+            sizeof(invalid_socket_address), 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "connect 保持 sockaddr 的精确 guest fault");
+
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(listener >= 0, "host 回环监听套接字创建成功");
+    struct sockaddr_in listener_address = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+    CHECK(bind(listener, (const struct sockaddr *) &listener_address,
+                    sizeof(listener_address)) == 0 &&
+            listen(listener, 1) == 0,
+            "host 回环监听套接字启动成功");
+    socklen_t listener_length = sizeof(listener_address);
+    CHECK(getsockname(listener,
+            (struct sockaddr *) &listener_address,
+            &listener_length) == 0,
+            "host 回环监听地址查询成功");
+
+    byte_t guest_socket_address[16] = {0};
+    word_t guest_family = AF_INET_;
+    memcpy(guest_socket_address, &guest_family, sizeof(guest_family));
+    memcpy(guest_socket_address + 2,
+            &listener_address.sin_port,
+            sizeof(listener_address.sin_port));
+    memcpy(guest_socket_address + 4,
+            &listener_address.sin_addr,
+            sizeof(listener_address.sin_addr));
+    memcpy(memory.bytes + socket_address_offset,
+            guest_socket_address, sizeof(guest_socket_address));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 203, 1,
+            USER_BASE + socket_address_offset,
+            sizeof(guest_socket_address), 0);
+    int accepted = accept(listener, NULL, NULL);
+    CHECK(result == 0 && accepted >= 0 && memory.read_calls == 1 &&
+            memory.read_bytes == sizeof(guest_socket_address),
+            "connect 通过 Linux sockaddr 建立 host 回环连接");
+    close(accepted);
+    close(listener);
+    CHECK(invoke(&fixture, &memory, &fault, 57, 1, 0, 0, 0) == 0,
+            "socket 探针 fd 清理成功");
+
     // openat 只读取 guest ABI 的低位参数，且不会越过路径 NUL。
     const size_t path_offset = 0x100;
     static const char created_path[] = "created";
     memcpy(memory.bytes + path_offset, created_path, sizeof(created_path));
+    reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + path_offset + sizeof(created_path);
-    qword_t result = invoke(&fixture, &memory, &fault, 56,
+    result = invoke(&fixture, &memory, &fault, 56,
             UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
             UINT64_C(0xdeadbeef000a0840),
             UINT64_C(0xfeedfaceabcd01ff));

@@ -88,6 +88,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETEUID = 175,
     AARCH64_LINUX_SYS_GETGID = 176,
     AARCH64_LINUX_SYS_GETEGID = 177,
+    AARCH64_LINUX_SYS_SOCKET = 198,
+    AARCH64_LINUX_SYS_CONNECT = 203,
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_WAIT4 = 260,
@@ -528,6 +530,29 @@ static qword_t dispatch_renameat(
     return syscall_result(file_renameat_task(task,
             syscall_fd(syscall->arguments[0]), source,
             syscall_fd(syscall->arguments[2]), destination));
+}
+
+static qword_t dispatch_connect(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    fd_t socket_fd = syscall_fd(syscall->arguments[0]);
+    int error = socket_check_fd_task(task, socket_fd);
+    if (error < 0)
+        return syscall_result(error);
+    dword_t length = (dword_t) syscall->arguments[2];
+    if (length < 2 || length > sizeof(struct sockaddr_max_))
+        return syscall_result(_EINVAL);
+    qword_t address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(address, length))
+        return user_range_error(fault, address, GUEST_MEMORY_READ);
+    struct sockaddr_max_ socket_address = {0};
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            address, &socket_address, length, fault))
+        return syscall_result(_EFAULT);
+    return syscall_result(socket_connect_task(
+            task, socket_fd, &socket_address, length));
 }
 
 static qword_t dispatch_chdir(
@@ -1409,6 +1434,14 @@ static qword_t dispatch_syscall(
             return task->gid;
         case AARCH64_LINUX_SYS_GETEGID:
             return task->egid;
+        case AARCH64_LINUX_SYS_SOCKET:
+            return syscall_result(socket_create_task(task,
+                    (dword_t) syscall->arguments[0],
+                    (dword_t) syscall->arguments[1],
+                    (dword_t) syscall->arguments[2]));
+        case AARCH64_LINUX_SYS_CONNECT:
+            return dispatch_connect(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLONE:
             // 旧 clone ABI 的高 32 位不参与 flags。
             if (!task_has_aarch64_process(task))
