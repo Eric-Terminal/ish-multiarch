@@ -37,6 +37,21 @@ static qword_t replicate_element(qword_t element, unsigned element_size,
     return result;
 }
 
+static qword_t expand_fp_immediate(byte_t immediate, byte_t width) {
+    unsigned exponent_width = width == 32 ? 8 : 11;
+    unsigned fraction_width = width == 32 ? 23 : 52;
+    bool selector = (immediate & UINT32_C(0x40)) != 0;
+    // VFPExpandImm 用 selector 的反码起始指数，再复制 selector 填满中段。
+    qword_t exponent = (qword_t) !selector << (exponent_width - 1);
+    if (selector)
+        exponent |= low_ones(exponent_width - 3) << 2;
+    exponent |= (immediate >> 4) & UINT32_C(3);
+    qword_t sign = (qword_t) (immediate >> 7) << (width - 1);
+    qword_t fraction = (qword_t) (immediate & UINT32_C(0xf)) <<
+            (fraction_width - 4);
+    return sign | exponent << fraction_width | fraction;
+}
+
 static bool decode_bit_masks(bool n, byte_t imms, byte_t immr,
         byte_t width, bool immediate, struct aarch64_bit_masks *masks) {
 
@@ -257,6 +272,23 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rd = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
                 .rm = (word >> 16) & 0x1f,
+            },
+        };
+        return true;
+    }
+
+    dword_t scalar_fp_immediate = word & UINT32_C(0xffe01fe0);
+    if (scalar_fp_immediate == UINT32_C(0x1e201000) ||
+            scalar_fp_immediate == UINT32_C(0x1e601000)) {
+        byte_t width = scalar_fp_immediate == UINT32_C(0x1e201000) ?
+                32 : 64;
+        byte_t immediate = (word >> 13) & UINT32_C(0xff);
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_FMOV_IMMEDIATE,
+            .width = width,
+            .operands.scalar_fp_immediate = {
+                .rd = word & 0x1f,
+                .immediate = expand_fp_immediate(immediate, width),
             },
         };
         return true;

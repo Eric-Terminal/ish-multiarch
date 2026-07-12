@@ -4,6 +4,7 @@
 
 #define BINARY_FIXED_MASK UINT32_C(0xffe0fc00)
 #define UNARY_FIXED_MASK UINT32_C(0xfffffc00)
+#define IMMEDIATE_FIXED_MASK UINT32_C(0xffe01fe0)
 #define COMPARE_REGISTER_FIXED_MASK UINT32_C(0xffe0fc1f)
 #define COMPARE_ZERO_FIXED_MASK UINT32_C(0xfffffc1f)
 
@@ -16,6 +17,11 @@ struct binary_case {
 struct unary_case {
     dword_t bits;
     enum aarch64_opcode opcode;
+    byte_t width;
+};
+
+struct immediate_case {
+    dword_t bits;
     byte_t width;
 };
 
@@ -43,6 +49,11 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x5ee1b800), AARCH64_OP_FCVTZS_SCALAR, 64},
     {UINT32_C(0x5e21d800), AARCH64_OP_SCVTF_SCALAR, 32},
     {UINT32_C(0x5e61d800), AARCH64_OP_SCVTF_SCALAR, 64},
+};
+
+static const struct immediate_case immediate_operations[] = {
+    {UINT32_C(0x1e201000), 32},
+    {UINT32_C(0x1e601000), 64},
 };
 
 static const struct compare_case comparisons[] = {
@@ -74,6 +85,26 @@ static dword_t encode_unary(unsigned operation, byte_t rn, byte_t rd) {
     return unary_operations[operation].bits | (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_immediate(
+        unsigned operation, byte_t immediate, byte_t rd) {
+    return immediate_operations[operation].bits |
+            (dword_t) immediate << 13 | rd;
+}
+
+static qword_t expanded_immediate(byte_t width, byte_t immediate) {
+    if (width == 32) {
+        return (qword_t) (immediate & UINT32_C(0x80)) << 24 |
+                ((immediate & UINT32_C(0x40)) != 0 ?
+                        UINT32_C(0x3e000000) : UINT32_C(0x40000000)) |
+                (qword_t) (immediate & UINT32_C(0x3f)) << 19;
+    }
+    return (qword_t) (immediate & UINT32_C(0x80)) << 56 |
+            ((immediate & UINT32_C(0x40)) != 0 ?
+                    UINT64_C(0x3fc0000000000000) :
+                    UINT64_C(0x4000000000000000)) |
+            (qword_t) (immediate & UINT32_C(0x3f)) << 48;
+}
+
 static dword_t encode_compare(unsigned comparison, byte_t rn, byte_t rm) {
     return comparisons[comparison].bits | (dword_t) rn << 5 |
             (comparisons[comparison].zero ? 0 : (dword_t) rm << 16);
@@ -85,6 +116,7 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
         case AARCH64_OP_FMOV_SCALAR:
+        case AARCH64_OP_FMOV_IMMEDIATE:
         case AARCH64_OP_FCMP_SCALAR:
         case AARCH64_OP_FCMPE_SCALAR:
         case AARCH64_OP_FCVTZS_SCALAR:
@@ -104,6 +136,12 @@ static bool is_scalar_fp_encoding(dword_t word) {
     for (unsigned i = 0; i < sizeof(unary_operations) /
             sizeof(unary_operations[0]); i++) {
         if ((word & UNARY_FIXED_MASK) == unary_operations[i].bits)
+            return true;
+    }
+    for (unsigned i = 0; i < sizeof(immediate_operations) /
+            sizeof(immediate_operations[0]); i++) {
+        if ((word & IMMEDIATE_FIXED_MASK) ==
+                immediate_operations[i].bits)
             return true;
     }
     for (unsigned i = 0; i < sizeof(comparisons) /
@@ -148,6 +186,17 @@ static void assert_unary(dword_t word, unsigned operation, byte_t rd,
     assert(instruction.operands.data_processing_1source.rn == rn);
 }
 
+static void assert_immediate(dword_t word, unsigned operation,
+        byte_t rd, byte_t immediate) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_FMOV_IMMEDIATE);
+    assert(instruction.width == immediate_operations[operation].width);
+    assert(instruction.operands.scalar_fp_immediate.rd == rd);
+    assert(instruction.operands.scalar_fp_immediate.immediate ==
+            expanded_immediate(
+                    immediate_operations[operation].width, immediate));
+}
+
 static void assert_compare(dword_t word, unsigned comparison, byte_t rn,
         byte_t rm) {
     struct aarch64_decoded instruction = decode(word);
@@ -174,6 +223,11 @@ static void test_apple_clang_vectors(void) {
     assert_unary(UINT32_C(0x5ee1b8a3), 3, 3, 5);
     assert_unary(UINT32_C(0x5e21d8a3), 4, 3, 5);
     assert_unary(UINT32_C(0x5e61d8a3), 5, 3, 5);
+
+    assert_immediate(UINT32_C(0x1e2e1003), 0, 3, UINT8_C(0x70));
+    assert_immediate(UINT32_C(0x1e6e1003), 1, 3, UINT8_C(0x70));
+    assert_immediate(UINT32_C(0x1e381005), 0, 5, UINT8_C(0xc0));
+    assert_immediate(UINT32_C(0x1e67f007), 1, 7, UINT8_C(0x3f));
 
     assert_compare(UINT32_C(0x1e2720a0), 0, 5, 7);
     assert_compare(UINT32_C(0x1e6720a0), 1, 5, 7);
@@ -218,6 +272,23 @@ static void test_unary_encoding_space(void) {
     assert(decoded_count == 6144);
 }
 
+static void test_immediate_encoding_space(void) {
+    unsigned decoded_count = 0;
+    for (unsigned operation = 0; operation <
+            sizeof(immediate_operations) /
+                    sizeof(immediate_operations[0]); operation++) {
+        for (unsigned immediate = 0; immediate < 256; immediate++) {
+            for (unsigned rd = 0; rd < 32; rd++) {
+                assert_immediate(encode_immediate(operation,
+                        (byte_t) immediate, (byte_t) rd), operation,
+                        (byte_t) rd, (byte_t) immediate);
+                decoded_count++;
+            }
+        }
+    }
+    assert(decoded_count == 16384);
+}
+
 static void test_compare_encoding_space(void) {
     unsigned register_count = 0;
     unsigned zero_count = 0;
@@ -256,6 +327,15 @@ static void test_fixed_bits(void) {
                 assert_classification(base ^ (UINT32_C(1) << bit));
         }
     }
+    for (unsigned operation = 0; operation <
+            sizeof(immediate_operations) /
+                    sizeof(immediate_operations[0]); operation++) {
+        dword_t base = encode_immediate(operation, UINT8_C(0x70), 3);
+        for (unsigned bit = 0; bit < 32; bit++) {
+            if (IMMEDIATE_FIXED_MASK & (UINT32_C(1) << bit))
+                assert_classification(base ^ (UINT32_C(1) << bit));
+        }
+    }
     for (unsigned comparison = 0; comparison < sizeof(comparisons) /
             sizeof(comparisons[0]); comparison++) {
         dword_t base = encode_compare(comparison, 5, 7);
@@ -266,6 +346,7 @@ static void test_fixed_bits(void) {
     }
     assert(BINARY_FIXED_MASK == UINT32_C(0xffe0fc00));
     assert(UNARY_FIXED_MASK == UINT32_C(0xfffffc00));
+    assert(IMMEDIATE_FIXED_MASK == UINT32_C(0xffe01fe0));
     assert(COMPARE_REGISTER_FIXED_MASK == UINT32_C(0xffe0fc1f));
     assert(COMPARE_ZERO_FIXED_MASK == UINT32_C(0xfffffc1f));
 }
@@ -287,7 +368,8 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e2120a8),
         UINT32_C(0x1e6120b8),
         UINT32_C(0x1e6718a3),
-        UINT32_C(0x1e6e1003),
+        UINT32_C(0x1eee1003),
+        UINT32_C(0x1eae1003),
         UINT32_C(0x1e670ca3),
         UINT32_C(0x1e6704a0),
         UINT32_C(0x5ef9b8a3),
@@ -336,6 +418,7 @@ int main(void) {
     test_apple_clang_vectors();
     test_binary_encoding_space();
     test_unary_encoding_space();
+    test_immediate_encoding_space();
     test_compare_encoding_space();
     test_fixed_bits();
     test_rejected_neighbors();

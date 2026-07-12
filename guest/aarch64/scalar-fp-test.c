@@ -32,6 +32,8 @@
 #define FMUL_D UINT32_C(0x1e600800)
 #define FMOV_S UINT32_C(0x1e204000)
 #define FMOV_D UINT32_C(0x1e604000)
+#define FMOV_IMMEDIATE_S UINT32_C(0x1e201000)
+#define FMOV_IMMEDIATE_D UINT32_C(0x1e601000)
 #define FCMP_S UINT32_C(0x1e202000)
 #define FCMP_D UINT32_C(0x1e602000)
 #define FCMPE_S UINT32_C(0x1e202010)
@@ -51,6 +53,24 @@ static dword_t binary(dword_t base, byte_t rd, byte_t rn, byte_t rm) {
 
 static dword_t unary(dword_t base, byte_t rd, byte_t rn) {
     return base | (dword_t) rn << 5 | rd;
+}
+
+static dword_t immediate(dword_t base, byte_t rd, byte_t imm8) {
+    return base | (dword_t) imm8 << 13 | rd;
+}
+
+static qword_t expected_immediate(byte_t width, byte_t imm8) {
+    if (width == 32) {
+        return (qword_t) (imm8 & UINT32_C(0x80)) << 24 |
+                ((imm8 & UINT32_C(0x40)) != 0 ?
+                        UINT32_C(0x3e000000) : UINT32_C(0x40000000)) |
+                (qword_t) (imm8 & UINT32_C(0x3f)) << 19;
+    }
+    return (qword_t) (imm8 & UINT32_C(0x80)) << 56 |
+            ((imm8 & UINT32_C(0x40)) != 0 ?
+                    UINT64_C(0x3fc0000000000000) :
+                    UINT64_C(0x4000000000000000)) |
+            (qword_t) (imm8 & UINT32_C(0x3f)) << 48;
 }
 
 static dword_t comparison(dword_t base, byte_t rn, byte_t rm) {
@@ -226,6 +246,49 @@ static void test_scalar_fmov(void) {
         execute_word(&cpu, unary(cases[i].base, 7, 7));
         assert_scalar_result(&cpu, 7, cases[i].width, cases[i].bits);
         assert(cpu.pc == UINT64_C(0x1008));
+    }
+}
+
+static void test_fmov_immediate(void) {
+    static const struct {
+        dword_t base;
+        byte_t width;
+    } cases[] = {
+        {FMOV_IMMEDIATE_S, 32},
+        {FMOV_IMMEDIATE_D, 64},
+    };
+
+    assert(immediate(FMOV_IMMEDIATE_S, 3, UINT8_C(0x70)) ==
+            UINT32_C(0x1e2e1003));
+    assert(immediate(FMOV_IMMEDIATE_D, 0, UINT8_C(0x70)) ==
+            UINT32_C(0x1e6e1000));
+    for (unsigned kind = 0; kind < ARRAY_SIZE(cases); kind++) {
+        for (unsigned value = 0; value < 256; value++) {
+            byte_t rd = (byte_t) (value & 31);
+            byte_t untouched = (byte_t) ((rd + 1) & 31);
+            struct cpu_state cpu = initial_cpu();
+            cpu.fpcr = TEST_FPCR_DN | TEST_FPCR_FZ | TEST_FPCR_RM;
+            cpu.fpsr = TEST_FPSR_QC | TEST_FPSR_IOC |
+                    TEST_FPSR_OFC | TEST_FPSR_UFC |
+                    TEST_FPSR_IXC | TEST_FPSR_IDC;
+            memset(&cpu.v[rd], 0xa5, sizeof(cpu.v[rd]));
+            memset(&cpu.v[untouched], 0x5a, sizeof(cpu.v[untouched]));
+            union aarch64_vector_reg saved = cpu.v[untouched];
+
+            execute_word(&cpu, immediate(cases[kind].base,
+                    rd, (byte_t) value));
+            assert_scalar_result(&cpu, rd, cases[kind].width,
+                    expected_immediate(cases[kind].width,
+                            (byte_t) value));
+            assert(memcmp(&cpu.v[untouched], &saved, sizeof(saved)) == 0);
+            assert(cpu.fpcr ==
+                    (TEST_FPCR_DN | TEST_FPCR_FZ | TEST_FPCR_RM));
+            assert(cpu.fpsr == (TEST_FPSR_QC | TEST_FPSR_IOC |
+                    TEST_FPSR_OFC | TEST_FPSR_UFC |
+                    TEST_FPSR_IXC | TEST_FPSR_IDC));
+            assert_non_fp_state(
+                    &cpu, UINT64_C(0x1004), UINT32_C(0xa0000000));
+        }
     }
 }
 
@@ -706,6 +769,7 @@ int main(void) {
     test_busybox_sleep_path();
     test_basic_arithmetic();
     test_scalar_fmov();
+    test_fmov_immediate();
     test_arithmetic_rounding_modes();
     test_nan_and_default_nan();
     test_flush_to_zero_and_sticky_flags();

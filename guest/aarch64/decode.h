@@ -147,6 +147,7 @@ enum aarch64_opcode {
     AARCH64_OP_FSUB_SCALAR,
     AARCH64_OP_FMUL_SCALAR,
     AARCH64_OP_FMOV_SCALAR,
+    AARCH64_OP_FMOV_IMMEDIATE,
     AARCH64_OP_FCMP_SCALAR,
     AARCH64_OP_FCMPE_SCALAR,
     AARCH64_OP_FCVTZS_SCALAR,
@@ -303,6 +304,10 @@ struct aarch64_decoded {
             byte_t rm;
             bool zero;
         } scalar_fp_compare;
+        struct {
+            byte_t rd;
+            qword_t immediate;
+        } scalar_fp_immediate;
         struct {
             byte_t rd;
             qword_t immediate;

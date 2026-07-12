@@ -894,6 +894,14 @@ static void execute_scalar_fp_move(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_immediate(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    write_scalar_fp(cpu, instruction->operands.scalar_fp_immediate.rd,
+            instruction->width,
+            instruction->operands.scalar_fp_immediate.immediate);
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_compare(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
@@ -1542,6 +1550,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_FMOV_SCALAR:
             execute_scalar_fp_move(cpu, instruction);
+            break;
+        case AARCH64_OP_FMOV_IMMEDIATE:
+            execute_scalar_fp_immediate(cpu, instruction);
             break;
         case AARCH64_OP_FCMP_SCALAR:
         case AARCH64_OP_FCMPE_SCALAR:
