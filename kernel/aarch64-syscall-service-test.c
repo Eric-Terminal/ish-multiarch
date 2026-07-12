@@ -475,7 +475,7 @@ int main(void) {
     memory.fail_read_at = USER_BASE + path_offset + sizeof(created_path);
     qword_t result = invoke(&fixture, &memory, &fault, 56,
             UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
-            UINT64_C(0xdeadbeef00088840),
+            UINT64_C(0xdeadbeef000a0840),
             UINT64_C(0xfeedfaceabcd01ff));
     CHECK(result == 1, "openat 把 AT_FDCWD 与参数低位正确解码");
     CHECK(strcmp(kernel.last_path, "/work/created") == 0 &&
@@ -501,21 +501,39 @@ int main(void) {
     memcpy(memory.bytes + path_offset, plain_path, sizeof(plain_path));
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 56, AT_FDCWD_,
-            USER_BASE + path_offset, 0,
+            USER_BASE + path_offset, UINT64_C(0xdeadbeef000a0000),
             UINT64_C(0x12345678abcd1234));
-    CHECK(result == 1 && kernel.last_mode == UINT16_C(0x1234),
-            "未创建 openat 的 mode 只保留低 16 位");
+    CHECK(result == 1 && kernel.last_mode == UINT16_C(0x1234) &&
+            kernel.last_flags == O_CLOEXEC_,
+            "BusyBox 常用 flags 映射 CLOEXEC、剥离 LARGEFILE 且 mode 只取低位");
     CHECK(invoke(&fixture, &memory, &fault, 57, 1, 0, 0, 0) == 0,
             "mode 解码探针 fd 清理成功");
 
-    reset_user_access(&memory);
-    memory.fail_read_at = USER_BASE + path_offset;
     unsigned opens_before = kernel.opens;
+    static const dword_t rejected_open_flags[] = {
+        UINT32_C(0x8000), UINT32_C(0x10000), UINT32_C(0x1000),
+        UINT32_C(0x3), UINT32_C(0x4040),
+    };
+    for (size_t index = 0; index < array_size(rejected_open_flags); index++) {
+        reset_user_access(&memory);
+        memory.fail_read_at = USER_BASE + path_offset;
+        result = invoke(&fixture, &memory, &fault, 56, AT_FDCWD_,
+                USER_BASE + path_offset, rejected_open_flags[index], 0);
+        CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+                kernel.opens == opens_before,
+                "未实现或冲突的 AArch64 open flag 在访问路径前返回 EINVAL");
+    }
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + sizeof(plain_path);
     result = invoke(&fixture, &memory, &fault, 56, AT_FDCWD_,
-            USER_BASE + path_offset, UINT64_C(0x20000), 0);
-    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
-            kernel.opens == opens_before,
-            "未实现的 open flag 在访问路径前返回 EINVAL");
+            USER_BASE + path_offset, UINT64_C(0xa4000), 0);
+    CHECK(result == encoded_error(_ENOTDIR) &&
+            memory.read_calls == sizeof(plain_path) &&
+            kernel.opens == opens_before + 1 &&
+            kernel.last_flags == (O_DIRECTORY_ | O_CLOEXEC_),
+            "BusyBox 目录 flags 显式映射并剥离 AArch64 LARGEFILE");
+    opens_before = kernel.opens;
 
     reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + path_offset + 3;

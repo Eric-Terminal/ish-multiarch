@@ -18,7 +18,17 @@
 #define AARCH64_LINUX_IOV_TRANSACTION_LIMIT UINT64_C(0x100000)
 #define AARCH64_LINUX_USER_ADDRESS_LIMIT \
     (AARCH64_LINUX_USER_ADDRESS_MAX + UINT64_C(1))
-#define AARCH64_LINUX_O_LARGEFILE UINT32_C(0x8000)
+
+#define AARCH64_LINUX_O_ACCMODE UINT32_C(0x000003)
+#define AARCH64_LINUX_O_CREAT UINT32_C(0x000040)
+#define AARCH64_LINUX_O_EXCL UINT32_C(0x000080)
+#define AARCH64_LINUX_O_NOCTTY UINT32_C(0x000100)
+#define AARCH64_LINUX_O_TRUNC UINT32_C(0x000200)
+#define AARCH64_LINUX_O_APPEND UINT32_C(0x000400)
+#define AARCH64_LINUX_O_NONBLOCK UINT32_C(0x000800)
+#define AARCH64_LINUX_O_DIRECTORY UINT32_C(0x004000)
+#define AARCH64_LINUX_O_LARGEFILE UINT32_C(0x020000)
+#define AARCH64_LINUX_O_CLOEXEC UINT32_C(0x080000)
 
 // 标量 host-buffer 通道按块限制内存；向量写入则先聚合，以保留一次 fd 操作的消息边界。
 
@@ -299,19 +309,46 @@ static qword_t dispatch_openat(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
-    const dword_t supported_flags = O_ACCMODE_ | O_CREAT_ | O_EXCL_ |
-            O_NOCTTY_ | O_TRUNC_ | O_APPEND_ | O_NONBLOCK_ |
-            O_DIRECTORY_ | O_CLOEXEC_;
     dword_t raw_flags = (dword_t) syscall->arguments[2];
-    if (raw_flags & ~(supported_flags | AARCH64_LINUX_O_LARGEFILE))
+    const dword_t supported_flags = AARCH64_LINUX_O_ACCMODE |
+            AARCH64_LINUX_O_CREAT | AARCH64_LINUX_O_EXCL |
+            AARCH64_LINUX_O_NOCTTY | AARCH64_LINUX_O_TRUNC |
+            AARCH64_LINUX_O_APPEND | AARCH64_LINUX_O_NONBLOCK |
+            AARCH64_LINUX_O_DIRECTORY | AARCH64_LINUX_O_LARGEFILE |
+            AARCH64_LINUX_O_CLOEXEC;
+    dword_t access_mode = raw_flags & AARCH64_LINUX_O_ACCMODE;
+    if (access_mode == AARCH64_LINUX_O_ACCMODE ||
+            (raw_flags & ~supported_flags) != 0 ||
+            (raw_flags & (AARCH64_LINUX_O_CREAT |
+                    AARCH64_LINUX_O_DIRECTORY)) ==
+                    (AARCH64_LINUX_O_CREAT |
+                    AARCH64_LINUX_O_DIRECTORY))
         return syscall_result(_EINVAL);
+
+    int flags = access_mode == 1 ? O_WRONLY_ :
+            access_mode == 2 ? O_RDWR_ : O_RDONLY_;
+    static const struct {
+        dword_t guest;
+        int internal;
+    } mappings[] = {
+        {AARCH64_LINUX_O_CREAT, O_CREAT_},
+        {AARCH64_LINUX_O_EXCL, O_EXCL_},
+        {AARCH64_LINUX_O_NOCTTY, O_NOCTTY_},
+        {AARCH64_LINUX_O_TRUNC, O_TRUNC_},
+        {AARCH64_LINUX_O_APPEND, O_APPEND_},
+        {AARCH64_LINUX_O_NONBLOCK, O_NONBLOCK_},
+        {AARCH64_LINUX_O_DIRECTORY, O_DIRECTORY_},
+        {AARCH64_LINUX_O_CLOEXEC, O_CLOEXEC_},
+    };
+    for (size_t index = 0; index < array_size(mappings); index++)
+        if (raw_flags & mappings[index].guest)
+            flags |= mappings[index].internal;
 
     char path[MAX_PATH];
     qword_t copied = copy_path_from_user(
             context, syscall->arguments[1], path, fault);
     if ((sqword_t) copied < 0)
         return copied;
-    int flags = (int) (raw_flags & supported_flags);
     mode_t_ mode = (mode_t_) (word_t) syscall->arguments[3];
     return syscall_result(file_openat_task(task,
             syscall_fd(syscall->arguments[0]), path, flags, mode));
