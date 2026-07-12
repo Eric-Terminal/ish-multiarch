@@ -86,7 +86,11 @@ struct aarch64_linux_process_config {
 
 struct aarch64_linux_process_fork_config {
     pid_t_ tid;
+    dword_t set_tls;
     void *task_opaque;
+    qword_t stack_pointer;
+    qword_t tls;
+    qword_t clear_child_tid;
 };
 
 struct aarch64_linux_process_thread_config {
@@ -168,6 +172,12 @@ struct aarch64_linux_executable_info
         const void *elf_data, size_t elf_size);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
+bool aarch64_linux_process_read_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t *value, struct guest_linux_user_fault *fault);
+bool aarch64_linux_process_write_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t value, struct guest_linux_user_fault *fault);
 // 核对 create 时复制的 tid、服务闭包与 task opaque；不比较描述符地址。
 bool aarch64_linux_process_uses_services(
         const struct aarch64_linux_process *process,

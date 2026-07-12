@@ -14,6 +14,8 @@
 #include "kernel/resource.h"
 #include "kernel/ptrace.h"
 
+struct guest_linux_user_fault;
+
 void handle_interrupt(int interrupt);
 
 int must_check user_read(addr_t addr, void *buf, size_t count);
@@ -30,6 +32,8 @@ int must_check user_write_string(addr_t addr, const char *buf);
 
 // process lifecycle
 dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid);
+dword_t sys_clone_aarch64(dword_t flags, qword_t stack, qword_t ptid,
+        qword_t tls, qword_t ctid, struct guest_linux_user_fault *fault);
 dword_t sys_fork(void);
 dword_t sys_vfork(void);
 dword_t sys_execve(addr_t file, addr_t argv, addr_t envp);

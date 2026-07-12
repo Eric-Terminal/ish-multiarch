@@ -36,6 +36,11 @@
 #define WAIT_OPTION_WAITID_EXITED UINT32_C(4)
 #define WAIT_OPTION_WCONTINUED UINT32_C(8)
 #define WAIT_OPTION_WNOWAIT UINT32_C(0x01000000)
+#define THREAD_CLONE_FLAGS (UINT32_C(0x00000100) | \
+        UINT32_C(0x00000200) | UINT32_C(0x00000400) | \
+        UINT32_C(0x00000800) | UINT32_C(0x00010000) | \
+        UINT32_C(0x00080000) | UINT32_C(0x00100000) | \
+        UINT32_C(0x00200000) | UINT32_C(0x01000000))
 
 struct exit_observation {
     atomic_bool called;
@@ -290,10 +295,16 @@ static struct aarch64_linux_process *make_process(struct task *task) {
         UINT32_C(0xd4000001), UINT32_C(0x92800127),
         UINT32_C(0xeb07001f), UINT32_C(0x540000a1),
         UINT32_C(0xd2800540), UINT32_C(0xd2800ba8),
-        UINT32_C(0xd4000001), UINT32_C(0x14000000),
+        UINT32_C(0xd4000001), UINT32_C(0x14000006),
         UINT32_C(0xd2800c60), UINT32_C(0xd2800ba8),
         UINT32_C(0xd4000001), UINT32_C(0x14000000),
         UINT32_C(0x14000000),
+        // 仅目标 TLS 的线程进入共享栈等待；普通 fork 子进程继续自旋。
+        UINT32_C(0xd53bd041), UINT32_C(0xd2824682),
+        UINT32_C(0xeb02003f), UINT32_C(0x54000001),
+        UINT32_C(0xb94007e0), UINT32_C(0x34ffffe0),
+        UINT32_C(0xd2800000), UINT32_C(0xd2800ba8),
+        UINT32_C(0xd4000001),
     };
     byte_t file[IMAGE_SIZE];
     make_image(file, program, array_size(program));
@@ -330,6 +341,68 @@ static void observe_exit(struct task *task, int status) {
             resources_released, memory_order_relaxed);
     atomic_store_explicit(&observed_exit.called,
             true, memory_order_release);
+}
+
+static bool exercise_thread_clone(struct task *parent) {
+    const qword_t child_stack = STACK_TOP - UINT64_C(0x200);
+    const qword_t child_tid = child_stack;
+    const qword_t child_ready = child_stack + sizeof(dword_t);
+    const qword_t parent_tid = child_ready + sizeof(dword_t);
+    const qword_t tls = UINT64_C(0x1234);
+    struct guest_linux_user_fault fault = {0};
+    if (!aarch64_linux_process_write_u32(
+            parent->aarch64_process, child_tid, 0, &fault) ||
+            !aarch64_linux_process_write_u32(
+                    parent->aarch64_process, child_ready, 0, &fault) ||
+            !aarch64_linux_process_write_u32(
+                    parent->aarch64_process, parent_tid, 0, &fault))
+        return false;
+
+    dword_t encoded_pid = sys_clone_aarch64(
+            THREAD_CLONE_FLAGS, child_stack,
+            parent_tid, tls, child_tid, &fault);
+    if ((sdword_t) encoded_pid <= 0)
+        return false;
+    pid_t_ pid = (pid_t_) encoded_pid;
+    lock(&pids_lock);
+    struct task *child = pid_get_task(pid);
+    bool published = child != NULL && child->group == parent->group &&
+            child->tgid == parent->tgid && child->mm == parent->mm &&
+            child->files == parent->files && child->fs == parent->fs &&
+            child->sighand == parent->sighand &&
+            task_has_aarch64_process(child) &&
+            child->aarch64_process != parent->aarch64_process &&
+            aarch64_linux_process_uses_services(
+                    child->aarch64_process, pid, child,
+                    &ish_aarch64_linux_syscall_service,
+                    &ish_aarch64_linux_signal_service) &&
+            atomic_load_explicit(
+                    &child->start_ready, memory_order_acquire);
+    unlock(&pids_lock);
+    dword_t observed_child_tid;
+    dword_t observed_parent_tid;
+    if (!published || !aarch64_linux_process_read_u32(
+            parent->aarch64_process, child_tid,
+            &observed_child_tid, &fault) ||
+            !aarch64_linux_process_read_u32(
+                    parent->aarch64_process, parent_tid,
+                    &observed_parent_tid, &fault) ||
+            observed_child_tid != (dword_t) pid ||
+            observed_parent_tid != (dword_t) pid)
+        return false;
+
+    if (!aarch64_linux_process_write_u32(
+            parent->aarch64_process, child_ready, 1, &fault))
+        return false;
+    bool reaped = false;
+    for (unsigned i = 0; i < 100000 && !reaped; i++) {
+        lock(&pids_lock);
+        reaped = pid_get_task_zombie(pid) == NULL;
+        unlock(&pids_lock);
+        if (!reaped)
+            sched_yield();
+    }
+    return reaped;
 }
 
 static void clear_pending_signals(struct task *task) {
@@ -606,6 +679,17 @@ static int run_clone_scenario(void) {
                     &ish_aarch64_linux_signal_service);
     if (!parent_unchanged)
         return 42;
+    if (!exercise_thread_clone(parent))
+        return 43;
+    if (atomic_load_explicit(&parent->mm->refcount,
+                    memory_order_relaxed) != 1 ||
+            atomic_load_explicit(&parent->files->refcount,
+                    memory_order_relaxed) != 1 ||
+            atomic_load_explicit(&parent->fs->refcount,
+                    memory_order_relaxed) != 1 ||
+            atomic_load_explicit(&parent->sighand->refcount,
+                    memory_order_relaxed) != 1)
+        return 44;
 
     destroy_parent(parent, &parent_group);
     return 0;

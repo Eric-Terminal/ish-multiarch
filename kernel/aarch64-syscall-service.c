@@ -1336,13 +1336,13 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_GETEGID:
             return task->egid;
         case AARCH64_LINUX_SYS_CLONE:
-            // 旧 clone ABI 的高 32 位不参与 flags；未请求的尾参数不读取。
-            if ((dword_t) syscall->arguments[0] != SIGCHLD_ ||
-                    syscall->arguments[1] != 0)
+            // 旧 clone ABI 的高 32 位不参与 flags。
+            if (!task_has_aarch64_process(task))
                 return syscall_result(_EINVAL);
-            assert(task_has_aarch64_process(task));
-            return syscall_result((sdword_t) sys_clone(
-                    (dword_t) syscall->arguments[0], 0, 0, 0, 0));
+            return syscall_result((sdword_t) sys_clone_aarch64(
+                    (dword_t) syscall->arguments[0],
+                    syscall->arguments[1], syscall->arguments[2],
+                    syscall->arguments[3], syscall->arguments[4], fault));
         case AARCH64_LINUX_SYS_EXECVE:
             return dispatch_execve(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WAIT4:

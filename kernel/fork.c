@@ -61,9 +61,12 @@ static void tgroup_init_copy(
     lock_init(&group->lock);
 }
 
-static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid_addr, addr_t tls_addr, addr_t ctid_addr) {
-    if (stack != 0)
-        task->cpu.esp = stack;
+static int copy_task(struct task *task, dword_t flags, qword_t stack,
+        qword_t ptid_addr, qword_t tls_addr, qword_t ctid_addr,
+        struct guest_linux_user_fault *fault) {
+    bool is_aarch64 = task_has_aarch64_process(task);
+    if (!is_aarch64 && stack != 0)
+        task->cpu.esp = (addr_t) stack;
 
     int err;
     struct mm *mm = task->mm;
@@ -115,21 +118,33 @@ static int copy_task(struct task *task, dword_t flags, addr_t stack, addr_t ptid
         }
     }
 
-    if (flags & CLONE_SETTLS_) {
-        err = task_set_thread_area(task, tls_addr);
+    if ((flags & CLONE_SETTLS_) && !is_aarch64) {
+        err = task_set_thread_area(task, (addr_t) tls_addr);
         if (err < 0)
             goto fail_free_sighand;
     }
 
     err = _EFAULT;
-    if (flags & CLONE_CHILD_SETTID_)
-        if (user_put_task(task, ctid_addr, task->pid))
+    if (flags & CLONE_CHILD_SETTID_) {
+        bool failed = is_aarch64 ?
+                !aarch64_linux_process_write_u32(
+                        task->aarch64_process, ctid_addr,
+                        (dword_t) task->pid, fault) :
+                user_put_task(task, (addr_t) ctid_addr, task->pid);
+        if (failed)
             goto fail_free_sighand;
-    if (flags & CLONE_PARENT_SETTID_)
-        if (user_put(ptid_addr, task->pid))
+    }
+    if (flags & CLONE_PARENT_SETTID_) {
+        bool failed = is_aarch64 ?
+                !aarch64_linux_process_write_u32(
+                        current->aarch64_process, ptid_addr,
+                        (dword_t) task->pid, fault) :
+                user_put((addr_t) ptid_addr, task->pid);
+        if (failed)
             goto fail_free_sighand;
-    if (flags & CLONE_CHILD_CLEARTID_)
-        task->clear_tid = ctid_addr;
+    }
+    if ((flags & CLONE_CHILD_CLEARTID_) && !is_aarch64)
+        task->clear_tid = (addr_t) ctid_addr;
     task->exit_signal = flags & CSIGNAL_;
 
     task_start_suspended(task);
@@ -162,8 +177,9 @@ fail_free_mem:
     return err;
 }
 
-dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid) {
-    STRACE("clone(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)", flags, stack, ptid, tls, ctid);
+static dword_t clone_task(dword_t flags, qword_t stack, qword_t ptid,
+        qword_t tls, qword_t ctid,
+        struct guest_linux_user_fault *fault) {
     if (flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS) {
         FIXME("unimplemented clone flags 0x%x", flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS);
         return _EINVAL;
@@ -173,8 +189,6 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
     if (flags & CLONE_THREAD_ && !(flags & CLONE_SIGHAND_))
         return _EINVAL;
     bool is_aarch64 = task_has_aarch64_process(current);
-    if (is_aarch64 && (flags != SIGCHLD_ || stack != 0))
-        return _EINVAL;
 
     struct task *task = task_create_(current);
     if (task == NULL)
@@ -183,15 +197,37 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
 
     if (is_aarch64) {
         // copy_task 会在末尾发布 PID；opaque process 必须在此之前完整接入。
-        const struct aarch64_linux_process_fork_config process_config = {
-            .tid = pid,
-            .task_opaque = task,
-        };
         struct aarch64_linux_process_error process_error;
-        struct aarch64_linux_process *process =
-                aarch64_linux_process_fork(
-                        current->aarch64_process,
-                        &process_config, &process_error);
+        struct aarch64_linux_process *process;
+        qword_t clear_child_tid =
+                (flags & CLONE_CHILD_CLEARTID_) != 0 ? ctid : 0;
+        if ((flags & CLONE_VM_) != 0) {
+            const struct aarch64_linux_process_thread_config
+                    process_config = {
+                .tid = pid,
+                .set_tls = (flags & CLONE_SETTLS_) != 0,
+                .task_opaque = task,
+                .stack_pointer = stack,
+                .tls = tls,
+                .clear_child_tid = clear_child_tid,
+            };
+            process = aarch64_linux_process_clone_thread(
+                    current->aarch64_process,
+                    &process_config, &process_error);
+        } else {
+            const struct aarch64_linux_process_fork_config
+                    process_config = {
+                .tid = pid,
+                .set_tls = (flags & CLONE_SETTLS_) != 0,
+                .task_opaque = task,
+                .stack_pointer = stack,
+                .tls = tls,
+                .clear_child_tid = clear_child_tid,
+            };
+            process = aarch64_linux_process_fork(
+                    current->aarch64_process,
+                    &process_config, &process_error);
+        }
         if (process == NULL) {
             task_abort_create(task);
             return process_error.stage ==
@@ -214,7 +250,7 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
     }
     task->cpu.eax = 0;
 
-    int err = copy_task(task, flags, stack, ptid, tls, ctid);
+    int err = copy_task(task, flags, stack, ptid, tls, ctid, fault);
     if (err < 0) {
         if (flags & CLONE_VFORK_)
             cond_destroy(&vfork.cond);
@@ -238,6 +274,24 @@ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t c
     }
 
     return pid;
+}
+
+dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid,
+        addr_t tls, addr_t ctid) {
+    STRACE("clone(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)",
+            flags, stack, ptid, tls, ctid);
+    return clone_task(flags, stack, ptid, tls, ctid, NULL);
+}
+
+dword_t sys_clone_aarch64(dword_t flags, qword_t stack, qword_t ptid,
+        qword_t tls, qword_t ctid,
+        struct guest_linux_user_fault *fault) {
+    STRACE("clone(0x%x, 0x%llx, 0x%llx, 0x%llx, 0x%llx)",
+            flags, (unsigned long long) stack,
+            (unsigned long long) ptid, (unsigned long long) tls,
+            (unsigned long long) ctid);
+    assert(task_has_aarch64_process(current));
+    return clone_task(flags, stack, ptid, tls, ctid, fault);
 }
 
 dword_t sys_fork(void) {

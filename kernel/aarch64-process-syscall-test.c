@@ -288,35 +288,19 @@ int main(void) {
     CHECK(result == (qword_t) (sqword_t) _ENOSYS,
             "gettid 仍由 AArch64 runtime 负责");
 
-    static const struct {
-        qword_t flags;
-        qword_t stack;
-    } invalid_clone_calls[] = {
-        {0, 0},
-        {SIGCHLD_ + 1, 0},
-        {SIGCHLD_ | UINT32_C(0x100), 0},
-        {UINT64_C(1) << 32, 0},
-        {SIGCHLD_, 1},
-        {SIGCHLD_, UINT64_C(1) << 32},
+    reset_user_probe(&probe, 0x5a);
+    fault = (struct guest_linux_user_fault) {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
     };
-    for (size_t i = 0; i < array_size(invalid_clone_calls); i++) {
-        reset_user_probe(&probe, 0x5a);
-        fault = (struct guest_linux_user_fault) {
-            .address = UINT64_MAX,
-            .access = UINT32_MAX,
-            .kind = UINT32_MAX,
-        };
-        result = invoke(&fixture, &probe, &fault, 220,
-                invalid_clone_calls[i].flags,
-                invalid_clone_calls[i].stack,
-                UINT64_MAX, UINT64_MAX - 1,
-                UINT64_MAX - 2, UINT64_MAX - 3);
-        CHECK(result == (qword_t) (sqword_t) _EINVAL &&
-                fault.address == 0 && fault.access == 0 &&
-                fault.kind == 0 && probe.reads == 0 &&
-                probe.writes == 0,
-                "clone 在访问尾参数前拒绝非法低位 flags 或完整 newsp");
-    }
+    result = invoke(&fixture, &probe, &fault, 220,
+            SIGCHLD_, 0, UINT64_MAX, UINT64_MAX - 1,
+            UINT64_MAX - 2, UINT64_MAX - 3);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            fault.address == 0 && fault.access == 0 &&
+            fault.kind == 0 && probe.reads == 0 && probe.writes == 0,
+            "clone 拒绝未挂接 AArch64 process 的伪任务");
 
     lock(&pids_lock);
     fixture.leader.parent = NULL;

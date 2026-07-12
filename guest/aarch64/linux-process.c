@@ -284,6 +284,17 @@ static void copy_fork_cpu(struct cpu_state *child,
     aarch64_clear_exclusive(child);
 }
 
+static void apply_clone_state(struct aarch64_linux_process *child,
+        qword_t stack_pointer, dword_t set_tls, qword_t tls,
+        qword_t clear_child_tid) {
+    if (stack_pointer != 0)
+        child->cpu.sp = (guest_addr_t) stack_pointer;
+    if (set_tls != 0)
+        child->cpu.tpidr_el0 = tls;
+    child->task.clear_child_tid =
+            (guest_addr_t) clear_child_tid;
+}
+
 struct aarch64_linux_process *aarch64_linux_process_create(
         const struct aarch64_linux_process_config *config,
         struct aarch64_linux_process_error *error) {
@@ -440,7 +451,7 @@ struct aarch64_linux_process *aarch64_linux_process_fork(
         struct aarch64_linux_process_error *error) {
     set_error(error, AARCH64_LINUX_PROCESS_ERROR_NONE, 0);
     if (parent == NULL || config == NULL || config->tid <= 0 ||
-            config->tid > AARCH64_LINUX_MAX_TID) {
+            config->tid > AARCH64_LINUX_MAX_TID || config->set_tls > 1) {
         set_error(error, AARCH64_LINUX_PROCESS_ERROR_ARGUMENT, 0);
         return NULL;
     }
@@ -465,6 +476,8 @@ struct aarch64_linux_process *aarch64_linux_process_fork(
             &child->memory->page_table.address_space);
     aarch64_runner_init(&child->runner, &child->tlb);
     copy_fork_cpu(&child->cpu, &parent->cpu);
+    apply_clone_state(child, config->stack_pointer,
+            config->set_tls, config->tls, config->clear_child_tid);
     return child;
 }
 
@@ -491,16 +504,12 @@ struct aarch64_linux_process *aarch64_linux_process_clone_thread(
     child->runtime.services = &child->services;
     aarch64_linux_task_init(&child->task,
             config->tid, config->task_opaque);
-    child->task.clear_child_tid =
-            (guest_addr_t) config->clear_child_tid;
     guest_tlb_init(&child->tlb,
             &child->memory->page_table.address_space);
     aarch64_runner_init(&child->runner, &child->tlb);
     copy_fork_cpu(&child->cpu, &parent->cpu);
-    if (config->stack_pointer != 0)
-        child->cpu.sp = (guest_addr_t) config->stack_pointer;
-    if (config->set_tls != 0)
-        child->cpu.tpidr_el0 = config->tls;
+    apply_clone_state(child, config->stack_pointer,
+            config->set_tls, config->tls, config->clear_child_tid);
     return child;
 }
 
@@ -602,6 +611,32 @@ static void export_fault(struct guest_linux_user_fault *destination,
         .access = (dword_t) source->access,
         .kind = (dword_t) source->kind,
     };
+}
+
+bool aarch64_linux_process_read_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t *value, struct guest_linux_user_fault *fault) {
+    assert(process != NULL && value != NULL);
+    struct guest_memory_fault memory_fault;
+    if (guest_tlb_read(&process->tlb, (guest_addr_t) address,
+            value, sizeof(*value), GUEST_MEMORY_READ, &memory_fault))
+        return true;
+    if (fault != NULL)
+        export_fault(fault, &memory_fault);
+    return false;
+}
+
+bool aarch64_linux_process_write_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t value, struct guest_linux_user_fault *fault) {
+    assert(process != NULL);
+    struct guest_memory_fault memory_fault;
+    if (guest_tlb_write(&process->tlb, (guest_addr_t) address,
+            &value, sizeof(value), &memory_fault))
+        return true;
+    if (fault != NULL)
+        export_fault(fault, &memory_fault);
+    return false;
 }
 
 static void apply_signal_result(
