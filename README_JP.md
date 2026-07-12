@@ -1,6 +1,8 @@
 # [iSH](https://ish.app)
 
-[![Build Status](https://github.com/ish-app/ish/actions/workflows/ci.yml/badge.svg)](https://github.com/ish-app/ish/actions)
+> **マルチアーキテクチャ実験ブランチ:** このリポジトリは既存の i386 guest を維持しつつ、実験的な AArch64 Linux guest を追加しています。対応範囲と制限は[マルチアーキテクチャ実装ノート](docs/multiarch/README.md)を参照してください。
+
+[![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
 [![fuck counter](https://img.shields.io/github/search/ish-app/ish/fuck.svg)](https://github.com/ish-app/ish/search?q=fuck)
 [![shit counter](https://img.shields.io/github/search/ish-app/ish/shit.svg)](https://github.com/ish-app/ish/search?q=shit)

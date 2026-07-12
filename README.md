@@ -2,7 +2,7 @@
 
 > **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。新增的可复用核心目前通过 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 编译门禁；真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建方法和已知限制见[多架构实现说明](docs/multiarch/README.md)。
 
-[![Build Status](https://github.com/ish-app/ish/actions/workflows/ci.yml/badge.svg)](https://github.com/ish-app/ish/actions)
+[![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
 [![fuck counter](https://img.shields.io/github/search/ish-app/ish/fuck.svg)](https://github.com/ish-app/ish/search?q=fuck)
 [![shit counter](https://img.shields.io/github/search/ish-app/ish/shit.svg)](https://github.com/ish-app/ish/search?q=shit)
@@ -13,7 +13,7 @@
 </a>
 </p>
 
-A project to get a Linux shell running on iOS, using usermode x86 emulation and syscall translation.
+This branch retains the i386 Linux guest through usermode x86 emulation and adds an experimental AArch64 Linux guest path with syscall translation.
 
 For the current status of the project, check the issues tab, and the commit logs.
 
@@ -21,7 +21,7 @@ For the current status of the project, check the issues tab, and the commit logs
 - [TestFlight beta](https://testflight.apple.com/join/97i7KM8O)
 - [Discord server](https://discord.gg/HFAXj44)
 - [Wiki with help and tutorials](https://github.com/ish-app/ish/wiki)
-- [README中文](https://github.com/ish-app/ish/blob/master/README_ZH.md) (如若未能保持最新，请提交PR以更新)
+- [README 中文](README_ZH.md) (如若未能保持最新，请提交 PR 以更新)
 
 # Hacking
 

@@ -2,7 +2,7 @@
 
 > **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。新增的可复用核心目前通过 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 编译门禁；真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建方法和已知限制见[多架构实现说明](docs/multiarch/README.md)。
 
-[![Build Status](https://github.com/ish-app/ish/actions/workflows/ci.yml/badge.svg)](https://github.com/ish-app/ish/actions)
+[![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
 [![fuck counter](https://img.shields.io/github/search/ish-app/ish/fuck.svg)](https://github.com/ish-app/ish/search?q=fuck)
 [![shit counter](https://img.shields.io/github/search/ish-app/ish/shit.svg)](https://github.com/ish-app/ish/search?q=shit)
@@ -13,7 +13,7 @@
 </a>
 </p>
 
-iSH 是一个运行在 iOS 上的 Linux shell。本项目使用了 x86 用户模式仿真和系统调用翻译转换。
+本分支通过 x86 用户模式仿真保留 i386 Linux guest，并新增实验性的 AArch64 Linux guest 执行路径和对应的系统调用翻译。
 
 请查看 issue 和提交记录以了解本项目当前的状态。
 
@@ -21,10 +21,11 @@ iSH 是一个运行在 iOS 上的 Linux shell。本项目使用了 x86 用户模
 - [Testflight 测试](https://testflight.apple.com/join/97i7KM8O)
 - [Discord 服务器](https://discord.gg/HFAXj44)
 - [维基帮助与教程](https://github.com/ish-app/ish/wiki)
+- [English README](README.md)
 
 # 上手
 
-本项目下包含了其他 git 项目作为子模块，请确保在克隆时使用参数`--recurse-submodules`，即 `git clone --recurse-submodules https://github.com/ish-app/ish.git`。或是在克隆好了之后执行 `git submodule update --init`。
+本项目下包含了其他 git 项目作为子模块，请确保在克隆时使用参数`--recurse-submodules`，即 `git clone --recurse-submodules https://github.com/Eric-Terminal/ish-multiarch.git`。或是在克隆好了之后执行 `git submodule update --init`。
 
 编译此项目需要以下依赖:
 

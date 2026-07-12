@@ -1,6 +1,8 @@
 # [iSH](https://ish.app)
 
-[![Build Status](https://github.com/ish-app/ish/actions/workflows/ci.yml/badge.svg)](https://github.com/ish-app/ish/actions)
+> **멀티 아키텍처 실험 브랜치:** 이 저장소는 기존 i386 guest를 유지하면서 실험적인 AArch64 Linux guest를 추가합니다. 지원 범위와 제한 사항은 [멀티 아키텍처 구현 안내](docs/multiarch/README.md)를 참고하세요.
+
+[![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
 [![fuck counter](https://img.shields.io/github/search/ish-app/ish/fuck.svg)](https://github.com/ish-app/ish/search?q=fuck)
 [![shit counter](https://img.shields.io/github/search/ish-app/ish/shit.svg)](https://github.com/ish-app/ish/search?q=shit)
@@ -19,7 +21,7 @@
 - [TestFlight beta](https://testflight.apple.com/join/97i7KM8O)
 - [Discord server](https://discord.gg/HFAXj44)
 - [도움 문서 Wiki](https://github.com/ish-app/ish/wiki)
-- [README중문](https://github.com/ish-app/ish/blob/master/README_ZH.md)
+- [README중문](README_ZH.md)
 
 
 # Hacking
