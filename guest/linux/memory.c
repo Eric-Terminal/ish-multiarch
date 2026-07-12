@@ -5,9 +5,6 @@
 #include "guest/linux/memory.h"
 #include "guest/linux/mman.h"
 
-// standalone 页表按页立即分配 backing，有限 arena 同时约束搜索与单次映射成本。
-#define GUEST_LINUX_MMAP_ARENA_SIZE (UINT64_C(128) * 1024 * 1024)
-
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
@@ -75,6 +72,47 @@ static bool range_is_in_mmap_arena(const struct guest_linux_mm *memory,
     return count <= arena_pages - offset_pages;
 }
 
+static bool mmap_anonymous_page_index(
+        const struct guest_linux_mm *memory, qword_t page,
+        dword_t *index) {
+    if (page < memory->mmap_base || page >= memory->mmap_limit)
+        return false;
+    qword_t offset = (page - memory->mmap_base) >>
+            GUEST_MEMORY_PAGE_BITS;
+    assert(offset < GUEST_LINUX_MMAP_ANONYMOUS_BITMAP_SIZE * 8);
+    *index = (dword_t) offset;
+    return true;
+}
+
+static bool mmap_anonymous_page_is_tracked(
+        const struct guest_linux_mm *memory, qword_t page) {
+    dword_t index;
+    if (!mmap_anonymous_page_index(memory, page, &index))
+        return false;
+    byte_t mask = (byte_t) (1u << (index & 7u));
+    return (memory->mmap_anonymous_bitmap[index >> 3] & mask) != 0;
+}
+
+static void mmap_anonymous_range_set(struct guest_linux_mm *memory,
+        qword_t first, qword_t count, bool tracked) {
+    assert(valid_range(memory, first, count));
+    qword_t range_end = first +
+            (count << GUEST_MEMORY_PAGE_BITS);
+    qword_t page = first < memory->mmap_base ?
+            memory->mmap_base : first;
+    qword_t end = range_end > memory->mmap_limit ?
+            memory->mmap_limit : range_end;
+    for (; page < end; page += GUEST_MEMORY_PAGE_SIZE) {
+        dword_t index;
+        assert(mmap_anonymous_page_index(memory, page, &index));
+        byte_t mask = (byte_t) (1u << (index & 7u));
+        if (tracked)
+            memory->mmap_anonymous_bitmap[index >> 3] |= mask;
+        else
+            memory->mmap_anonymous_bitmap[index >> 3] &= (byte_t) ~mask;
+    }
+}
+
 static bool find_mmap_hole(struct guest_linux_mm *memory,
         qword_t count, qword_t *first) {
     qword_t arena_pages = (memory->mmap_limit - memory->mmap_base) >>
@@ -140,9 +178,17 @@ static bool range_is_in_allocated_brk(
 static bool range_is_discardable_anonymous(
         const struct guest_linux_mm *memory, qword_t first,
         qword_t count) {
-    // 缺少 VMA 来源元数据时，只在受控匿名域内承诺可丢弃后重新置零。
-    return range_is_in_allocated_brk(memory, first, count) ||
-            range_is_in_mmap_arena(memory, first, count);
+    if (range_is_in_allocated_brk(memory, first, count))
+        return true;
+    if (!range_is_in_mmap_arena(memory, first, count))
+        return false;
+    for (qword_t index = 0; index < count; index++) {
+        qword_t page = first +
+                (index << GUEST_MEMORY_PAGE_BITS);
+        if (!mmap_anonymous_page_is_tracked(memory, page))
+            return false;
+    }
+    return true;
 }
 
 void guest_linux_mm_init(struct guest_linux_mm *memory,
@@ -309,8 +355,12 @@ static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
     enum guest_page_table_result result = guest_page_table_map_zero_range(
             memory->page_table, make_range(first, count), permissions,
             fixed && !no_replace);
-    if (result == GUEST_PAGE_TABLE_OK)
+    if (result == GUEST_PAGE_TABLE_OK) {
+        mmap_anonymous_range_set(memory, first, count, false);
+        if (range_is_in_mmap_arena(memory, first, count))
+            mmap_anonymous_range_set(memory, first, count, true);
         return first;
+    }
     if (result == GUEST_PAGE_TABLE_ALREADY_MAPPED && no_replace)
         return linux_error(GUEST_LINUX_EEXIST);
     return linux_error(GUEST_LINUX_ENOMEM);
@@ -337,6 +387,7 @@ static qword_t guest_linux_munmap_unlocked(struct guest_linux_mm *memory,
     enum guest_page_table_result result = guest_page_table_unmap_range(
             memory->page_table, make_range(address, count), true);
     assert(result == GUEST_PAGE_TABLE_OK);
+    mmap_anonymous_range_set(memory, address, count, false);
     return 0;
 }
 
@@ -401,10 +452,6 @@ static qword_t guest_linux_madvise_unlocked(
     if (!valid_range(memory, address, count))
         return linux_error(GUEST_LINUX_ENOMEM);
 
-    if (advice == GUEST_LINUX_MADV_DONTNEED &&
-            !range_is_discardable_anonymous(memory, address, count))
-        return linux_error(GUEST_LINUX_EINVAL);
-
     // 先验证整段，避免空洞或不受支持的映射留下部分清零结果。
     for (qword_t index = 0; index < count; index++) {
         guest_addr_t page = address +
@@ -414,6 +461,8 @@ static qword_t guest_linux_madvise_unlocked(
     }
     if (advice != GUEST_LINUX_MADV_DONTNEED)
         return 0;
+    if (!range_is_discardable_anonymous(memory, address, count))
+        return linux_error(GUEST_LINUX_EINVAL);
 
     for (qword_t index = 0; index < count; index++) {
         guest_addr_t page = address +

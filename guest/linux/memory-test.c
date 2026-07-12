@@ -412,11 +412,66 @@ static void test_madvise(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
     struct guest_linux_mm memory;
+    memset(&memory, 0xff, sizeof(memory));
     guest_linux_mm_init(&memory, &table, BRK_BASE, BRK_LIMIT);
-    guest_addr_t base = (guest_addr_t) memory.mmap_base +
-            64 * GUEST_MEMORY_PAGE_SIZE;
     qword_t flags = GUEST_LINUX_MAP_PRIVATE |
             GUEST_LINUX_MAP_ANONYMOUS | GUEST_LINUX_MAP_FIXED;
+
+    guest_addr_t code_page = (guest_addr_t) memory.mmap_base;
+    byte_t *code;
+    assert(guest_page_table_map(&table, code_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE,
+            &code) == GUEST_PAGE_TABLE_OK);
+    memset(code, 0xcc, GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory, code_page,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(code[0] == 0xcc &&
+            code[GUEST_MEMORY_PAGE_SIZE - 1] == 0xcc);
+
+    assert(guest_linux_mmap(&memory, code_page,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            flags, UINT64_MAX, 0) == code_page);
+    byte_t *replacement = lookup_page(&table, code_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    memset(replacement, 0x5c, GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory, code_page,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert(replacement[0] == 0 &&
+            replacement[GUEST_MEMORY_PAGE_SIZE - 1] == 0);
+
+    replacement[0] = 0x6d;
+    struct guest_page_table clone_table;
+    struct guest_linux_mm clone;
+    assert(guest_linux_mm_clone(&clone, &clone_table, &memory));
+    byte_t *cloned = lookup_page(&clone_table, code_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(cloned[0] == 0x6d);
+    assert(guest_linux_madvise(&clone, code_page,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert(cloned[0] == 0 && replacement[0] == 0x6d);
+    guest_page_table_destroy(&clone_table);
+
+    assert(guest_linux_munmap(&memory, code_page,
+            GUEST_MEMORY_PAGE_SIZE) == 0);
+    byte_t *remapped_code;
+    assert(guest_page_table_map(&table, code_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE,
+            &remapped_code) == GUEST_PAGE_TABLE_OK);
+    memset(remapped_code, 0x8e, GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory, code_page,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(remapped_code[0] == 0x8e &&
+            remapped_code[GUEST_MEMORY_PAGE_SIZE - 1] == 0x8e);
+
+    guest_addr_t base = (guest_addr_t) memory.mmap_base +
+            64 * GUEST_MEMORY_PAGE_SIZE;
     assert(guest_linux_mmap(&memory, base,
             3 * GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
@@ -490,6 +545,22 @@ static void test_madvise(void) {
     assert(sentinel[0] == 0xa5 &&
             sentinel[GUEST_MEMORY_PAGE_SIZE - 1] == 0xa5);
     assert(heap[0] == 0x3c);
+
+    guest_addr_t fixed_outside = foreign_page -
+            GUEST_MEMORY_PAGE_SIZE;
+    assert(guest_linux_mmap(&memory, fixed_outside,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            flags, UINT64_MAX, 0) == fixed_outside);
+    byte_t *outside_anonymous = lookup_page(&table, fixed_outside,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    memset(outside_anonymous, 0xb7, GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory, fixed_outside,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(outside_anonymous[0] == 0xb7 &&
+            outside_anonymous[GUEST_MEMORY_PAGE_SIZE - 1] == 0xb7);
 
     assert(guest_linux_madvise(&memory, base + 1, 0,
             GUEST_LINUX_MADV_NORMAL) ==
