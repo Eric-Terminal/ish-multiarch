@@ -609,6 +609,24 @@ int main(void) {
     reset_user_access(&memory);
     struct guest_linux_user_fault fault;
 
+    CHECK(invoke(&fixture, &memory, &fault, 129,
+            UINT64_C(0x123456787fffffff), 65, 0, 0) ==
+                    encoded_error(_EINVAL) &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "kill 按低 32 位校验信号且不访问 guest 内存");
+    CHECK(invoke(&fixture, &memory, &fault, 129,
+            UINT64_C(0x123456787fffffff), 0, 0, 0) ==
+                    encoded_error(_ESRCH),
+            "kill 按低 32 位解析不存在的 PID");
+    CHECK(invoke(&fixture, &memory, &fault, 130,
+            UINT64_C(0xabcdef0100000000), SIGTERM_, 0, 0) ==
+                    encoded_error(_EINVAL),
+            "tkill 拒绝低 32 位为零的 TID");
+    CHECK(invoke(&fixture, &memory, &fault, 131,
+            UINT64_C(0xabcdef0100000000), 1, SIGTERM_, 0) ==
+                    encoded_error(_EINVAL),
+            "tgkill 拒绝低 32 位为零的 TGID");
+
     // openat 只读取 guest ABI 的低位参数，且不会越过路径 NUL。
     const size_t path_offset = 0x100;
     static const char created_path[] = "created";

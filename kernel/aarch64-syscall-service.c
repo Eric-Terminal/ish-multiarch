@@ -72,6 +72,9 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FUTEX = 98,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
     AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
+    AARCH64_LINUX_SYS_KILL = 129,
+    AARCH64_LINUX_SYS_TKILL = 130,
+    AARCH64_LINUX_SYS_TGKILL = 131,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
     AARCH64_LINUX_SYS_RT_SIGSUSPEND = 133,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
@@ -105,6 +108,10 @@ static qword_t syscall_result(sqword_t result) {
 
 static fd_t syscall_fd(qword_t argument) {
     return (fd_t) (sdword_t) (dword_t) argument;
+}
+
+static pid_t_ syscall_pid(qword_t argument) {
+    return (pid_t_) (sdword_t) (dword_t) argument;
 }
 
 static qword_t user_range_error(struct guest_linux_user_fault *fault,
@@ -1357,6 +1364,19 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_CLOCK_GETTIME:
             return aarch64_linux_dispatch_clock_gettime(
                     context, syscall, fault);
+        case AARCH64_LINUX_SYS_KILL:
+            return syscall_result((sdword_t) sys_kill(
+                    syscall_pid(syscall->arguments[0]),
+                    (dword_t) syscall->arguments[1]));
+        case AARCH64_LINUX_SYS_TKILL:
+            return syscall_result((sdword_t) sys_tkill(
+                    syscall_pid(syscall->arguments[0]),
+                    (dword_t) syscall->arguments[1]));
+        case AARCH64_LINUX_SYS_TGKILL:
+            return syscall_result((sdword_t) sys_tgkill(
+                    syscall_pid(syscall->arguments[0]),
+                    syscall_pid(syscall->arguments[1]),
+                    (dword_t) syscall->arguments[2]));
         case AARCH64_LINUX_SYS_SIGALTSTACK:
             return dispatch_sigaltstack(
                     context, syscall, task, fault);

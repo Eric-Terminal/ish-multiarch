@@ -567,7 +567,19 @@ static int run_clone_scenario(void) {
                 AARCH64_TASK_EVENT_CONTINUE)
             return 25;
     }
-    send_signal(child, SIGKILL_, SIGINFO_NIL);
+    struct guest_linux_syscall_completion kill_completion = {0};
+    const struct guest_linux_syscall_context kill_context = {
+        .task_opaque = parent,
+        .completion = &kill_completion,
+    };
+    const struct guest_linux_syscall kill_syscall = {
+        .number = 129,
+        .arguments = {(qword_t) (dword_t) child_pid, SIGKILL_},
+    };
+    struct guest_linux_user_fault kill_fault = {0};
+    if (ish_aarch64_linux_syscall_service.dispatch(
+            &kill_context, &kill_syscall, &kill_fault) != 0)
+        return 26;
     struct aarch64_task_event parent_event = {
         .action = AARCH64_TASK_EVENT_CONTINUE,
     };
@@ -579,24 +591,24 @@ static int run_clone_scenario(void) {
     if (parent_event.action != AARCH64_TASK_EVENT_EXIT ||
             parent_event.status != UINT32_C(42) << 8 ||
             !exit_observation_matches(child_pid, SIGKILL_))
-        return 26;
+        return 27;
 
     lock(&pids_lock);
     bool reaped = pid_get_task_zombie(child_pid) == NULL &&
             list_empty(&parent->children);
     unlock(&pids_lock);
     if (!reaped)
-        return 27;
+        return 28;
 
     struct wait4_result edge_result;
     if (do_wait4(INT32_MIN, 0, &edge_result) != _ESRCH ||
             do_wait4(-1, WAIT_OPTION_WAITID_EXITED,
                     &edge_result) != _EINVAL)
-        return 28;
+        return 29;
 
     dword_t encoded_fault_pid = sys_clone(SIGCHLD_, 0, 0, 0, 0);
     if ((sdword_t) encoded_fault_pid <= 0)
-        return 29;
+        return 30;
     pid_t_ fault_pid = (pid_t_) encoded_fault_pid;
     lock(&pids_lock);
     struct task *fault_child = pid_get_task(fault_pid);
@@ -605,7 +617,7 @@ static int run_clone_scenario(void) {
             task_has_aarch64_process(fault_child);
     unlock(&pids_lock);
     if (!fault_child_published)
-        return 30;
+        return 31;
     reset_exit_observation();
     exit_hook = observe_exit;
     send_signal(fault_child, SIGKILL_, SIGINFO_NIL);
@@ -645,18 +657,18 @@ static int run_clone_scenario(void) {
             !exit_observation_matches(fault_pid, SIGKILL_) ||
             do_wait4(fault_pid, WAIT_OPTION_WNOHANG,
                     &edge_result) != _ECHILD)
-        return 31;
+        return 32;
 
     lock(&pids_lock);
     bool fault_child_reaped = pid_get_task_zombie(fault_pid) == NULL &&
             list_empty(&parent->children);
     unlock(&pids_lock);
     if (!fault_child_reaped)
-        return 32;
+        return 33;
 
     dword_t encoded_job_pid = sys_clone(SIGCHLD_, 0, 0, 0, 0);
     if ((sdword_t) encoded_job_pid <= 0)
-        return 33;
+        return 34;
     pid_t_ job_pid = (pid_t_) encoded_job_pid;
     lock(&pids_lock);
     struct task *job_child = pid_get_task(job_pid);
@@ -665,7 +677,7 @@ static int run_clone_scenario(void) {
             task_has_aarch64_process(job_child);
     unlock(&pids_lock);
     if (!job_child_published)
-        return 34;
+        return 35;
 
     send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
     dword_t stop_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
@@ -674,7 +686,7 @@ static int run_clone_scenario(void) {
             job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
     if (stop_peek != 0 || stopped != job_pid || edge_result.status !=
             ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
-        return 35;
+        return 36;
     send_signal(job_child, SIGCONT_, SIGINFO_NIL);
     dword_t continue_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
             WAIT_OPTION_WCONTINUED | WAIT_OPTION_WNOWAIT);
@@ -688,17 +700,17 @@ static int run_clone_scenario(void) {
             do_wait4(job_pid,
                     WAIT_OPTION_WNOHANG | WAIT_OPTION_WCONTINUED,
                     &edge_result) != 0)
-        return 36;
+        return 37;
 
     send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
     stopped = do_wait4(
             job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
     if (stopped != job_pid || edge_result.status !=
             ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
-        return 37;
+        return 38;
     send_signal(job_child, SIGCONT_, SIGINFO_NIL);
     if (!wait_for_continue_notification(job_child))
-        return 38;
+        return 39;
     send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
     stopped = do_wait4(
             job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
@@ -707,11 +719,11 @@ static int run_clone_scenario(void) {
             do_wait4(job_pid,
                     WAIT_OPTION_WNOHANG | WAIT_OPTION_WCONTINUED,
                     &edge_result) != 0)
-        return 39;
+        return 40;
 
     send_signal(job_child, SIGCONT_, SIGINFO_NIL);
     if (!wait_for_continue_notification(job_child))
-        return 40;
+        return 41;
     reset_exit_observation();
     exit_hook = observe_exit;
     send_signal(job_child, SIGKILL_, SIGINFO_NIL);
@@ -728,7 +740,7 @@ static int run_clone_scenario(void) {
     if (!job_exited || killed != job_pid ||
             edge_result.status != SIGKILL_ ||
             !exit_observation_matches(job_pid, SIGKILL_))
-        return 41;
+        return 42;
 
     lock(&pids_lock);
     bool job_child_reaped = pid_get_task_zombie(job_pid) == NULL &&
@@ -748,9 +760,9 @@ static int run_clone_scenario(void) {
                     &ish_aarch64_linux_syscall_service,
                     &ish_aarch64_linux_signal_service);
     if (!parent_unchanged)
-        return 42;
-    if (!exercise_thread_clone(parent))
         return 43;
+    if (!exercise_thread_clone(parent))
+        return 44;
     if (atomic_load_explicit(&parent->mm->refcount,
                     memory_order_relaxed) != 1 ||
             atomic_load_explicit(&parent->files->refcount,
@@ -759,7 +771,7 @@ static int run_clone_scenario(void) {
                     memory_order_relaxed) != 1 ||
             atomic_load_explicit(&parent->sighand->refcount,
                     memory_order_relaxed) != 1)
-        return 44;
+        return 45;
 
     destroy_parent(parent, &parent_group);
     return 0;
