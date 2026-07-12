@@ -127,6 +127,24 @@ static bool page_end(const struct guest_linux_mm *memory,
     return true;
 }
 
+static bool range_is_in_allocated_brk(
+        const struct guest_linux_mm *memory, qword_t first,
+        qword_t count) {
+    qword_t end;
+    if (!page_end(memory, memory->brk, &end) ||
+            first < memory->start_brk || first >= end)
+        return false;
+    return count <= (end - first) >> GUEST_MEMORY_PAGE_BITS;
+}
+
+static bool range_is_discardable_anonymous(
+        const struct guest_linux_mm *memory, qword_t first,
+        qword_t count) {
+    // 缺少 VMA 来源元数据时，只在受控匿名域内承诺可丢弃后重新置零。
+    return range_is_in_allocated_brk(memory, first, count) ||
+            range_is_in_mmap_arena(memory, first, count);
+}
+
 void guest_linux_mm_init(struct guest_linux_mm *memory,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit) {
@@ -383,7 +401,20 @@ static qword_t guest_linux_madvise_unlocked(
     if (!valid_range(memory, address, count))
         return linux_error(GUEST_LINUX_ENOMEM);
 
-    bool has_hole = false;
+    if (advice == GUEST_LINUX_MADV_DONTNEED &&
+            !range_is_discardable_anonymous(memory, address, count))
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    // 先验证整段，避免空洞或不受支持的映射留下部分清零结果。
+    for (qword_t index = 0; index < count; index++) {
+        guest_addr_t page = address +
+                (index << GUEST_MEMORY_PAGE_BITS);
+        if (!page_is_mapped(memory, page))
+            return linux_error(GUEST_LINUX_ENOMEM);
+    }
+    if (advice != GUEST_LINUX_MADV_DONTNEED)
+        return 0;
+
     for (qword_t index = 0; index < count; index++) {
         guest_addr_t page = address +
                 (index << GUEST_MEMORY_PAGE_BITS);
@@ -392,20 +423,14 @@ static qword_t guest_linux_madvise_unlocked(
         enum guest_page_table_result lookup =
                 guest_page_table_lookup(memory->page_table,
                         page, &host_page, &permissions);
-        if (lookup == GUEST_PAGE_TABLE_NOT_MAPPED) {
-            has_hole = true;
-            continue;
-        }
         assert(lookup == GUEST_PAGE_TABLE_OK);
         use(permissions);
-        if (advice == GUEST_LINUX_MADV_DONTNEED) {
-            memset(host_page, 0, GUEST_MEMORY_PAGE_SIZE);
-            guest_address_space_written(
-                    &memory->page_table->address_space,
-                    page, GUEST_MEMORY_PAGE_SIZE);
-        }
+        memset(host_page, 0, GUEST_MEMORY_PAGE_SIZE);
+        guest_address_space_written(
+                &memory->page_table->address_space,
+                page, GUEST_MEMORY_PAGE_SIZE);
     }
-    return has_hole ? linux_error(GUEST_LINUX_ENOMEM) : 0;
+    return 0;
 }
 
 qword_t guest_linux_madvise(struct guest_linux_mm *memory,

@@ -463,7 +463,33 @@ static void test_madvise(void) {
             3 * GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_MADV_DONTNEED) ==
             encoded_error(GUEST_LINUX_ENOMEM));
-    assert(first[0] == 0 && last[0] == 0);
+    assert(first[0] == 0x44 && last[0] == 0x66);
+
+    assert(guest_linux_brk(&memory,
+            BRK_BASE + GUEST_MEMORY_PAGE_SIZE) ==
+            BRK_BASE + GUEST_MEMORY_PAGE_SIZE);
+    byte_t *heap = lookup_page(&table, BRK_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    memset(heap, 0x77, GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory, BRK_BASE,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert(heap[0] == 0 && heap[GUEST_MEMORY_PAGE_SIZE - 1] == 0);
+
+    guest_addr_t foreign_page = BRK_BASE - GUEST_MEMORY_PAGE_SIZE;
+    byte_t *sentinel;
+    assert(guest_page_table_map(&table, foreign_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE,
+            &sentinel) == GUEST_PAGE_TABLE_OK);
+    memset(sentinel, 0xa5, GUEST_MEMORY_PAGE_SIZE);
+    heap[0] = 0x3c;
+    assert(guest_linux_madvise(&memory, foreign_page,
+            2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(sentinel[0] == 0xa5 &&
+            sentinel[GUEST_MEMORY_PAGE_SIZE - 1] == 0xa5);
+    assert(heap[0] == 0x3c);
 
     assert(guest_linux_madvise(&memory, base + 1, 0,
             GUEST_LINUX_MADV_NORMAL) ==
