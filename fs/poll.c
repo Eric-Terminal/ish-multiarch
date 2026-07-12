@@ -6,6 +6,7 @@
 #include <limits.h>
 #include "misc.h"
 #include "util/list.h"
+#include "util/timer.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "fs/fd.h"
@@ -288,7 +289,48 @@ void poll_wakeup(struct fd *fd, int events) {
     unlock(&fd->poll_lock);
 }
 
+static bool poll_timeout_valid(const struct timespec *timeout) {
+    return timeout == NULL || (timeout->tv_sec >= 0 &&
+            timeout->tv_nsec >= 0 && timeout->tv_nsec < 1000000000);
+}
+
+static bool poll_deadline_remaining(
+        struct timer_time deadline, struct timespec *slice) {
+    struct timer_time remaining = timer_time_subtract(
+            deadline,
+            timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)));
+    if (!timer_time_positive(remaining))
+        return false;
+
+    if (slice != NULL) {
+        int64_t seconds = remaining.sec;
+        long nanoseconds = (long) remaining.nsec;
+        // watchOS arm64_32 的 time_t 只有 32 位；统一分片也避免把
+        // 过大的相对时长直接交给不同宿主后端。
+        if (seconds > INT32_MAX) {
+            seconds = INT32_MAX;
+            nanoseconds = 0;
+        }
+        *slice = (struct timespec) {
+            .tv_sec = (time_t) seconds,
+            .tv_nsec = nanoseconds,
+        };
+    }
+    return true;
+}
+
 int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struct timespec *timeout) {
+    if (!poll_timeout_valid(timeout))
+        return _EINVAL;
+
+    bool has_deadline = timeout != NULL;
+    struct timer_time deadline = {0};
+    if (has_deadline) {
+        deadline = timer_time_add(
+                timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)),
+                timer_time_from_timespec(*timeout));
+    }
+
     lock(&poll_->lock);
 
     if (poll_->destroying) {
@@ -319,7 +361,6 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         }
     }
 
-    // TODO this is pretty broken with regards to timeouts
     int res = 0;
     while (true) {
         // check if any fds are ready
@@ -365,6 +406,11 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
             break;
         }
 
+        struct timespec wait_slice;
+        if (has_deadline &&
+                !poll_deadline_remaining(deadline, &wait_slice))
+            break;
+
         // 对 begin 时的登记集合做精确快照；强引用使等待
         // 期间的 DEL 与最终关闭无法让 end 访问已释放的 fd。
         size_t listen_wait_capacity = 0;
@@ -392,11 +438,24 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         }
         unlock(&poll_->lock);
         int err;
+        int wait_errno;
         struct real_poll_event e[4];
-        do {
-            err = real_poll_wait(&poll_->real, e, sizeof(e)/sizeof(e[0]), timeout);
-        } while (sockrestart_should_restart_listen_wait() && errno == EINTR);
-        int wait_errno = errno;
+        while (true) {
+            err = real_poll_wait(&poll_->real, e,
+                    sizeof(e)/sizeof(e[0]),
+                    has_deadline ? &wait_slice : NULL);
+            wait_errno = errno;
+            bool restart_listen_wait =
+                    sockrestart_should_restart_listen_wait();
+            if (!(err < 0 && wait_errno == EINTR && restart_listen_wait))
+                break;
+            if (has_deadline &&
+                    !poll_deadline_remaining(deadline, &wait_slice)) {
+                err = 0;
+                wait_errno = 0;
+                break;
+            }
+        }
         for (size_t index = 0; index < listen_wait_count; index++)
             sockrestart_end_listen_wait(listen_waits[index]);
         lock(&poll_->lock);
@@ -410,8 +469,9 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
             res = errno_map();
             stop_waiting = true;
         } else if (err == 0) {
-            // timed out and still nobody is ready
-            stop_waiting = true;
+            // 宿主分片可能先于总截止点结束，只有绝对截止点到达才超时。
+            stop_waiting = !has_deadline ||
+                    !poll_deadline_remaining(deadline, NULL);
         } else {
             // dead with any edge-triggered notifications
             for (int i = 0; i < err; i++) {
@@ -511,8 +571,19 @@ static int real_poll_init(struct real_poll *real) {
 
 static int real_poll_wait(struct real_poll *real, struct real_poll_event *events, int max, struct timespec *timeout) {
     int timeout_millis = -1;
-    if (timeout != NULL)
-        timeout_millis = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
+    if (timeout != NULL) {
+        if (timeout->tv_sec > INT_MAX / 1000) {
+            timeout_millis = INT_MAX;
+        } else {
+            timeout_millis = (int) timeout->tv_sec * 1000;
+            int partial_millis = timeout->tv_nsec == 0 ? 0 :
+                    1 + (int) ((timeout->tv_nsec - 1) / 1000000);
+            if (timeout_millis > INT_MAX - partial_millis)
+                timeout_millis = INT_MAX;
+            else
+                timeout_millis += partial_millis;
+        }
+    }
     return epoll_wait(real->fd, (struct epoll_event *) events, max, timeout_millis);
 }
 

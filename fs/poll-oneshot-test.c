@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "fs/fd.h"
@@ -169,6 +170,16 @@ struct wait_context {
     int result;
 };
 
+struct timeout_wait_context {
+    struct poll *poll;
+    struct task task;
+    struct sighand sighand;
+    struct callback_result callback;
+    atomic_bool finished;
+    struct timespec elapsed;
+    int result;
+};
+
 static void *wait_for_event(void *opaque) {
     struct wait_context *context = opaque;
     current = &context->task;
@@ -184,6 +195,27 @@ static void *wait_forever_for_event(void *opaque) {
     current = &context->task;
     context->result = poll_wait(context->poll, record_event,
             &context->callback, NULL);
+    current = NULL;
+    return NULL;
+}
+
+static void *wait_with_repeated_notifications(void *opaque) {
+    struct timeout_wait_context *context = opaque;
+    current = &context->task;
+    struct timespec timeout = {.tv_nsec = 300000000};
+    struct timespec started;
+    struct timespec finished;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    context->result = poll_wait(context->poll, record_event,
+            &context->callback, &timeout);
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    context->elapsed.tv_sec = finished.tv_sec - started.tv_sec;
+    context->elapsed.tv_nsec = finished.tv_nsec - started.tv_nsec;
+    if (context->elapsed.tv_nsec < 0) {
+        context->elapsed.tv_sec--;
+        context->elapsed.tv_nsec += 1000000000;
+    }
+    atomic_store_explicit(&context->finished, true, memory_order_release);
     current = NULL;
     return NULL;
 }
@@ -397,6 +429,82 @@ static int test_duplicate_poll_entries(void) {
 
     poll_destroy(poll);
     CHECK(fd_close(fd) == 0, "释放重复登记测试文件对象");
+    return 0;
+}
+
+static int test_invalid_timeout(void) {
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建非法超时测试 poll 实例");
+    const struct timespec invalid[] = {
+        {.tv_sec = -1},
+        {.tv_nsec = -1},
+        {.tv_nsec = 1000000000},
+    };
+    for (unsigned index = 0; index < array_size(invalid); index++) {
+        struct timespec timeout = invalid[index];
+        struct callback_result callback = {0};
+        CHECK(poll_wait(poll, record_event,
+                &callback, &timeout) == _EINVAL,
+                "拒绝超出规范范围的 timespec");
+        CHECK(callback.calls == 0 && poll->waiters == 0 &&
+                poll->notify_pipe[0] == -1 && poll->notify_pipe[1] == -1,
+                "非法超时不会建立宿主等待资源");
+    }
+    poll_destroy(poll);
+    return 0;
+}
+
+static int test_notifications_preserve_deadline(void) {
+    int readiness = 0;
+    struct fd *fd = fd_create(&fake_ops);
+    CHECK(fd != NULL, "创建截止时间测试文件对象");
+    fd->data = &readiness;
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建截止时间测试 poll 实例");
+    CHECK(poll_add_fd_unique(poll, fd, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0,
+            "登记始终未就绪的测试文件对象");
+
+    struct timeout_wait_context context = {
+        .poll = poll,
+    };
+    init_task(&context.task, &context.sighand);
+    atomic_init(&context.finished, false);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL,
+            wait_with_repeated_notifications, &context) == 0,
+            "启动固定截止时间等待线程");
+    CHECK(wait_until_blocked(poll),
+            "发送通知前等待线程已进入宿主后端");
+
+    struct timespec interval = {.tv_nsec = 40000000};
+    int notify_result = 0;
+    for (unsigned attempt = 0; attempt < 25; attempt++) {
+        nanosleep(&interval, NULL);
+        if (atomic_load_explicit(
+                &context.finished, memory_order_acquire))
+            break;
+        notify_result = poll_mod_fd(poll, fd, POLL_READ,
+                (union poll_fd_info) {.num = attempt + 2});
+        if (notify_result < 0)
+            break;
+    }
+    int join_result = pthread_join(waiter, NULL);
+    int64_t elapsed_millis = context.elapsed.tv_sec * INT64_C(1000) +
+            context.elapsed.tv_nsec / 1000000;
+
+    CHECK(notify_result == 0 && join_result == 0,
+            "重复无就绪通知与等待线程均正常完成");
+    CHECK(context.result == 0 && context.callback.calls == 0,
+            "重复通知不会伪造就绪事件");
+    CHECK(elapsed_millis >= 200 && elapsed_millis < 800,
+            "重复通知不会从头复用相对超时时长");
+
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&context.sighand.lock.m);
+    poll_destroy(poll);
+    CHECK(fd_close(fd) == 0, "释放截止时间测试文件对象");
     return 0;
 }
 
@@ -986,6 +1094,10 @@ int main(void) {
     init_current_task(&task, &sighand);
 
     int result = test_duplicate_poll_entries();
+    if (result == 0)
+        result = test_invalid_timeout();
+    if (result == 0)
+        result = test_notifications_preserve_deadline();
     if (result == 0)
         result = test_registration_semantics();
     if (result == 0)
