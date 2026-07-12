@@ -380,9 +380,12 @@ static unsigned exercise_futex_edges(struct task *parent) {
             0, 0, 0, &fault) != (dword_t) _EINVAL)
         return 3;
     if (sys_futex_aarch64(word, 131, 0,
-            1, word + 1, 0, &fault) != (dword_t) _EINVAL ||
-            sys_futex_aarch64(word, 132, 0,
-                    1, word + 1, 7, &fault) != (dword_t) _EINVAL)
+            1, word + 1, 0, &fault) != (dword_t) _EINVAL)
+        return 4;
+    fault.address = UINT64_MAX;
+    if (sys_futex_aarch64(word + 1, 132, 0,
+            invalid, word + 1, 7, &fault) != (dword_t) _ENOSYS ||
+            fault.address != UINT64_MAX)
         return 4;
     if (sys_futex_aarch64(word, 129, 1,
                     0, 0, 0, &fault) != 0 ||

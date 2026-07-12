@@ -6,7 +6,6 @@
 #define FUTEX_WAIT_ 0
 #define FUTEX_WAKE_ 1
 #define FUTEX_REQUEUE_ 3
-#define FUTEX_CMP_REQUEUE_ 4
 #define FUTEX_PRIVATE_FLAG_ 128
 #define FUTEX_CMD_MASK_ ~(FUTEX_PRIVATE_FLAG_)
 
@@ -268,9 +267,13 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
     struct aarch64_linux_process *process = current->aarch64_process;
     assert(process != NULL);
     dword_t command = op & FUTEX_CMD_MASK_;
+    use(val3);
+    if (command != FUTEX_WAIT_ && command != FUTEX_WAKE_ &&
+            command != FUTEX_REQUEUE_)
+        return _ENOSYS;
     if ((uaddr & (sizeof(dword_t) - 1)) != 0)
         return _EINVAL;
-    if ((command == FUTEX_REQUEUE_ || command == FUTEX_CMP_REQUEUE_) &&
+    if (command == FUTEX_REQUEUE_ &&
             (uaddr2 & (sizeof(dword_t) - 1)) != 0)
         return _EINVAL;
     struct timer_time deadline;
@@ -302,7 +305,6 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
                     (dword_t) timeout_or_val2,
                     aarch64_futex_key(process, uaddr2));
     }
-    use(val3);
     return _ENOSYS;
 }
 
