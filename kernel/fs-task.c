@@ -7,6 +7,9 @@
 #include "kernel/fs.h"
 #include "kernel/task.h"
 
+_Static_assert(sizeof(off_t) >= sizeof(off_t_),
+        "host off_t 必须完整容纳 guest 文件偏移");
+
 static struct fd *at_fd_task_retain(
         struct task *task, fd_t fd_number) {
     if (fd_number == AT_FDCWD_)
@@ -47,6 +50,35 @@ ssize_t file_read_task(struct task *task, fd_t fd_number,
     return result;
 }
 
+ssize_t file_pread_fd(struct fd *fd, void *buffer,
+        size_t size, off_t_ offset) {
+    int error = file_read_check_fd(fd);
+    if (error < 0)
+        return error;
+    if (offset < 0)
+        return _EINVAL;
+
+    lock(&fd->lock);
+    ssize_t result;
+    if (fd->ops->pread != NULL) {
+        result = fd->ops->pread(fd, buffer, size, (off_t) offset);
+    } else if (fd->ops->lseek == NULL) {
+        result = _ESPIPE;
+    } else {
+        off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
+        result = saved_offset < 0 ? saved_offset :
+                fd->ops->lseek(fd, offset, LSEEK_SET);
+        if (result >= 0) {
+            result = fd->ops->read(fd, buffer, size);
+            off_t_ restored = fd->ops->lseek(
+                    fd, saved_offset, LSEEK_SET);
+            assert(restored >= 0);
+        }
+    }
+    unlock(&fd->lock);
+    return result;
+}
+
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
     if (fd == NULL)
         return _EBADF;
@@ -68,6 +100,35 @@ ssize_t file_write_task(struct task *task, fd_t fd_number,
     ssize_t result = file_write_fd(fd, buffer, size);
     if (fd != NULL)
         fd_close(fd);
+    return result;
+}
+
+ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
+        size_t size, off_t_ offset) {
+    int error = file_write_check_fd(fd);
+    if (error < 0)
+        return error;
+    if (offset < 0)
+        return _EINVAL;
+
+    lock(&fd->lock);
+    ssize_t result;
+    if (fd->ops->pwrite != NULL) {
+        result = fd->ops->pwrite(fd, buffer, size, (off_t) offset);
+    } else if (fd->ops->lseek == NULL) {
+        result = _ESPIPE;
+    } else {
+        off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
+        result = saved_offset < 0 ? saved_offset :
+                fd->ops->lseek(fd, offset, LSEEK_SET);
+        if (result >= 0) {
+            result = fd->ops->write(fd, buffer, size);
+            off_t_ restored = fd->ops->lseek(
+                    fd, saved_offset, LSEEK_SET);
+            assert(restored >= 0);
+        }
+    }
+    unlock(&fd->lock);
     return result;
 }
 

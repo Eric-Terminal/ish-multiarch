@@ -104,9 +104,13 @@ static ssize_t probe_pwrite(struct fd *fd, const void *buffer, size_t size, off_
 
 static off_t_ probe_lseek(struct fd *fd, off_t_ offset, int whence) {
     struct io_probe *probe = fd->data;
-    if (whence != LSEEK_CUR)
+    if (whence == LSEEK_CUR) {
+        fd->offset += offset;
+    } else if (whence == LSEEK_SET) {
+        fd->offset = offset;
+    } else {
         return _EINVAL;
-    fd->offset += offset;
+    }
     probe->seek_calls++;
     return fd->offset;
 }
@@ -150,6 +154,12 @@ static const struct fd_ops direct_ops = {
 static const struct fd_ops positioned_ops = {
     .pread = probe_pread,
     .pwrite = probe_pwrite,
+    .lseek = probe_lseek,
+};
+
+static const struct fd_ops seekable_ops = {
+    .read = probe_read,
+    .write = probe_write,
     .lseek = probe_lseek,
 };
 
@@ -320,21 +330,29 @@ int main(void) {
         .inode = 2,
         .path = "/positioned",
     };
+    struct io_probe seekable_io = {
+        .input = "seek",
+        .input_size = 4,
+        .path = "/seekable",
+    };
     struct io_probe directory_io = {.path = "/directory"};
     struct io_probe empty_io = {.path = "/empty"};
 
     struct fd *decoy_fd = make_fd(&decoy, &decoy_io, &direct_ops, S_IFREG);
     struct fd *target_fd = make_fd(&target, &target_io, &direct_ops, S_IFREG);
     struct fd *positioned_fd = make_fd(&target, &positioned_io, &positioned_ops, S_IFREG);
+    struct fd *seekable_fd = make_fd(&target, &seekable_io, &seekable_ops, S_IFREG);
     struct fd *directory_fd = make_fd(&target, &directory_io, &direct_ops, S_IFDIR);
     struct fd *empty_fd = make_fd(&target, &empty_io, &empty_ops, S_IFREG);
     struct fd *decoy_pwd = make_fd(&decoy, &decoy_io, &empty_ops, S_IFDIR);
     struct fd *target_pwd = make_fd(&target, &target_io, &empty_ops, S_IFDIR);
     CHECK(decoy_fd != NULL && target_fd != NULL && positioned_fd != NULL &&
+            seekable_fd != NULL &&
             directory_fd != NULL && empty_fd != NULL && decoy_pwd != NULL &&
             target_pwd != NULL, "测试 fd 创建成功");
     target_fd->flags = O_RDWR_;
     positioned_fd->flags = O_WRONLY_;
+    seekable_fd->flags = O_RDWR_;
     empty_fd->flags = O_RDWR_;
     decoy.fs.pwd = decoy_pwd;
     target.fs.pwd = target_pwd;
@@ -343,6 +361,8 @@ int main(void) {
     CHECK(f_install_task(&target.task, positioned_fd, 0) == 1, "定位回退 fd 安装成功");
     CHECK(f_install_task(&target.task, directory_fd, 0) == 2, "目录 fd 安装成功");
     CHECK(f_install_task(&target.task, empty_fd, 0) == 3, "空操作 fd 安装成功");
+    CHECK(f_install_task(&target.task, seekable_fd, 0) == 4,
+            "可定位顺序 fd 安装成功");
     current = &decoy.task;
 
     const enum close_race_operation close_races[] = {
@@ -420,6 +440,37 @@ int main(void) {
             "positioned I/O 保持底层错误");
     CHECK(positioned_fd->offset == 12 && positioned_io.seek_calls == 2,
             "positioned I/O 失败时不得推进 offset");
+
+    positioned_fd->flags = O_RDWR_;
+    positioned_io.read_error = 0;
+    positioned_io.write_error = 0;
+    memset(buffer, 0, sizeof(buffer));
+    CHECK(file_pread_fd(positioned_fd, buffer, 3, 19) == 3 &&
+            positioned_io.positioned_offset == 19 &&
+            positioned_fd->offset == 12,
+            "显式 pread 回调使用指定位置且不改变顺序 offset");
+    CHECK(file_pwrite_fd(positioned_fd, "ab", 2, 23) == 2 &&
+            positioned_io.positioned_offset == 23 &&
+            positioned_fd->offset == 12,
+            "显式 pwrite 回调使用指定位置且不改变顺序 offset");
+
+    seekable_fd->offset = 41;
+    memset(buffer, 0, sizeof(buffer));
+    CHECK(file_pread_fd(seekable_fd, buffer, 4, 7) == 4 &&
+            memcmp(buffer, "seek", 4) == 0 &&
+            seekable_fd->offset == 41 && seekable_io.seek_calls == 3,
+            "read+lseek 回退读取后恢复共享顺序 offset");
+    CHECK(file_pwrite_fd(seekable_fd, "back", 4, 9) == 4 &&
+            seekable_io.output_size == 4 &&
+            memcmp(seekable_io.output, "back", 4) == 0 &&
+            seekable_fd->offset == 41 && seekable_io.seek_calls == 6,
+            "write+lseek 回退写入后恢复共享顺序 offset");
+    CHECK(file_pread_fd(target_fd, buffer, 1, 0) == _ESPIPE &&
+            file_pwrite_fd(target_fd, buffer, 1, 0) == _ESPIPE,
+            "不可定位的顺序 fd 对显式偏移返回 ESPIPE");
+    CHECK(file_pread_fd(seekable_fd, buffer, 1, -1) == _EINVAL &&
+            file_pwrite_fd(seekable_fd, buffer, 1, -1) == _EINVAL,
+            "显式定位读写拒绝负 offset");
 
     CHECK(file_read_task(&target.task, 2, buffer, 1) == _EISDIR,
             "目录读取返回 EISDIR");

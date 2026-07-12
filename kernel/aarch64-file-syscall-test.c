@@ -56,6 +56,12 @@ struct io_probe {
     size_t write_requests[4];
     unsigned write_error_call;
     int write_error;
+    unsigned pread_calls;
+    size_t pread_requests[4];
+    off_t pread_offsets[4];
+    unsigned pwrite_calls;
+    size_t pwrite_requests[4];
+    off_t pwrite_offsets[4];
 };
 
 #define DIRECTORY_PROBE_CAPACITY 4
@@ -223,9 +229,48 @@ static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
     return (ssize_t) copied;
 }
 
+static ssize_t probe_pread(
+        struct fd *fd, void *buffer, size_t size, off_t offset) {
+    struct io_probe *probe = fd->data;
+    probe->pread_calls++;
+    if (probe->pread_calls <= array_size(probe->pread_requests)) {
+        probe->pread_requests[probe->pread_calls - 1] = size;
+        probe->pread_offsets[probe->pread_calls - 1] = offset;
+    }
+    size_t position = (size_t) offset;
+    size_t available = position < probe->readable_size ?
+            probe->readable_size - position : 0;
+    size_t copied = size < available ? size : available;
+    if (probe->max_read != 0 && copied > probe->max_read)
+        copied = probe->max_read;
+    if (copied != 0)
+        memcpy(buffer, probe->readable_data + position, copied);
+    return (ssize_t) copied;
+}
+
+static ssize_t probe_pwrite(
+        struct fd *fd, const void *buffer, size_t size, off_t offset) {
+    struct io_probe *probe = fd->data;
+    probe->pwrite_calls++;
+    if (probe->pwrite_calls <= array_size(probe->pwrite_requests)) {
+        probe->pwrite_requests[probe->pwrite_calls - 1] = size;
+        probe->pwrite_offsets[probe->pwrite_calls - 1] = offset;
+    }
+    size_t copied = size;
+    if (probe->max_write != 0 && copied > probe->max_write)
+        copied = probe->max_write;
+    if (copied > sizeof(probe->written_data) - probe->written_size)
+        copied = sizeof(probe->written_data) - probe->written_size;
+    memcpy(probe->written_data + probe->written_size, buffer, copied);
+    probe->written_size += copied;
+    return (ssize_t) copied;
+}
+
 static const struct fd_ops probe_fd_ops = {
     .read = probe_read,
     .write = probe_write,
+    .pread = probe_pread,
+    .pwrite = probe_pwrite,
 };
 
 static int directory_readdir(struct fd *fd, struct dir_entry *entry) {
@@ -292,6 +337,12 @@ static void reset_io(struct io_probe *probe) {
     memset(probe->write_requests, 0, sizeof(probe->write_requests));
     probe->write_error_call = 0;
     probe->write_error = 0;
+    probe->pread_calls = 0;
+    memset(probe->pread_requests, 0, sizeof(probe->pread_requests));
+    memset(probe->pread_offsets, 0, sizeof(probe->pread_offsets));
+    probe->pwrite_calls = 0;
+    memset(probe->pwrite_requests, 0, sizeof(probe->pwrite_requests));
+    memset(probe->pwrite_offsets, 0, sizeof(probe->pwrite_offsets));
 }
 
 static bool init_fixture(struct syscall_fixture *fixture,
@@ -334,6 +385,26 @@ static qword_t invoke(struct syscall_fixture *fixture,
     const struct guest_linux_syscall syscall = {
         .number = number,
         .arguments = {fd, vectors, count},
+    };
+    return ish_aarch64_linux_syscall_service.dispatch(
+            &context, &syscall, fault);
+}
+
+static qword_t invoke_positioned(struct syscall_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t number, qword_t fd, qword_t buffer, qword_t count,
+        qword_t offset, qword_t high, qword_t flags) {
+    const struct guest_linux_syscall_context context = {
+        .task_opaque = &fixture->task,
+        .user = {
+            .opaque = memory,
+            .read = read_user,
+            .write = write_user,
+        },
+    };
+    const struct guest_linux_syscall syscall = {
+        .number = number,
+        .arguments = {fd, buffer, count, offset, high, flags},
     };
     return ish_aarch64_linux_syscall_service.dispatch(
             &context, &syscall, fault);
@@ -735,6 +806,250 @@ int main(void) {
             io.read_calls == 0 && memory.read_calls == 0,
             "只写 fd 在导入 readv 向量前返回 EBADF");
     readv_fd->flags = O_RDWR_;
+
+    struct fd *positioned_fd = f_get_task(&fixture.task, 0);
+    CHECK(positioned_fd != NULL, "定位读写测试 fd 可用");
+    positioned_fd->offset = 1234;
+
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            67, 99, UINT64_MAX, 1, UINT64_MAX, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.write_calls == 0 &&
+            io.pread_calls == 0,
+            "pread64 的负 offset 优先于无效 fd 与 guest 地址");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            68, 99, UINT64_MAX, 1, UINT64_MAX, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            io.pwrite_calls == 0,
+            "pwrite64 的负 offset 优先于无效 fd 与 guest 地址");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            69, 99, UINT64_MAX, 1, UINT64_MAX - 1, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            io.pread_calls == 0,
+            "preadv 的普通负 offset 优先于无效 fd 与 iovec 地址");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            70, 99, UINT64_MAX, 1, UINT64_MAX - 1, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            io.pwrite_calls == 0,
+            "pwritev 的普通负 offset 优先于无效 fd 与 iovec 地址");
+
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            67, 99, UINT64_MAX, 4, 0, 0, 0);
+    CHECK(result == encoded_error(_EBADF) && memory.write_calls == 0 &&
+            io.pread_calls == 0,
+            "pread64 的无效 fd 不访问 guest 目标");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            68, 99, UINT64_MAX, 4, 0, 0, 0);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0 &&
+            io.pwrite_calls == 0,
+            "pwrite64 的无效 fd 不访问 guest 来源");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            69, 99, UINT64_MAX, 1, 0, 0, 0);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0 &&
+            io.pread_calls == 0,
+            "preadv 的无效 fd 不导入 iovec");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            70, 99, UINT64_MAX, 1, 0, 0, 0);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0 &&
+            io.pwrite_calls == 0,
+            "pwritev 的无效 fd 不导入 iovec");
+
+    const off_t scalar_read_offset = 37;
+    reset_io(&io);
+    memcpy(io.readable_data + scalar_read_offset, "pread", 5);
+    io.readable_size = scalar_read_offset + 5;
+    memset(memory.bytes + first_offset, 0xa5, 5);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            67, 0, USER_BASE + first_offset, 5,
+            scalar_read_offset, UINT64_MAX, 0);
+    CHECK(result == 5 && io.pread_calls == 1 &&
+            io.pread_requests[0] == 5 &&
+            io.pread_offsets[0] == scalar_read_offset &&
+            memcmp(memory.bytes + first_offset, "pread", 5) == 0,
+            "pread64 按显式 offset 读取指定内容");
+    CHECK(positioned_fd->offset == 1234,
+            "pread64 不修改描述符顺序 offset");
+
+    const off_t scalar_write_offset = (off_t) UINT64_C(0x20000005b);
+    memcpy(memory.bytes + first_offset, "pwrite", 6);
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            68, 0, USER_BASE + first_offset, 6,
+            scalar_write_offset, UINT64_C(0xfeedface), 0);
+    CHECK(result == 6 && io.pwrite_calls == 1 &&
+            io.pwrite_requests[0] == 6 &&
+            io.pwrite_offsets[0] == scalar_write_offset &&
+            io.written_size == 6 &&
+            memcmp(io.written_data, "pwrite", 6) == 0,
+            "pwrite64 保留完整 64 位 offset 并写出精确负载");
+    CHECK(positioned_fd->offset == 1234,
+            "pwrite64 不修改描述符顺序 offset");
+
+    const size_t chunked_size = 4097;
+    const off_t chunked_read_offset = 17;
+    reset_io(&io);
+    for (size_t index = 0; index < chunked_size; index++)
+        io.readable_data[chunked_read_offset + index] =
+                (byte_t) (index * 29 + 3);
+    io.readable_size = chunked_read_offset + chunked_size;
+    memset(memory.bytes + first_offset, 0, chunked_size);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            67, 0, USER_BASE + first_offset, chunked_size,
+            chunked_read_offset, 0, 0);
+    CHECK(result == chunked_size && io.pread_calls == 2 &&
+            io.pread_requests[0] == 4096 && io.pread_requests[1] == 1 &&
+            io.pread_offsets[0] == chunked_read_offset &&
+            io.pread_offsets[1] == chunked_read_offset + 4096,
+            "pread64 的 4097 字节分块逐次推进后端 offset");
+    CHECK(memcmp(memory.bytes + first_offset,
+                    io.readable_data + chunked_read_offset,
+                    chunked_size) == 0 && positioned_fd->offset == 1234,
+            "pread64 分块保持字节顺序且不改变顺序位置");
+
+    const off_t chunked_write_offset = 23;
+    for (size_t index = 0; index < chunked_size; index++)
+        memory.bytes[first_offset + index] = (byte_t) (index * 31 + 11);
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            68, 0, USER_BASE + first_offset, chunked_size,
+            chunked_write_offset, 0, 0);
+    CHECK(result == chunked_size && io.pwrite_calls == 2 &&
+            io.pwrite_requests[0] == 4096 && io.pwrite_requests[1] == 1 &&
+            io.pwrite_offsets[0] == chunked_write_offset &&
+            io.pwrite_offsets[1] == chunked_write_offset + 4096,
+            "pwrite64 的 4097 字节分块逐次推进后端 offset");
+    CHECK(io.written_size == chunked_size &&
+            memcmp(io.written_data, memory.bytes + first_offset,
+                    chunked_size) == 0 && positioned_fd->offset == 1234,
+            "pwrite64 分块保持负载顺序且不改变顺序位置");
+
+    vectors[0] = (struct aarch64_linux_iovec) {
+        USER_BASE + first_offset, 3,
+    };
+    vectors[1] = (struct aarch64_linux_iovec) {
+        USER_BASE + second_offset, 5,
+    };
+    store_vectors(&memory, vector_offset, vectors, 2);
+    const off_t vector_read_offset = 31;
+    reset_io(&io);
+    memcpy(io.readable_data + vector_read_offset, "position", 8);
+    io.readable_size = vector_read_offset + 8;
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            69, 0, USER_BASE + vector_offset, 2, vector_read_offset,
+            UINT64_C(0x8000000000000000), 0);
+    CHECK(result == 8 && io.pread_calls == 1 &&
+            io.pread_requests[0] == 8 &&
+            io.pread_offsets[0] == vector_read_offset &&
+            io.read_calls == 0 && positioned_fd->offset == 1234,
+            "preadv 聚合为一次定位读取并忽略 x4 高半辅助值");
+    CHECK(memcmp(memory.bytes + first_offset, "pos", 3) == 0 &&
+            memcmp(memory.bytes + second_offset, "ition", 5) == 0,
+            "preadv 把一次定位读取结果按向量顺序分散");
+
+    memcpy(memory.bytes + first_offset, "vec", 3);
+    memcpy(memory.bytes + second_offset, "write", 5);
+    const off_t vector_write_offset = (off_t) UINT64_C(0x10000002f);
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            70, 0, USER_BASE + vector_offset, 2, vector_write_offset,
+            UINT64_C(0xffffffffffffffff), 0);
+    CHECK(result == 8 && io.pwrite_calls == 1 &&
+            io.pwrite_requests[0] == 8 &&
+            io.pwrite_offsets[0] == vector_write_offset &&
+            io.write_calls == 0 && positioned_fd->offset == 1234,
+            "pwritev 聚合为一次定位写入并忽略 x4 高半辅助值");
+    CHECK(io.written_size == 8 &&
+            memcmp(io.written_data, "vecwrite", 8) == 0,
+            "pwritev 保持多个向量的聚合负载顺序");
+
+    reset_io(&io);
+    memcpy(io.readable_data, "__stream!", 9);
+    io.readable_size = 9;
+    io.read_position = 2;
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            286, 0, USER_BASE + vector_offset, 2, UINT64_MAX,
+            UINT64_C(0x123456789abcdef0), 0);
+    CHECK(result == 7 && io.read_calls == 1 && io.pread_calls == 0 &&
+            io.read_position == 9 &&
+            memcmp(memory.bytes + first_offset, "str", 3) == 0 &&
+            memcmp(memory.bytes + second_offset, "eam!", 4) == 0,
+            "preadv2 的 offset=-1 使用并推进顺序读取位置");
+
+    memcpy(memory.bytes + first_offset, "seq", 3);
+    memcpy(memory.bytes + second_offset, "write", 5);
+    reset_io(&io);
+    memcpy(io.written_data, "__", 2);
+    io.written_size = 2;
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            287, 0, USER_BASE + vector_offset, 2, UINT64_MAX,
+            UINT64_MAX, 0);
+    CHECK(result == 8 && io.write_calls == 1 && io.pwrite_calls == 0 &&
+            io.written_size == 10 &&
+            memcmp(io.written_data, "__seqwrite", 10) == 0,
+            "pwritev2 的 offset=-1 使用并推进顺序写入位置");
+
+    vectors[0] = (struct aarch64_linux_iovec) {
+        USER_BASE + first_offset, 4,
+    };
+    store_vectors(&memory, vector_offset, vectors, 1);
+    reset_io(&io);
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + first_offset;
+    result = invoke_positioned(&fixture, &memory, &fault,
+            286, 0, USER_BASE + vector_offset, 1, 5, 0, 1);
+    CHECK(result == encoded_error(_EOPNOTSUPP) &&
+            memory.read_calls == 1 && memory.write_calls == 0 &&
+            io.read_calls == 0 && io.pread_calls == 0,
+            "preadv2 的未知 flags 不读取后端也不写 guest 负载");
+
+    reset_io(&io);
+    reset_user(&memory);
+    memory.fail_read_at = USER_BASE + first_offset;
+    result = invoke_positioned(&fixture, &memory, &fault,
+            287, 0, USER_BASE + vector_offset, 1, 5, 0, 2);
+    CHECK(result == encoded_error(_EOPNOTSUPP) &&
+            memory.read_calls == 1 && io.write_calls == 0 &&
+            io.pwrite_calls == 0,
+            "pwritev2 的未知 flags 不读取 guest 负载也不写后端");
+
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            286, 0, UINT64_MAX, 0, 5, UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 0 && io.read_calls == 0 &&
+            io.pread_calls == 0,
+            "零向量 preadv2 即使 flags 未知也返回零且不访问 guest");
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke_positioned(&fixture, &memory, &fault,
+            287, 0, UINT64_MAX, 0, 5, UINT64_MAX, UINT64_MAX);
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            io.write_calls == 0 && io.pwrite_calls == 0,
+            "零向量 pwritev2 即使 flags 未知也返回零且不访问负载");
 
     fd_t event_fd = sys_eventfd2(0, O_NONBLOCK_);
     CHECK(event_fd == 1 && file_write_check_task(&fixture.task, event_fd) == 0,

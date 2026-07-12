@@ -65,6 +65,10 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_READV = 65,
     AARCH64_LINUX_SYS_WRITEV = 66,
+    AARCH64_LINUX_SYS_PREAD64 = 67,
+    AARCH64_LINUX_SYS_PWRITE64 = 68,
+    AARCH64_LINUX_SYS_PREADV = 69,
+    AARCH64_LINUX_SYS_PWRITEV = 70,
     AARCH64_LINUX_SYS_PPOLL = 73,
     AARCH64_LINUX_SYS_READLINKAT = 78,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
@@ -94,6 +98,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_WAIT4 = 260,
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
+    AARCH64_LINUX_SYS_PREADV2 = 286,
+    AARCH64_LINUX_SYS_PWRITEV2 = 287,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -189,10 +195,13 @@ static int copy_iovecs_from_user(
     return 0;
 }
 
-static qword_t dispatch_readv(
+static qword_t dispatch_readv_at(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
-        struct task *task, struct guest_linux_user_fault *fault) {
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool positioned, off_t_ offset, dword_t flags) {
+    if (positioned && offset < 0)
+        return syscall_result(_EINVAL);
     struct fd *target = f_get_task_retain(
             task, syscall_fd(syscall->arguments[0]));
     if (target == NULL)
@@ -217,10 +226,20 @@ static qword_t dispatch_readv(
         fd_close(target);
         return 0;
     }
+    if (flags != 0) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_EOPNOTSUPP);
+    }
     if (total > AARCH64_LINUX_IOV_TRANSACTION_LIMIT) {
         free(vectors);
         fd_close(target);
         return syscall_result(_ENOMEM);
+    }
+    if (positioned && total > (qword_t) INT64_MAX - (qword_t) offset) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_EINVAL);
     }
 
     // 单次读取保留管道与套接字的消息语义，再按实际读取长度分散写回。
@@ -230,7 +249,9 @@ static qword_t dispatch_readv(
         fd_close(target);
         return syscall_result(_ENOMEM);
     }
-    ssize_t read = file_read_fd(target, buffer, (size_t) total);
+    ssize_t read = positioned ?
+            file_pread_fd(target, buffer, (size_t) total, offset) :
+            file_read_fd(target, buffer, (size_t) total);
     assert(read < 0 || (qword_t) read <= total);
     if (read <= 0) {
         free(buffer);
@@ -267,6 +288,14 @@ static qword_t dispatch_readv(
     free(vectors);
     fd_close(target);
     return copied;
+}
+
+static qword_t dispatch_readv(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    return dispatch_readv_at(
+            context, syscall, task, fault, false, 0, 0);
 }
 
 static qword_t copy_path_from_user(
@@ -870,10 +899,183 @@ static qword_t dispatch_write(
     return completed;
 }
 
-static qword_t dispatch_writev(
+static qword_t dispatch_pread64(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
+    off_t_ offset = (off_t_) syscall->arguments[3];
+    if (offset < 0)
+        return syscall_result(_EINVAL);
+
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_read_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+
+    qword_t address = syscall->arguments[1];
+    qword_t remaining = syscall->arguments[2] < AARCH64_LINUX_MAX_RW_COUNT ?
+            syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
+    if (remaining > (qword_t) INT64_MAX - (qword_t) offset) {
+        fd_close(target);
+        return syscall_result(_EINVAL);
+    }
+
+    byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
+    if (remaining == 0) {
+        ssize_t result = file_pread_fd(target, buffer, 0, offset);
+        fd_close(target);
+        return syscall_result(result);
+    }
+
+    qword_t completed = 0;
+    while (remaining != 0) {
+        size_t chunk = remaining < sizeof(buffer) ?
+                (size_t) remaining : sizeof(buffer);
+        ssize_t read = file_pread_fd(target, buffer, chunk,
+                offset + (off_t_) completed);
+        if (read < 0) {
+            qword_t result = completed != 0 ?
+                    completed : syscall_result(read);
+            fd_close(target);
+            return result;
+        }
+        assert((size_t) read <= chunk);
+        if (read == 0) {
+            fd_close(target);
+            return completed;
+        }
+        dword_t copy_size = (dword_t) read;
+        if (!user_range_fits(address, copy_size)) {
+            qword_t result = completed != 0 ? completed :
+                    user_range_error(
+                            fault, address, GUEST_MEMORY_WRITE);
+            fd_close(target);
+            return result;
+        }
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                address, buffer, copy_size, fault)) {
+            qword_t result = completed != 0 ?
+                    completed : syscall_result(_EFAULT);
+            fd_close(target);
+            return result;
+        }
+        completed += (qword_t) read;
+        if ((size_t) read != chunk) {
+            fd_close(target);
+            return completed;
+        }
+        remaining -= (qword_t) read;
+        if (remaining == 0) {
+            fd_close(target);
+            return completed;
+        }
+        if (address > UINT64_MAX - (qword_t) read) {
+            user_range_error(fault, address, GUEST_MEMORY_WRITE);
+            fd_close(target);
+            return completed;
+        }
+        address += (qword_t) read;
+    }
+    fd_close(target);
+    return completed;
+}
+
+static qword_t dispatch_pwrite64(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    off_t_ offset = (off_t_) syscall->arguments[3];
+    if (offset < 0)
+        return syscall_result(_EINVAL);
+
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_write_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+
+    qword_t address = syscall->arguments[1];
+    qword_t remaining = syscall->arguments[2] < AARCH64_LINUX_MAX_RW_COUNT ?
+            syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
+    if (remaining > (qword_t) INT64_MAX - (qword_t) offset) {
+        fd_close(target);
+        return syscall_result(_EINVAL);
+    }
+
+    byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
+    if (remaining == 0) {
+        ssize_t result = file_pwrite_fd(target, buffer, 0, offset);
+        fd_close(target);
+        return syscall_result(result);
+    }
+
+    qword_t completed = 0;
+    while (remaining != 0) {
+        size_t chunk = remaining < sizeof(buffer) ?
+                (size_t) remaining : sizeof(buffer);
+        dword_t copy_size = (dword_t) chunk;
+        if (!user_range_fits(address, copy_size)) {
+            qword_t result = completed != 0 ? completed :
+                    user_range_error(
+                            fault, address, GUEST_MEMORY_READ);
+            fd_close(target);
+            return result;
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                address, buffer, copy_size, fault)) {
+            qword_t result = completed != 0 ?
+                    completed : syscall_result(_EFAULT);
+            fd_close(target);
+            return result;
+        }
+        ssize_t written = file_pwrite_fd(target, buffer, chunk,
+                offset + (off_t_) completed);
+        if (written < 0) {
+            qword_t result = completed != 0 ?
+                    completed : syscall_result(written);
+            fd_close(target);
+            return result;
+        }
+        assert((size_t) written <= chunk);
+        completed += (qword_t) written;
+        if ((size_t) written != chunk) {
+            fd_close(target);
+            return completed;
+        }
+        remaining -= (qword_t) written;
+        if (remaining == 0) {
+            fd_close(target);
+            return completed;
+        }
+        if (address > UINT64_MAX - (qword_t) written) {
+            user_range_error(fault, address, GUEST_MEMORY_READ);
+            fd_close(target);
+            return completed;
+        }
+        address += (qword_t) written;
+    }
+    fd_close(target);
+    return completed;
+}
+
+static qword_t dispatch_writev_at(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool positioned, off_t_ offset, dword_t flags) {
+    if (positioned && offset < 0)
+        return syscall_result(_EINVAL);
     struct fd *target = f_get_task_retain(
             task, syscall_fd(syscall->arguments[0]));
     if (target == NULL)
@@ -898,10 +1100,20 @@ static qword_t dispatch_writev(
         fd_close(target);
         return 0;
     }
+    if (flags != 0) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_EOPNOTSUPP);
+    }
     if (total > AARCH64_LINUX_IOV_TRANSACTION_LIMIT) {
         free(vectors);
         fd_close(target);
         return syscall_result(_ENOMEM);
+    }
+    if (positioned && total > (qword_t) INT64_MAX - (qword_t) offset) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_EINVAL);
     }
 
     // 有界聚合后只执行一次 fd 写入；既保留消息边界，也避免 watchOS 出现不可控内存峰值。
@@ -934,12 +1146,22 @@ static qword_t dispatch_writev(
         copied += length;
     }
     assert(copied == total);
-    ssize_t written = file_write_fd(target, buffer, (size_t) total);
+    ssize_t written = positioned ?
+            file_pwrite_fd(target, buffer, (size_t) total, offset) :
+            file_write_fd(target, buffer, (size_t) total);
     assert(written < 0 || (qword_t) written <= total);
     free(buffer);
     free(vectors);
     fd_close(target);
     return syscall_result(written);
+}
+
+static qword_t dispatch_writev(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    return dispatch_writev_at(
+            context, syscall, task, fault, false, 0, 0);
 }
 
 static struct aarch64_linux_stat pack_stat(const struct statbuf *source) {
@@ -1365,6 +1587,16 @@ static qword_t dispatch_syscall(
             return dispatch_readv(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITEV:
             return dispatch_writev(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_PREAD64:
+            return dispatch_pread64(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_PWRITE64:
+            return dispatch_pwrite64(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_PREADV:
+            return dispatch_readv_at(context, syscall, task, fault,
+                    true, (off_t_) syscall->arguments[3], 0);
+        case AARCH64_LINUX_SYS_PWRITEV:
+            return dispatch_writev_at(context, syscall, task, fault,
+                    true, (off_t_) syscall->arguments[3], 0);
         case AARCH64_LINUX_SYS_PPOLL:
             return dispatch_ppoll(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_READLINKAT:
@@ -1458,6 +1690,18 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_RENAMEAT2:
             return dispatch_renameat(
                     context, syscall, task, fault, true);
+        case AARCH64_LINUX_SYS_PREADV2: {
+            dword_t flags = (dword_t) syscall->arguments[5];
+            off_t_ offset = (off_t_) syscall->arguments[3];
+            return dispatch_readv_at(context, syscall, task, fault,
+                    offset != -1, offset == -1 ? 0 : offset, flags);
+        }
+        case AARCH64_LINUX_SYS_PWRITEV2: {
+            dword_t flags = (dword_t) syscall->arguments[5];
+            off_t_ offset = (off_t_) syscall->arguments[3];
+            return dispatch_writev_at(context, syscall, task, fault,
+                    offset != -1, offset == -1 ? 0 : offset, flags);
+        }
         default:
             return syscall_result(_ENOSYS);
     }
