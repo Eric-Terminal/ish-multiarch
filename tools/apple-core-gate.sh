@@ -72,7 +72,17 @@ build_slice() {
             --cross-file "$cross_file" -Dcore_only=true --buildtype=release
     fi
     "$NINJA" -C "$build_dir" libish_aarch64_core.a aarch64_core_link_smoke
+
+    local sysroot
+    local float80_object="$build_dir/float80-compile.o"
+    sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
+    echo "==> 编译 ${name} 的 float80 可移植性证据"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/emu/float80.c" -o "$float80_object"
     file "$build_dir/libish_aarch64_core.a" "$build_dir/aarch64_core_link_smoke"
+    file "$float80_object"
     if ! xcrun vtool -show-build "$build_dir/aarch64_core_link_smoke" | \
             grep -q "platform $platform"; then
         echo "错误：${name} 的 Mach-O 平台不是 ${platform}。" >&2

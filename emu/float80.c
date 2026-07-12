@@ -19,10 +19,10 @@ typedef unsigned __int128 uint128_t;
 #define EXP_SPECIAL 0x7fff
 #define EXP_DENORMAL 0
 static unsigned bias(int exp) {
-    return exp + BIAS80;
+    return (unsigned) (exp + BIAS80);
 }
 static int unbias(unsigned exp) {
-    return exp - BIAS80;
+    return (int) exp - BIAS80;
 }
 // returns the correct answer for denormal numbers
 static int unbias_denormal(unsigned exp) {
@@ -31,7 +31,7 @@ static int unbias_denormal(unsigned exp) {
     return unbias(exp);
 }
 
-#define CURSED_BIT (1ul << 63)
+#define CURSED_BIT (UINT64_C(1) << 63)
 
 __thread enum f80_rounding_mode f80_rounding_mode;
 
@@ -57,9 +57,9 @@ static uint128_t u128_shift_right_round(uint128_t i, int shift, int sign) {
 
     // stuff necessary for rounding to nearest or even. reference: https://stackoverflow.com/a/8984135
     // grab the guard bit, the last bit shifted out
-    int guard = (i >> (shift - 1)) & 1;
-    // now grab the rest of the bits being shifted out
-    uint64_t rest = i & ~((uint128_t) -1 << (shift - 1));
+    int guard = (int) ((i >> (shift - 1)) & 1);
+    // 粘滞位必须覆盖所有移出位，不能在 64 位边界提前截断。
+    uint128_t rest = i & ~((uint128_t) -1 << (shift - 1));
 
     i >>= shift;
     // if all the bits shifted out were zeroes, we're done
@@ -86,7 +86,7 @@ static float80 f80_shift_left(float80 f, int shift) {
 
 // may lose precision
 static float80 f80_shift_right(float80 f, int shift) {
-    f.signif = u128_shift_right_round(f.signif, shift, f.sign);
+    f.signif = (uint64_t) u128_shift_right_round(f.signif, shift, (int) f.sign);
     f.exp += shift;
     return f;
 }
@@ -101,10 +101,10 @@ bool f80_is_supported(float80 f) {
 }
 
 bool f80_isnan(float80 f) {
-    return f.exp == EXP_SPECIAL && (f.signif & (-1ul >> 1)) != 0;
+    return f.exp == EXP_SPECIAL && (f.signif & (UINT64_MAX >> 1)) != 0;
 }
 bool f80_isinf(float80 f) {
-    return f.exp == EXP_SPECIAL && (f.signif & (-1ul >> 1)) == 0;
+    return f.exp == EXP_SPECIAL && (f.signif & (UINT64_MAX >> 1)) == 0;
 }
 bool f80_iszero(float80 f) {
     return f.exp == EXP_DENORMAL && f.signif == 0;
@@ -126,9 +126,9 @@ static float80 f80_normalize(float80 f) {
     // number of leading zeroes = how many times we can shift out a leading digit before overflow
     int shift;
     if (f.signif != 0)
-        shift = __builtin_clzl(f.signif);
+        shift = __builtin_clzll((unsigned long long) f.signif);
     else
-        shift = 64; // __builtin_clzl has undefined result with zero
+        shift = 64; // 计数前单独处理零，避免调用内建函数的未定义分支。
     if (f.exp - shift < EXP_MIN) {
         // if we shifted this much, exponent would go below its minimum
         // so shift as much as possible and create a denormal
@@ -143,15 +143,18 @@ static int u128_clz(uint128_t x) {
     // correctly counting leading zeros on a 128-bit int is interesting
     int zeros;
     if (x >> 64 != 0)
-        zeros = __builtin_clzl((uint64_t) (x >> 64));
+        zeros = __builtin_clzll((unsigned long long) (x >> 64));
     else if (x != 0)
-        zeros = 64 + __builtin_clzl((uint64_t) x);
+        zeros = 64 + __builtin_clzll((unsigned long long) x);
     else
         zeros = 128;
     return zeros;
 }
 
 static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
+    if (signif == 0)
+        return (float80) {.sign = (unsigned) sign};
+
     int shift = u128_clz(signif);
     // now shift left
     if (exp - shift < unbias(EXP_MIN)) {
@@ -167,10 +170,10 @@ static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
         if (signif == ((uint128_t) 1 << 127))
             f = F80_INF;
         else if ((f80_rounding_mode == round_up && sign) || (f80_rounding_mode == round_down && !sign) || f80_rounding_mode == round_chop)
-            f = (float80) {.exp = EXP_MAX, .signif = -1};
+            f = (float80) {.exp = EXP_MAX, .signif = UINT64_MAX};
         else
             f = F80_INF;
-        f.sign = sign;
+        f.sign = (unsigned) sign;
         return f;
     } else {
         signif <<= shift;
@@ -186,25 +189,22 @@ static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
         signif >>= 1;
         f.exp++;
     }
-    f.signif = signif;
-    f.sign = sign;
+    f.signif = (uint64_t) signif;
+    f.sign = (unsigned) sign;
     return f;
 }
 
 float80 f80_from_int(int64_t i) {
     // stick i in the significand, give it an exponent of 2^63 to offset the
     // implicit binary point after the first bit, and then normalize
+    uint64_t magnitude = i < 0 ? (uint64_t) (-(i + 1)) + 1 : (uint64_t) i;
     float80 f = {
-        .signif = i,
+        .signif = magnitude,
         .exp = bias(63),
-        .sign = 0,
+        .sign = i < 0,
     };
     if (i == 0)
         f.exp = 0;
-    if (i < 0) {
-        f.sign = 1;
-        f.signif = -(uint64_t) i;
-    }
     return f80_normalize(f);
 }
 
@@ -216,16 +216,18 @@ int64_t f80_to_int(float80 f) {
     if (f.exp > bias(63))
         return INT64_MIN; // also indefinite
     // shift right (reduce precision) until the exponent is 2^63
-    f = f80_shift_right(f, bias(63) - f.exp);
+    f = f80_shift_right(f, (int) (bias(63) - f.exp));
     // and the answer should be the significand!
-    return !f.sign ? f.signif : -f.signif;
+    if (!f.sign)
+        return f.signif <= INT64_MAX ? (int64_t) f.signif : INT64_MIN;
+    if (f.signif >= (UINT64_C(1) << 63))
+        return INT64_MIN;
+    return -(int64_t) f.signif;
 }
-
-struct double_bits {
-    unsigned long signif:52;
-    unsigned exp:11;
-    unsigned sign:1;
-};
+#define SIGNIF64_BITS 52
+#define SIGNIF64_MASK ((UINT64_C(1) << SIGNIF64_BITS) - 1)
+#define EXP64_SHIFT SIGNIF64_BITS
+#define SIGN64_SHIFT 63
 #define EXP64_MAX 0x7fe
 #define EXP64_MIN 0x001
 #define EXP64_SPECIAL 0x7ff
@@ -233,58 +235,79 @@ struct double_bits {
 
 // unsupported?
 float80 f80_from_double(double d) {
-    struct double_bits db;
-    memcpy(&db, &d, sizeof(db));
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    uint64_t signif = bits & SIGNIF64_MASK;
+    unsigned exp = (unsigned) ((bits >> EXP64_SHIFT) & EXP64_SPECIAL);
+    unsigned sign = (unsigned) (bits >> SIGN64_SHIFT);
     float80 f;
 
-    if (db.exp == EXP64_SPECIAL)
+    if (exp == EXP64_SPECIAL)
         f.exp = EXP_SPECIAL;
-    else if (db.exp == EXP64_DENORMAL)
+    else if (exp == EXP64_DENORMAL)
         // denormals actually have an exponent of EXP_MIN, the special exponent
         // is needed to indicate the integer bit is 0
         // zeroes have the same exponent as denormals but need to be handled
         // differently
-        f.exp = db.signif == 0 ? 0 : bias(1 - 0x3ff);
+        f.exp = signif == 0 ? 0 : bias(1 - 0x3ff);
     else
-        f.exp = bias((int) db.exp - 0x3ff);
+        f.exp = bias((int) exp - 0x3ff);
 
-    f.signif = (uint64_t) db.signif << 11;
-    if (db.exp != EXP64_DENORMAL)
+    f.signif = signif << 11;
+    if (exp != EXP64_DENORMAL)
         f.signif |= CURSED_BIT;
-    f.sign = db.sign;
+    f.sign = sign;
     return f80_normalize(f);
 }
 
 double f80_to_double(float80 f) {
     if (!f80_is_supported(f))
         return NAN;
-    struct double_bits db;
-    db.sign = f.sign;
-    int new_exp = unbias(f.exp) + 0x3ff;
-    if (f.exp == EXP_SPECIAL)
+    uint64_t fraction;
+    int new_exp;
+    if (f.exp == EXP_SPECIAL) {
         new_exp = EXP64_SPECIAL;
-    else if (new_exp > EXP64_MAX)
-        // out of range
-        return !f.sign ? INFINITY : -INFINITY;
-    if (new_exp <= 0) {
-        // number can only be represented in double precision as a denormal
-        // shift it enough to make the exponent into EXP64_MIN
-        // does it work on numbers that are not denormal but are too small to represent as double?
-        f.signif >>= 1;
-        f = f80_shift_right(f, -new_exp);
-        new_exp = unbias(f.exp) + 0x3ff;
+        fraction = (f.signif & (UINT64_MAX >> 1)) >> 11;
+        if (f80_isnan(f) && fraction == 0)
+            fraction = 1;
+    } else if (f80_iszero(f)) {
+        new_exp = EXP64_DENORMAL;
+        fraction = 0;
+    } else {
+        int exp = unbias_denormal(f.exp);
+        if (exp > 1023) {
+            bool to_infinity = f80_rounding_mode == round_to_nearest ||
+                (f80_rounding_mode == round_up && !f.sign) ||
+                (f80_rounding_mode == round_down && f.sign);
+            new_exp = to_infinity ? EXP64_SPECIAL : EXP64_MAX;
+            fraction = to_infinity ? 0 : SIGNIF64_MASK;
+        } else if (exp < -1022) {
+            // binary64 子正常数以 2^-1074 为一个整数单位完成一次舍入。
+            int shift = -exp - 1011;
+            uint64_t rounded = (uint64_t) u128_shift_right_round(
+                f.signif, shift, (int) f.sign);
+            if (rounded & (UINT64_C(1) << SIGNIF64_BITS)) {
+                new_exp = EXP64_MIN;
+                fraction = 0;
+            } else {
+                new_exp = EXP64_DENORMAL;
+                fraction = rounded;
+            }
+        } else {
+            new_exp = exp + 0x3ff;
+            uint64_t rounded = (uint64_t) u128_shift_right_round(
+                f.signif, 11, (int) f.sign);
+            if (rounded & (UINT64_C(1) << 53)) {
+                rounded >>= 1;
+                new_exp++;
+            }
+            fraction = rounded & SIGNIF64_MASK;
+        }
     }
-    db.exp = new_exp;
-    uint64_t db_signif = u128_shift_right_round(f.signif, 11, f.sign);
-    // handle the case when f.signif becomes 0x1fffffffffffff after shifting
-    // and then is rounded up
-    if (db_signif & (1ul << 53)) {
-        db_signif >>= 1;
-        db.exp++;
-    }
-    db.signif = db_signif;
+    uint64_t bits = ((uint64_t) f.sign << SIGN64_SHIFT) |
+        ((uint64_t) new_exp << EXP64_SHIFT) | fraction;
     double d;
-    memcpy(&d, &db, sizeof(db));
+    memcpy(&d, &bits, sizeof(d));
     return d;
 }
 
@@ -307,7 +330,7 @@ float80 f80_round(float80 f) {
 }
 
 float80 f80_neg(float80 f) {
-    f.sign = ~f.sign;
+    f.sign = !f.sign;
     return f;
 }
 float80 f80_abs(float80 f) {
@@ -342,8 +365,8 @@ float80 f80_add(float80 a, float80 b) {
     // reduce the number of cases to deal with
     bool flipped = false;
     if (a.sign) {
-        a.sign = ~a.sign;
-        b.sign = ~b.sign;
+        a.sign = !a.sign;
+        b.sign = !b.sign;
         flipped = true;
     }
     // now either both are positive (addition) or a is positive and b is
@@ -461,7 +484,7 @@ float80 f80_div(float80 a, float80 b) {
         if (f80_iszero(a))
             f = F80_NAN;
     } else {
-        int b_trailing = __builtin_ctzl(b.signif);
+        int b_trailing = __builtin_ctzll((unsigned long long) b.signif);
         b.signif >>= b_trailing;
         uint128_t signif = ((uint128_t) a.signif << 64) / b.signif;
         uint128_t remainder = ((uint128_t) a.signif << 64) % b.signif;
