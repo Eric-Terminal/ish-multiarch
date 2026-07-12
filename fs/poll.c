@@ -75,6 +75,19 @@ static void poll_fd_free(struct poll_fd *poll_fd) {
     list_add(&poll->pollfd_freelist, &poll_fd->fds);
 }
 
+// 调用方持有 poll 锁；EAGAIN 表示管道中已有通知，无需重复写入。
+static void poll_notify_waiters_locked(struct poll *poll) {
+    if (poll->notify_pipe[1] == -1)
+        return;
+
+    ssize_t written;
+    do {
+        written = write(poll->notify_pipe[1], "", 1);
+    } while (written < 0 && errno == EINTR);
+    assert(written == 1 || (written < 0 &&
+            (errno == EAGAIN || errno == EWOULDBLOCK)));
+}
+
 bool poll_has_fd(struct poll *poll, struct fd *fd) {
     lock(&poll->lock);
     bool found = poll_find_fd(poll, fd) != NULL;
@@ -123,6 +136,7 @@ static int poll_add_fd_impl(
 
     list_add(&fd->poll_fds, &poll_fd->polls);
     list_add(&poll->poll_fds, &poll_fd->fds);
+    poll_notify_waiters_locked(poll);
 
     err = 0;
 out:
@@ -194,6 +208,7 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     poll_fd->info = info;
     poll_fd->triggered_types = 0;
     poll_fd->enabled = true;
+    poll_notify_waiters_locked(poll);
 
     err = 0;
 out:
