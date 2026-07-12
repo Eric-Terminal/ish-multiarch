@@ -118,7 +118,7 @@ sqword_t file_select_task(struct task *task, fd_t nfds,
         .ready_writefds = ready_writefds,
         .ready_exceptfds = ready_exceptfds,
     };
-    result = poll_wait_until(
+    result = poll_wait_until_signal_safe(
             poll, select_event_callback, &context, deadline);
     if (result >= 0) {
         if (ready_readfds != NULL)
@@ -321,7 +321,8 @@ sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
     struct timespec immediate = {0};
     if (invalid != 0)
         timeout = &immediate;
-    error = poll_wait(poll, poll_event_callback, &context, timeout);
+    error = poll_wait_signal_safe(
+            poll, poll_event_callback, &context, timeout);
     if (error >= 0) {
         error = 0;
         for (size_t i = 0; i < nfds; i++)

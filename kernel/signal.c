@@ -1,6 +1,8 @@
 #include "debug.h"
+#include <errno.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
 #include "kernel/calls.h"
 #include "kernel/signal-delivery.h"
 #include "kernel/signal.h"
@@ -29,6 +31,19 @@ static bool signal_is_blockable(int sig) {
 static bool signal_default_ignored(int sig) {
     return sig == SIGURG_ || sig == SIGCONT_ ||
             sig == SIGCHLD_ || sig == SIGWINCH_;
+}
+
+// 调用方持有 waiting_cond_lock；通知管道是非阻塞的，满管道本身已表示可读。
+static void wake_poll_wait_locked(struct task *task) {
+    if (!task->waiting_poll_active)
+        return;
+
+    ssize_t written;
+    do {
+        written = write(task->waiting_poll_notify_fd, "", 1);
+    } while (written < 0 && errno == EINTR);
+    assert(written == 1 || (written < 0 &&
+            (errno == EAGAIN || errno == EWOULDBLOCK)));
 }
 
 enum signal_delivery_disposition signal_disposition_locked(
@@ -64,8 +79,13 @@ static void wake_signal_task_unlocked(struct task *task, int sig) {
         // actual madness, I hope to god it's correct
         // must release the sighand lock while going insane, to avoid a deadlock
         unlock(&task->sighand->lock);
+        bool poll_notified = false;
 retry:
         lock(&task->waiting_cond_lock);
+        if (!poll_notified) {
+            wake_poll_wait_locked(task);
+            poll_notified = true;
+        }
         if (task->waiting_cond != NULL) {
             bool mine = false;
             if (trylock(task->waiting_lock) == EBUSY) {

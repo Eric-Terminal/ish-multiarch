@@ -49,6 +49,7 @@ struct poll *poll_create(void) {
     if (err < 0)
         goto error;
     poll->waiters = 0;
+    poll->exclusive_waiter = false;
     poll->destroying = false;
     poll->notify_pipe[0] = -1;
     poll->notify_pipe[1] = -1;
@@ -319,8 +320,10 @@ static bool poll_deadline_remaining(
     return true;
 }
 
-int poll_wait_until(struct poll *poll_, poll_callback_t callback,
-        void *context, const struct timer_time *deadline_pointer) {
+static int poll_wait_deadline(struct poll *poll_,
+        poll_callback_t callback, void *context,
+        const struct timer_time *deadline_pointer,
+        bool signal_safe) {
     if (deadline_pointer != NULL &&
             (deadline_pointer->nsec < 0 ||
                     deadline_pointer->nsec >= INT64_C(1000000000)))
@@ -336,12 +339,20 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
         unlock(&poll_->lock);
         return _EBADF;
     }
+    if (poll_->exclusive_waiter ||
+            (signal_safe && poll_->waiters != 0)) {
+        unlock(&poll_->lock);
+        return _EBUSY;
+    }
+    if (signal_safe)
+        poll_->exclusive_waiter = true;
 
     // acquire the pipe
     if (poll_->waiters++ == 0) {
         assert(poll_->notify_pipe[0] == -1 && poll_->notify_pipe[1] == -1);
         if (pipe(poll_->notify_pipe) < 0) {
             poll_->waiters--;
+            poll_->exclusive_waiter = false;
             unlock(&poll_->lock);
             return errno_map();
         }
@@ -355,12 +366,37 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
             poll_->notify_pipe[0] = -1;
             poll_->notify_pipe[1] = -1;
             poll_->waiters--;
+            poll_->exclusive_waiter = false;
             unlock(&poll_->lock);
             return err;
         }
     }
 
     int res = 0;
+    bool signal_registration = false;
+    bool pending_at_registration = false;
+    if (signal_safe) {
+        struct task *task = current;
+        assert(task != NULL && task->sighand != NULL);
+        lock(&task->sighand->lock);
+        pending_at_registration =
+                !!(task->pending & ~task->blocked);
+        lock(&task->waiting_cond_lock);
+        if (task->waiting_poll_active) {
+            unlock(&task->waiting_cond_lock);
+            unlock(&task->sighand->lock);
+            res = _EBUSY;
+            goto release_pipe;
+        }
+        assert(task->waiting_cond == NULL &&
+                poll_->waiters == 1 && poll_->notify_pipe[1] >= 0);
+        task->waiting_poll_notify_fd = poll_->notify_pipe[1];
+        task->waiting_poll_active = true;
+        signal_registration = true;
+        unlock(&task->waiting_cond_lock);
+        unlock(&task->sighand->lock);
+    }
+
     while (true) {
         // check if any fds are ready
         struct poll_fd *poll_fd, *tmp;
@@ -398,7 +434,9 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
             break;
 
         lock(&current->sighand->lock);
-        bool signal_pending = !!(current->pending & ~current->blocked);
+        bool signal_pending = pending_at_registration ||
+                !!(current->pending & ~current->blocked);
+        pending_at_registration = false;
         unlock(&current->sighand->lock);
         if (signal_pending) {
             res = _EINTR;
@@ -463,6 +501,8 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
         if (poll_->destroying) {
             res = _EBADF;
             stop_waiting = true;
+        } else if (err < 0 && wait_errno == EINTR) {
+            // 宿主信号只负责唤醒；外层先重扫 fd，再按 guest 掩码判断 EINTR。
         } else if (err < 0) {
             errno = wait_errno;
             res = errno_map();
@@ -502,6 +542,21 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
             break;
     }
 
+release_pipe:
+    if (signal_registration) {
+        struct task *task = current;
+        lock(&task->waiting_cond_lock);
+        assert(task->waiting_poll_active &&
+                task->waiting_poll_notify_fd == poll_->notify_pipe[1]);
+        task->waiting_poll_active = false;
+        task->waiting_poll_notify_fd = -1;
+        unlock(&task->waiting_cond_lock);
+    }
+    if (signal_safe) {
+        assert(poll_->exclusive_waiter && poll_->waiters == 1);
+        poll_->exclusive_waiter = false;
+    }
+
     // release the pipe
     if (--poll_->waiters == 0) {
         close(poll_->notify_pipe[0]);
@@ -516,8 +571,22 @@ int poll_wait_until(struct poll *poll_, poll_callback_t callback,
     return res;
 }
 
-int poll_wait(struct poll *poll_, poll_callback_t callback,
-        void *context, struct timespec *timeout) {
+int poll_wait_until(struct poll *poll, poll_callback_t callback,
+        void *context, const struct timer_time *deadline) {
+    return poll_wait_deadline(
+            poll, callback, context, deadline, false);
+}
+
+int poll_wait_until_signal_safe(struct poll *poll,
+        poll_callback_t callback, void *context,
+        const struct timer_time *deadline) {
+    return poll_wait_deadline(
+            poll, callback, context, deadline, true);
+}
+
+static int poll_wait_relative(struct poll *poll_,
+        poll_callback_t callback, void *context,
+        struct timespec *timeout, bool signal_safe) {
     if (!poll_timeout_valid(timeout))
         return _EINVAL;
 
@@ -529,8 +598,21 @@ int poll_wait(struct poll *poll_, poll_callback_t callback,
                 timer_time_from_timespec(*timeout));
         deadline_pointer = &deadline;
     }
-    return poll_wait_until(
-            poll_, callback, context, deadline_pointer);
+    return poll_wait_deadline(poll_, callback, context,
+            deadline_pointer, signal_safe);
+}
+
+int poll_wait(struct poll *poll, poll_callback_t callback,
+        void *context, struct timespec *timeout) {
+    return poll_wait_relative(
+            poll, callback, context, timeout, false);
+}
+
+int poll_wait_signal_safe(struct poll *poll,
+        poll_callback_t callback, void *context,
+        struct timespec *timeout) {
+    return poll_wait_relative(
+            poll, callback, context, timeout, true);
 }
 
 void poll_destroy(struct poll *poll) {

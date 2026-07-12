@@ -100,6 +100,9 @@ struct task {
     // current condition/lock, so it can be notified in case of a signal
     cond_t *waiting_cond;
     lock_t *waiting_lock;
+    // 仅供单等待者 poll 使用；发送信号时写入非阻塞通知管道。
+    bool waiting_poll_active;
+    int waiting_poll_notify_fd;
     lock_t waiting_cond_lock;
 };
 

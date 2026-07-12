@@ -533,6 +533,8 @@ static bool init_fixture(struct task_fixture *fixture,
     fixture->task.sighand = sighand_new();
     if (fixture->task.sighand == NULL)
         return false;
+    lock_init(&fixture->task.waiting_cond_lock);
+    fixture->task.waiting_poll_notify_fd = -1;
     fixture->task.files = fdtable_new(1);
     if (IS_ERR(fixture->task.files))
         return false;
@@ -564,6 +566,7 @@ static int destroy_fixture(struct task_fixture *fixture) {
     fd_close(fixture->fs.pwd);
     fd_close(fixture->root);
     sighand_release(fixture->task.sighand);
+    pthread_mutex_destroy(&fixture->task.waiting_cond_lock.m);
     current = NULL;
     mount_release(fixture->mount);
     lock(&mounts_lock);

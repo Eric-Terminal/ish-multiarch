@@ -11,6 +11,8 @@ struct poll {
     struct real_poll real;
     int notify_pipe[2];
     int waiters; // if nonzero, notify_pipe exists
+    // signal-safe 等待期间拒绝共享后端上的其他等待者。
+    bool exclusive_waiter;
     // 销毁先拒绝新操作，再等待所有宿主等待调用离开。
     bool destroying;
     cond_t drained;
@@ -92,10 +94,17 @@ void poll_wakeup(struct fd *fd, int events);
 // Returns the number of times the callback returned 1, or negative for error.
 typedef int (*poll_callback_t)(void *context, int types, union poll_fd_info info);
 int poll_wait(struct poll *poll, poll_callback_t callback, void *context, struct timespec *timeout);
+// 仅供每次调用新建、且只有当前 task 一个等待者的 poll 使用。
+int poll_wait_signal_safe(struct poll *poll,
+        poll_callback_t callback, void *context,
+        struct timespec *timeout);
 struct timer_time;
 // deadline 使用 CLOCK_MONOTONIC 的绝对 64 位时间，避免 arm64_32 截断长等待。
 int poll_wait_until(struct poll *poll, poll_callback_t callback,
         void *context, const struct timer_time *deadline);
+int poll_wait_until_signal_safe(struct poll *poll,
+        poll_callback_t callback, void *context,
+        const struct timer_time *deadline);
 // 阻止新操作、唤醒并排空等待者后再释放登记和宿主后端。
 void poll_destroy(struct poll *poll);
 

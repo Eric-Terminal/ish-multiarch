@@ -180,6 +180,8 @@ struct task *task_create_(struct task *parent) {
     list_init(&task->sockrestart.listen);
     task->waiting_cond = NULL;
     task->waiting_lock = NULL;
+    task->waiting_poll_active = false;
+    task->waiting_poll_notify_fd = -1;
     task->waiting_cond_lock = (lock_t) {0};
     lock_init(&task->waiting_cond_lock);
     task->pause = (cond_t) {0};

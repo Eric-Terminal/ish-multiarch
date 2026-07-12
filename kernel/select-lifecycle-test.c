@@ -1,4 +1,6 @@
 #include <pthread.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,8 +50,17 @@ struct fd_probe {
 
 struct select_call {
     struct task *task;
+    bool use_poll;
+    fd_t nfds;
+    addr_t readfds_address;
+    addr_t timeout_address;
+    int poll_timeout;
     sdword_t result;
 };
+
+static void host_wakeup_handler(int signal) {
+    (void) signal;
+}
 
 static int map_user_page(struct task *task) {
     write_wrlock(&task->mem->lock);
@@ -74,7 +85,9 @@ static bool fixture_init(struct select_fixture *fixture) {
     atomic_init(&fixture->sighand.refcount, 1);
     lock_init(&fixture->sighand.lock);
     fixture->task.sighand = &fixture->sighand;
+    list_init(&fixture->task.queue);
     lock_init(&fixture->task.waiting_cond_lock);
+    fixture->task.waiting_poll_notify_fd = -1;
     struct mm *mm = mm_new();
     if (mm == NULL) {
         fdtable_release(fixture->task.files);
@@ -226,10 +239,185 @@ static struct fd *make_fd(struct fd_probe *probe) {
 static void *run_select(void *opaque) {
     struct select_call *call = opaque;
     current = call->task;
-    call->result = (sdword_t) sys_select(
-            1, READFDS_ADDRESS, 0, 0, TIMEOUT_ADDRESS);
+    task_thread_store(call->task, pthread_self());
+    if (call->use_poll)
+        call->result = (sdword_t) sys_poll(
+                0, 0, call->poll_timeout);
+    else
+        call->result = (sdword_t) sys_select(
+                call->nfds, call->readfds_address,
+                0, 0, call->timeout_address);
     current = NULL;
     return NULL;
+}
+
+static bool wait_for_poll_registration(
+        struct task *task, int *notify_fd) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 2;
+
+    while (true) {
+        lock(&task->waiting_cond_lock);
+        bool active = task->waiting_poll_active;
+        int fd = task->waiting_poll_notify_fd;
+        unlock(&task->waiting_cond_lock);
+        if (active) {
+            if (notify_fd != NULL)
+                *notify_fd = fd;
+            return fd >= 0;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+                (now.tv_sec == deadline.tv_sec &&
+                        now.tv_nsec >= deadline.tv_nsec))
+            return false;
+        sched_yield();
+    }
+}
+
+static bool poll_registration_cleared(struct task *task) {
+    lock(&task->waiting_cond_lock);
+    bool cleared = !task->waiting_poll_active &&
+            task->waiting_poll_notify_fd == -1;
+    unlock(&task->waiting_cond_lock);
+    return cleared;
+}
+
+static int64_t elapsed_nanoseconds(
+        struct timespec started, struct timespec finished) {
+    return (int64_t) (finished.tv_sec - started.tv_sec) *
+            INT64_C(1000000000) + finished.tv_nsec - started.tv_nsec;
+}
+
+static void queue_guest_signal_from_sender(struct task *task, int signal) {
+    struct task *saved = current;
+    current = NULL;
+    deliver_signal(task, signal, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+    });
+    current = saved;
+}
+
+static int test_atomic_signal_wakeup(struct select_fixture *fixture) {
+    const struct timeval_ long_timeout = {.sec = 2};
+    CHECK(user_put(TIMEOUT_ADDRESS, long_timeout) == 0,
+            "准备原子信号唤醒超时");
+
+    for (unsigned use_poll = 0; use_poll < 2; use_poll++) {
+        fixture->task.blocked = 0;
+        signal_flush_pending(&fixture->task);
+        struct select_call call = {
+            .task = &fixture->task,
+            .use_poll = use_poll != 0,
+            .nfds = 0,
+            .timeout_address = TIMEOUT_ADDRESS,
+            .poll_timeout = 2000,
+        };
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL, run_select, &call) == 0,
+                "启动独占 poll 信号等待线程");
+        int notify_fd = -1;
+        bool active = wait_for_poll_registration(
+                &fixture->task, &notify_fd);
+        if (active)
+            queue_guest_signal_from_sender(
+                    &fixture->task, SIGUSR1_);
+        int join_result = pthread_join(thread, NULL);
+
+        CHECK(active && notify_fd >= 0 && join_result == 0 &&
+                call.result == _EINTR &&
+                sigset_has(fixture->task.pending, SIGUSR1_) &&
+                poll_registration_cleared(&fixture->task),
+                use_poll ?
+                        "poll 在发布 active 后不丢 guest 信号唤醒" :
+                        "select 在发布 active 后不丢 guest 信号唤醒");
+        signal_flush_pending(&fixture->task);
+    }
+    return 0;
+}
+
+static int test_blocked_and_host_signals(
+        struct select_fixture *fixture) {
+    const struct timeval_ short_timeout = {.usec = 50000};
+    CHECK(user_put(TIMEOUT_ADDRESS, short_timeout) == 0,
+            "准备阻塞信号短超时");
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    deliver_signal(&fixture->task, SIGUSR1_, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+    });
+
+    struct select_call call = {
+        .task = &fixture->task,
+        .nfds = 0,
+        .timeout_address = TIMEOUT_ADDRESS,
+    };
+    struct timespec started;
+    struct timespec finished;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, run_select, &call) == 0,
+            "启动阻塞 guest 信号等待线程");
+    bool active = wait_for_poll_registration(&fixture->task, NULL);
+    unsigned host_interrupts = 0;
+    const struct timespec pulse = {.tv_nsec = 1000000};
+    while (active && host_interrupts < 200) {
+        pthread_kill(task_thread_load(&fixture->task), SIGUSR1);
+        host_interrupts++;
+        nanosleep(&pulse, NULL);
+        lock(&fixture->task.waiting_cond_lock);
+        active = fixture->task.waiting_poll_active;
+        unlock(&fixture->task.waiting_cond_lock);
+    }
+    int join_result = pthread_join(thread, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+
+    CHECK(join_result == 0 && call.result == 0 &&
+            host_interrupts != 0 &&
+            elapsed_nanoseconds(started, finished) >= INT64_C(40000000) &&
+            sigset_has(fixture->task.pending, SIGUSR1_) &&
+            poll_registration_cleared(&fixture->task),
+            "被 guest 掩码阻塞的 pending 与直接 host SIGUSR1 不产生虚假 EINTR");
+    signal_flush_pending(&fixture->task);
+    fixture->task.blocked = 0;
+    return 0;
+}
+
+static int test_ready_precedes_pending(
+        struct select_fixture *fixture) {
+    struct fd_probe probe = {.poll_events = POLL_READ};
+    atomic_init(&probe.close_calls, 0);
+    struct fd *fd = make_fd(&probe);
+    CHECK(fd != NULL && f_install_task(&fixture->task, fd, 0) == 0,
+            "安装 ready 优先测试文件对象");
+    byte_t selected = 1;
+    const struct timeval_ long_timeout = {.sec = 2};
+    CHECK(user_put(READFDS_ADDRESS, selected) == 0 &&
+            user_put(TIMEOUT_ADDRESS, long_timeout) == 0,
+            "准备 ready 与 pending 并存参数");
+    deliver_signal(&fixture->task, SIGUSR1_, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+    });
+
+    sdword_t result = (sdword_t) sys_select(
+            1, READFDS_ADDRESS, 0, 0, TIMEOUT_ADDRESS);
+    byte_t ready = 0;
+    CHECK(user_get(READFDS_ADDRESS, ready) == 0 &&
+            result == 1 && ready == 1 &&
+            sigset_has(fixture->task.pending, SIGUSR1_) &&
+            poll_registration_cleared(&fixture->task),
+            "fd ready 与 pending 并存时先返回 ready 位");
+    signal_flush_pending(&fixture->task);
+    CHECK(f_close_task(&fixture->task, 0) == 0 &&
+            atomic_load_explicit(&probe.close_calls,
+                    memory_order_relaxed) == 1,
+            "释放 ready 优先测试文件对象");
+    return 0;
 }
 
 static int test_argument_bounds(void) {
@@ -288,7 +476,12 @@ static int test_close_and_reuse(struct select_fixture *fixture) {
     CHECK(user_put(READFDS_ADDRESS, selected) == 0 &&
             user_put(TIMEOUT_ADDRESS, immediate) == 0,
             "准备 close/reuse select 参数");
-    struct select_call call = {.task = &fixture->task};
+    struct select_call call = {
+        .task = &fixture->task,
+        .nfds = 1,
+        .readfds_address = READFDS_ADDRESS,
+        .timeout_address = TIMEOUT_ADDRESS,
+    };
     pthread_t thread;
     CHECK(pthread_create(&thread, NULL, run_select, &call) == 0,
             "启动 select 等待线程");
@@ -342,6 +535,13 @@ static int test_close_and_reuse(struct select_fixture *fixture) {
 }
 
 int main(void) {
+    struct sigaction host_action = {0};
+    struct sigaction old_host_action;
+    host_action.sa_handler = host_wakeup_handler;
+    sigemptyset(&host_action.sa_mask);
+    CHECK(sigaction(SIGUSR1, &host_action, &old_host_action) == 0,
+            "安装 host 唤醒信号处理器");
+
     struct select_fixture fixture;
     CHECK(fixture_init(&fixture), "初始化 select 生命周期夹具");
 
@@ -352,7 +552,14 @@ int main(void) {
         result = test_error_cleanup_balance(&fixture);
     if (result == 0)
         result = test_close_and_reuse(&fixture);
+    if (result == 0)
+        result = test_atomic_signal_wakeup(&fixture);
+    if (result == 0)
+        result = test_blocked_and_host_signals(&fixture);
+    if (result == 0)
+        result = test_ready_precedes_pending(&fixture);
 
     fixture_destroy(&fixture);
+    sigaction(SIGUSR1, &old_host_action, NULL);
     return result;
 }
