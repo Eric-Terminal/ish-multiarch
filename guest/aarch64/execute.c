@@ -546,6 +546,33 @@ static void write_vector_element(union aarch64_vector_reg *reg,
             ((value & mask) << shift);
 }
 
+static void execute_advsimd_shift_long(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_shift_long.rd;
+    byte_t rn = instruction->operands.advsimd_shift_long.rn;
+    byte_t source_size =
+            instruction->operands.advsimd_shift_long.element_size;
+    byte_t shift = instruction->operands.advsimd_shift_long.shift;
+    byte_t lanes = 8 / source_size;
+    byte_t source_offset =
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSHLL2 ? lanes : 0;
+    qword_t source_sign = UINT64_C(1) << (source_size * 8 - 1);
+    qword_t source_mask = vector_element_mask(source_size);
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_vector_element(&source, source_size,
+                (byte_t) (source_offset + lane));
+        if (value & source_sign)
+            value |= ~source_mask;
+        write_vector_element(&result, source_size * 2,
+                lane, value << shift);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_add(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
@@ -1539,6 +1566,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_SHL_SCALAR:
             execute_advsimd_scalar_shift(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SSHLL:
+        case AARCH64_OP_ADVSIMD_SSHLL2:
+            execute_advsimd_shift_long(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_DUP_ELEMENT:
         case AARCH64_OP_ADVSIMD_DUP_GENERAL:
