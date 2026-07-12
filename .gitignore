@@ -1,6 +1,7 @@
 build/
 build-apple-core/
 xcuserdata/
+.DS_Store
 .floo
 
 cross-*.txt

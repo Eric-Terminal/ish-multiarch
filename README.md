@@ -1,5 +1,7 @@
 # [iSH](https://ish.app)
 
+> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。新增的可复用核心目前通过 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 编译门禁；真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建方法和已知限制见[多架构实现说明](docs/multiarch/README.md)。
+
 [![Build Status](https://github.com/ish-app/ish/actions/workflows/ci.yml/badge.svg)](https://github.com/ish-app/ish/actions)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
 [![fuck counter](https://img.shields.io/github/search/ish-app/ish/fuck.svg)](https://github.com/ish-app/ish/search?q=fuck)
