@@ -221,6 +221,12 @@ if get_option('kernel') == 'ish'
             'poll_oneshot_test', 'fs/poll-oneshot-test.c', dependencies: ish)
         test('poll_oneshot', poll_oneshot_test)
 
+        select_lifecycle_test = executable(
+            'select_lifecycle_test',
+            'kernel/select-lifecycle-test.c',
+            dependencies: ish)
+        test('select_lifecycle', select_lifecycle_test)
+
         fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
         test('fs_task', fs_task_test)
 

@@ -6,6 +6,8 @@
 #include "kernel/calls.h"
 
 static int user_read_or_zero(addr_t addr, void *data, size_t size) {
+    if (size == 0)
+        return 0;
     if (addr == 0)
         memset(data, 0, size);
     else if (user_read(addr, data, size))
@@ -35,16 +37,31 @@ static int select_event_callback(void *context, int types, union poll_fd_info in
 }
 
 static dword_t select_common(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t exceptfds_addr, struct timespec *timeout_addr, const char *name) {
-    size_t fdset_size = BITS_SIZE(nfds);
-    char readfds[fdset_size];
-    if (user_read_or_zero(readfds_addr, readfds, fdset_size))
-        return _EFAULT;
-    char writefds[fdset_size];
-    if (user_read_or_zero(writefds_addr, writefds, fdset_size))
-        return _EFAULT;
-    char exceptfds[fdset_size];
-    if (user_read_or_zero(exceptfds_addr, exceptfds, fdset_size))
-        return _EFAULT;
+    if (nfds < 0 || (rlim_t_) nfds >
+            rlimit_task(current, RLIMIT_NOFILE_) ||
+            (size_t) nfds > SIZE_MAX / sizeof(struct fd *))
+        return _EINVAL;
+
+    size_t fdset_size = ((size_t) nfds + 7) / 8;
+    char *readfds = fdset_size == 0 ? NULL : malloc(fdset_size);
+    char *writefds = fdset_size == 0 ? NULL : malloc(fdset_size);
+    char *exceptfds = fdset_size == 0 ? NULL : malloc(fdset_size);
+    struct fd **files = nfds == 0 ? NULL :
+            calloc((size_t) nfds, sizeof(*files));
+    int result = 0;
+    if ((fdset_size != 0 &&
+            (readfds == NULL || writefds == NULL || exceptfds == NULL)) ||
+            (nfds != 0 && files == NULL)) {
+        result = _ENOMEM;
+        goto out;
+    }
+
+    if (user_read_or_zero(readfds_addr, readfds, fdset_size) ||
+            user_read_or_zero(writefds_addr, writefds, fdset_size) ||
+            user_read_or_zero(exceptfds_addr, exceptfds, fdset_size)) {
+        result = _EFAULT;
+        goto out;
+    }
 
     STRACE("%s(%d, 0x%x, 0x%x, 0x%x, 0x%x {%lus %luns}) ",
            name, nfds, readfds_addr, writefds_addr, exceptfds_addr,
@@ -52,8 +69,10 @@ static dword_t select_common(fd_t nfds, addr_t readfds_addr, addr_t writefds_add
            timeout_addr ? timeout_addr->tv_nsec : 0);
 
     struct poll *poll = poll_create();
-    if (IS_ERR(poll))
-        return PTR_ERR(poll);
+    if (IS_ERR(poll)) {
+        result = PTR_ERR(poll);
+        goto out;
+    }
 
     for (fd_t i = 0; i < nfds; i++) {
         int events = 0;
@@ -68,21 +87,26 @@ static dword_t select_common(fd_t nfds, addr_t readfds_addr, addr_t writefds_add
                     bit_test(i, readfds) ? "r" : "",
                     bit_test(i, writefds) ? "w" : "",
                     bit_test(i, exceptfds) ? "x" : "");
-            struct fd *fd = f_get(i);
-            if (fd == NULL) {
-                poll_destroy(poll);
-                return _EBADF;
+            files[i] = f_get_task_retain(current, i);
+            if (files[i] == NULL) {
+                result = _EBADF;
+                goto out_poll;
             }
-            poll_add_fd(poll, fd, events, (union poll_fd_info) i);
+            result = poll_add_fd(poll, files[i], events,
+                    (union poll_fd_info) i);
+            if (result < 0)
+                goto out_poll;
         }
     }
     STRACE("...\n");
 
-    memset(readfds, 0, fdset_size);
-    memset(writefds, 0, fdset_size);
-    memset(exceptfds, 0, fdset_size);
+    if (fdset_size != 0) {
+        memset(readfds, 0, fdset_size);
+        memset(writefds, 0, fdset_size);
+        memset(exceptfds, 0, fdset_size);
+    }
     struct select_context context = {readfds, writefds, exceptfds};
-    int err = poll_wait(poll, select_event_callback, &context, timeout_addr);
+    result = poll_wait(poll, select_event_callback, &context, timeout_addr);
     STRACE("%d end %s ", current->pid, name);
     for (fd_t i = 0; i < nfds; i++) {
         if (bit_test(i, readfds) || bit_test(i, writefds) || bit_test(i, exceptfds)) {
@@ -92,17 +116,35 @@ static dword_t select_common(fd_t nfds, addr_t readfds_addr, addr_t writefds_add
                     bit_test(i, exceptfds) ? "x" : "");
         }
     }
-    poll_destroy(poll);
-    if (err < 0)
-        return err;
 
-    if (readfds_addr && user_write(readfds_addr, readfds, fdset_size))
-        return _EFAULT;
-    if (writefds_addr && user_write(writefds_addr, writefds, fdset_size))
-        return _EFAULT;
-    if (exceptfds_addr && user_write(exceptfds_addr, exceptfds, fdset_size))
-        return _EFAULT;
-    return err;
+out_poll:
+    poll_destroy(poll);
+    for (fd_t i = 0; i < nfds; i++)
+        if (files[i] != NULL)
+            fd_close(files[i]);
+    if (result < 0)
+        goto out;
+
+    if (fdset_size != 0 && readfds_addr &&
+            user_write(readfds_addr, readfds, fdset_size)) {
+        result = _EFAULT;
+        goto out;
+    }
+    if (fdset_size != 0 && writefds_addr &&
+            user_write(writefds_addr, writefds, fdset_size)) {
+        result = _EFAULT;
+        goto out;
+    }
+    if (fdset_size != 0 && exceptfds_addr &&
+            user_write(exceptfds_addr, exceptfds, fdset_size))
+        result = _EFAULT;
+
+out:
+    free(readfds);
+    free(writefds);
+    free(exceptfds);
+    free(files);
+    return result;
 }
 
 dword_t sys_select(fd_t nfds, addr_t readfds_addr, addr_t writefds_addr, addr_t exceptfds_addr, addr_t timeout_addr) {
