@@ -17,7 +17,7 @@ struct aarch64_linux_services {
 };
 
 struct aarch64_linux_runtime {
-    struct guest_linux_mm memory;
+    struct guest_linux_mm *memory;
     const struct aarch64_linux_services *services;
 };
 
@@ -45,8 +45,8 @@ struct aarch64_linux_syscall_result {
 };
 
 void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
-        struct guest_page_table *page_table, guest_addr_t start_brk,
-        guest_addr_t brk_limit,
+        struct guest_linux_mm *memory, struct guest_page_table *page_table,
+        guest_addr_t start_brk, guest_addr_t brk_limit,
         const struct aarch64_linux_services *services);
 void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid,
         void *service_opaque);

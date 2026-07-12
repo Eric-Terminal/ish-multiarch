@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <limits.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,8 +20,14 @@ _Static_assert(AARCH64_LINUX_PROCESS_RANDOM_SIZE ==
                 AARCH64_LINUX_RANDOM_SIZE,
         "process 与初始栈的随机字节长度必须一致");
 
-struct aarch64_linux_process {
+struct aarch64_linux_process_memory {
+    atomic_uint references;
     struct guest_page_table page_table;
+    struct guest_linux_mm linux_mm;
+};
+
+struct aarch64_linux_process {
+    struct aarch64_linux_process_memory *memory;
     struct guest_tlb tlb;
     struct aarch64_runner runner;
     struct cpu_state cpu;
@@ -29,6 +37,53 @@ struct aarch64_linux_process {
     struct aarch64_linux_runtime runtime;
     struct aarch64_linux_task task;
 };
+
+static struct aarch64_linux_process_memory *process_memory_create(void) {
+    struct aarch64_linux_process_memory *memory =
+            calloc(1, sizeof(*memory));
+    if (memory == NULL)
+        return NULL;
+    if (!guest_page_table_init(&memory->page_table,
+            AARCH64_LINUX_PROCESS_ADDRESS_BITS)) {
+        free(memory);
+        return NULL;
+    }
+    atomic_init(&memory->references, 1);
+    return memory;
+}
+
+static struct aarch64_linux_process_memory *process_memory_clone(
+        const struct aarch64_linux_process_memory *source) {
+    struct aarch64_linux_process_memory *copy =
+            calloc(1, sizeof(*copy));
+    if (copy == NULL)
+        return NULL;
+    if (!guest_linux_mm_clone(&copy->linux_mm,
+            &copy->page_table, &source->linux_mm)) {
+        free(copy);
+        return NULL;
+    }
+    atomic_init(&copy->references, 1);
+    return copy;
+}
+
+static void process_memory_retain(
+        struct aarch64_linux_process_memory *memory) {
+    // 锁必须先启用，再把第二个可运行线程发布给调度器。
+    guest_page_table_enable_concurrency(&memory->page_table);
+    unsigned previous = atomic_fetch_add_explicit(
+            &memory->references, 1, memory_order_relaxed);
+    assert(previous != 0 && previous != UINT_MAX);
+}
+
+static void process_memory_release(
+        struct aarch64_linux_process_memory *memory) {
+    if (memory == NULL || atomic_fetch_sub_explicit(
+            &memory->references, 1, memory_order_acq_rel) != 1)
+        return;
+    guest_page_table_destroy(&memory->page_table);
+    free(memory);
+}
 
 static void set_error(struct aarch64_linux_process_error *error,
         enum aarch64_linux_process_error_stage stage, dword_t detail) {
@@ -284,14 +339,16 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
         set_error(error, AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
         return NULL;
     }
-    if (!guest_page_table_init(&process->page_table,
-            AARCH64_LINUX_PROCESS_ADDRESS_BITS))
+    process->memory = process_memory_create();
+    if (process->memory == NULL)
         return create_failed(process, error,
                 AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+    struct guest_page_table *page_table =
+            &process->memory->page_table;
 
     struct aarch64_elf64_load_result main_loaded;
     enum aarch64_elf64_load_error load_error = aarch64_elf64_load(
-            &main_image, &process->page_table,
+            &main_image, page_table,
             (guest_addr_t) config->load_bias, &main_loaded);
     if (load_error != AARCH64_ELF64_LOAD_OK)
         return create_failed(process, error,
@@ -301,7 +358,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
     struct aarch64_elf64_load_result interpreter_loaded = {0};
     if (interpreter != NULL) {
         load_error = aarch64_elf64_load(
-                &interpreter_image, &process->page_table,
+                &interpreter_image, page_table,
                 (guest_addr_t) interpreter->load_bias,
                 &interpreter_loaded);
         if (load_error != AARCH64_ELF64_LOAD_OK)
@@ -327,7 +384,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
     guest_addr_t signal_trampoline;
     enum guest_page_table_result page_table_error =
             aarch64_linux_map_signal_trampoline(
-                    &process->page_table,
+                    page_table,
                     (guest_addr_t) config->signal_trampoline_page,
                     &signal_trampoline);
     if (page_table_error != GUEST_PAGE_TABLE_OK)
@@ -354,7 +411,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
     struct aarch64_linux_stack_result stack;
     enum aarch64_linux_stack_error stack_error =
             aarch64_linux_build_initial_stack(
-                    &process->page_table, &main_loaded,
+                    page_table, &main_loaded,
                     &stack_config, &stack);
     if (stack_error != AARCH64_LINUX_STACK_OK)
         return create_failed(process, error,
@@ -363,12 +420,12 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
 
     copy_services(process, config, signal_trampoline);
     aarch64_linux_runtime_init(&process->runtime,
-            &process->page_table, main_loaded.brk_end,
+            &process->memory->linux_mm, page_table, main_loaded.brk_end,
             (guest_addr_t) config->brk_limit, &process->services);
     aarch64_linux_task_init(&process->task,
             config->tid, config->task_opaque);
     guest_tlb_init(&process->tlb,
-            &process->page_table.address_space);
+            &page_table->address_space);
     aarch64_runner_init(&process->runner, &process->tlb);
     guest_addr_t initial_pc = interpreter == NULL ?
             main_loaded.entry : interpreter_loaded.entry;
@@ -393,20 +450,57 @@ struct aarch64_linux_process *aarch64_linux_process_fork(
         set_error(error, AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
         return NULL;
     }
-    if (!guest_page_table_clone(&child->page_table,
-            &parent->page_table))
+    child->memory = process_memory_clone(parent->memory);
+    if (child->memory == NULL)
         return create_failed(child, error,
                 AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
 
     copy_fork_services(child, parent);
     child->runtime = parent->runtime;
-    child->runtime.memory.page_table = &child->page_table;
+    child->runtime.memory = &child->memory->linux_mm;
     child->runtime.services = &child->services;
     aarch64_linux_task_init(&child->task,
             config->tid, config->task_opaque);
-    guest_tlb_init(&child->tlb, &child->page_table.address_space);
+    guest_tlb_init(&child->tlb,
+            &child->memory->page_table.address_space);
     aarch64_runner_init(&child->runner, &child->tlb);
     copy_fork_cpu(&child->cpu, &parent->cpu);
+    return child;
+}
+
+struct aarch64_linux_process *aarch64_linux_process_clone_thread(
+        const struct aarch64_linux_process *parent,
+        const struct aarch64_linux_process_thread_config *config,
+        struct aarch64_linux_process_error *error) {
+    set_error(error, AARCH64_LINUX_PROCESS_ERROR_NONE, 0);
+    if (parent == NULL || config == NULL || config->tid <= 0 ||
+            config->tid > AARCH64_LINUX_MAX_TID || config->set_tls > 1) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ARGUMENT, 0);
+        return NULL;
+    }
+
+    struct aarch64_linux_process *child = calloc(1, sizeof(*child));
+    if (child == NULL) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+        return NULL;
+    }
+    process_memory_retain(parent->memory);
+    child->memory = parent->memory;
+    copy_fork_services(child, parent);
+    child->runtime = parent->runtime;
+    child->runtime.services = &child->services;
+    aarch64_linux_task_init(&child->task,
+            config->tid, config->task_opaque);
+    child->task.clear_child_tid =
+            (guest_addr_t) config->clear_child_tid;
+    guest_tlb_init(&child->tlb,
+            &child->memory->page_table.address_space);
+    aarch64_runner_init(&child->runner, &child->tlb);
+    copy_fork_cpu(&child->cpu, &parent->cpu);
+    if (config->stack_pointer != 0)
+        child->cpu.sp = (guest_addr_t) config->stack_pointer;
+    if (config->set_tls != 0)
+        child->cpu.tpidr_el0 = config->tls;
     return child;
 }
 
@@ -414,7 +508,7 @@ void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process) {
     if (process == NULL)
         return;
-    guest_page_table_destroy(&process->page_table);
+    process_memory_release(process->memory);
     free(process);
 }
 
@@ -463,17 +557,18 @@ bool aarch64_linux_process_test_has_owned_state(
             break;
         }
     }
+    const struct guest_page_table *page_table =
+            &process->memory->page_table;
     return owns_syscalls && owns_signals &&
-            process->page_table.address_space.opaque ==
-                    &process->page_table &&
+            page_table->address_space.opaque == page_table &&
             process->tlb.address_space ==
-                    &process->page_table.address_space &&
+                    &page_table->address_space &&
             process->tlb.observed_generation ==
-                    process->page_table.address_space.generation &&
+                    page_table->address_space.generation &&
             (!require_empty_tlb || tlb_is_empty) &&
             process->runner.tlb == &process->tlb &&
-            process->runtime.memory.page_table ==
-                    &process->page_table &&
+            process->runtime.memory == &process->memory->linux_mm &&
+            process->runtime.memory->page_table == page_table &&
             process->runtime.services == &process->services &&
             process->services.signal_trampoline == signal_trampoline &&
             process->task.tid == tid &&
@@ -481,6 +576,15 @@ bool aarch64_linux_process_test_has_owned_state(
             process->task.clear_child_tid == clear_child_tid &&
             process->cpu.mmu == NULL &&
             process->cpu.poked_ptr == NULL && !process->cpu._poked;
+}
+
+bool aarch64_linux_process_test_has_thread_state(
+        const struct aarch64_linux_process *process,
+        guest_addr_t stack_pointer, qword_t tls,
+        guest_addr_t clear_child_tid) {
+    return process != NULL && process->cpu.sp == stack_pointer &&
+            process->cpu.tpidr_el0 == tls &&
+            process->task.clear_child_tid == clear_child_tid;
 }
 #endif
 

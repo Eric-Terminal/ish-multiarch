@@ -230,13 +230,14 @@ int main(void) {
     int task_opaque;
     struct aarch64_linux_task task;
     aarch64_linux_task_init(&task, 1234, &task_opaque);
+    struct guest_linux_mm memory;
     struct aarch64_linux_runtime runtime;
     struct return_probe probe = {0};
     struct guest_linux_signal_service signal_service;
     struct guest_linux_syscall_service syscall_service;
     struct aarch64_linux_services services = make_services(
             &probe, &signal_service, &syscall_service);
-    aarch64_linux_runtime_init(&runtime, &table,
+    aarch64_linux_runtime_init(&runtime, &memory, &table,
             BRK_BASE, BRK_LIMIT, &services);
     probe.expected_task_opaque = &task_opaque;
 

@@ -15,6 +15,9 @@ struct guest_linux_mm {
 void guest_linux_mm_init(struct guest_linux_mm *memory,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit);
+bool guest_linux_mm_clone(struct guest_linux_mm *destination,
+        struct guest_page_table *destination_page_table,
+        const struct guest_linux_mm *source);
 guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
         guest_addr_t requested);
 qword_t guest_linux_mmap(struct guest_linux_mm *memory,

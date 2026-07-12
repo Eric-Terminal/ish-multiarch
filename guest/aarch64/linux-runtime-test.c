@@ -133,8 +133,9 @@ int main(void) {
     const struct aarch64_linux_services services = {
         .syscalls = &sink_service,
     };
+    struct guest_linux_mm memory;
     struct aarch64_linux_runtime runtime;
-    aarch64_linux_runtime_init(&runtime, &table,
+    aarch64_linux_runtime_init(&runtime, &memory, &table,
             BRK_BASE, BRK_LIMIT, &services);
     int host_task;
     struct aarch64_linux_task task;
@@ -292,7 +293,7 @@ int main(void) {
     cpu.x[5] = 0;
     result = aarch64_linux_dispatch_syscall(
             &cpu, &tlb, &runtime, &task);
-    guest_addr_t mapped = (guest_addr_t) runtime.memory.mmap_base;
+    guest_addr_t mapped = (guest_addr_t) runtime.memory->mmap_base;
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
     assert(cpu.x[0] == mapped);

@@ -178,8 +178,9 @@ int main(void) {
         .signals = &signal_service,
         .signal_trampoline = entry,
     };
+    struct guest_linux_mm memory;
     struct aarch64_linux_runtime runtime;
-    aarch64_linux_runtime_init(&runtime, &table,
+    aarch64_linux_runtime_init(&runtime, &memory, &table,
             BRK_BASE, BRK_LIMIT, &services);
     struct aarch64_linux_task task;
     aarch64_linux_task_init(&task, 1234, &table);

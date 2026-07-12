@@ -518,8 +518,109 @@ static void test_exclusive_monitor_reset(void) {
     aarch64_linux_process_destroy(child);
 }
 
+struct thread_fixture {
+    int parent_task;
+    int child_task;
+    unsigned parent_calls;
+    unsigned child_calls;
+};
+
+static qword_t dispatch_thread_fixture(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    struct thread_fixture *fixture = context->runtime_opaque;
+    assert(syscall->number == 600);
+    if (context->task_opaque == &fixture->parent_task) {
+        const byte_t marker = 0x7b;
+        assert(context->user.write(context->user.opaque,
+                DATA_ADDRESS, &marker, sizeof(marker), fault));
+        fixture->parent_calls++;
+    } else {
+        assert(context->task_opaque == &fixture->child_task);
+        byte_t marker;
+        assert(context->user.read(context->user.opaque,
+                DATA_ADDRESS, &marker, sizeof(marker), fault));
+        assert(marker == 0x7b);
+        fixture->child_calls++;
+    }
+    return 0;
+}
+
+static void test_thread_shared_memory(void) {
+    static const dword_t program[] = {
+        UINT32_C(0xd2804b08), UINT32_C(0xd4000001),
+        UINT32_C(0xd2800000), UINT32_C(0xd2800ba8),
+        UINT32_C(0xd4000001),
+    };
+    byte_t file[TEST_FILE_SIZE];
+    make_test_elf(file, program, sizeof(program) / sizeof(program[0]));
+    struct thread_fixture fixture = {0};
+    const struct guest_linux_syscall_service syscall_service = {
+        .runtime_opaque = &fixture,
+        .dispatch = dispatch_thread_fixture,
+    };
+    struct aarch64_linux_process_config config = make_config(
+            file, PARENT_TID, &fixture.parent_task,
+            &syscall_service, NULL);
+    struct aarch64_linux_process *parent =
+            aarch64_linux_process_create(&config, NULL);
+    assert(parent != NULL);
+
+    const guest_addr_t child_stack = STACK_TOP - UINT64_C(0x8000);
+    const qword_t child_tls = UINT64_C(0x123456789abcdef0);
+    const guest_addr_t clear_child_tid = DATA_ADDRESS + 4;
+    const struct aarch64_linux_process_thread_config thread_config = {
+        .tid = CHILD_TID,
+        .set_tls = 1,
+        .task_opaque = &fixture.child_task,
+        .stack_pointer = child_stack,
+        .tls = child_tls,
+        .clear_child_tid = clear_child_tid,
+    };
+    struct aarch64_linux_process_error error = {
+        .stage = UINT32_MAX,
+        .detail = UINT32_MAX,
+    };
+    struct aarch64_linux_process_thread_config invalid = thread_config;
+    invalid.tid = 0;
+    assert(aarch64_linux_process_clone_thread(
+            parent, &invalid, &error) == NULL);
+    assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_ARGUMENT);
+    invalid = thread_config;
+    invalid.set_tls = 2;
+    assert(aarch64_linux_process_clone_thread(
+            parent, &invalid, &error) == NULL);
+    assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_ARGUMENT);
+
+    struct aarch64_linux_process *child =
+            aarch64_linux_process_clone_thread(
+                    parent, &thread_config, &error);
+    assert(child != NULL &&
+            error.stage == AARCH64_LINUX_PROCESS_ERROR_NONE &&
+            error.detail == 0);
+    assert(aarch64_linux_process_test_has_owned_state(
+            child, CHILD_TID, &fixture.child_task,
+            clear_child_tid, SIGNAL_TRAMPOLINE, true));
+    assert(aarch64_linux_process_test_has_thread_state(
+            child, child_stack, child_tls, clear_child_tid));
+
+    run_to_exit(parent, 0);
+    assert(fixture.parent_calls == 1);
+    aarch64_linux_process_destroy(parent);
+    run_to_exit(child, 0);
+    assert(fixture.child_calls == 1);
+    aarch64_linux_process_destroy(child);
+
+    assert(aarch64_linux_process_clone_thread(
+            NULL, &thread_config, &error) == NULL);
+    assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_ARGUMENT);
+    assert(aarch64_linux_process_clone_thread(NULL, NULL, NULL) == NULL);
+}
+
 int main(void) {
     test_post_svc_fork();
     test_exclusive_monitor_reset();
+    test_thread_shared_memory();
     return 0;
 }

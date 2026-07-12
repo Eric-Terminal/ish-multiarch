@@ -89,6 +89,15 @@ struct aarch64_linux_process_fork_config {
     void *task_opaque;
 };
 
+struct aarch64_linux_process_thread_config {
+    pid_t_ tid;
+    dword_t set_tls;
+    void *task_opaque;
+    qword_t stack_pointer;
+    qword_t tls;
+    qword_t clear_child_tid;
+};
+
 struct aarch64_linux_interpreter_image {
     const void *data;
     size_t size;
@@ -140,6 +149,14 @@ struct aarch64_linux_process *aarch64_linux_process_fork(
         const struct aarch64_linux_process *parent,
         const struct aarch64_linux_process_fork_config *config,
         struct aarch64_linux_process_error *error);
+/*
+ * 线程副本拥有独立 CPU、TLB、task 和服务描述符，但共享页表与 mm 状态。
+ * stack_pointer 为 0 时继承当前 SP；set_tls 为 1 时安装 tls。
+ */
+struct aarch64_linux_process *aarch64_linux_process_clone_thread(
+        const struct aarch64_linux_process *parent,
+        const struct aarch64_linux_process_thread_config *config,
+        struct aarch64_linux_process_error *error);
 // required_size 包含末尾 NUL；destination 为 NULL 可只查询长度，返回
 // BUFFER_TOO_SMALL；任何缓冲区不足情形都不写入部分路径。
 struct aarch64_linux_interpreter_path_result
@@ -164,6 +181,10 @@ bool aarch64_linux_process_test_has_owned_state(
         guest_addr_t clear_child_tid,
         guest_addr_t signal_trampoline,
         bool require_empty_tlb);
+bool aarch64_linux_process_test_has_thread_state(
+        const struct aarch64_linux_process *process,
+        guest_addr_t stack_pointer, qword_t tls,
+        guest_addr_t clear_child_tid);
 #endif
 // fault/undefined 不推进 PC；undefined 的 fault.address 保存精确 PC。
 // 调用方排入同步信号后应先调用 poll_signals。

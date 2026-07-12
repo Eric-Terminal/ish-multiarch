@@ -197,11 +197,12 @@ static void apply_signal_result(
 }
 
 void aarch64_linux_runtime_init(struct aarch64_linux_runtime *runtime,
-        struct guest_page_table *page_table, guest_addr_t start_brk,
-        guest_addr_t brk_limit,
+        struct guest_linux_mm *memory, struct guest_page_table *page_table,
+        guest_addr_t start_brk, guest_addr_t brk_limit,
         const struct aarch64_linux_services *services) {
-    guest_linux_mm_init(&runtime->memory, page_table,
-            start_brk, brk_limit);
+    assert(memory != NULL);
+    guest_linux_mm_init(memory, page_table, start_brk, brk_limit);
+    runtime->memory = memory;
     runtime->services = services;
 }
 
@@ -333,17 +334,17 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = (qword_t) task->tid;
     } else if (syscall.number == AARCH64_LINUX_SYS_BRK) {
         result.return_value = guest_linux_brk(
-                &runtime->memory, syscall.arguments[0]);
+                runtime->memory, syscall.arguments[0]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MUNMAP) {
-        result.return_value = guest_linux_munmap(&runtime->memory,
+        result.return_value = guest_linux_munmap(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MMAP) {
-        result.return_value = guest_linux_mmap(&runtime->memory,
+        result.return_value = guest_linux_mmap(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],
                 syscall.arguments[2], syscall.arguments[3],
                 syscall.arguments[4], syscall.arguments[5]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MPROTECT) {
-        result.return_value = guest_linux_mprotect(&runtime->memory,
+        result.return_value = guest_linux_mprotect(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],
                 syscall.arguments[2]);
     } else {

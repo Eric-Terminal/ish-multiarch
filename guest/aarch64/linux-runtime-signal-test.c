@@ -218,8 +218,9 @@ int main(void) {
     struct guest_tlb tlb;
     guest_tlb_init(&tlb, &table.address_space);
 
+    struct guest_linux_mm memory;
     struct aarch64_linux_runtime runtime;
-    aarch64_linux_runtime_init(&runtime, &table,
+    aarch64_linux_runtime_init(&runtime, &memory, &table,
             BRK_BASE, BRK_LIMIT, NULL);
     int task_opaque;
     struct aarch64_linux_task task;

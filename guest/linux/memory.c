@@ -151,6 +151,22 @@ void guest_linux_mm_init(struct guest_linux_mm *memory,
     };
 }
 
+bool guest_linux_mm_clone(struct guest_linux_mm *destination,
+        struct guest_page_table *destination_page_table,
+        const struct guest_linux_mm *source) {
+    assert(destination != NULL && destination_page_table != NULL &&
+            source != NULL && source->page_table != NULL);
+    bool locked = guest_page_table_read_lock(source->page_table);
+    bool result = guest_page_table_clone_locked(
+            destination_page_table, source->page_table);
+    if (result) {
+        *destination = *source;
+        destination->page_table = destination_page_table;
+    }
+    guest_page_table_read_unlock(source->page_table, locked);
+    return result;
+}
+
 static guest_addr_t guest_linux_brk_unlocked(struct guest_linux_mm *memory,
         guest_addr_t requested) {
     if (requested == 0)

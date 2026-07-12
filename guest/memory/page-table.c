@@ -66,17 +66,11 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
 }
 
 static bool address_space_read_lock(void *opaque) {
-    struct guest_page_table *table = opaque;
-    if (!atomic_load_explicit(&table->concurrent, memory_order_acquire))
-        return false;
-    assert(pthread_rwlock_rdlock(&table->lock) == 0);
-    return true;
+    return guest_page_table_read_lock(opaque);
 }
 
 static void address_space_read_unlock(void *opaque, bool locked) {
-    struct guest_page_table *table = opaque;
-    if (locked)
-        assert(pthread_rwlock_unlock(&table->lock) == 0);
+    guest_page_table_read_unlock(opaque, locked);
 }
 
 static bool address_space_write_lock(void *opaque) {
@@ -182,6 +176,19 @@ void guest_page_table_enable_concurrency(struct guest_page_table *table) {
     atomic_store_explicit(&table->concurrent, true, memory_order_release);
 }
 
+bool guest_page_table_read_lock(struct guest_page_table *table) {
+    if (!atomic_load_explicit(&table->concurrent, memory_order_acquire))
+        return false;
+    assert(pthread_rwlock_rdlock(&table->lock) == 0);
+    return true;
+}
+
+void guest_page_table_read_unlock(
+        struct guest_page_table *table, bool locked) {
+    if (locked)
+        assert(pthread_rwlock_unlock(&table->lock) == 0);
+}
+
 bool guest_page_table_write_lock(struct guest_page_table *table) {
     if (!atomic_load_explicit(&table->concurrent, memory_order_acquire))
         return false;
@@ -252,19 +259,16 @@ static struct guest_page_table_node *clone_level1(
     return copy;
 }
 
-bool guest_page_table_clone(struct guest_page_table *destination,
+bool guest_page_table_clone_locked(struct guest_page_table *destination,
         const struct guest_page_table *source) {
     if (destination == NULL || destination == source)
         return false;
     *destination = (struct guest_page_table) {0};
     if (source == NULL || source->root == NULL)
         return false;
-    bool source_locked = address_space_read_lock((void *) source);
     if (!guest_page_table_init(destination,
-            source->address_space.address_bits)) {
-        address_space_read_unlock((void *) source, source_locked);
+            source->address_space.address_bits))
         return false;
-    }
 
     for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
         if (source->root->entries[i] == NULL)
@@ -273,14 +277,25 @@ bool guest_page_table_clone(struct guest_page_table *destination,
                 clone_level1(source->root->entries[i]);
         if (destination->root->entries[i] == NULL) {
             guest_page_table_destroy(destination);
-            address_space_read_unlock((void *) source, source_locked);
             return false;
         }
     }
     destination->address_space.generation =
             source->address_space.generation;
-    address_space_read_unlock((void *) source, source_locked);
     return true;
+}
+
+bool guest_page_table_clone(struct guest_page_table *destination,
+        const struct guest_page_table *source) {
+    if (destination == NULL || source == NULL || source->root == NULL ||
+            destination == source)
+        return false;
+    bool locked = guest_page_table_read_lock(
+            (struct guest_page_table *) source);
+    bool result = guest_page_table_clone_locked(destination, source);
+    guest_page_table_read_unlock(
+            (struct guest_page_table *) source, locked);
+    return result;
 }
 
 static bool valid_page(const struct guest_page_table *table,

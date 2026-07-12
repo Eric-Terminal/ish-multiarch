@@ -159,8 +159,9 @@ int main(void) {
     const struct aarch64_linux_services services = {
         .syscalls = &syscall_service,
     };
+    struct guest_linux_mm memory;
     struct aarch64_linux_runtime runtime;
-    aarch64_linux_runtime_init(&runtime, &table, loaded.brk_end,
+    aarch64_linux_runtime_init(&runtime, &memory, &table, loaded.brk_end,
             loaded.brk_end + 16 * GUEST_MEMORY_PAGE_SIZE, &services);
     struct aarch64_linux_task task;
     aarch64_linux_task_init(&task, 1, NULL);
