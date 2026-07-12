@@ -3,6 +3,17 @@
 
 #include "misc.h"
 
+struct aarch64_linux_iovec {
+    qword_t base;
+    qword_t length;
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_iovec) == 16 &&
+        _Alignof(struct aarch64_linux_iovec) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_iovec, base) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_iovec, length) == 8,
+        "AArch64 Linux iovec ABI 必须固定为两个连续 qword");
+
 struct aarch64_linux_stat {
     qword_t dev;
     qword_t ino;

@@ -157,6 +157,16 @@ struct fd *f_get_task(struct task *task, fd_t f) {
     return fd;
 }
 
+struct fd *f_get_task_retain(struct task *task, fd_t f) {
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, f);
+    if (fd != NULL)
+        fd_retain(fd);
+    unlock(&table->lock);
+    return fd;
+}
+
 struct fd *f_get(fd_t f) {
     return f_get_task(current, f);
 }

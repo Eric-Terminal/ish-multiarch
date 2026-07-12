@@ -29,6 +29,9 @@ void fs_chdir(struct fs_info *fs, struct fd *pwd);
 // fd_ops 与 fs_ops 仍可读取线程局部 current；调用方必须在 task 自己的执行线程内使用这些入口。
 ssize_t file_read_task(struct task *task, fd_t fd, void *buffer, size_t size);
 ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t size);
+ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size);
+int file_write_check_task(struct task *task, fd_t fd);
+int file_write_check_fd(struct fd *fd);
 int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
 int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);

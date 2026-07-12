@@ -39,9 +39,7 @@ ssize_t file_read_task(struct task *task, fd_t fd_number,
     return result;
 }
 
-ssize_t file_write_task(struct task *task, fd_t fd_number,
-        const void *buffer, size_t size) {
-    struct fd *fd = f_get_task(task, fd_number);
+ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
     if (fd == NULL)
         return _EBADF;
 
@@ -54,6 +52,29 @@ ssize_t file_write_task(struct task *task, fd_t fd_number,
     if (result > 0)
         fd->ops->lseek(fd, result, LSEEK_CUR);
     return result;
+}
+
+ssize_t file_write_task(struct task *task, fd_t fd_number,
+        const void *buffer, size_t size) {
+    return file_write_fd(f_get_task(task, fd_number), buffer, size);
+}
+
+int file_write_check_fd(struct fd *fd) {
+    if (fd == NULL)
+        return _EBADF;
+    int flags = fd_getflags(fd);
+    if (flags < 0)
+        return flags;
+    int access_mode = flags & O_ACCMODE_;
+    if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
+        return _EBADF;
+    if (fd->ops->write == NULL && fd->ops->pwrite == NULL)
+        return _EBADF;
+    return 0;
+}
+
+int file_write_check_task(struct task *task, fd_t fd_number) {
+    return file_write_check_fd(f_get_task(task, fd_number));
 }
 
 static int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
@@ -138,6 +159,6 @@ fd_t file_openat_task(struct task *task, fd_t dirfd,
         return _ENOTDIR;
     struct fd *fd = generic_openat_task(task, at, path, flags, mode);
     if (IS_ERR(fd))
-        return PTR_ERR(fd);
+        return (fd_t) PTR_ERR(fd);
     return f_install_task(task, fd, flags);
 }

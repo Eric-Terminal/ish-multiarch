@@ -64,6 +64,13 @@ int main(void) {
             "目标安装不得修改当前任务 fd 表");
     CHECK(f_get_task(&target_task, 3) == target_fds[3],
             "查询边界必须使用目标 fd 表尺寸");
+    int retained_close_count = closed_fds;
+    struct fd *retained = f_get_task_retain(&target_task, 2);
+    CHECK(retained == target_fds[2], "保留查询返回目标 fd 的独立引用");
+    CHECK(fd_close(retained) == 0 && closed_fds == retained_close_count,
+            "释放独立引用不得关闭表中仍持有的 fd");
+    CHECK(f_get_task_retain(&target_task, 99) == NULL,
+            "保留查询拒绝越界描述符");
     CHECK(f_get_task(&target_task, -1) == NULL && f_get_task(&target_task, 4) == NULL,
             "目标查询拒绝负数和越界描述符");
     current = &target_task;

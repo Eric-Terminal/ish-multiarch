@@ -188,6 +188,8 @@ struct fd *fdtable_get(struct fdtable *table, fd_t f);
 
 // 返回借用指针；与兼容接口相同，不延长 fd 生命周期。
 struct fd *f_get_task(struct task *task, fd_t f);
+// 返回独立引用；调用方完成操作后必须 fd_close。
+struct fd *f_get_task_retain(struct task *task, fd_t f);
 struct fd *f_get(fd_t f);
 // 接管 fd 引用：成功时交给目标表，失败时销毁；flags 只处理 O_CLOEXEC 与 O_NONBLOCK。
 fd_t f_install_task(struct task *task, struct fd *fd, int flags);

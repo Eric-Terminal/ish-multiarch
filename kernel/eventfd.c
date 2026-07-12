@@ -13,6 +13,7 @@ int_t sys_eventfd2(uint_t initval, int_t flags) {
     if (fd == NULL)
         return _ENOMEM;
     fd->eventfd.val = initval;
+    fd->flags = O_RDWR_;
     return f_install(fd, flags);
 }
 int_t sys_eventfd(uint_t initval) {

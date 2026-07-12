@@ -14,9 +14,19 @@
 
 #define AARCH64_LINUX_MAX_RW_COUNT UINT64_C(0x7ffff000)
 #define AARCH64_LINUX_IO_CHUNK_SIZE 4096
+#define AARCH64_LINUX_IOV_MAX UINT64_C(1024)
+#define AARCH64_LINUX_IOV_TRANSACTION_LIMIT UINT64_C(0x100000)
+#define AARCH64_LINUX_USER_ADDRESS_LIMIT \
+    (AARCH64_LINUX_USER_ADDRESS_MAX + UINT64_C(1))
 #define AARCH64_LINUX_O_LARGEFILE UINT32_C(0x8000)
 
-// 该 host-buffer 引导通道按块限制内存；消息型 fd 接入时必须改用保留消息边界的单次 I/O 通道。
+// 标量 host-buffer 通道按块限制内存；向量写入则先聚合，以保留一次 fd 操作的消息边界。
+
+_Static_assert(SIZE_MAX >= AARCH64_LINUX_MAX_RW_COUNT,
+        "Apple host 的 size_t 必须容纳 Linux MAX_RW_COUNT");
+_Static_assert(AARCH64_LINUX_IOV_TRANSACTION_LIMIT <=
+        AARCH64_LINUX_MAX_RW_COUNT,
+        "向量事务缓冲上限不得超过 Linux MAX_RW_COUNT");
 
 enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETCWD = 17,
@@ -24,6 +34,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
+    AARCH64_LINUX_SYS_WRITEV = 66,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
@@ -61,8 +72,66 @@ static qword_t user_range_error(struct guest_linux_user_fault *fault,
     return syscall_result(_EFAULT);
 }
 
-static bool user_range_fits(qword_t address, dword_t size) {
+static bool user_range_fits(qword_t address, qword_t size) {
     return size == 0 || address <= UINT64_MAX - (qword_t) size + 1;
+}
+
+static bool aarch64_user_range_fits(qword_t address, qword_t size) {
+    return address <= AARCH64_LINUX_USER_ADDRESS_LIMIT &&
+            size <= AARCH64_LINUX_USER_ADDRESS_LIMIT - address;
+}
+
+static int copy_iovecs_from_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, qword_t count,
+        struct aarch64_linux_iovec **vectors_out, qword_t *total_out,
+        struct guest_linux_user_fault *fault) {
+    *vectors_out = NULL;
+    *total_out = 0;
+    if (count > AARCH64_LINUX_IOV_MAX)
+        return _EINVAL;
+    if (count == 0)
+        return 0;
+
+    dword_t byte_count = (dword_t) count *
+            (dword_t) sizeof(struct aarch64_linux_iovec);
+    if (!aarch64_user_range_fits(address, byte_count)) {
+        user_range_error(fault, address, GUEST_MEMORY_READ);
+        return _EFAULT;
+    }
+    struct aarch64_linux_iovec *vectors = malloc(byte_count);
+    if (vectors == NULL)
+        return _ENOMEM;
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            address, vectors, byte_count, fault)) {
+        free(vectors);
+        return _EFAULT;
+    }
+
+    qword_t total = 0;
+    for (size_t index = 0; index < (size_t) count; index++) {
+        qword_t length = vectors[index].length;
+        if ((sqword_t) length < 0) {
+            free(vectors);
+            return _EINVAL;
+        }
+        qword_t checked_length = length;
+        if (count == 1 && checked_length > AARCH64_LINUX_MAX_RW_COUNT)
+            checked_length = AARCH64_LINUX_MAX_RW_COUNT;
+        if (!aarch64_user_range_fits(
+                vectors[index].base, checked_length)) {
+            user_range_error(fault, vectors[index].base,
+                    GUEST_MEMORY_READ);
+            free(vectors);
+            return _EFAULT;
+        }
+        qword_t available = AARCH64_LINUX_MAX_RW_COUNT - total;
+        total += length < available ? length : available;
+    }
+    *vectors_out = vectors;
+    *total_out = total;
+    return 0;
 }
 
 static qword_t copy_path_from_user(
@@ -335,6 +404,78 @@ static qword_t dispatch_write(
         address += (qword_t) written;
     }
     return completed;
+}
+
+static qword_t dispatch_writev(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_write_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+
+    struct aarch64_linux_iovec *vectors;
+    qword_t total;
+    error = copy_iovecs_from_user(context,
+            syscall->arguments[1], syscall->arguments[2],
+            &vectors, &total, fault);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+    if (total == 0) {
+        free(vectors);
+        fd_close(target);
+        return 0;
+    }
+    if (total > AARCH64_LINUX_IOV_TRANSACTION_LIMIT) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_ENOMEM);
+    }
+
+    // 有界聚合后只执行一次 fd 写入；既保留消息边界，也避免 watchOS 出现不可控内存峰值。
+    byte_t *buffer = malloc((size_t) total);
+    if (buffer == NULL) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_ENOMEM);
+    }
+    qword_t copied = 0;
+    for (size_t index = 0;
+            index < (size_t) syscall->arguments[2] && copied < total;
+            index++) {
+        qword_t length = vectors[index].length;
+        qword_t remaining = total - copied;
+        if (length > remaining)
+            length = remaining;
+        if (length == 0)
+            continue;
+        assert(length <= UINT32_MAX);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                vectors[index].base, buffer + (size_t) copied,
+                (dword_t) length, fault)) {
+            free(buffer);
+            free(vectors);
+            fd_close(target);
+            return syscall_result(_EFAULT);
+        }
+        copied += length;
+    }
+    assert(copied == total);
+    ssize_t written = file_write_fd(target, buffer, (size_t) total);
+    assert(written < 0 || (qword_t) written <= total);
+    free(buffer);
+    free(vectors);
+    fd_close(target);
+    return syscall_result(written);
 }
 
 static struct aarch64_linux_stat pack_stat(const struct statbuf *source) {
@@ -641,6 +782,8 @@ static qword_t dispatch_syscall(
             return dispatch_read(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITE:
             return dispatch_write(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_WRITEV:
+            return dispatch_writev(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_NEWFSTATAT:
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:

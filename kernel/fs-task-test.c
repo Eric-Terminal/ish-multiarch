@@ -179,6 +179,9 @@ int main(void) {
     CHECK(decoy_fd != NULL && target_fd != NULL && positioned_fd != NULL &&
             directory_fd != NULL && empty_fd != NULL && decoy_pwd != NULL &&
             target_pwd != NULL, "测试 fd 创建成功");
+    target_fd->flags = O_RDWR_;
+    positioned_fd->flags = O_WRONLY_;
+    empty_fd->flags = O_RDWR_;
     decoy.fs.pwd = decoy_pwd;
     target.fs.pwd = target_pwd;
     CHECK(f_install_task(&decoy.task, decoy_fd, 0) == 0, "诱饵 fd 安装成功");
@@ -197,6 +200,16 @@ int main(void) {
             "host-buffer 写入使用显式目标任务");
     CHECK(target_io.output_size == 5 && memcmp(target_io.output, "write", 5) == 0 &&
             decoy_io.write_calls == 0, "显式写入只修改目标 fd");
+    CHECK(file_write_check_task(&target.task, 0) == 0 &&
+            file_write_check_task(&target.task, 1) == 0,
+            "写入预检接受可写与读写 fd");
+    CHECK(file_write_check_task(&target.task, 3) == _EBADF &&
+            file_write_check_task(&target.task, 99) == _EBADF,
+            "写入预检拒绝无写操作与无效 fd");
+    target_fd->flags = O_RDONLY_;
+    CHECK(file_write_check_task(&target.task, 0) == _EBADF,
+            "写入预检拒绝只读 fd");
+    target_fd->flags = O_RDWR_;
 
     struct statbuf stat;
     memset(&stat, 0xff, sizeof(stat));

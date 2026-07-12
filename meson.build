@@ -225,6 +225,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_syscall_service', aarch64_syscall_service_test)
 
+        aarch64_file_syscall_test = executable(
+            'aarch64_file_syscall_test',
+            'kernel/aarch64-file-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_file_syscall', aarch64_file_syscall_test)
+
         aarch64_process_syscall_test = executable(
             'aarch64_process_syscall_test',
             'kernel/aarch64-process-syscall-test.c',
