@@ -240,6 +240,7 @@ static int probe_close(struct fd *fd) {
     struct fd_state *state = fd->data;
     if (state->allocated) {
         state->kernel->opened_closes++;
+        free((void *) state->path);
         free(state);
     }
     return 0;
@@ -258,17 +259,26 @@ static struct fd *probe_open(struct mount *mount,
     strcpy(probe->last_path, path);
     probe->last_flags = flags;
     probe->last_mode = mode;
+    if (strcmp(path, "/work/missing") == 0)
+        return ERR_PTR(_ENOENT);
 
     struct fd_state *state = malloc(sizeof(*state));
     if (state == NULL)
         return ERR_PTR(_ENOMEM);
+    char *saved_path = strdup(path);
+    if (saved_path == NULL) {
+        free(state);
+        return ERR_PTR(_ENOMEM);
+    }
     struct fd *fd = fd_create(&probe_fd_ops);
     if (fd == NULL) {
+        free(saved_path);
         free(state);
         return ERR_PTR(_ENOMEM);
     }
     *state = (struct fd_state) {
         .kernel = probe,
+        .path = saved_path,
         .allocated = true,
     };
     fd->data = state;
@@ -405,7 +415,7 @@ static bool init_fixture(struct task_fixture *fixture,
 static int destroy_fixture(struct task_fixture *fixture) {
     current = &fixture->task;
     fdtable_release(fixture->task.files);
-    fd_close(fixture->pwd);
+    fd_close(fixture->fs.pwd);
     fd_close(fixture->root);
     current = NULL;
     mount_release(fixture->mount);
@@ -1063,6 +1073,86 @@ int main(void) {
     CHECK(result == encoded_error(_E2BIG) && memory.write_calls == 0 &&
             fixture.completion.disposition == GUEST_LINUX_SYSCALL_RETURN,
             "execve 对 argv、envp、字符串和指针表应用同一 ARG_MAX 预算");
+
+    static const char chdir_path[] = "next";
+    char cwd[MAX_PATH];
+    memcpy(memory.bytes + path_offset, chdir_path, sizeof(chdir_path));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + 2;
+    opens_before = kernel.opens;
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_EFAULT) && kernel.opens == opens_before &&
+            memory.read_calls == 3 && memory.read_bytes == 2 &&
+            memory.max_read_size == 1 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "chdir 路径故障保持精确 guest fault 且不打开目录");
+
+    memset(memory.bytes + path_offset, 'x', MAX_PATH);
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_ENAMETOOLONG) &&
+            memory.read_calls == MAX_PATH && memory.read_bytes == MAX_PATH &&
+            memory.max_read_size == 1 && kernel.opens == opens_before &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work") == 0,
+            "chdir 对 4096 字节无 NUL 路径返回 ENAMETOOLONG");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            kernel.opens == opens_before,
+            "chdir 空路径返回 ENOENT 且不打开目录");
+
+    static const char missing_path[] = "missing";
+    memcpy(memory.bytes + path_offset, missing_path, sizeof(missing_path));
+    reset_user_access(&memory);
+    closes_before = kernel.opened_closes;
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_ENOENT) &&
+            kernel.opens == opens_before + 1 &&
+            kernel.opened_closes == closes_before &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work") == 0,
+            "chdir 对缺失目录返回 ENOENT 且保持 cwd");
+
+    memcpy(memory.bytes + path_offset, chdir_path, sizeof(chdir_path));
+    kernel.stat.mode = S_IFREG;
+    reset_user_access(&memory);
+    closes_before = kernel.opened_closes;
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_ENOTDIR) &&
+            kernel.opens == opens_before + 2 &&
+            kernel.opened_closes == closes_before + 1 &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work") == 0,
+            "chdir 在权限检查前拒绝普通文件、释放 fd 并保持 cwd");
+
+    kernel.stat.mode = S_IFDIR | 0100;
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + sizeof(chdir_path);
+    opens_before = kernel.opens;
+    closes_before = kernel.opened_closes;
+    result = invoke(&fixture, &memory, &fault, 49,
+            USER_BASE + path_offset, UINT64_C(0x1111222233334444),
+            UINT64_C(0x5555666677778888), UINT64_MAX);
+    CHECK(result == 0 && kernel.opens == opens_before + 1 &&
+            kernel.opened_closes == closes_before &&
+            strcmp(kernel.last_path, "/work/next") == 0 &&
+            kernel.last_flags == O_DIRECTORY_ &&
+            memory.read_calls == sizeof(chdir_path) &&
+            memory.read_bytes == sizeof(chdir_path) &&
+            memory.max_read_size == 1 &&
+            fixture.fs.pwd != fixture.pwd &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work/next") == 0,
+            "chdir 更新目标 cwd 并接管新目录 fd 的唯一引用");
 
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 999, 0, 0, 0, 0);

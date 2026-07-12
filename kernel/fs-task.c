@@ -140,6 +140,14 @@ ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size) {
     return (ssize_t) length;
 }
 
+int file_chdir_task(struct task *task, const char *path) {
+    struct fd *directory = generic_open_directory_task(task, path);
+    if (IS_ERR(directory))
+        return PTR_ERR(directory);
+    fs_chdir(task->fs, directory);
+    return 0;
+}
+
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)

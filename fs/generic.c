@@ -65,7 +65,12 @@ static struct fd *generic_openat_task_access(struct task *task,
     fd->type = stat.mode & S_IFMT;
     fd->flags = flags;
 
-    if (accmode == AC_X && !(stat.mode & 0111))
+    // 目录查找先锁定对象类型，避免把普通文件的权限错误误报给调用方。
+    err = _ENOTDIR;
+    if (!S_ISDIR(fd->type) && flags & O_DIRECTORY_)
+        goto error;
+
+    if (accmode == AC_X && !(flags & O_DIRECTORY_) && !(stat.mode & 0111))
         err = _EACCES;
     else
         err = access_check_task(task, &stat, accmode);
@@ -89,9 +94,6 @@ static struct fd *generic_openat_task_access(struct task *task,
     err = _EISDIR;
     if (S_ISDIR(fd->type) && flags & (O_RDWR_ | O_WRONLY_))
         goto error;
-    err = _ENOTDIR;
-    if (!S_ISDIR(fd->type) && flags & O_DIRECTORY_)
-        goto error;
     return fd;
 
 error:
@@ -113,6 +115,11 @@ struct fd *generic_openat_exec_task(struct task *task,
         struct fd *at, const char *path) {
     return generic_openat_task_access(
             task, at, path, O_RDONLY_, 0, AC_X);
+}
+
+struct fd *generic_open_directory_task(struct task *task, const char *path) {
+    return generic_openat_task_access(
+            task, AT_PWD, path, O_DIRECTORY_, 0, AC_X);
 }
 
 struct fd *generic_open_exec(const char *path) {

@@ -459,6 +459,58 @@ int main(void) {
             strcmp(probe.last_unlink_path, "/decoy/compat") == 0,
             "兼容 unlinkat 入口仍使用 current 的 cwd");
 
+    char cwd[MAX_PATH];
+    opens_before = probe.opens;
+    CHECK(file_chdir_task(&target.task, "") == _ENOENT &&
+            probe.opens == opens_before &&
+            fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/target") == 0,
+            "chdir 空路径不打开对象且保持目标 cwd");
+    closes_before = probe.closes;
+    probe.file_mode = S_IFDIR;
+    CHECK(file_chdir_task(&target.task, "blocked") == _EACCES &&
+            probe.opens == opens_before + 1 &&
+            probe.closes == closes_before + 1 &&
+            fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/target") == 0,
+            "chdir 拒绝没有执行权限的目录且保持目标 cwd");
+
+    opens_before = probe.opens;
+    closes_before = probe.closes;
+    probe.file_mode = S_IFREG;
+    CHECK(file_chdir_task(&target.task, "executable") == _ENOTDIR &&
+            probe.opens == opens_before + 1 &&
+            probe.closes == closes_before + 1 &&
+            fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/target") == 0,
+            "chdir 在权限检查前以 ENOTDIR 拒绝普通文件");
+
+    uid_t_ target_euid = target.task.euid;
+    target.task.euid = 0;
+    opens_before = probe.opens;
+    closes_before = probe.closes;
+    probe.file_mode = S_IFDIR;
+    struct fd *root_directory = generic_open_directory_task(
+            &target.task, "root-search");
+    CHECK(!IS_ERR(root_directory) && probe.opens == opens_before + 1,
+            "root 可按目录搜索语义打开 mode 000 目录");
+    fd_close(root_directory);
+    CHECK(probe.closes == closes_before + 1,
+            "root 目录搜索探针释放唯一 fd 引用");
+    target.task.euid = target_euid;
+
+    probe.file_mode = S_IFDIR | 0100;
+    CHECK(file_chdir_task(&target.task, "link") == 0 &&
+            strcmp(probe.last_path, "/sandbox/absolute") == 0 &&
+            probe.last_flags == O_DIRECTORY_,
+            "chdir 跟随末端符号链接并允许仅有执行权限的目录");
+    target.pwd = target.fs.pwd;
+    CHECK(fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/sandbox/absolute") == 0 &&
+            fs_getcwd_task(&decoy.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/decoy") == 0,
+            "chdir 只更新目标任务 cwd，诱饵任务保持不变");
+
     current = NULL;
     fdtable_release(decoy.task.files);
     fdtable_release(target.task.files);
@@ -466,7 +518,7 @@ int main(void) {
     fd_close(decoy.root);
     fd_close(target.pwd);
     fd_close(target.root);
-    CHECK(probe.opens == 6 && probe.closes == 6,
+    CHECK(probe.opens == 10 && probe.closes == 10,
             "所有成功、拒绝和超限打开都恰好关闭一次");
     CHECK(mount->refcount == 1, "清理阶段仅保留测试持有的 mount 引用");
     mount_release(mount);

@@ -43,6 +43,7 @@ int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
 int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
+int file_chdir_task(struct task *task, const char *path);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
 int file_unlinkat_task(struct task *task, fd_t dirfd,
@@ -84,6 +85,7 @@ struct fd *generic_openat_task(struct task *task, struct fd *at,
         const char *path, int flags, int mode);
 struct fd *generic_openat_exec_task(struct task *task,
         struct fd *at, const char *path);
+struct fd *generic_open_directory_task(struct task *task, const char *path);
 struct fd *generic_openat(struct fd *at, const char *path, int flags, int mode);
 int generic_getpath(struct fd *fd, char *buf);
 int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw);
