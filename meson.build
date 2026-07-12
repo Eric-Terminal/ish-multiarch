@@ -471,7 +471,8 @@ endforeach
 
 if not meson.is_cross_build()
     # test for floating point library
-    float80_test = executable('float80_test', ['emu/float80.c', 'emu/float80-test.c'], dependencies: [libm])
+    float80_test = executable('float80_test',
+        ['emu/float80.c', 'emu/fpu.c', 'emu/float80-test.c'], dependencies: [libm])
     test('float80', float80_test)
 
     fiber_cell_test = executable('fiber_cell_test', 'asbestos/cell-test.c', include_directories: includes)

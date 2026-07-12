@@ -81,7 +81,7 @@ void fpu_ist64(struct cpu_state *cpu, int64_t *i) {
 }
 
 void fpu_stm32(struct cpu_state *cpu, float32 *f) {
-    *f = f80_to_double(ST(0));
+    *f = (float32) f80_to_double(ST(0));
 }
 void fpu_stm64(struct cpu_state *cpu, float64 *f) {
     *f = f80_to_double(ST(0));
@@ -110,8 +110,15 @@ FCMOVcc(nu, !cpu->pf)
 // math
 
 void fpu_prem(struct cpu_state *cpu) {
-    ST(0) = f80_mod(ST(0), ST(1));
-    cpu->c2 = 0; // say we finished the entire remainder
+    struct f80_mod_result result = f80_mod(ST(0), ST(1));
+    ST(0) = result.value;
+    // 本模拟器单次计算完整余数，不暴露硬件相关的中间余数步骤。
+    cpu->c2 = 0;
+    if (result.quotient_valid) {
+        cpu->c0 = (result.quotient_low >> 2) & 1;
+        cpu->c3 = (result.quotient_low >> 1) & 1;
+        cpu->c1 = result.quotient_low & 1;
+    }
 }
 
 void fpu_scale(struct cpu_state *cpu) {
@@ -352,8 +359,8 @@ void fpu_stenv32(struct cpu_state *cpu, struct fpu_env32 *env) {
     env->operand = env->operand_selector = 0;
 }
 void fpu_ldenv32(struct cpu_state *cpu, struct fpu_env32 *env) {
-    cpu->fcw = env->control;
-    cpu->fsw = env->status;
+    cpu->fcw = (word_t) env->control;
+    cpu->fsw = (word_t) env->status;
 }
 
 struct fpu_state32 {

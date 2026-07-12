@@ -537,13 +537,61 @@ float80 f80_div(float80 a, float80 b) {
     return f;
 }
 
-float80 f80_mod(float80 x, float80 y) {
-    float80 quotient = f80_div(x, y);
-    enum f80_rounding_mode old_mode = f80_rounding_mode;
-    f80_rounding_mode = round_chop;
-    quotient = f80_round(quotient);
-    f80_rounding_mode = old_mode;
-    return f80_sub(x, f80_mul(quotient, y));
+struct f80_mod_result f80_mod(float80 x, float80 y) {
+    struct f80_mod_result result = {.value = F80_NAN};
+
+    // 无法形成截断商的输入只返回无效结果，并沿用二元算术的 NaN 选择顺序。
+    if (!f80_is_supported(x) || !f80_is_supported(y))
+        return result;
+    if (f80_isnan(x) && f80_isnan(y) && x.sign && !y.sign)
+        result.value = y;
+    else if (f80_isnan(x))
+        result.value = x;
+    else if (f80_isnan(y))
+        result.value = y;
+    if (f80_isnan(x) || f80_isnan(y))
+        return result;
+    if (f80_isinf(x) || f80_iszero(y))
+        return result;
+
+    result.quotient_valid = true;
+    if (f80_isinf(y) || f80_iszero(x)) {
+        result.value = x;
+        return result;
+    }
+
+    int x_unit = unbias_denormal(x.exp) - 63;
+    int y_unit = unbias_denormal(y.exp) - 63;
+    int delta = x_unit - y_unit;
+    if (delta < 0) {
+        result.value = x;
+        return result;
+    }
+
+    uint64_t remainder = x.signif % y.signif;
+    result.quotient_low = (uint8_t) ((x.signif / y.signif) & 7);
+    // 每轮追加一个二进制商位，同时保持 remainder < y.signif。
+    for (int bit = 0; bit < delta; bit++) {
+        uint128_t doubled = (uint128_t) remainder << 1;
+        uint8_t quotient_bit = doubled >= y.signif;
+        if (quotient_bit)
+            doubled -= y.signif;
+        remainder = (uint64_t) doubled;
+        result.quotient_low = (uint8_t) (
+            ((unsigned) result.quotient_low << 1 | quotient_bit) & 7);
+    }
+
+    if (remainder == 0) {
+        result.value = (float80) {.sign = x.sign};
+        return result;
+    }
+    result.value = (float80) {
+        .signif = remainder,
+        .exp = y.exp,
+        .sign = x.sign,
+    };
+    result.value = f80_normalize(result.value);
+    return result;
 }
 
 bool f80_uncomparable(float80 a, float80 b) {

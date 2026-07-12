@@ -30,8 +30,12 @@ float80 f80_add(float80 a, float80 b);
 float80 f80_sub(float80 a, float80 b);
 float80 f80_mul(float80 a, float80 b);
 float80 f80_div(float80 a, float80 b);
-float80 f80_mod(float80 a, float80 b);
-float80 f80_rem(float80 a, float80 b);
+struct f80_mod_result {
+    float80 value;
+    uint8_t quotient_low;
+    bool quotient_valid;
+};
+struct f80_mod_result f80_mod(float80 a, float80 b);
 
 bool f80_lt(float80 a, float80 b);
 bool f80_eq(float80 a, float80 b);

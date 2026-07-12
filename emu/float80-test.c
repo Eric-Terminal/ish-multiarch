@@ -10,7 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cpu.h"
 #include "float80.h"
+#include "fpu.h"
 
 #if defined(__clang__)
 #pragma STDC FENV_ACCESS ON
@@ -74,6 +76,19 @@ static void check_f80(const char *name, float80 actual, float80 expected) {
     check(f80_same(actual, expected),
         "%s：实际 %04" PRIx16 ":%016" PRIx64 "，期望 %04" PRIx16 ":%016" PRIx64,
         name, actual.signExp, actual.signif, expected.signExp, expected.signif);
+}
+
+static void check_mod_result(const char *name, struct f80_mod_result actual,
+        float80 expected, uint8_t quotient_low, bool quotient_valid) {
+    check_f80(name, actual.value, expected);
+    check(actual.quotient_valid == quotient_valid,
+        "%s：商有效性实际为 %d，期望为 %d",
+        name, actual.quotient_valid, quotient_valid);
+    if (quotient_valid) {
+        check(actual.quotient_low == quotient_low,
+            "%s：商低三位实际为 %u，期望为 %u",
+            name, (unsigned) actual.quotient_low, (unsigned) quotient_low);
+    }
 }
 
 static double double_from_bits(uint64_t bits) {
@@ -408,6 +423,129 @@ static void test_add_subnormal_golden(void) {
     suite_end("正常数与子正常数加减边界");
 }
 
+static void check_mod_case(const char *name, float80 x, float80 y,
+        float80 expected, uint8_t quotient_low, bool quotient_valid,
+        enum f80_rounding_mode mode) {
+    char label[192];
+    snprintf(label, sizeof(label), "%s（%s）", name, rounding_name(mode));
+    check_mod_result(label, f80_mod(x, y), expected, quotient_low, quotient_valid);
+}
+
+static void check_fpu_prem_case(const char *name, float80 x, float80 y,
+        float80 expected, uint8_t quotient_low, bool quotient_valid,
+        enum f80_rounding_mode mode) {
+    struct cpu_state cpu = {0};
+    cpu.fp[0] = x;
+    cpu.fp[1] = y;
+    cpu.c0 = 1;
+    cpu.c1 = 0;
+    cpu.c2 = 1;
+    cpu.c3 = 1;
+
+    fpu_prem(&cpu);
+
+    char label[192];
+    snprintf(label, sizeof(label), "%s（%s）", name, rounding_name(mode));
+    check_f80(label, cpu.fp[0], expected);
+    check(cpu.c2 == 0, "%s：完成态 C2 未清零", label);
+    if (quotient_valid) {
+        check(cpu.c0 == ((quotient_low >> 2) & 1) &&
+                cpu.c3 == ((quotient_low >> 1) & 1) &&
+                cpu.c1 == (quotient_low & 1),
+            "%s：商位实际 C0=%u C3=%u C1=%u，期望商低三位为 %u",
+            label, cpu.c0, cpu.c3, cpu.c1, (unsigned) quotient_low);
+    } else {
+        check(cpu.c0 == 1 && cpu.c1 == 0 && cpu.c3 == 1,
+            "%s：无效商改写了 C0/C1/C3", label);
+    }
+}
+
+static void test_mod_golden(void) {
+    float80 zero = f80_bits(0, 0x0000);
+    float80 neg_zero = f80_bits(0, 0x8000);
+    float80 one = f80_from_int(1);
+    float80 neg_one = f80_from_int(-1);
+    float80 two = f80_from_int(2);
+    float80 neg_two = f80_from_int(-2);
+    float80 three = f80_from_int(3);
+    float80 neg_three = f80_from_int(-3);
+    float80 seven = f80_from_int(7);
+    float80 neg_seven = f80_from_int(-7);
+    float80 ten = f80_from_int(10);
+    float80 min_subnormal = f80_bits(1, 0x0000);
+    float80 max_subnormal = f80_bits(UINT64_C(0x7fffffffffffffff), 0x0000);
+    float80 min_normal = f80_bits(UINT64_C(0x8000000000000000), 0x0001);
+    float80 positive_inf = F80_INF;
+    float80 negative_inf = f80_bits(UINT64_C(0x8000000000000000), 0xffff);
+    float80 positive_nan = f80_bits(UINT64_C(0xd000000000000001), 0x7fff);
+    float80 negative_nan = f80_bits(UINT64_C(0xe000000000000002), 0xffff);
+    float80 unsupported = f80_bits(0, 0x3fff);
+    float80 blocker = f80_bits(UINT64_C(0x8000000000000003), 0x403f);
+    float80 max_finite = f80_bits(UINT64_MAX, 0x7ffe);
+
+    suite_start("精确截断余数与 FPREM 商位");
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        check_mod_case("正零除以有限数", zero, three, zero, 0, true, mode);
+        check_mod_case("负零除以有限数", neg_zero, neg_three, neg_zero, 0, true, mode);
+        check_mod_case("绝对值小于除数", two, neg_three, two, 0, true, mode);
+        check_mod_case("负数绝对值小于除数", neg_two, three, neg_two, 0, true, mode);
+        check_mod_case("相等正数", three, three, zero, 1, true, mode);
+        check_mod_case("相等负被除数", neg_three, three, neg_zero, 1, true, mode);
+        check_mod_case("正七模正三", seven, three, one, 2, true, mode);
+        check_mod_case("正七模负三", seven, neg_three, one, 2, true, mode);
+        check_mod_case("负七模正三", neg_seven, three, neg_one, 2, true, mode);
+        check_mod_case("负七模负三", neg_seven, neg_three, neg_one, 2, true, mode);
+        check_mod_case("十模三", ten, three, one, 3, true, mode);
+        check_mod_case("大商低位保真", blocker, three, one, 7, true, mode);
+        check_mod_case("正常数跨入子正常余数", min_normal, max_subnormal,
+            min_subnormal, 1, true, mode);
+        check_mod_case("子正常数小于最小正常数", max_subnormal, min_normal,
+            max_subnormal, 0, true, mode);
+        check_mod_case("子正常整数单位整除", max_subnormal, min_subnormal,
+            zero, 7, true, mode);
+        check_mod_case("偶数公因子", f80_from_int(48), f80_from_int(18),
+            f80_from_int(12), 2, true, mode);
+        check_mod_case("最大指数差", max_finite, f80_bits(7, 0x0000),
+            f80_bits(4, 0x0000), 4, true, mode);
+
+        check_mod_case("不受支持被除数", unsupported, three,
+            F80_NAN, 0, false, mode);
+        check_mod_case("不受支持除数", three, unsupported,
+            F80_NAN, 0, false, mode);
+        check_mod_case("被除数 NaN 传播", negative_nan, three,
+            negative_nan, 0, false, mode);
+        check_mod_case("除数 NaN 传播", three, positive_nan,
+            positive_nan, 0, false, mode);
+        check_mod_case("双 NaN 选择正号除数", negative_nan, positive_nan,
+            positive_nan, 0, false, mode);
+        check_mod_case("双 NaN 保留被除数", positive_nan, negative_nan,
+            positive_nan, 0, false, mode);
+        check_mod_case("无穷被除数", positive_inf, three,
+            F80_NAN, 0, false, mode);
+        check_mod_case("负无穷被除数", negative_inf, neg_three,
+            F80_NAN, 0, false, mode);
+        check_mod_case("正零除数", three, zero,
+            F80_NAN, 0, false, mode);
+        check_mod_case("负零除数", three, neg_zero,
+            F80_NAN, 0, false, mode);
+        check_mod_case("有限数模正无穷", three, positive_inf,
+            three, 0, true, mode);
+        check_mod_case("有限数模负无穷", neg_three, negative_inf,
+            neg_three, 0, true, mode);
+
+        for (uint8_t quotient = 0; quotient < 8; quotient++) {
+            char name[96];
+            snprintf(name, sizeof(name), "FPREM 商位映射 %u", (unsigned) quotient);
+            check_fpu_prem_case(name, f80_from_int((int64_t) quotient * 3 + 1),
+                three, one, quotient, true, mode);
+        }
+        check_fpu_prem_case("FPREM 无效商保持条件位", positive_inf, three,
+            F80_NAN, 0, false, mode);
+    }
+    suite_end("精确截断余数与 FPREM 商位");
+}
+
 static void test_scale_golden(void) {
     float80 zero = f80_bits(0, 0x0000);
     float80 neg_zero = f80_bits(0, 0x8000);
@@ -715,6 +853,46 @@ static float80 native_x87_sub(float80 left, float80 right) {
     return f80_from_native(native_result);
 }
 
+struct native_prem_result {
+    float80 value;
+    uint8_t quotient_low;
+    bool completed;
+};
+
+static struct native_prem_result native_x87_prem(float80 x, float80 y) {
+    long double native_x = native_from_f80(x);
+    long double native_y = native_from_f80(y);
+    long double native_result;
+    uint16_t status;
+    int remaining = 2048;
+    __asm__ volatile(
+        "fldt %[y]\n\t"
+        "fldt %[x]\n\t"
+        "1:\n\t"
+        "fprem\n\t"
+        "fnstsw %[status]\n\t"
+        "testw $0x0400, %[status]\n\t"
+        "jz 2f\n\t"
+        "decl %[remaining]\n\t"
+        "jnz 1b\n\t"
+        "2:\n\t"
+        "fstpt %[result]\n\t"
+        "fstp %%st(0)"
+        : [result] "=m" (native_result), [status] "=&a" (status),
+          [remaining] "+r" (remaining)
+        : [x] "m" (native_x), [y] "m" (native_y)
+        : "cc", "st");
+
+    unsigned quotient_low = ((unsigned) status >> 8 & 1) << 2 |
+        ((unsigned) status >> 14 & 1) << 1 |
+        ((unsigned) status >> 9 & 1);
+    return (struct native_prem_result) {
+        .value = f80_from_native(native_result),
+        .quotient_low = (uint8_t) quotient_low,
+        .completed = (status & UINT16_C(0x0400)) == 0,
+    };
+}
+
 static bool native_result_same(float80 actual, float80 expected) {
     return (f80_isnan(actual) && f80_isnan(expected)) || f80_same(actual, expected);
 }
@@ -812,6 +990,35 @@ static void test_native_x87_oracle(void) {
         {.signif = UINT64_MAX, .signExp = 0x7ffe},
         {.signif = UINT64_MAX, .signExp = 0xfffe},
     };
+    static const struct {
+        float80 x;
+        float80 y;
+    } prem_cases[] = {
+        {{.signif = 0, .signExp = 0x0000},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = 0, .signExp = 0x8000},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0xc000}},
+        {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0xe000000000000000), .signExp = 0x4001},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0xe000000000000000), .signExp = 0x4001},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0xc000}},
+        {{.signif = UINT64_C(0xe000000000000000), .signExp = 0xc001},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0xe000000000000000), .signExp = 0xc001},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0xc000}},
+        {{.signif = UINT64_C(0xa000000000000000), .signExp = 0x4002},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0x8000000000000003), .signExp = 0x403f},
+         {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000}},
+        {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x0001},
+         {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000}},
+        {{.signif = UINT64_MAX, .signExp = 0x7ffe},
+         {.signif = 7, .signExp = 0x0000}},
+    };
 
     suite_start("原生 x87 参考");
     for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
@@ -854,6 +1061,25 @@ static void test_native_x87_oracle(void) {
                     rounding_name(mode), left, right);
             }
         }
+        for (size_t i = 0; i < sizeof(prem_cases) / sizeof(prem_cases[0]); i++) {
+            struct native_prem_result expected = native_x87_prem(
+                prem_cases[i].x, prem_cases[i].y);
+            struct f80_mod_result actual = f80_mod(prem_cases[i].x, prem_cases[i].y);
+            check(expected.completed,
+                "x87 固定 FPREM 超出循环上限（%s，序号=%zu）",
+                rounding_name(mode), i);
+            if (!expected.completed)
+                continue;
+            check(actual.quotient_valid,
+                "固定 FPREM 商无效（%s，序号=%zu）", rounding_name(mode), i);
+            check(native_result_same(actual.value, expected.value),
+                "x87 固定 FPREM 余数不一致（%s，序号=%zu）",
+                rounding_name(mode), i);
+            check(actual.quotient_low == expected.quotient_low,
+                "x87 固定 FPREM 商位不一致（%s，序号=%zu，实际=%u，期望=%u）",
+                rounding_name(mode), i, (unsigned) actual.quotient_low,
+                (unsigned) expected.quotient_low);
+        }
         random_state = UINT64_C(0x452821e638d01377) ^ (uint64_t) mode;
         for (int i = 0; i < 50000; i++) {
             uint64_t left_signif = next_random();
@@ -895,6 +1121,71 @@ static void test_native_x87_oracle(void) {
                 "x87 随机加法不一致（%s，序号=%d）", rounding_name(mode), i);
             check(native_result_same(f80_sub(left, right), expected_sub),
                 "x87 随机减法不一致（%s，序号=%d）", rounding_name(mode), i);
+        }
+        random_state = UINT64_C(0xbe5466cf34e90c6c) ^ (uint64_t) mode;
+        for (int i = 0; i < 5000; i++) {
+            uint64_t x_signif = next_random();
+            uint64_t y_signif = next_random();
+            uint16_t x_sign = (uint16_t) ((next_random() & 1) << 15);
+            uint16_t y_sign = (uint16_t) ((next_random() & 1) << 15);
+            float80 x;
+            float80 y;
+            if (i % 32 == 0) {
+                uint16_t x_exp = (uint16_t) (1 + next_random() % 0x7ffe);
+                uint16_t y_exp = (uint16_t) (1 + next_random() % x_exp);
+                x = f80_bits(x_signif | (UINT64_C(1) << 63),
+                    (uint16_t) (x_exp | x_sign));
+                y = f80_bits(y_signif | (UINT64_C(1) << 63),
+                    (uint16_t) (y_exp | y_sign));
+            } else {
+                switch (i & 3) {
+                    case 0:
+                        x_signif &= UINT64_MAX >> 1;
+                        y_signif &= UINT64_MAX >> 1;
+                        x = f80_bits(x_signif == 0 ? 1 : x_signif, x_sign);
+                        y = f80_bits(y_signif == 0 ? 1 : y_signif, y_sign);
+                        break;
+                    case 1:
+                        x = f80_bits(x_signif | (UINT64_C(1) << 63),
+                            (uint16_t) (1 + next_random() % 4) | x_sign);
+                        y_signif &= UINT64_MAX >> 1;
+                        y = f80_bits(y_signif == 0 ? 1 : y_signif, y_sign);
+                        break;
+                    case 2: {
+                        uint16_t exp = (uint16_t) (1 + next_random() % 0x7ffe);
+                        x = f80_bits(x_signif | (UINT64_C(1) << 63),
+                            (uint16_t) (exp | x_sign));
+                        y = f80_bits(y_signif | (UINT64_C(1) << 63),
+                            (uint16_t) (exp | y_sign));
+                        break;
+                    }
+                    default: {
+                        uint16_t x_exp = (uint16_t) (1 + next_random() % 0x7ffd);
+                        x = f80_bits(x_signif | (UINT64_C(1) << 63),
+                            (uint16_t) (x_exp | x_sign));
+                        y = f80_bits(y_signif | (UINT64_C(1) << 63),
+                            (uint16_t) (x_exp + 1) | y_sign);
+                        break;
+                    }
+                }
+            }
+
+            struct native_prem_result expected = native_x87_prem(x, y);
+            struct f80_mod_result actual = f80_mod(x, y);
+            check(expected.completed,
+                "x87 随机 FPREM 超出循环上限（%s，序号=%d）",
+                rounding_name(mode), i);
+            if (!expected.completed)
+                continue;
+            check(actual.quotient_valid,
+                "随机 FPREM 商无效（%s，序号=%d）", rounding_name(mode), i);
+            check(native_result_same(actual.value, expected.value),
+                "x87 随机 FPREM 余数不一致（%s，序号=%d）",
+                rounding_name(mode), i);
+            check(actual.quotient_low == expected.quotient_low,
+                "x87 随机 FPREM 商位不一致（%s，序号=%d，实际=%u，期望=%u）",
+                rounding_name(mode), i, (unsigned) actual.quotient_low,
+                (unsigned) expected.quotient_low);
         }
         for (size_t left = 0;
                 left < sizeof(division_values) / sizeof(division_values[0]); left++) {
@@ -1002,6 +1293,7 @@ int main(void) {
     test_round_to_integer();
     test_arithmetic_golden();
     test_add_subnormal_golden();
+    test_mod_golden();
     test_scale_golden();
     test_sqrt_golden();
     test_portable_properties();
