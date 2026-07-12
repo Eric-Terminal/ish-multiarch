@@ -561,6 +561,23 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xff80fc00)) == UINT32_C(0x5f005400)) {
+        byte_t immediate = (word >> 16) & UINT32_C(0x7f);
+        // Advanced SIMD 标量 SHL 只定义 64 位 D 形式，immh[3] 必须为一。
+        if ((immediate & UINT32_C(0x40)) == 0)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_SHL_SCALAR,
+            .width = 64,
+            .operands.advsimd_shift_immediate = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .shift = immediate & UINT32_C(0x3f),
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x9ff80c00)) == UINT32_C(0x0f000400)) {
         bool op = (word >> 29) & 1;
         byte_t cmode = (word >> 12) & UINT32_C(0xf);

@@ -104,6 +104,7 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_MVNI,
     AARCH64_OP_ADVSIMD_ORR_IMMEDIATE,
     AARCH64_OP_ADVSIMD_BIC_IMMEDIATE,
+    AARCH64_OP_ADVSIMD_SHL_SCALAR,
     AARCH64_OP_ADVSIMD_DUP_ELEMENT,
     AARCH64_OP_ADVSIMD_DUP_GENERAL,
     AARCH64_OP_ADVSIMD_INS_ELEMENT,
@@ -312,6 +313,11 @@ struct aarch64_decoded {
             byte_t rd;
             qword_t immediate;
         } advsimd_immediate;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t shift;
+        } advsimd_shift_immediate;
         struct {
             byte_t rd;
             byte_t rn;

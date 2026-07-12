@@ -479,6 +479,17 @@ static void execute_advsimd_immediate(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_scalar_shift(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_shift_immediate.rd;
+    byte_t rn = instruction->operands.advsimd_shift_immediate.rn;
+    byte_t shift = instruction->operands.advsimd_shift_immediate.shift;
+    qword_t source = cpu->v[rn].d[0];
+    cpu->v[rd].d[0] = source << shift;
+    cpu->v[rd].d[1] = 0;
+    cpu->pc += 4;
+}
+
 static qword_t vector_element_mask(byte_t element_size) {
     return element_size == 8 ? UINT64_MAX :
             (UINT64_C(1) << (element_size * 8)) - 1;
@@ -1485,6 +1496,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_ORR_IMMEDIATE:
         case AARCH64_OP_ADVSIMD_BIC_IMMEDIATE:
             execute_advsimd_immediate(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SHL_SCALAR:
+            execute_advsimd_scalar_shift(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_DUP_ELEMENT:
         case AARCH64_OP_ADVSIMD_DUP_GENERAL:

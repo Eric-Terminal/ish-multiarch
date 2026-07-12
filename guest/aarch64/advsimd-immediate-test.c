@@ -16,6 +16,11 @@ static dword_t encode(bool q, bool op, byte_t cmode, bool o2,
             rd;
 }
 
+static dword_t encode_scalar_shl(byte_t shift, byte_t rn, byte_t rd) {
+    return UINT32_C(0x5f405400) | (dword_t) shift << 16 |
+            (dword_t) rn << 5 | rd;
+}
+
 static struct aarch64_decoded decode(dword_t word) {
     struct aarch64_decoded instruction;
     assert(aarch64_decode(word, &instruction));
@@ -242,10 +247,140 @@ static void test_special_forms(void) {
     assert(cpu.pc == UINT64_C(0x180c));
 }
 
+static void assert_scalar_shl_decode(
+        dword_t word, byte_t shift, byte_t rn, byte_t rd) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_SHL_SCALAR);
+    assert(instruction.width == 64);
+    assert(instruction.operands.advsimd_shift_immediate.rd == rd);
+    assert(instruction.operands.advsimd_shift_immediate.rn == rn);
+    assert(instruction.operands.advsimd_shift_immediate.shift == shift);
+}
+
+static void test_scalar_shl_decode(void) {
+    assert_scalar_shl_decode(UINT32_C(0x5f405420), 0, 1, 0);
+    assert_scalar_shl_decode(UINT32_C(0x5f415462), 1, 3, 2);
+    assert_scalar_shl_decode(UINT32_C(0x5f5f54a4), 31, 5, 4);
+    assert_scalar_shl_decode(UINT32_C(0x5f6054e6), 32, 7, 6);
+    assert_scalar_shl_decode(UINT32_C(0x5f7e5528), 62, 9, 8);
+    assert_scalar_shl_decode(UINT32_C(0x5f7f57fe), 63, 31, 30);
+    assert_scalar_shl_decode(
+            UINT32_C(0x5f7457ff), 52, 31, 31);
+    unsigned count = 0;
+    for (unsigned shift = 0; shift < 64; shift++) {
+        for (unsigned rn = 0; rn < 32; rn++) {
+            for (unsigned rd = 0; rd < 32; rd++) {
+                assert_scalar_shl_decode(encode_scalar_shl(
+                        (byte_t) shift, (byte_t) rn, (byte_t) rd),
+                        (byte_t) shift, (byte_t) rn, (byte_t) rd);
+                count++;
+            }
+        }
+    }
+    assert(count == 65536);
+
+    unsigned rejected_count = 0;
+    for (unsigned immediate = 0; immediate < 64; immediate++) {
+        for (unsigned rn = 0; rn < 32; rn++) {
+            for (unsigned rd = 0; rd < 32; rd++) {
+                dword_t word = UINT32_C(0x5f005400) |
+                        (dword_t) immediate << 16 |
+                        (dword_t) rn << 5 | (dword_t) rd;
+                struct aarch64_decoded instruction;
+                assert(!aarch64_decode(word, &instruction));
+                rejected_count++;
+            }
+        }
+    }
+    assert(rejected_count == 65536);
+
+    const dword_t fixed_mask = UINT32_C(0xff80fc00);
+    dword_t base = encode_scalar_shl(52, 31, 31);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((fixed_mask & (UINT32_C(1) << bit)) == 0)
+            continue;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(
+                base ^ (UINT32_C(1) << bit), &instruction);
+        assert(!decoded || instruction.opcode !=
+                AARCH64_OP_ADVSIMD_SHL_SCALAR);
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x5f085420), // SHL B0, B1, #0 的保留标量编码。
+        UINT32_C(0x5f105420), // SHL H0, H1, #0 的保留标量编码。
+        UINT32_C(0x5f205420), // SHL S0, S1, #0 的保留标量编码。
+        UINT32_C(0x4f405420), // 向量 SHL V0.2D, V1.2D, #0。
+        UINT32_C(0x5f405020), // 操作字段不同的相邻标量编码。
+        UINT32_C(0x7f405420), // U 字段不同的相邻标量编码。
+    };
+    for (unsigned i = 0; i < sizeof(neighbors) / sizeof(neighbors[0]); i++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[i], &instruction);
+        assert(!decoded || instruction.opcode !=
+                AARCH64_OP_ADVSIMD_SHL_SCALAR);
+    }
+}
+
+static void assert_scalar_shl_state(
+        const struct cpu_state *cpu, qword_t expected, qword_t pc) {
+    assert(cpu->v[2].d[0] == expected);
+    assert(cpu->v[2].d[1] == 0);
+    assert(cpu->x[0] == UINT64_C(0x8877665544332211));
+    assert(cpu->pc == pc);
+    assert(cpu->sp == UINT64_C(0x1122334455667788));
+    assert(cpu->nzcv == UINT32_C(0xa0000000));
+    assert(cpu->fpcr == UINT32_C(0x01000000));
+    assert(cpu->fpsr == UINT32_C(0x08000000));
+}
+
+static qword_t reference_scalar_shl(qword_t source, byte_t shift) {
+    for (byte_t bit = 0; bit < shift; bit++)
+        source += source;
+    return source;
+}
+
+static void test_scalar_shl_execution(void) {
+    for (unsigned shift = 0; shift < 64; shift++) {
+        qword_t source = UINT64_C(0x8123456789abcdef) ^ shift;
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x1000),
+            .sp = UINT64_C(0x1122334455667788),
+            .nzcv = UINT32_C(0xa0000000),
+            .fpcr = UINT32_C(0x01000000),
+            .fpsr = UINT32_C(0x08000000),
+        };
+        cpu.x[0] = UINT64_C(0x8877665544332211);
+        cpu.v[1].d[0] = source;
+        cpu.v[1].d[1] = UINT64_C(0x1020304050607080);
+        cpu.v[2].d[0] = UINT64_MAX;
+        cpu.v[2].d[1] = UINT64_MAX;
+        union aarch64_vector_reg saved_source = cpu.v[1];
+
+        execute_instruction(&cpu,
+                encode_scalar_shl((byte_t) shift, 1, 2));
+        assert_scalar_shl_state(
+                &cpu, reference_scalar_shl(source, (byte_t) shift),
+                UINT64_C(0x1004));
+        assert(cpu.v[1].d[0] == saved_source.d[0]);
+        assert(cpu.v[1].d[1] == saved_source.d[1]);
+
+        cpu.v[2].d[0] = source;
+        cpu.v[2].d[1] = UINT64_MAX;
+        execute_instruction(&cpu,
+                encode_scalar_shl((byte_t) shift, 2, 2));
+        assert_scalar_shl_state(
+                &cpu, reference_scalar_shl(source, (byte_t) shift),
+                UINT64_C(0x1008));
+    }
+}
+
 int main(void) {
     test_apple_vectors();
     test_encoding_space();
     test_execution_space();
     test_special_forms();
+    test_scalar_shl_decode();
+    test_scalar_shl_execution();
     return 0;
 }
