@@ -153,6 +153,7 @@ if get_option('kernel') == 'ish'
         'kernel/aarch64-task-runner.c',
         'kernel/aarch64-signal-service.c',
         'kernel/aarch64-syscall-service.c',
+        'kernel/aarch64-time-service.c',
         'kernel/aarch64-wait-service.c',
         'kernel/fs_info.c',
         'fs/mount.c',
@@ -255,6 +256,13 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_sigsuspend_syscall',
             aarch64_sigsuspend_syscall_test)
+
+        aarch64_nanosleep_syscall_test = executable(
+            'aarch64_nanosleep_syscall_test',
+            'kernel/aarch64-nanosleep-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_nanosleep_syscall',
+            aarch64_nanosleep_syscall_test)
 
         aarch64_clone_test = executable(
             'aarch64_clone_test',

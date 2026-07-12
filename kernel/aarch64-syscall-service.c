@@ -9,6 +9,7 @@
 #include "kernel/aarch64-fd-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
+#include "kernel/aarch64-time-service.h"
 #include "kernel/aarch64-wait-service.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
@@ -55,6 +56,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITEV = 66,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_NANOSLEEP = 101,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
     AARCH64_LINUX_SYS_RT_SIGSUSPEND = 133,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
@@ -933,6 +935,9 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_NANOSLEEP:
+            return aarch64_linux_dispatch_nanosleep(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_SIGALTSTACK:
             return dispatch_sigaltstack(
                     context, syscall, task, fault);
