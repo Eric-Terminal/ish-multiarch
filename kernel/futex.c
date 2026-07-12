@@ -1,4 +1,6 @@
 #include "kernel/calls.h"
+#include "guest/aarch64/linux-process.h"
+#include "guest/aarch64/linux-time-abi.h"
 
 #define FUTEX_WAIT_ 0
 #define FUTEX_WAKE_ 1
@@ -8,8 +10,9 @@
 
 struct futex {
     atomic_uint refcount;
-    struct mem *mem;
-    addr_t addr;
+    const void *memory_identity;
+    qword_t addr;
+    bool aarch64;
     struct list queue;
     struct list chain; // locked by futex_hash_lock
 };
@@ -30,25 +33,51 @@ static void __attribute__((constructor)) init_futex_hash(void) {
         list_init(&futex_hash[i]);
 }
 
-static struct futex *futex_get_unlocked(addr_t addr) {
-    int hash = (addr ^ (unsigned long) current->mem) % FUTEX_HASH_SIZE;
+struct futex_key {
+    const void *memory_identity;
+    qword_t addr;
+    bool aarch64;
+};
+
+static struct futex_key i386_futex_key(addr_t addr) {
+    return (struct futex_key) {
+        .memory_identity = current->mem,
+        .addr = addr,
+    };
+}
+
+static struct futex_key aarch64_futex_key(
+        struct aarch64_linux_process *process, qword_t addr) {
+    return (struct futex_key) {
+        .memory_identity =
+                aarch64_linux_process_memory_identity(process),
+        .addr = addr,
+        .aarch64 = true,
+    };
+}
+
+static struct futex *futex_get_unlocked(struct futex_key key) {
+    uintptr_t mixed = (uintptr_t) key.memory_identity ^
+            (uintptr_t) key.addr ^ (uintptr_t) (key.addr >> 32);
+    size_t hash = mixed % FUTEX_HASH_SIZE;
     struct list *bucket = &futex_hash[hash];
     struct futex *futex;
     list_for_each_entry(bucket, futex, chain) {
-        if (futex->addr == addr && futex->mem == current->mem) {
+        if (futex->addr == key.addr &&
+                futex->memory_identity == key.memory_identity &&
+                futex->aarch64 == key.aarch64) {
             futex->refcount++;
             return futex;
         }
     }
 
     futex = malloc(sizeof(struct futex));
-    if (futex == NULL) {
-        unlock(&futex_lock);
+    if (futex == NULL)
         return NULL;
-    }
     futex->refcount = 1;
-    futex->mem = current->mem;
-    futex->addr = addr;
+    futex->memory_identity = key.memory_identity;
+    futex->addr = key.addr;
+    futex->aarch64 = key.aarch64;
     list_init(&futex->queue);
     list_add(bucket, &futex->chain);
     return futex;
@@ -56,9 +85,9 @@ static struct futex *futex_get_unlocked(addr_t addr) {
 
 // Returns the futex for the current process at the given addr, and locks it
 // Unlocked variant is available for times when you need to get two futexes at once
-static struct futex *futex_get(addr_t addr) {
+static struct futex *futex_get(struct futex_key key) {
     lock(&futex_lock);
-    struct futex *futex = futex_get_unlocked(addr);
+    struct futex *futex = futex_get_unlocked(key);
     if (futex == NULL)
         unlock(&futex_lock);
     return futex;
@@ -79,10 +108,21 @@ static void futex_put(struct futex *futex) {
     unlock(&futex_lock);
 }
 
-static int futex_load(struct futex *futex, dword_t *out) {
-    assert(futex->mem == current->mem);
+static int futex_load(struct futex *futex, dword_t *out,
+        struct guest_linux_user_fault *fault) {
+    if (futex->aarch64) {
+        assert(task_has_aarch64_process(current) &&
+                futex->memory_identity ==
+                        aarch64_linux_process_memory_identity(
+                                current->aarch64_process));
+        return aarch64_linux_process_read_u32(
+                current->aarch64_process, futex->addr,
+                out, fault) ? 0 : 1;
+    }
+    assert(futex->memory_identity == current->mem);
     read_wrlock(&current->mem->lock);
-    dword_t *ptr = mem_ptr(current->mem, futex->addr, MEM_READ);
+    dword_t *ptr = mem_ptr(
+            current->mem, (addr_t) futex->addr, MEM_READ);
     read_wrunlock(&current->mem->lock);
     if (ptr == NULL)
         return 1;
@@ -90,11 +130,15 @@ static int futex_load(struct futex *futex, dword_t *out) {
     return 0;
 }
 
-static int futex_wait(addr_t uaddr, dword_t val, struct timespec *timeout) {
-    struct futex *futex = futex_get(uaddr);
+static int futex_wait(struct futex_key key, dword_t val,
+        struct timespec *timeout,
+        struct guest_linux_user_fault *fault) {
+    struct futex *futex = futex_get(key);
+    if (futex == NULL)
+        return _ENOMEM;
     int err = 0;
     dword_t tmp;
-    if (futex_load(futex, &tmp))
+    if (futex_load(futex, &tmp, fault))
         err = _EFAULT;
     else if (tmp != val)
         err = _EAGAIN;
@@ -112,8 +156,12 @@ static int futex_wait(addr_t uaddr, dword_t val, struct timespec *timeout) {
     return err;
 }
 
-static int futex_wakelike(int op, addr_t uaddr, dword_t wake_max, dword_t requeue_max, addr_t requeue_addr) {
-    struct futex *futex = futex_get(uaddr);
+static int futex_wakelike(int op, struct futex_key key,
+        dword_t wake_max, dword_t requeue_max,
+        struct futex_key requeue_key) {
+    struct futex *futex = futex_get(key);
+    if (futex == NULL)
+        return _ENOMEM;
 
     struct futex_wait *wait, *tmp;
     unsigned woken = 0;
@@ -126,7 +174,11 @@ static int futex_wakelike(int op, addr_t uaddr, dword_t wake_max, dword_t requeu
     }
 
     if (op == FUTEX_REQUEUE_) {
-        struct futex *futex2 = futex_get_unlocked(requeue_addr);
+        struct futex *futex2 = futex_get_unlocked(requeue_key);
+        if (futex2 == NULL) {
+            futex_put(futex);
+            return _ENOMEM;
+        }
         unsigned requeued = 0;
         list_for_each_entry_safe(&futex->queue, wait, tmp, queue) {
             if (requeued >= requeue_max)
@@ -149,7 +201,15 @@ static int futex_wakelike(int op, addr_t uaddr, dword_t wake_max, dword_t requeu
 }
 
 int futex_wake(addr_t uaddr, dword_t wake_max) {
-    return futex_wakelike(FUTEX_WAKE_, uaddr, wake_max, 0, 0);
+    return futex_wakelike(FUTEX_WAKE_, i386_futex_key(uaddr),
+            wake_max, 0, (struct futex_key) {0});
+}
+
+int futex_wake_aarch64(struct aarch64_linux_process *process,
+        qword_t uaddr, dword_t wake_max) {
+    return futex_wakelike(FUTEX_WAKE_,
+            aarch64_futex_key(process, uaddr), wake_max, 0,
+            (struct futex_key) {0});
 }
 
 dword_t sys_futex(addr_t uaddr, dword_t op, dword_t val, addr_t timeout_or_val2, addr_t uaddr2, dword_t val3) {
@@ -167,16 +227,56 @@ dword_t sys_futex(addr_t uaddr, dword_t op, dword_t val, addr_t timeout_or_val2,
     switch (op & FUTEX_CMD_MASK_) {
         case FUTEX_WAIT_:
             STRACE("futex(FUTEX_WAIT, %#x, %d, 0x%x {%ds %dns}) = ...\n", uaddr, val, timeout_or_val2, timeout.tv_sec, timeout.tv_nsec);
-            return futex_wait(uaddr, val, timeout_or_val2 ? &timeout : NULL);
+            return futex_wait(i386_futex_key(uaddr), val,
+                    timeout_or_val2 ? &timeout : NULL, NULL);
         case FUTEX_WAKE_:
             STRACE("futex(FUTEX_WAKE, %#x, %d)", uaddr, val);
-            return futex_wakelike(op & FUTEX_CMD_MASK_, uaddr, val, 0, 0);
+            return futex_wakelike(op & FUTEX_CMD_MASK_,
+                    i386_futex_key(uaddr), val, 0,
+                    (struct futex_key) {0});
         case FUTEX_REQUEUE_:
             STRACE("futex(FUTEX_REQUEUE, %#x, %d, %#x)", uaddr, val, uaddr2);
-            return futex_wakelike(op & FUTEX_CMD_MASK_, uaddr, val, timeout_or_val2, uaddr2);
+            return futex_wakelike(op & FUTEX_CMD_MASK_,
+                    i386_futex_key(uaddr), val, timeout_or_val2,
+                    i386_futex_key(uaddr2));
     }
     STRACE("futex(%#x, %d, %d, timeout=%#x, %#x, %d) ", uaddr, op, val, timeout_or_val2, uaddr2, val3);
     FIXME("unsupported futex operation %d", op);
+    return _ENOSYS;
+}
+
+dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
+        qword_t timeout_or_val2, qword_t uaddr2, dword_t val3,
+        struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_process *process = current->aarch64_process;
+    assert(process != NULL);
+    struct timespec timeout = {0};
+    struct timespec *timeout_pointer = NULL;
+    if ((op & FUTEX_CMD_MASK_) == FUTEX_WAIT_ && timeout_or_val2 != 0) {
+        struct aarch64_linux_timespec wire;
+        if (!aarch64_linux_process_read_memory(process,
+                timeout_or_val2, &wire, sizeof(wire), fault))
+            return _EFAULT;
+        timeout.tv_sec = (time_t) wire.sec;
+        timeout.tv_nsec = (long) wire.nsec;
+        if ((sqword_t) timeout.tv_sec != wire.sec || wire.sec < 0 ||
+                wire.nsec < 0 || wire.nsec >= 1000000000)
+            return _EINVAL;
+        timeout_pointer = &timeout;
+    }
+    struct futex_key key = aarch64_futex_key(process, uaddr);
+    switch (op & FUTEX_CMD_MASK_) {
+        case FUTEX_WAIT_:
+            return futex_wait(key, val, timeout_pointer, fault);
+        case FUTEX_WAKE_:
+            return futex_wakelike(FUTEX_WAKE_, key, val, 0,
+                    (struct futex_key) {0});
+        case FUTEX_REQUEUE_:
+            return futex_wakelike(FUTEX_REQUEUE_, key, val,
+                    (dword_t) timeout_or_val2,
+                    aarch64_futex_key(process, uaddr2));
+    }
+    use(val3);
     return _ENOSYS;
 }
 

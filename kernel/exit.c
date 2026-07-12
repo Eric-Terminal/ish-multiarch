@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include "guest/aarch64/linux-process.h"
 #include "kernel/calls.h"
 #include "kernel/mm.h"
 #include "kernel/futex.h"
@@ -39,11 +40,18 @@ static struct task *find_new_parent(struct task *task) {
 
 noreturn void do_exit(int status) {
     // has to happen before mm_release
-    addr_t clear_tid = current->clear_tid;
-    if (clear_tid) {
+    if (task_has_aarch64_process(current)) {
+        struct aarch64_linux_process *process =
+                current->aarch64_process;
+        qword_t clear_tid =
+                aarch64_linux_process_take_clear_child_tid(process);
+        if (clear_tid != 0 && aarch64_linux_process_write_u32(
+                process, clear_tid, 0, NULL))
+            futex_wake_aarch64(process, clear_tid, 1);
+    } else if (current->clear_tid != 0) {
         pid_t_ zero = 0;
-        if (user_put(clear_tid, zero) == 0)
-            futex_wake(clear_tid, 1);
+        if (user_put(current->clear_tid, zero) == 0)
+            futex_wake(current->clear_tid, 1);
     }
 
     // 最后一个进入退出流程的线程负责在资源仍完整时退休组定时器。

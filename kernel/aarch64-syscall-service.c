@@ -67,6 +67,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_READLINKAT = 78,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
+    AARCH64_LINUX_SYS_FUTEX = 98,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
     AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
@@ -1297,6 +1298,15 @@ static qword_t dispatch_syscall(
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:
             return dispatch_fstat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FUTEX:
+            if (!task_has_aarch64_process(task))
+                return syscall_result(_EINVAL);
+            return syscall_result((sdword_t) sys_futex_aarch64(
+                    syscall->arguments[0],
+                    (dword_t) syscall->arguments[1],
+                    (dword_t) syscall->arguments[2],
+                    syscall->arguments[3], syscall->arguments[4],
+                    (dword_t) syscall->arguments[5], fault));
         case AARCH64_LINUX_SYS_NANOSLEEP:
             return aarch64_linux_dispatch_nanosleep(
                     context, syscall, task, fault);

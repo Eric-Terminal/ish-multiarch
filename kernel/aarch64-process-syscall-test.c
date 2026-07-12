@@ -302,6 +302,14 @@ int main(void) {
             fault.kind == 0 && probe.reads == 0 && probe.writes == 0,
             "clone 拒绝未挂接 AArch64 process 的伪任务");
 
+    reset_user_probe(&probe, 0x5a);
+    result = invoke(&fixture, &probe, &fault, 98,
+            UINT64_C(0x7fff00000000), 128, 0,
+            0, 0, 0);
+    CHECK(result == (qword_t) (sqword_t) _EINVAL &&
+            probe.reads == 0 && probe.writes == 0,
+            "futex 拒绝未挂接 AArch64 process 的伪任务");
+
     lock(&pids_lock);
     fixture.leader.parent = NULL;
     unlock(&pids_lock);

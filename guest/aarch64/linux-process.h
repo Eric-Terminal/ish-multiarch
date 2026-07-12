@@ -172,6 +172,15 @@ struct aarch64_linux_executable_info
         const void *elf_data, size_t elf_size);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
+const void *aarch64_linux_process_memory_identity(
+        const struct aarch64_linux_process *process);
+qword_t aarch64_linux_process_take_clear_child_tid(
+        struct aarch64_linux_process *process);
+// 单次读取不得超过 GUEST_TLB_MAX_ACCESS_SIZE。
+bool aarch64_linux_process_read_memory(
+        struct aarch64_linux_process *process, qword_t address,
+        void *destination, size_t size,
+        struct guest_linux_user_fault *fault);
 bool aarch64_linux_process_read_u32(
         struct aarch64_linux_process *process, qword_t address,
         dword_t *value, struct guest_linux_user_fault *fault);

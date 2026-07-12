@@ -267,6 +267,9 @@ dword_t sys_sysinfo(addr_t info_addr);
 
 // futexes
 dword_t sys_futex(addr_t uaddr, dword_t op, dword_t val, addr_t timeout_or_val2, addr_t uaddr2, dword_t val3);
+dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
+        qword_t timeout_or_val2, qword_t uaddr2, dword_t val3,
+        struct guest_linux_user_fault *fault);
 int_t sys_set_robust_list(addr_t robust_list, dword_t len);
 int_t sys_get_robust_list(pid_t_ pid, addr_t robust_list_ptr, addr_t len_ptr);
 

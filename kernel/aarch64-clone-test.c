@@ -299,10 +299,13 @@ static struct aarch64_linux_process *make_process(struct task *task) {
         UINT32_C(0xd2800c60), UINT32_C(0xd2800ba8),
         UINT32_C(0xd4000001), UINT32_C(0x14000000),
         UINT32_C(0x14000000),
-        // 仅目标 TLS 的线程进入共享栈等待；普通 fork 子进程继续自旋。
+        // 仅目标 TLS 的线程进入 futex 等待；普通 fork 子进程继续自旋。
         UINT32_C(0xd53bd041), UINT32_C(0xd2824682),
         UINT32_C(0xeb02003f), UINT32_C(0x54000001),
-        UINT32_C(0xb94007e0), UINT32_C(0x34ffffe0),
+        UINT32_C(0x910013e0), UINT32_C(0xd2801001),
+        UINT32_C(0xd2800002), UINT32_C(0xd2800003),
+        UINT32_C(0xd2800004), UINT32_C(0xd2800005),
+        UINT32_C(0xd2800c48), UINT32_C(0xd4000001),
         UINT32_C(0xd2800000), UINT32_C(0xd2800ba8),
         UINT32_C(0xd4000001),
     };
@@ -341,6 +344,57 @@ static void observe_exit(struct task *task, int status) {
             resources_released, memory_order_relaxed);
     atomic_store_explicit(&observed_exit.called,
             true, memory_order_release);
+}
+
+static bool write_guest_timespec(struct aarch64_linux_process *process,
+        qword_t address, sqword_t sec, sqword_t nsec) {
+    qword_t sec_bits = (qword_t) sec;
+    qword_t nsec_bits = (qword_t) nsec;
+    return aarch64_linux_process_write_u32(
+            process, address, (dword_t) sec_bits, NULL) &&
+            aarch64_linux_process_write_u32(
+                    process, address + 4,
+                    (dword_t) (sec_bits >> 32), NULL) &&
+            aarch64_linux_process_write_u32(
+                    process, address + 8,
+                    (dword_t) nsec_bits, NULL) &&
+            aarch64_linux_process_write_u32(
+                    process, address + 12,
+                    (dword_t) (nsec_bits >> 32), NULL);
+}
+
+static unsigned exercise_futex_edges(struct task *parent) {
+    const qword_t word = STACK_TOP - UINT64_C(0x300);
+    const qword_t timeout = word + 16;
+    struct guest_linux_user_fault fault = {0};
+    if (!aarch64_linux_process_write_u32(
+            parent->aarch64_process, word, 7, &fault))
+        return 1;
+    if (sys_futex_aarch64(word, 128, 8, 0, 0, 0, &fault) !=
+            (dword_t) _EAGAIN)
+        return 2;
+
+    const qword_t invalid = UINT64_C(1) << 48;
+    fault = (struct guest_linux_user_fault) {0};
+    if (sys_futex_aarch64(invalid, 128, 0, 0, 0, 0, &fault) !=
+                    (dword_t) _EFAULT ||
+            fault.address != invalid ||
+            fault.access != GUEST_MEMORY_READ ||
+            fault.kind != GUEST_MEMORY_FAULT_ADDRESS_SIZE)
+        return 3;
+
+    if (!write_guest_timespec(
+            parent->aarch64_process, timeout, -1, 0) ||
+            sys_futex_aarch64(word, 128, 7,
+                    timeout, 0, 0, &fault) != (dword_t) _EINVAL)
+        return 4;
+    if (!write_guest_timespec(
+            parent->aarch64_process, timeout, 0, 1000000) ||
+            sys_futex_aarch64(word, 128, 7,
+                    timeout, 0, 0, &fault) != (dword_t) _ETIMEDOUT)
+        return 5;
+    return sys_futex_aarch64(
+            word, 129, 1, 0, 0, 0, &fault) == 0 ? 0 : 6;
 }
 
 static bool exercise_thread_clone(struct task *parent) {
@@ -391,7 +445,17 @@ static bool exercise_thread_clone(struct task *parent) {
             observed_parent_tid != (dword_t) pid)
         return false;
 
-    if (!aarch64_linux_process_write_u32(
+    bool woken = false;
+    for (unsigned i = 0; i < 100000 && !woken; i++) {
+        dword_t wake_result = sys_futex_aarch64(
+                child_ready, 129, 1, 0, 0, 0, &fault);
+        if ((sdword_t) wake_result < 0)
+            return false;
+        woken = wake_result == 1;
+        if (!woken)
+            sched_yield();
+    }
+    if (!woken || !aarch64_linux_process_write_u32(
             parent->aarch64_process, child_ready, 1, &fault))
         return false;
     bool reaped = false;
@@ -402,7 +466,10 @@ static bool exercise_thread_clone(struct task *parent) {
         if (!reaped)
             sched_yield();
     }
-    return reaped;
+    dword_t cleared_child_tid;
+    return reaped && aarch64_linux_process_read_u32(
+            parent->aarch64_process, child_tid,
+            &cleared_child_tid, &fault) && cleared_child_tid == 0;
 }
 
 static void clear_pending_signals(struct task *task) {
@@ -453,6 +520,9 @@ static int run_clone_scenario(void) {
     if (process == NULL ||
             !task_attach_aarch64_process(parent, process))
         return 22;
+    unsigned futex_edge_error = exercise_futex_edges(parent);
+    if (futex_edge_error != 0)
+        return 45 + (int) futex_edge_error;
     extern void (*exit_hook)(struct task *task, int code);
     reset_exit_observation();
     exit_hook = observe_exit;

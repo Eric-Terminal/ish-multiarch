@@ -521,6 +521,20 @@ void aarch64_linux_process_destroy(
     free(process);
 }
 
+const void *aarch64_linux_process_memory_identity(
+        const struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    return process->memory;
+}
+
+qword_t aarch64_linux_process_take_clear_child_tid(
+        struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    qword_t address = process->task.clear_child_tid;
+    process->task.clear_child_tid = 0;
+    return address;
+}
+
 bool aarch64_linux_process_uses_services(
         const struct aarch64_linux_process *process,
         pid_t_ tid, const void *task_opaque,
@@ -613,17 +627,26 @@ static void export_fault(struct guest_linux_user_fault *destination,
     };
 }
 
-bool aarch64_linux_process_read_u32(
+bool aarch64_linux_process_read_memory(
         struct aarch64_linux_process *process, qword_t address,
-        dword_t *value, struct guest_linux_user_fault *fault) {
-    assert(process != NULL && value != NULL);
+        void *destination, size_t size,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && destination != NULL);
     struct guest_memory_fault memory_fault;
     if (guest_tlb_read(&process->tlb, (guest_addr_t) address,
-            value, sizeof(*value), GUEST_MEMORY_READ, &memory_fault))
+            destination, size, GUEST_MEMORY_READ, &memory_fault))
         return true;
     if (fault != NULL)
         export_fault(fault, &memory_fault);
     return false;
+}
+
+bool aarch64_linux_process_read_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t *value, struct guest_linux_user_fault *fault) {
+    assert(value != NULL);
+    return aarch64_linux_process_read_memory(
+            process, address, value, sizeof(*value), fault);
 }
 
 bool aarch64_linux_process_write_u32(
