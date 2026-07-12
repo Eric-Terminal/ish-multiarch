@@ -20,9 +20,7 @@ static void apply_umask_task(struct task *task, mode_t_ *mode) {
     unlock(&fs->lock);
 }
 
-ssize_t file_read_task(struct task *task, fd_t fd_number,
-        void *buffer, size_t size) {
-    struct fd *fd = f_get_task(task, fd_number);
+ssize_t file_read_fd(struct fd *fd, void *buffer, size_t size) {
     if (fd == NULL)
         return _EBADF;
     if (S_ISDIR(fd->type))
@@ -37,6 +35,11 @@ ssize_t file_read_task(struct task *task, fd_t fd_number,
     if (result > 0)
         fd->ops->lseek(fd, result, LSEEK_CUR);
     return result;
+}
+
+ssize_t file_read_task(struct task *task, fd_t fd_number,
+        void *buffer, size_t size) {
+    return file_read_fd(f_get_task(task, fd_number), buffer, size);
 }
 
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
@@ -69,6 +72,22 @@ int file_write_check_fd(struct fd *fd) {
     if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
         return _EBADF;
     if (fd->ops->write == NULL && fd->ops->pwrite == NULL)
+        return _EBADF;
+    return 0;
+}
+
+int file_read_check_fd(struct fd *fd) {
+    if (fd == NULL)
+        return _EBADF;
+    if (S_ISDIR(fd->type))
+        return _EISDIR;
+    int flags = fd_getflags(fd);
+    if (flags < 0)
+        return flags;
+    int access_mode = flags & O_ACCMODE_;
+    if (access_mode != O_RDONLY_ && access_mode != O_RDWR_)
+        return _EBADF;
+    if (fd->ops->read == NULL && fd->ops->pread == NULL)
         return _EBADF;
     return 0;
 }

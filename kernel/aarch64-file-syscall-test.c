@@ -41,6 +41,14 @@ struct user_memory {
 };
 
 struct io_probe {
+    byte_t readable_data[IO_DATA_SIZE];
+    size_t readable_size;
+    size_t read_position;
+    size_t max_read;
+    unsigned read_calls;
+    size_t read_requests[4];
+    unsigned read_error_call;
+    int read_error;
     byte_t written_data[IO_DATA_SIZE];
     size_t written_size;
     size_t max_write;
@@ -182,6 +190,22 @@ static void reset_user(struct user_memory *memory) {
     memory->replacement_installed = false;
 }
 
+static ssize_t probe_read(struct fd *fd, void *buffer, size_t size) {
+    struct io_probe *probe = fd->data;
+    probe->read_calls++;
+    if (probe->read_calls <= array_size(probe->read_requests))
+        probe->read_requests[probe->read_calls - 1] = size;
+    if (probe->read_error_call == probe->read_calls)
+        return probe->read_error;
+    size_t available = probe->readable_size - probe->read_position;
+    size_t copied = size < available ? size : available;
+    if (probe->max_read != 0 && copied > probe->max_read)
+        copied = probe->max_read;
+    memcpy(buffer, probe->readable_data + probe->read_position, copied);
+    probe->read_position += copied;
+    return (ssize_t) copied;
+}
+
 static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
     struct io_probe *probe = fd->data;
     probe->write_calls++;
@@ -200,6 +224,7 @@ static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
 }
 
 static const struct fd_ops probe_fd_ops = {
+    .read = probe_read,
     .write = probe_write,
 };
 
@@ -254,6 +279,13 @@ static struct fd *create_directory_fd(struct directory_probe *probe) {
 }
 
 static void reset_io(struct io_probe *probe) {
+    probe->readable_size = 0;
+    probe->read_position = 0;
+    probe->max_read = 0;
+    probe->read_calls = 0;
+    memset(probe->read_requests, 0, sizeof(probe->read_requests));
+    probe->read_error_call = 0;
+    probe->read_error = 0;
     probe->written_size = 0;
     probe->max_write = 0;
     probe->write_calls = 0;
@@ -588,12 +620,121 @@ int main(void) {
             "只读 fd 在导入 iovec 前返回 EBADF");
     fixture_fd->flags = O_RDWR_;
 
+    vectors[0] = (struct aarch64_linux_iovec) {
+        USER_BASE + first_offset, 4,
+    };
+    vectors[1] = (struct aarch64_linux_iovec) {
+        USER_BASE + second_offset, 8,
+    };
+    store_vectors(&memory, vector_offset, vectors, 2);
+    memset(memory.bytes + first_offset, 0xa5, 4);
+    memset(memory.bytes + second_offset, 0xa5, 8);
+    reset_io(&io);
+    memcpy(io.readable_data, "read vector", 11);
+    io.readable_size = 11;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 2);
+    CHECK(result == 11 && io.read_calls == 1 &&
+            io.read_requests[0] == 12 && memory.read_calls == 1 &&
+            memory.write_calls == 2,
+            "readv 以一次后端读取把短结果分散到多个向量");
+    CHECK(memcmp(memory.bytes + first_offset, "read", 4) == 0 &&
+            memcmp(memory.bytes + second_offset, " vector", 7) == 0 &&
+            memory.bytes[second_offset + 7] == 0xa5,
+            "readv 只写回后端实际返回的字节并保留尾部哨兵");
+
+    reset_io(&io);
+    memcpy(io.readable_data, "failure", 7);
+    io.readable_size = 7;
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + first_offset + 2;
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 2);
+    CHECK(result == encoded_error(_EFAULT) && io.read_calls == 1 &&
+            memory.write_calls == 1 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "readv 首个向量写回故障传播 EFAULT 与精确地址");
+
+    vectors[0].length = 3;
+    vectors[1].length = 5;
+    store_vectors(&memory, vector_offset, vectors, 2);
+    reset_io(&io);
+    memcpy(io.readable_data, "onefault", 8);
+    io.readable_size = 8;
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + second_offset + 2;
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 2);
+    CHECK(result == 3 && io.read_calls == 1 &&
+            memory.write_calls == 2 &&
+            memcmp(memory.bytes + first_offset, "one", 3) == 0,
+            "readv 后续向量故障返回此前完整写回的前缀长度");
+
+    vectors[0].length = UINT64_C(0x100001);
+    store_vectors(&memory, vector_offset, vectors, 1);
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 1);
+    CHECK(result == encoded_error(_ENOMEM) && io.read_calls == 0 &&
+            memory.read_calls == 1 && memory.write_calls == 0,
+            "readv 超过事务上限时在后端读取前返回 ENOMEM");
+
+    vectors[0] = (struct aarch64_linux_iovec) {
+        AARCH64_LINUX_USER_ADDRESS_MAX, 2,
+    };
+    store_vectors(&memory, vector_offset, vectors, 1);
+    reset_io(&io);
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 1);
+    CHECK(result == encoded_error(_EFAULT) && io.read_calls == 0 &&
+            memory.read_calls == 1 && memory.write_calls == 0 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "readv 在后端读取前拒绝跨越用户上限的目标向量");
+
+    reset_io(&io);
+    reset_user(&memory);
+    io.read_error_call = 1;
+    io.read_error = _EIO;
+    vectors[0] = (struct aarch64_linux_iovec) {
+        USER_BASE + first_offset, 4,
+    };
+    store_vectors(&memory, vector_offset, vectors, 1);
+    result = invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 1);
+    CHECK(result == encoded_error(_EIO) && io.read_calls == 1 &&
+            memory.write_calls == 0,
+            "readv 保持单次后端读取错误且不写 guest");
+
     reset_io(&io);
     reset_user(&memory);
     CHECK(invoke(&fixture, &memory, &fault, 65, 0,
-            UINT64_MAX, UINT64_MAX) == encoded_error(_ENOSYS) &&
+            UINT64_MAX, 0) == 0 && io.read_calls == 0 &&
             memory.read_calls == 0 && memory.write_calls == 0,
-            "尚未提供精确部分写回语义前 readv 保持 ENOSYS");
+            "零向量 readv 检查有效 fd 后不访问 guest 或后端");
+    CHECK(invoke(&fixture, &memory, &fault, 65, 99,
+            UINT64_MAX, 0) == encoded_error(_EBADF) &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "零向量 readv 仍优先拒绝无效 fd");
+    CHECK(invoke(&fixture, &memory, &fault, 65, 99,
+            UINT64_MAX, 1025) == encoded_error(_EBADF) &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "readv 的无效 fd 优先于向量数量和地址错误");
+
+    struct fd *readv_fd = f_get_task(&fixture.task, 0);
+    CHECK(readv_fd != NULL, "readv 测试 fd 可用于访问模式探针");
+    readv_fd->flags = O_WRONLY_;
+    reset_io(&io);
+    reset_user(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 65, 0,
+            USER_BASE + vector_offset, 1) == encoded_error(_EBADF) &&
+            io.read_calls == 0 && memory.read_calls == 0,
+            "只写 fd 在导入 readv 向量前返回 EBADF");
+    readv_fd->flags = O_RDWR_;
 
     fd_t event_fd = sys_eventfd2(0, O_NONBLOCK_);
     CHECK(event_fd == 1 && file_write_check_task(&fixture.task, event_fd) == 0,

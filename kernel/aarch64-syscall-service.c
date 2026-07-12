@@ -55,6 +55,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETDENTS64 = 61,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
+    AARCH64_LINUX_SYS_READV = 65,
     AARCH64_LINUX_SYS_WRITEV = 66,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
@@ -111,6 +112,7 @@ static bool aarch64_user_range_fits(qword_t address, qword_t size) {
 static int copy_iovecs_from_user(
         const struct guest_linux_syscall_context *context,
         qword_t address, qword_t count,
+        enum guest_memory_access payload_access,
         struct aarch64_linux_iovec **vectors_out, qword_t *total_out,
         struct guest_linux_user_fault *fault) {
     *vectors_out = NULL;
@@ -149,7 +151,7 @@ static int copy_iovecs_from_user(
         if (!aarch64_user_range_fits(
                 vectors[index].base, checked_length)) {
             user_range_error(fault, vectors[index].base,
-                    GUEST_MEMORY_READ);
+                    payload_access);
             free(vectors);
             return _EFAULT;
         }
@@ -159,6 +161,86 @@ static int copy_iovecs_from_user(
     *vectors_out = vectors;
     *total_out = total;
     return 0;
+}
+
+static qword_t dispatch_readv(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_read_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+
+    struct aarch64_linux_iovec *vectors;
+    qword_t total;
+    error = copy_iovecs_from_user(context,
+            syscall->arguments[1], syscall->arguments[2],
+            GUEST_MEMORY_WRITE, &vectors, &total, fault);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
+    if (total == 0) {
+        free(vectors);
+        fd_close(target);
+        return 0;
+    }
+    if (total > AARCH64_LINUX_IOV_TRANSACTION_LIMIT) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_ENOMEM);
+    }
+
+    // 单次读取保留管道与套接字的消息语义，再按实际读取长度分散写回。
+    byte_t *buffer = malloc((size_t) total);
+    if (buffer == NULL) {
+        free(vectors);
+        fd_close(target);
+        return syscall_result(_ENOMEM);
+    }
+    ssize_t read = file_read_fd(target, buffer, (size_t) total);
+    assert(read < 0 || (qword_t) read <= total);
+    if (read <= 0) {
+        free(buffer);
+        free(vectors);
+        fd_close(target);
+        return syscall_result(read);
+    }
+
+    qword_t copied = 0;
+    for (size_t index = 0;
+            index < (size_t) syscall->arguments[2] && copied < (qword_t) read;
+            index++) {
+        qword_t length = vectors[index].length;
+        qword_t remaining = (qword_t) read - copied;
+        if (length > remaining)
+            length = remaining;
+        if (length == 0)
+            continue;
+        assert(length <= UINT32_MAX);
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                vectors[index].base, buffer + (size_t) copied,
+                (dword_t) length, fault)) {
+            qword_t result = copied != 0 ? copied : syscall_result(_EFAULT);
+            free(buffer);
+            free(vectors);
+            fd_close(target);
+            return result;
+        }
+        copied += length;
+    }
+    assert(copied == (qword_t) read);
+    free(buffer);
+    free(vectors);
+    fd_close(target);
+    return copied;
 }
 
 static qword_t copy_path_from_user(
@@ -507,7 +589,7 @@ static qword_t dispatch_writev(
     qword_t total;
     error = copy_iovecs_from_user(context,
             syscall->arguments[1], syscall->arguments[2],
-            &vectors, &total, fault);
+            GUEST_MEMORY_READ, &vectors, &total, fault);
     if (error < 0) {
         fd_close(target);
         return syscall_result(error);
@@ -965,6 +1047,8 @@ static qword_t dispatch_syscall(
             return dispatch_read(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITE:
             return dispatch_write(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_READV:
+            return dispatch_readv(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITEV:
             return dispatch_writev(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_NEWFSTATAT:
