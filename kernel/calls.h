@@ -102,6 +102,10 @@ struct pollfd_ {
     word_t events;
     word_t revents;
 };
+struct timer_time;
+sqword_t file_select_task(struct task *task, fd_t nfds,
+        byte_t *readfds, byte_t *writefds, byte_t *exceptfds,
+        size_t fdset_size, const struct timer_time *deadline);
 sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
         size_t nfds, struct timespec *timeout);
 dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout);

@@ -20,6 +20,7 @@
 #define BRK_LIMIT (BRK_BASE + 2 * GUEST_MEMORY_PAGE_SIZE)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00004000eeee0000)
 #define SYS_READ UINT64_C(63)
+#define SYS_PSELECT6 UINT64_C(72)
 #define SYS_NANOSLEEP UINT64_C(101)
 #define DISABLED_ALTSTACK 2
 #define MAX_INSTALLS 2
@@ -578,6 +579,26 @@ int main(void) {
     syscall_entry = cpu;
     interrupted = (struct interrupted_syscall_probe) {
         .number = SYS_NANOSLEEP,
+        .result = interrupted_result,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {restarting},
+        .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+        .delivery_count = 1,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = restarting.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(frame.uc.mcontext.pc == syscall_entry.pc);
+    assert(frame.uc.mcontext.regs[0] == interrupted_result);
+
+    cpu = syscall_entry;
+    cpu.x[8] = SYS_PSELECT6;
+    syscall_entry = cpu;
+    interrupted = (struct interrupted_syscall_probe) {
+        .number = SYS_PSELECT6,
         .result = interrupted_result,
     };
     probe = (struct signal_probe) {

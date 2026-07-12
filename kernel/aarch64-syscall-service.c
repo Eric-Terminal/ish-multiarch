@@ -22,6 +22,7 @@
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/task.h"
+#include "util/timer.h"
 
 #define AARCH64_LINUX_MAX_RW_COUNT UINT64_C(0x7ffff000)
 #define AARCH64_LINUX_IO_CHUNK_SIZE 4096
@@ -78,6 +79,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_PWRITE64 = 68,
     AARCH64_LINUX_SYS_PREADV = 69,
     AARCH64_LINUX_SYS_PWRITEV = 70,
+    AARCH64_LINUX_SYS_PSELECT6 = 72,
     AARCH64_LINUX_SYS_PPOLL = 73,
     AARCH64_LINUX_SYS_READLINKAT = 78,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
@@ -865,6 +867,204 @@ static struct timespec ppoll_host_timeout(
         .tv_sec = (time_t) seconds,
         .tv_nsec = (long) timeout.nsec,
     };
+}
+
+static qword_t dispatch_pselect6(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_pselect_sigmask mask_argument = {0};
+    if (syscall->arguments[5] != 0) {
+        if (!aarch64_user_range_fits(
+                syscall->arguments[5], sizeof(mask_argument)))
+            return user_range_error(
+                    fault, syscall->arguments[5], GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[5], &mask_argument,
+                sizeof(mask_argument), fault))
+            return syscall_result(_EFAULT);
+    }
+
+    struct timer_time deadline;
+    bool has_timeout = syscall->arguments[4] != 0;
+    bool zero_timeout = false;
+    if (has_timeout) {
+        struct aarch64_linux_timespec timeout;
+        if (!aarch64_user_range_fits(
+                syscall->arguments[4], sizeof(timeout)))
+            return user_range_error(
+                    fault, syscall->arguments[4], GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[4], &timeout,
+                sizeof(timeout), fault))
+            return syscall_result(_EFAULT);
+        if (timeout.sec < 0 || timeout.nsec < 0 ||
+                timeout.nsec >= INT64_C(1000000000))
+            return syscall_result(_EINVAL);
+        zero_timeout = timeout.sec == 0 && timeout.nsec == 0;
+        deadline = timer_time_add(
+                timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)),
+                (struct timer_time) {timeout.sec, timeout.nsec});
+    }
+
+    sigset_t_ mask = 0;
+    bool has_mask = mask_argument.address != 0;
+    if (has_mask) {
+        if (mask_argument.size != sizeof(mask))
+            return syscall_result(_EINVAL);
+        if (!aarch64_user_range_fits(
+                mask_argument.address, sizeof(mask)))
+            return user_range_error(
+                    fault, mask_argument.address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                mask_argument.address, &mask, sizeof(mask), fault))
+            return syscall_result(_EFAULT);
+    }
+
+    bool mask_applied = false;
+    if (has_mask) {
+        sigmask_set_temp_task(task, mask);
+        mask_applied = true;
+    }
+    fd_t nfds = (fd_t) (sdword_t) (dword_t) syscall->arguments[0];
+    sqword_t result = 0;
+    size_t fdset_size = 0;
+    byte_t *readfds = NULL;
+    byte_t *writefds = NULL;
+    byte_t *exceptfds = NULL;
+    if (nfds < 0 || (rlim_t_) nfds >
+            rlimit_task(task, RLIMIT_NOFILE_)) {
+        result = _EINVAL;
+        goto finish;
+    }
+    fdset_size = (((size_t) nfds + 63) / 64) * sizeof(qword_t);
+
+    if (fdset_size != 0 && syscall->arguments[1] != 0) {
+        readfds = malloc(fdset_size);
+        if (readfds == NULL) {
+            result = _ENOMEM;
+            goto finish;
+        }
+    }
+    if (fdset_size != 0 && syscall->arguments[2] != 0) {
+        writefds = malloc(fdset_size);
+        if (writefds == NULL) {
+            result = _ENOMEM;
+            goto finish;
+        }
+    }
+    if (fdset_size != 0 && syscall->arguments[3] != 0) {
+        exceptfds = malloc(fdset_size);
+        if (exceptfds == NULL) {
+            result = _ENOMEM;
+            goto finish;
+        }
+    }
+
+    if (readfds != NULL) {
+        if (!aarch64_user_range_fits(
+                syscall->arguments[1], fdset_size)) {
+            (void) user_range_error(
+                    fault, syscall->arguments[1], GUEST_MEMORY_READ);
+            result = _EFAULT;
+            goto finish;
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[1], readfds,
+                (dword_t) fdset_size, fault)) {
+            result = _EFAULT;
+            goto finish;
+        }
+    }
+    if (writefds != NULL) {
+        if (!aarch64_user_range_fits(
+                syscall->arguments[2], fdset_size)) {
+            (void) user_range_error(
+                    fault, syscall->arguments[2], GUEST_MEMORY_READ);
+            result = _EFAULT;
+            goto finish;
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[2], writefds,
+                (dword_t) fdset_size, fault)) {
+            result = _EFAULT;
+            goto finish;
+        }
+    }
+    if (exceptfds != NULL) {
+        if (!aarch64_user_range_fits(
+                syscall->arguments[3], fdset_size)) {
+            (void) user_range_error(
+                    fault, syscall->arguments[3], GUEST_MEMORY_READ);
+            result = _EFAULT;
+            goto finish;
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[3], exceptfds,
+                (dword_t) fdset_size, fault)) {
+            result = _EFAULT;
+            goto finish;
+        }
+    }
+
+    result = file_select_task(task, nfds,
+            readfds, writefds, exceptfds, fdset_size,
+            has_timeout ? &deadline : NULL);
+    if (result >= 0 && readfds != NULL) {
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                syscall->arguments[1], readfds,
+                (dword_t) fdset_size, fault))
+            result = _EFAULT;
+    }
+    if (result >= 0 && writefds != NULL) {
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                syscall->arguments[2], writefds,
+                (dword_t) fdset_size, fault))
+            result = _EFAULT;
+    }
+    if (result >= 0 && exceptfds != NULL) {
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                syscall->arguments[3], exceptfds,
+                (dword_t) fdset_size, fault))
+            result = _EFAULT;
+    }
+
+finish:
+    free(readfds);
+    free(writefds);
+    free(exceptfds);
+
+    if (mask_applied && result != _EINTR) {
+        sigmask_restore_temp_task(task);
+        mask_applied = false;
+    }
+    if (has_timeout && !zero_timeout) {
+        struct timer_time remaining = timer_time_subtract(
+                deadline,
+                timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)));
+        if (!timer_time_positive(remaining))
+            remaining = (struct timer_time) {0};
+        const struct aarch64_linux_timespec timeout = {
+            .sec = remaining.sec,
+            .nsec = remaining.nsec,
+        };
+        assert(context->user.write != NULL);
+        // Linux raw syscall 的剩余超时写回不覆盖主要返回值。
+        struct guest_linux_user_fault timeout_fault;
+        (void) context->user.write(context->user.opaque,
+                syscall->arguments[4], &timeout,
+                sizeof(timeout), &timeout_fault);
+    }
+    return syscall_result(result);
 }
 
 static qword_t dispatch_ppoll(
@@ -1881,6 +2081,8 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_PWRITEV:
             return dispatch_writev_at(context, syscall, task, fault,
                     true, (off_t_) syscall->arguments[3], 0);
+        case AARCH64_LINUX_SYS_PSELECT6:
+            return dispatch_pselect6(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_PPOLL:
             return dispatch_ppoll(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_READLINKAT:

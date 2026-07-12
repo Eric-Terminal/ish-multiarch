@@ -31,9 +31,21 @@ struct aarch64_linux_sigaction {
     qword_t mask;
 } __attribute__((packed, aligned(8)));
 
+struct aarch64_linux_pselect_sigmask {
+    qword_t address;
+    qword_t size;
+} __attribute__((packed, aligned(8)));
+
 _Static_assert(sizeof(struct aarch64_linux_sigaction) == 32 &&
         _Alignof(struct aarch64_linux_sigaction) == 8,
         "AArch64 Linux sigaction ABI 必须固定为 32 字节且按 8 字节对齐");
+_Static_assert(sizeof(struct aarch64_linux_pselect_sigmask) == 16 &&
+        _Alignof(struct aarch64_linux_pselect_sigmask) == 8 &&
+        __builtin_offsetof(
+                struct aarch64_linux_pselect_sigmask, address) == 0 &&
+        __builtin_offsetof(
+                struct aarch64_linux_pselect_sigmask, size) == 8,
+        "AArch64 Linux pselect6 信号掩码参数必须保持两个 64 位字段");
 _Static_assert(__builtin_offsetof(struct aarch64_linux_sigaction, handler) == 0 &&
         __builtin_offsetof(struct aarch64_linux_sigaction, flags) == 8 &&
         __builtin_offsetof(struct aarch64_linux_sigaction, restorer) == 16 &&

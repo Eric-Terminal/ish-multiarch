@@ -19,6 +19,7 @@
 #define USER_BASE UINT64_C(0x00007abc12340000)
 #define USER_MEMORY_SIZE UINT32_C(0x10000)
 #define IO_DATA_SIZE 8192
+#define USER_ACCESS_LOG_SIZE 16
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -31,6 +32,12 @@
 _Static_assert(sizeof(guest_addr_t) == 4,
         "生产系统调用服务测试必须位于 i386 内核类型域");
 
+struct user_access {
+    qword_t address;
+    dword_t size;
+    dword_t access;
+};
+
 struct user_memory {
     byte_t bytes[USER_MEMORY_SIZE];
     qword_t fail_read_at;
@@ -41,6 +48,17 @@ struct user_memory {
     qword_t write_bytes;
     dword_t max_read_size;
     dword_t max_write_size;
+    struct user_access accesses[USER_ACCESS_LOG_SIZE];
+    unsigned access_count;
+    struct task *observe_task;
+    qword_t observe_read_at;
+    qword_t observe_write_at;
+    sigset_t_ observed_blocked;
+    sigset_t_ observed_write_blocked;
+    bool observed_has_saved_mask;
+    bool observed_write_has_saved_mask;
+    bool observed_read;
+    bool observed_write;
 };
 
 struct io_probe {
@@ -125,6 +143,24 @@ static void reset_user_access(struct user_memory *memory) {
     memory->write_bytes = 0;
     memory->max_read_size = 0;
     memory->max_write_size = 0;
+    memory->access_count = 0;
+    memory->observe_task = NULL;
+    memory->observed_read = false;
+    memory->observed_write = false;
+}
+
+static void record_user_access(struct user_memory *memory,
+        qword_t address, dword_t size,
+        enum guest_memory_access access) {
+    if (memory->access_count < array_size(memory->accesses)) {
+        memory->accesses[memory->access_count] =
+                (struct user_access) {
+                    .address = address,
+                    .size = size,
+                    .access = (dword_t) access,
+                };
+    }
+    memory->access_count++;
 }
 
 static bool user_range(const struct user_memory *memory,
@@ -158,7 +194,17 @@ static bool read_user(void *opaque, qword_t address,
         void *destination, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct user_memory *memory = opaque;
+    record_user_access(memory, address, size, GUEST_MEMORY_READ);
     memory->read_calls++;
+    if (memory->observe_task != NULL &&
+            range_contains(address, size, memory->observe_read_at)) {
+        lock(&memory->observe_task->sighand->lock);
+        memory->observed_blocked = memory->observe_task->blocked;
+        memory->observed_has_saved_mask =
+                memory->observe_task->has_saved_mask;
+        unlock(&memory->observe_task->sighand->lock);
+        memory->observed_read = true;
+    }
     if (size > memory->max_read_size)
         memory->max_read_size = size;
     size_t offset;
@@ -184,7 +230,17 @@ static bool write_user(void *opaque, qword_t address,
         const void *source, dword_t size,
         struct guest_linux_user_fault *fault) {
     struct user_memory *memory = opaque;
+    record_user_access(memory, address, size, GUEST_MEMORY_WRITE);
     memory->write_calls++;
+    if (memory->observe_task != NULL &&
+            range_contains(address, size, memory->observe_write_at)) {
+        lock(&memory->observe_task->sighand->lock);
+        memory->observed_write_blocked = memory->observe_task->blocked;
+        memory->observed_write_has_saved_mask =
+                memory->observe_task->has_saved_mask;
+        unlock(&memory->observe_task->sighand->lock);
+        memory->observed_write = true;
+    }
     if (size > memory->max_write_size)
         memory->max_write_size = size;
     size_t offset;
@@ -558,6 +614,316 @@ static qword_t invoke_five(struct task_fixture *fixture,
     return invoke_arguments(fixture, memory, fault, number, arguments);
 }
 
+static qword_t invoke_six(struct task_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t number, qword_t argument0, qword_t argument1,
+        qword_t argument2, qword_t argument3, qword_t argument4,
+        qword_t argument5) {
+    const qword_t arguments[6] = {
+        argument0, argument1, argument2,
+        argument3, argument4, argument5,
+    };
+    return invoke_arguments(fixture, memory, fault, number, arguments);
+}
+
+static bool access_is(const struct user_memory *memory, unsigned index,
+        qword_t address, dword_t size,
+        enum guest_memory_access access) {
+    return index < memory->access_count &&
+            memory->accesses[index].address == address &&
+            memory->accesses[index].size == size &&
+            memory->accesses[index].access == (dword_t) access;
+}
+
+static int test_pselect6(struct task_fixture *fixture,
+        struct user_memory *memory,
+        struct guest_linux_user_fault *fault,
+        struct io_probe *io) {
+    const size_t read_offset = 0x8000;
+    const size_t write_offset = 0x8020;
+    const size_t except_offset = 0x8040;
+    const size_t timeout_offset = 0x8060;
+    const size_t mask_argument_offset = 0x8080;
+    const size_t mask_offset = 0x80a0;
+    const qword_t read_address = USER_BASE + read_offset;
+    const qword_t write_address = USER_BASE + write_offset;
+    const qword_t except_address = USER_BASE + except_offset;
+    const qword_t timeout_address = USER_BASE + timeout_offset;
+    const qword_t mask_argument_address =
+            USER_BASE + mask_argument_offset;
+    const qword_t mask_address = USER_BASE + mask_offset;
+
+    struct aarch64_linux_pselect_sigmask mask_argument = {
+        .address = mask_address,
+        .size = sizeof(sigset_t_),
+    };
+    struct aarch64_linux_timespec timeout = {0};
+    sigset_t_ mask = sig_mask(SIGUSR2_) |
+            sig_mask(SIGKILL_) | sig_mask(SIGSTOP_);
+    memcpy(memory->bytes + mask_argument_offset,
+            &mask_argument, sizeof(mask_argument));
+    memcpy(memory->bytes + timeout_offset, &timeout, sizeof(timeout));
+    memcpy(memory->bytes + mask_offset, &mask, sizeof(mask));
+    memset(memory->bytes + read_offset, 0xff, sizeof(qword_t));
+    memset(memory->bytes + write_offset, 0xff, sizeof(qword_t));
+    memset(memory->bytes + except_offset, 0xff, sizeof(qword_t));
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    fixture->task.has_saved_mask = false;
+    io->poll_events = 0;
+    reset_user_access(memory);
+    qword_t result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, write_address, except_address,
+            timeout_address, mask_argument_address);
+    qword_t read_set;
+    qword_t write_set;
+    qword_t except_set;
+    memcpy(&read_set, memory->bytes + read_offset, sizeof(read_set));
+    memcpy(&write_set, memory->bytes + write_offset, sizeof(write_set));
+    memcpy(&except_set, memory->bytes + except_offset, sizeof(except_set));
+    CHECK(result == 0 && read_set == 0 && write_set == 0 &&
+            except_set == 0 && memory->access_count == 9 &&
+            access_is(memory, 0, mask_argument_address, 16,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 1, timeout_address, 16,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 2, mask_address, 8,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 3, read_address, 8,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 4, write_address, 8,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 5, except_address, 8,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 6, read_address, 8,
+                    GUEST_MEMORY_WRITE) &&
+            access_is(memory, 7, write_address, 8,
+                    GUEST_MEMORY_WRITE) &&
+            access_is(memory, 8, except_address, 8,
+                    GUEST_MEMORY_WRITE),
+            "pselect6 按 x5、timeout、mask、三组 fdset 的 ABI 顺序访问用户内存");
+    CHECK(fixture->task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture->task.has_saved_mask,
+            "pselect6 正常超时后恢复原信号掩码");
+
+    memset(memory->bytes + read_offset, 0, sizeof(qword_t));
+    memset(memory->bytes + write_offset, 0, sizeof(qword_t));
+    memset(memory->bytes + except_offset, 0, sizeof(qword_t));
+    memory->bytes[read_offset] = 1;
+    io->poll_events = POLL_ERR;
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, write_address, except_address,
+            timeout_address, 0);
+    memcpy(&read_set, memory->bytes + read_offset, sizeof(read_set));
+    memcpy(&write_set, memory->bytes + write_offset, sizeof(write_set));
+    CHECK(result == 1 && read_set == 1 && write_set == 0,
+            "pselect6 的 POLLERR 不把未请求写位误报为就绪");
+
+    memset(memory->bytes + read_offset, 0, sizeof(qword_t));
+    memset(memory->bytes + write_offset, 0, sizeof(qword_t));
+    memory->bytes[write_offset] = 1;
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, write_address, except_address,
+            timeout_address, 0);
+    memcpy(&read_set, memory->bytes + read_offset, sizeof(read_set));
+    memcpy(&write_set, memory->bytes + write_offset, sizeof(write_set));
+    CHECK(result == 1 && read_set == 0 && write_set == 1,
+            "pselect6 的 POLLERR 不把未请求读位误报为就绪");
+
+    memset(memory->bytes + read_offset, 0, sizeof(qword_t));
+    memset(memory->bytes + write_offset, 0, sizeof(qword_t));
+    memory->bytes[read_offset] = 1;
+    memory->bytes[write_offset] = 1;
+    io->poll_events = POLL_READ | POLL_WRITE;
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, write_address, except_address,
+            timeout_address, 0);
+    memcpy(&read_set, memory->bytes + read_offset, sizeof(read_set));
+    memcpy(&write_set, memory->bytes + write_offset, sizeof(write_set));
+    memcpy(&except_set, memory->bytes + except_offset, sizeof(except_set));
+    CHECK(result == 2 && read_set == 1 && write_set == 1 &&
+            except_set == 0 && memory->write_calls == 3,
+            "pselect6 分别计数同一 fd 的读写命中并清零 64 位 fdset 填充位");
+
+    struct rlimit_ saved_limit =
+            fixture->group.limits[RLIMIT_NOFILE_];
+    fixture->group.limits[RLIMIT_NOFILE_] =
+            (struct rlimit_) {128, 128};
+    memset(memory->bytes + read_offset, 0, 16);
+    io->poll_events = 0;
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            65, read_address, 0, 0, timeout_address, 0);
+    CHECK(result == 0 && memory->access_count == 3 &&
+            access_is(memory, 1, read_address, 16,
+                    GUEST_MEMORY_READ) &&
+            access_is(memory, 2, read_address, 16,
+                    GUEST_MEMORY_WRITE),
+            "pselect6 按 AArch64 64 位 unsigned long 把 65 个 fd 舍入为 16 字节");
+    fixture->group.limits[RLIMIT_NOFILE_] = saved_limit;
+
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            timeout_address, 0);
+    CHECK(result == 0 && memory->access_count == 1 &&
+            access_is(memory, 0, timeout_address, 16,
+                    GUEST_MEMORY_READ),
+            "pselect6 在 nfds 为零时忽略所有 fdset 指针");
+
+    reset_user_access(memory);
+    memory->fail_read_at = mask_argument_address + 8;
+    result = invoke_six(fixture, memory, fault, 72,
+            UINT64_MAX, read_address, write_address, except_address,
+            timeout_address, mask_argument_address);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->access_count == 1 &&
+            fault->address == mask_argument_address + 8,
+            "pselect6 优先传播 16 字节 x5 参数读取故障");
+
+    mask_argument.size = UINT64_C(0x1234567800000008);
+    memcpy(memory->bytes + mask_argument_offset,
+            &mask_argument, sizeof(mask_argument));
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, write_address, except_address,
+            timeout_address, mask_argument_address);
+    CHECK(result == encoded_error(_EINVAL) &&
+            memory->access_count == 2 && memory->write_calls == 0,
+            "pselect6 对非空掩码按完整 64 位检查 sigset size");
+
+    mask_argument.size = sizeof(sigset_t_);
+    memcpy(memory->bytes + mask_argument_offset,
+            &mask_argument, sizeof(mask_argument));
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            UINT64_C(0x12345678ffffffff),
+            read_address, write_address, except_address,
+            timeout_address, mask_argument_address);
+    CHECK(result == encoded_error(_EINVAL) &&
+            memory->access_count == 3 && memory->write_calls == 0 &&
+            fixture->task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture->task.has_saved_mask,
+            "pselect6 读取辅助参数后按低 32 位拒绝负 nfds 并恢复掩码");
+
+    mask = 0;
+    memcpy(memory->bytes + mask_offset, &mask, sizeof(mask));
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    fixture->task.has_saved_mask = false;
+    reset_user_access(memory);
+    memory->observe_task = &fixture->task;
+    memory->observe_read_at = read_address + 4;
+    memory->fail_read_at = read_address + 4;
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, 0, 0,
+            timeout_address, mask_argument_address);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->observed_read && memory->observed_blocked == 0 &&
+            memory->observed_has_saved_mask &&
+            fixture->task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture->task.has_saved_mask,
+            "pselect6 在读取 fdset 前原子安装临时掩码并在 EFAULT 后恢复");
+
+    timeout = (struct aarch64_linux_timespec) {
+        .sec = (sqword_t) INT32_MAX + 123,
+        .nsec = 500000000,
+    };
+    memcpy(memory->bytes + timeout_offset, &timeout, sizeof(timeout));
+    memset(memory->bytes + read_offset, 0, sizeof(qword_t));
+    memory->bytes[read_offset] = 1;
+    io->poll_events = POLL_READ;
+    reset_user_access(memory);
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, 0, 0, timeout_address, 0);
+    memcpy(&timeout, memory->bytes + timeout_offset, sizeof(timeout));
+    CHECK(result == 1 && timeout.sec > INT32_MAX &&
+            timeout.nsec >= 0 && timeout.nsec < INT64_C(1000000000) &&
+            memory->write_calls == 2,
+            "pselect6 的超长等待与剩余时间保持 64 位且不经过 host time_t");
+
+    timeout = (struct aarch64_linux_timespec) {
+        .sec = (sqword_t) INT32_MAX + 123,
+        .nsec = 500000000,
+    };
+    memcpy(memory->bytes + timeout_offset, &timeout, sizeof(timeout));
+    memory->bytes[read_offset] = 1;
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    fixture->task.has_saved_mask = false;
+    reset_user_access(memory);
+    memory->observe_task = &fixture->task;
+    memory->observe_write_at = timeout_address + 8;
+    memory->fail_write_at = timeout_address + 8;
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, 0, 0,
+            timeout_address, mask_argument_address);
+    CHECK(result == 1 && memory->write_calls == 2 &&
+            fault->address == read_address &&
+            fault->access == GUEST_MEMORY_WRITE &&
+            fault->kind == GUEST_MEMORY_FAULT_NONE &&
+            memory->observed_write &&
+            memory->observed_write_blocked == sig_mask(SIGUSR1_) &&
+            !memory->observed_write_has_saved_mask &&
+            fixture->task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture->task.has_saved_mask,
+            "pselect6 正常路径先恢复掩码且 timeout 故障不覆盖结果或 fault");
+
+    timeout = (struct aarch64_linux_timespec) {.sec = 5};
+    mask = 0;
+    memcpy(memory->bytes + timeout_offset, &timeout, sizeof(timeout));
+    memcpy(memory->bytes + mask_offset, &mask, sizeof(mask));
+    memory->bytes[read_offset] = 1;
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    fixture->task.has_saved_mask = false;
+    reset_user_access(memory);
+    memory->observe_task = &fixture->task;
+    memory->observe_write_at = timeout_address;
+    memory->fail_write_at = read_address + 4;
+    result = invoke_six(fixture, memory, fault, 72,
+            1, read_address, 0, 0,
+            timeout_address, mask_argument_address);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->write_calls == 2 &&
+            fault->address == read_address + 4 &&
+            fault->access == GUEST_MEMORY_WRITE &&
+            memory->observed_write &&
+            memory->observed_write_blocked == sig_mask(SIGUSR1_) &&
+            !memory->observed_write_has_saved_mask &&
+            fixture->task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture->task.has_saved_mask,
+            "pselect6 的 fdset 故障优先并在 timeout 写回前恢复掩码");
+
+    memcpy(memory->bytes + timeout_offset, &timeout, sizeof(timeout));
+    fixture->task.blocked = sig_mask(SIGUSR1_);
+    fixture->task.has_saved_mask = false;
+    lock(&fixture->task.sighand->lock);
+    fixture->task.pending |= sig_mask(SIGUSR1_);
+    unlock(&fixture->task.sighand->lock);
+    reset_user_access(memory);
+    memory->observe_task = &fixture->task;
+    memory->observe_write_at = timeout_address;
+    result = invoke_six(fixture, memory, fault, 72,
+            0, UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            timeout_address, mask_argument_address);
+    memcpy(&timeout, memory->bytes + timeout_offset, sizeof(timeout));
+    CHECK(result == encoded_error(_EINTR) &&
+            fixture->task.blocked == 0 &&
+            fixture->task.has_saved_mask &&
+            fixture->task.saved_mask == sig_mask(SIGUSR1_) &&
+            memory->observed_write &&
+            memory->observed_write_blocked == 0 &&
+            memory->observed_write_has_saved_mask &&
+            timeout.sec >= 0 && timeout.sec <= 5,
+            "pselect6 被信号中断时保留临时掩码并写回剩余超时");
+    sigmask_restore_temp_task(&fixture->task);
+    lock(&fixture->task.sighand->lock);
+    fixture->task.pending &= ~sig_mask(SIGUSR1_);
+    unlock(&fixture->task.sighand->lock);
+    io->poll_events = 0;
+    return 0;
+}
+
 static const byte_t expected_stat[128] = {
     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
     0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
@@ -608,6 +974,12 @@ int main(void) {
     memset(&memory, 0xa5, sizeof(memory));
     reset_user_access(&memory);
     struct guest_linux_user_fault fault;
+
+    if (test_pselect6(&fixture, &memory, &fault, &io) != 0) {
+        (void) destroy_fixture(&fixture);
+        return 1;
+    }
+    reset_user_access(&memory);
 
     CHECK(invoke(&fixture, &memory, &fault, 129,
             UINT64_C(0x123456787fffffff), 65, 0, 0) ==

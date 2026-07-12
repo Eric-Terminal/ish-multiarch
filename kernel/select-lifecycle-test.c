@@ -15,6 +15,7 @@
 
 #define USER_PAGE UINT32_C(0x00100000)
 #define READFDS_ADDRESS (USER_PAGE + 16)
+#define WRITEFDS_ADDRESS (USER_PAGE + 24)
 #define TIMEOUT_ADDRESS (USER_PAGE + 32)
 #define UNMAPPED_ADDRESS UINT32_C(0x00200000)
 
@@ -41,6 +42,7 @@ struct readiness_gate {
 
 struct fd_probe {
     struct readiness_gate *gate;
+    int poll_events;
     atomic_uint close_calls;
 };
 
@@ -140,7 +142,7 @@ static bool readiness_gate_wait_until_entered(
 static int probe_poll(struct fd *fd) {
     struct fd_probe *probe = fd->data;
     if (probe->gate == NULL)
-        return 0;
+        return probe->poll_events;
 
     pthread_mutex_lock(&probe->gate->lock);
     probe->gate->entered = true;
@@ -149,6 +151,57 @@ static int probe_poll(struct fd *fd) {
         pthread_cond_wait(&probe->gate->cond, &probe->gate->lock);
     pthread_mutex_unlock(&probe->gate->lock);
     return POLL_READ;
+}
+
+static struct fd *make_fd(struct fd_probe *probe);
+
+static int test_ready_set_count(struct select_fixture *fixture) {
+    struct fd_probe probe = {.poll_events = POLL_ERR};
+    atomic_init(&probe.close_calls, 0);
+    struct fd *fd = make_fd(&probe);
+    CHECK(fd != NULL && f_install_task(&fixture->task, fd, 0) == 0,
+            "安装就绪集合计数测试文件对象");
+
+    byte_t selected = 1;
+    byte_t unselected = 0;
+    struct timeval_ immediate = {0};
+    CHECK(user_put(READFDS_ADDRESS, selected) == 0 &&
+            user_put(WRITEFDS_ADDRESS, unselected) == 0 &&
+            user_put(TIMEOUT_ADDRESS, immediate) == 0,
+            "准备仅请求读位的双指针 select 参数");
+    CHECK((sdword_t) sys_select(1, READFDS_ADDRESS,
+                    WRITEFDS_ADDRESS, 0, TIMEOUT_ADDRESS) == 1,
+            "POLLERR 只计入实际请求的读位");
+    byte_t ready_read;
+    byte_t ready_write;
+    CHECK(user_get(READFDS_ADDRESS, ready_read) == 0 &&
+            user_get(WRITEFDS_ADDRESS, ready_write) == 0 &&
+            ready_read == 1 && ready_write == 0,
+            "未请求的写位保持未就绪");
+
+    CHECK(user_put(READFDS_ADDRESS, unselected) == 0 &&
+            user_put(WRITEFDS_ADDRESS, selected) == 0,
+            "准备仅请求写位的双指针 select 参数");
+    CHECK((sdword_t) sys_select(1, READFDS_ADDRESS,
+                    WRITEFDS_ADDRESS, 0, TIMEOUT_ADDRESS) == 1,
+            "POLLERR 只计入实际请求的写位");
+    CHECK(user_get(READFDS_ADDRESS, ready_read) == 0 &&
+            user_get(WRITEFDS_ADDRESS, ready_write) == 0 &&
+            ready_read == 0 && ready_write == 1,
+            "未请求的读位保持未就绪");
+
+    probe.poll_events = POLL_READ | POLL_WRITE;
+    CHECK(user_put(READFDS_ADDRESS, selected) == 0 &&
+            user_put(WRITEFDS_ADDRESS, selected) == 0,
+            "准备同一 fd 的双集合 select 参数");
+    CHECK((sdword_t) sys_select(1, READFDS_ADDRESS,
+                    WRITEFDS_ADDRESS, 0, TIMEOUT_ADDRESS) == 2,
+            "同一 fd 的读写命中分别计入 select 返回值");
+    CHECK(f_close_task(&fixture->task, 0) == 0 &&
+            atomic_load_explicit(&probe.close_calls,
+                    memory_order_relaxed) == 1,
+            "释放就绪集合计数测试文件对象");
+    return 0;
 }
 
 static int probe_close(struct fd *fd) {
@@ -293,6 +346,8 @@ int main(void) {
     CHECK(fixture_init(&fixture), "初始化 select 生命周期夹具");
 
     int result = test_argument_bounds();
+    if (result == 0)
+        result = test_ready_set_count(&fixture);
     if (result == 0)
         result = test_error_cleanup_balance(&fixture);
     if (result == 0)

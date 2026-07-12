@@ -319,17 +319,16 @@ static bool poll_deadline_remaining(
     return true;
 }
 
-int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struct timespec *timeout) {
-    if (!poll_timeout_valid(timeout))
+int poll_wait_until(struct poll *poll_, poll_callback_t callback,
+        void *context, const struct timer_time *deadline_pointer) {
+    if (deadline_pointer != NULL &&
+            (deadline_pointer->nsec < 0 ||
+                    deadline_pointer->nsec >= INT64_C(1000000000)))
         return _EINVAL;
 
-    bool has_deadline = timeout != NULL;
-    struct timer_time deadline = {0};
-    if (has_deadline) {
-        deadline = timer_time_add(
-                timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)),
-                timer_time_from_timespec(*timeout));
-    }
+    bool has_deadline = deadline_pointer != NULL;
+    struct timer_time deadline = has_deadline
+            ? *deadline_pointer : (struct timer_time) {0};
 
     lock(&poll_->lock);
 
@@ -515,6 +514,23 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
 
     unlock(&poll_->lock);
     return res;
+}
+
+int poll_wait(struct poll *poll_, poll_callback_t callback,
+        void *context, struct timespec *timeout) {
+    if (!poll_timeout_valid(timeout))
+        return _EINVAL;
+
+    struct timer_time deadline;
+    const struct timer_time *deadline_pointer = NULL;
+    if (timeout != NULL) {
+        deadline = timer_time_add(
+                timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)),
+                timer_time_from_timespec(*timeout));
+        deadline_pointer = &deadline;
+    }
+    return poll_wait_until(
+            poll_, callback, context, deadline_pointer);
 }
 
 void poll_destroy(struct poll *poll) {
