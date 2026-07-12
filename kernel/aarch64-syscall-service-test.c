@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/errno.h"
@@ -59,6 +60,7 @@ struct io_probe {
 struct kernel_probe {
     char last_path[MAX_PATH];
     char last_stat_path[MAX_PATH];
+    char last_readlink_path[MAX_PATH];
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
     int last_flags;
@@ -67,6 +69,7 @@ struct kernel_probe {
     unsigned opened_closes;
     unsigned stat_calls;
     unsigned fstat_calls;
+    unsigned readlink_calls;
     unsigned unlink_calls;
     unsigned rmdir_calls;
     struct statbuf stat;
@@ -175,6 +178,9 @@ static bool write_user(void *opaque, qword_t address,
     }
     if (memory->fail_write_at != UINT64_MAX &&
             range_contains(address, size, memory->fail_write_at)) {
+        size_t prefix = (size_t) (memory->fail_write_at - address);
+        memcpy(memory->bytes + offset, source, prefix);
+        memory->write_bytes += prefix;
         set_user_fault(fault, memory->fail_write_at, GUEST_MEMORY_WRITE,
                 GUEST_MEMORY_FAULT_UNMAPPED);
         return false;
@@ -313,7 +319,9 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
 
 static ssize_t probe_readlink(struct mount *mount,
         const char *path, char *buffer, size_t size) {
-    (void) mount;
+    struct kernel_probe *probe = mount->data;
+    probe->readlink_calls++;
+    strcpy(probe->last_readlink_path, path);
     if (strcmp(path, "/work/link") != 0)
         return _EINVAL;
     static const char target[] = "metadata";
@@ -866,6 +874,119 @@ int main(void) {
             USER_BASE + stat_offset, 0, 0);
     CHECK(result == encoded_error(_EBADF) && memory.write_calls == 0,
             "fstat 的 fd 错误优先于 guest 写回故障");
+
+    const size_t readlink_path_offset = 0x5800;
+    const size_t readlink_output_offset = 0x5903;
+    static const char readlink_path[] = "link";
+    memcpy(memory.bytes + readlink_path_offset,
+            readlink_path, sizeof(readlink_path));
+    memset(memory.bytes + readlink_output_offset - 1, 0xa5, 18);
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + readlink_path_offset;
+    unsigned readlink_calls_before = kernel.readlink_calls;
+    result = invoke(&fixture, &memory, &fault, 78, AT_FDCWD_,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset,
+            UINT64_C(0xabcdef0100000000));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            memory.write_calls == 0 &&
+            kernel.readlink_calls == readlink_calls_before,
+            "readlinkat 的零长度在访问路径前返回 EINVAL");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + readlink_path_offset;
+    result = invoke(&fixture, &memory, &fault, 78, AT_FDCWD_,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset,
+            UINT64_C(0xabcdef01ffffffff));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            memory.write_calls == 0 &&
+            kernel.readlink_calls == readlink_calls_before,
+            "readlinkat 按低 32 位拒绝负长度且不访问路径");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + readlink_path_offset + 2;
+    result = invoke(&fixture, &memory, &fault, 78, AT_FDCWD_,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset, 16);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            kernel.readlink_calls == readlink_calls_before &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "readlinkat 保持路径读取故障且不查询后端");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + readlink_path_offset +
+            sizeof(readlink_path);
+    result = invoke(&fixture, &memory, &fault, 78,
+            UINT64_C(0x12345678ffffff9c),
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset,
+            UINT64_C(0xabcdef0100000004));
+    CHECK(result == 4 && memory.read_calls == sizeof(readlink_path) &&
+            memory.write_calls == 1 && memory.write_bytes == 4 &&
+            strcmp(kernel.last_readlink_path, "/work/link") == 0 &&
+            memcmp(memory.bytes + readlink_output_offset, "meta", 4) == 0,
+            "readlinkat 按低位解码参数并截断符号链接内容");
+    CHECK(memory.bytes[readlink_output_offset - 1] == 0xa5 &&
+            memory.bytes[readlink_output_offset + 4] == 0xa5,
+            "readlinkat 不写 NUL 且保持输出范围外哨兵");
+
+    static const char absolute_link_path[] = "/work/link";
+    memcpy(memory.bytes + readlink_path_offset,
+            absolute_link_path, sizeof(absolute_link_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 78, 99,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset, 16);
+    CHECK(result == 8 && memory.write_calls == 1 &&
+            memcmp(memory.bytes + readlink_output_offset,
+                    "metadata", 8) == 0,
+            "readlinkat 的绝对路径使用目标 root 并忽略无效 dirfd");
+
+    memcpy(memory.bytes + readlink_path_offset,
+            readlink_path, sizeof(readlink_path));
+    reset_user_access(&memory);
+    readlink_calls_before = kernel.readlink_calls;
+    result = invoke(&fixture, &memory, &fault, 78, 99,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset, 16);
+    CHECK(result == encoded_error(_EBADF) &&
+            memory.read_calls == sizeof(readlink_path) &&
+            memory.write_calls == 0 &&
+            kernel.readlink_calls == readlink_calls_before,
+            "readlinkat 的相对路径在复制后拒绝无效 dirfd");
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 78, 0,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset, 16);
+    CHECK(result == encoded_error(_ENOTDIR) && memory.write_calls == 0,
+            "readlinkat 的相对路径拒绝普通文件 dirfd");
+
+    reset_user_access(&memory);
+    readlink_calls_before = kernel.readlink_calls;
+    result = invoke(&fixture, &memory, &fault, 78, AT_FDCWD_,
+            USER_BASE + readlink_path_offset,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 3, 16);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            kernel.readlink_calls == readlink_calls_before + 1 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX - 3 &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "readlinkat 只按实际结果长度拒绝跨越用户上限的输出");
+
+    memset(memory.bytes + readlink_output_offset, 0xa5, 8);
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + readlink_output_offset + 3;
+    result = invoke(&fixture, &memory, &fault, 78, AT_FDCWD_,
+            USER_BASE + readlink_path_offset,
+            USER_BASE + readlink_output_offset, 16);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 1 &&
+            memcmp(memory.bytes + readlink_output_offset, "met", 3) == 0 &&
+            memory.bytes[readlink_output_offset + 3] == 0xa5 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "readlinkat 保持部分 guest 写回并传播精确故障");
 
     // newfstatat 复用 task 路径语义，并输出同一份 AArch64 stat wire ABI。
     const size_t metadata_offset = 0x6000;

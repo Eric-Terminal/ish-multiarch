@@ -49,6 +49,8 @@ int file_statat_task(struct task *task, fd_t dirfd, const char *path,
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 int file_chdir_task(struct task *task, const char *path);
 int file_fchdir_task(struct task *task, fd_t fd);
+ssize_t file_readlinkat_task(struct task *task, fd_t dirfd,
+        const char *path, char *buffer, size_t size);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
 int file_unlinkat_task(struct task *task, fd_t dirfd,
@@ -115,7 +117,10 @@ int generic_statat(struct fd *at, const char *path,
         struct statbuf *stat, bool follow_links);
 int generic_setattrat(struct fd *at, const char *path, struct attr attr, bool follow_links);
 int generic_utime(struct fd *at, const char *path, struct timespec atime, struct timespec mtime, bool follow_links);
-ssize_t generic_readlinkat(struct fd *at, const char *path, char *buf, size_t bufsize);
+ssize_t generic_readlinkat_task(struct task *task, struct fd *at,
+        const char *path, char *buffer, size_t size);
+ssize_t generic_readlinkat(
+        struct fd *at, const char *path, char *buffer, size_t size);
 int generic_mkdirat(struct fd *at, const char *path, mode_t_ mode);
 
 int access_check_task(struct task *task, struct statbuf *stat, int check);

@@ -204,6 +204,25 @@ int file_fchdir_task(struct task *task, fd_t fd_number) {
     return 0;
 }
 
+ssize_t file_readlinkat_task(struct task *task, fd_t dirfd,
+        const char *path, char *buffer, size_t size) {
+    if (path[0] == '\0')
+        return _ENOENT;
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = retained ? f_get_task_retain(task, dirfd) : AT_PWD;
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    ssize_t result = generic_readlinkat_task(
+            task, at, path, buffer, size);
+    if (retained)
+        fd_close(at);
+    return result;
+}
+
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)

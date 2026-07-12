@@ -59,6 +59,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_READV = 65,
     AARCH64_LINUX_SYS_WRITEV = 66,
+    AARCH64_LINUX_SYS_READLINKAT = 78,
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
@@ -482,6 +483,40 @@ static qword_t dispatch_chdir(
     if ((sqword_t) copied < 0)
         return copied;
     return syscall_result(file_chdir_task(task, path));
+}
+
+static qword_t dispatch_readlinkat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    sdword_t requested = (sdword_t) (dword_t) syscall->arguments[3];
+    if (requested <= 0)
+        return syscall_result(_EINVAL);
+
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+
+    char buffer[MAX_PATH];
+    size_t capacity = (dword_t) requested < sizeof(buffer) ?
+            (dword_t) requested : sizeof(buffer);
+    ssize_t length = file_readlinkat_task(task,
+            syscall_fd(syscall->arguments[0]), path, buffer, capacity);
+    if (length < 0)
+        return syscall_result(length);
+    assert((size_t) length <= capacity);
+    if (!aarch64_user_range_fits(syscall->arguments[2], (qword_t) length))
+        return user_range_error(
+                fault, syscall->arguments[2], GUEST_MEMORY_WRITE);
+    if (length == 0)
+        return 0;
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            syscall->arguments[2], buffer, (dword_t) length, fault))
+        return syscall_result(_EFAULT);
+    return (qword_t) length;
 }
 
 static qword_t dispatch_read(
@@ -1061,6 +1096,9 @@ static qword_t dispatch_syscall(
             return dispatch_readv(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITEV:
             return dispatch_writev(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_READLINKAT:
+            return dispatch_readlinkat(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_NEWFSTATAT:
             return dispatch_newfstatat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTAT:

@@ -285,17 +285,24 @@ int generic_utime(struct fd *at, const char *path_raw, struct timespec atime, st
     return err;
 }
 
-ssize_t generic_readlinkat(struct fd *at, const char *path_raw, char *buf, size_t bufsize) {
+ssize_t generic_readlinkat_task(struct task *task, struct fd *at,
+        const char *path_raw, char *buffer, size_t size) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, N_SYMLINK_NOFOLLOW);
-    if (err < 0)
-        return err;
+    int error = path_normalize_task(
+            task, at, path_raw, path, N_SYMLINK_NOFOLLOW);
+    if (error < 0)
+        return error;
     struct mount *mount = find_mount_and_trim_path(path);
-    err = _EINVAL;
+    ssize_t result = _EINVAL;
     if (mount->fs->readlink)
-        err = mount->fs->readlink(mount, path, buf, bufsize);
+        result = mount->fs->readlink(mount, path, buffer, size);
     mount_release(mount);
-    return err;
+    return result;
+}
+
+ssize_t generic_readlinkat(
+        struct fd *at, const char *path, char *buffer, size_t size) {
+    return generic_readlinkat_task(current, at, path, buffer, size);
 }
 
 int generic_mkdirat(struct fd *at, const char *path_raw, mode_t_ mode) {

@@ -133,6 +133,8 @@ static ssize_t probe_readlink(struct mount *mount,
     const char *target;
     if (strcmp(path, "/target/link") == 0)
         target = "/absolute";
+    else if (strcmp(path, "/explicit/link") == 0)
+        target = "explicit";
     else if (strcmp(path, "/target/escape-link") == 0)
         target = "/../escape";
     else
@@ -309,6 +311,21 @@ int main(void) {
     decoy.task.euid = 0;
     CHECK(access_check(&permission, AC_W) == 0, "兼容权限入口保留超级用户语义");
     decoy.task.euid = 2000;
+
+    char link_target[16] = {0};
+    CHECK(file_readlinkat_task(&target.task, AT_FDCWD_, "link",
+            link_target, sizeof(link_target)) == 9 &&
+            memcmp(link_target, "/absolute", 9) == 0,
+            "readlinkat 相对路径使用目标任务 cwd 而非 current");
+    CHECK(file_readlinkat_task(&target.task, 99, "link",
+            link_target, sizeof(link_target)) == _EBADF,
+            "readlinkat 相对路径拒绝目标任务中的无效 dirfd");
+    memset(link_target, 0, sizeof(link_target));
+    CHECK(file_readlinkat_task(&target.task, 0, "link",
+            link_target, sizeof(link_target)) == 8 &&
+            memcmp(link_target, "explicit", 8) == 0,
+            "readlinkat 相对路径使用目标任务中的显式 dirfd");
+
     const int sync_flags = (1 << 20) | (1 << 12);
     struct fd *sync_read = generic_openat_task(
             &target.task, AT_PWD, "sync-read", sync_flags, 0);
