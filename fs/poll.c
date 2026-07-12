@@ -1,4 +1,5 @@
 #include "kernel/task.h"
+#include <sched.h>
 #include <string.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -43,14 +44,21 @@ struct poll *poll_create(void) {
         return ERR_PTR(_ENOMEM);
     int err = real_poll_init(&poll->real);
     if (err < 0)
-        return ERR_PTR(errno_map());
+        goto error;
     poll->waiters = 0;
+    poll->destroying = false;
     poll->notify_pipe[0] = -1;
     poll->notify_pipe[1] = -1;
     list_init(&poll->poll_fds);
     list_init(&poll->pollfd_freelist);
     lock_init(&poll->lock);
+    cond_init(&poll->drained);
     return poll;
+
+error:
+    err = errno_map();
+    free(poll);
+    return ERR_PTR(err);
 }
 
 static inline bool poll_fd_is_real(struct poll_fd *pollfd) {
@@ -101,6 +109,11 @@ static int poll_add_fd_impl(
     int err;
     lock(&fd->poll_lock);
     lock(&poll->lock);
+
+    if (poll->destroying) {
+        err = _EBADF;
+        goto out;
+    }
 
     if (unique && poll_find_fd(poll, fd) != NULL) {
         err = _EEXIST;
@@ -161,6 +174,10 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
     int err;
     lock(&fd->poll_lock);
     lock(&poll->lock);
+    if (poll->destroying) {
+        err = _EBADF;
+        goto out;
+    }
     struct poll_fd *poll_fd = poll_find_fd(poll, fd);
     if (poll_fd == NULL) {
         err = _ENOENT;
@@ -190,6 +207,10 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     int err;
     lock(&fd->poll_lock);
     lock(&poll->lock);
+    if (poll->destroying) {
+        err = _EBADF;
+        goto out;
+    }
     struct poll_fd *poll_fd = poll_find_fd(poll, fd);
     if (poll_fd == NULL) {
         err = _ENOENT;
@@ -245,8 +266,7 @@ void poll_wakeup(struct fd *fd, int events) {
         }
         if (poll_fd->types & POLL_EDGETRIGGERED)
             poll_fd->triggered_types &= ~events;
-        if (poll->notify_pipe[1] != -1)
-            write(poll->notify_pipe[1], "", 1);
+        poll_notify_waiters_locked(poll);
         unlock(&poll->lock);
     }
     unlock(&fd->poll_lock);
@@ -255,16 +275,32 @@ void poll_wakeup(struct fd *fd, int events) {
 int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struct timespec *timeout) {
     lock(&poll_->lock);
 
+    if (poll_->destroying) {
+        unlock(&poll_->lock);
+        return _EBADF;
+    }
+
     // acquire the pipe
     if (poll_->waiters++ == 0) {
         assert(poll_->notify_pipe[0] == -1 && poll_->notify_pipe[1] == -1);
         if (pipe(poll_->notify_pipe) < 0) {
+            poll_->waiters--;
             unlock(&poll_->lock);
             return errno_map();
         }
         fcntl(poll_->notify_pipe[0], F_SETFL, O_NONBLOCK);
         fcntl(poll_->notify_pipe[1], F_SETFL, O_NONBLOCK);
-        real_poll_update(&poll_->real, poll_->notify_pipe[0], POLL_READ, NULL);
+        if (real_poll_update(&poll_->real, poll_->notify_pipe[0],
+                POLL_READ, NULL) < 0) {
+            int err = errno_map();
+            close(poll_->notify_pipe[0]);
+            close(poll_->notify_pipe[1]);
+            poll_->notify_pipe[0] = -1;
+            poll_->notify_pipe[1] = -1;
+            poll_->waiters--;
+            unlock(&poll_->lock);
+            return err;
+        }
     }
 
     // TODO this is pretty broken with regards to timeouts
@@ -328,6 +364,11 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
             sockrestart_end_listen_wait(poll_fd->fd);
         }
 
+        if (poll_->destroying) {
+            res = _EBADF;
+            break;
+        }
+
         if (err < 0) {
             res = errno_map();
             break;
@@ -360,6 +401,8 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         close(poll_->notify_pipe[1]);
         poll_->notify_pipe[0] = -1;
         poll_->notify_pipe[1] = -1;
+        if (poll_->destroying)
+            notify(&poll_->drained);
     }
 
     unlock(&poll_->lock);
@@ -367,22 +410,43 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
 }
 
 void poll_destroy(struct poll *poll) {
-    struct poll_fd *poll_fd;
-    struct poll_fd *tmp;
-    list_for_each_entry_safe(&poll->poll_fds, poll_fd, tmp, fds) {
-        lock(&poll_fd->fd->poll_lock);
+    lock(&poll->lock);
+    assert(!poll->destroying);
+    poll->destroying = true;
+    // 通知管道按电平触发；销毁中的等待者不会读取这个字节，因此一个
+    // 未消费通知会持续唤醒共享宿主后端上的全部等待者。
+    poll_notify_waiters_locked(poll);
+    while (poll->waiters != 0)
+        wait_for_ignore_signals(&poll->drained, &poll->lock, NULL);
+
+    // fd 清理遵循 fd→poll 锁序；销毁路径持有 poll 时只尝试 fd 锁，
+    // 失败便退让，让已持有 fd 锁的清理线程先完成。
+    while (!list_empty(&poll->poll_fds)) {
+        struct poll_fd *poll_fd = list_first_entry(
+                &poll->poll_fds, struct poll_fd, fds);
+        if (trylock(&poll_fd->fd->poll_lock) != 0) {
+            unlock(&poll->lock);
+            sched_yield();
+            lock(&poll->lock);
+            continue;
+        }
         list_remove(&poll_fd->polls);
         list_remove(&poll_fd->fds);
         unlock(&poll_fd->fd->poll_lock);
         free(poll_fd);
     }
 
+    struct poll_fd *poll_fd;
+    struct poll_fd *tmp;
     list_for_each_entry_safe(&poll->pollfd_freelist, poll_fd, tmp, fds) {
         list_remove(&poll_fd->fds);
         free(poll_fd);
     }
 
     real_poll_close(&poll->real);
+    unlock(&poll->lock);
+    cond_destroy(&poll->drained);
+    pthread_mutex_destroy(&poll->lock.m);
     free(poll);
 }
 

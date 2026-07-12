@@ -11,6 +11,9 @@ struct poll {
     struct real_poll real;
     int notify_pipe[2];
     int waiters; // if nonzero, notify_pipe exists
+    // 销毁先拒绝新操作，再等待所有宿主等待调用离开。
+    bool destroying;
+    cond_t drained;
 
     // This is used to solve the race/UaF described here: https://lwn.net/Articles/520012/
     // thread 1: calls poll_wait, real_poll_wait returns an event with a pointer to a poll_fd
@@ -89,8 +92,7 @@ void poll_wakeup(struct fd *fd, int events);
 // Returns the number of times the callback returned 1, or negative for error.
 typedef int (*poll_callback_t)(void *context, int types, union poll_fd_info info);
 int poll_wait(struct poll *poll, poll_callback_t callback, void *context, struct timespec *timeout);
-// does not lock the poll because lock ordering, you must ensure no other
-// thread will add or remove fds from this poll
+// 阻止新操作、唤醒并排空等待者后再释放登记和宿主后端。
 void poll_destroy(struct poll *poll);
 
 // for fd_close

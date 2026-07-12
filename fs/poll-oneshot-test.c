@@ -7,12 +7,14 @@
 #include "fs/fd.h"
 #include "fs/poll.h"
 #include "fs/real.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
+#include "kernel/resource.h"
 #include "kernel/task.h"
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
-        fprintf(stderr, "poll 单次触发测试失败：%s（第 %d 行）\n", \
+        fprintf(stderr, "poll 测试失败：%s（第 %d 行）\n", \
                 message, __LINE__); \
         return 1; \
     } \
@@ -69,11 +71,61 @@ static const struct fd_ops fake_ops = {
     .poll = fake_ready,
 };
 
+struct poll_gate {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool entered;
+    bool released;
+    int readiness;
+};
+
+static void poll_gate_init(struct poll_gate *gate, int readiness) {
+    *gate = (struct poll_gate) {.readiness = readiness};
+    pthread_mutex_init(&gate->lock, NULL);
+    pthread_cond_init(&gate->cond, NULL);
+}
+
+static void poll_gate_destroy(struct poll_gate *gate) {
+    pthread_cond_destroy(&gate->cond);
+    pthread_mutex_destroy(&gate->lock);
+}
+
+static void poll_gate_wait_until_entered(struct poll_gate *gate) {
+    pthread_mutex_lock(&gate->lock);
+    while (!gate->entered)
+        pthread_cond_wait(&gate->cond, &gate->lock);
+    pthread_mutex_unlock(&gate->lock);
+}
+
+static void poll_gate_release(struct poll_gate *gate) {
+    pthread_mutex_lock(&gate->lock);
+    gate->released = true;
+    pthread_cond_broadcast(&gate->cond);
+    pthread_mutex_unlock(&gate->lock);
+}
+
+static int gated_ready(struct fd *fd) {
+    struct poll_gate *gate = fd->data;
+    pthread_mutex_lock(&gate->lock);
+    gate->entered = true;
+    pthread_cond_broadcast(&gate->cond);
+    while (!gate->released)
+        pthread_cond_wait(&gate->cond, &gate->lock);
+    int readiness = gate->readiness;
+    pthread_mutex_unlock(&gate->lock);
+    return readiness;
+}
+
+static const struct fd_ops gated_ops = {
+    .poll = gated_ready,
+};
+
 static void init_task(struct task *task, struct sighand *sighand) {
     memset(task, 0, sizeof(*task));
     memset(sighand, 0, sizeof(*sighand));
     atomic_init(&sighand->refcount, 1);
     lock_init(&sighand->lock);
+    lock_init(&task->waiting_cond_lock);
     task->sighand = sighand;
 }
 
@@ -100,12 +152,183 @@ static void *wait_for_event(void *opaque) {
     return NULL;
 }
 
+static void *wait_forever_for_event(void *opaque) {
+    struct wait_context *context = opaque;
+    current = &context->task;
+    context->result = poll_wait(context->poll, record_event,
+            &context->callback, NULL);
+    current = NULL;
+    return NULL;
+}
+
 static bool wait_until_blocked(struct poll *poll) {
     for (unsigned attempt = 0; attempt < 100000; attempt++) {
         lock(&poll->lock);
         bool waiting = poll->waiters != 0;
         unlock(&poll->lock);
         if (waiting)
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+static bool wait_until_waiter_count(struct poll *poll, int expected) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        lock(&poll->lock);
+        bool reached = poll->waiters == expected;
+        unlock(&poll->lock);
+        if (reached)
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+struct destroy_context {
+    struct poll *poll;
+    atomic_bool started;
+};
+
+static void *destroy_poll(void *opaque) {
+    struct destroy_context *context = opaque;
+    current = NULL;
+    atomic_store_explicit(&context->started, true, memory_order_release);
+    poll_destroy(context->poll);
+    return NULL;
+}
+
+struct close_context {
+    struct fd *fd;
+    int result;
+};
+
+static void *close_fd(void *opaque) {
+    struct close_context *context = opaque;
+    current = NULL;
+    context->result = fd_close(context->fd);
+    return NULL;
+}
+
+static bool wait_until_fd_poll_locked(struct fd *fd) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        if (trylock(&fd->poll_lock) != 0)
+            return true;
+        unlock(&fd->poll_lock);
+        sched_yield();
+    }
+    return false;
+}
+
+static bool wait_until_started(atomic_bool *started) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        if (atomic_load_explicit(started, memory_order_acquire))
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+struct epoll_fixture {
+    struct task task;
+    struct tgroup group;
+    struct sighand sighand;
+    struct task *previous;
+};
+
+struct epoll_registration {
+    fd_t epoll_number;
+    fd_t target_number;
+    struct fd *epoll;
+    struct fd *target;
+};
+
+static bool epoll_fixture_init(struct epoll_fixture *fixture) {
+    struct task *previous = current;
+    memset(fixture, 0, sizeof(*fixture));
+    fixture->previous = previous;
+    init_task(&fixture->task, &fixture->sighand);
+    lock_init(&fixture->group.lock);
+    fixture->group.limits[RLIMIT_NOFILE_] =
+            (struct rlimit_) {8, 8};
+    fixture->task.group = &fixture->group;
+    fixture->task.files = fdtable_new(8);
+    if (IS_ERR(fixture->task.files))
+        return false;
+    current = &fixture->task;
+    return true;
+}
+
+static void epoll_fixture_destroy(struct epoll_fixture *fixture) {
+    current = NULL;
+    fdtable_release(fixture->task.files);
+    pthread_mutex_destroy(&fixture->task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&fixture->sighand.lock.m);
+    pthread_mutex_destroy(&fixture->group.lock.m);
+    current = fixture->previous;
+}
+
+static bool epoll_registration_create(struct epoll_registration *registration,
+        const struct fd_ops *target_ops, void *target_data) {
+    *registration = (struct epoll_registration) {
+        .epoll_number = sys_epoll_create(0),
+        .target_number = -1,
+    };
+    if (registration->epoll_number < 0)
+        return false;
+
+    registration->target = fd_create(target_ops);
+    if (registration->target == NULL)
+        return false;
+    registration->target->data = target_data;
+    registration->target_number = f_install(registration->target, 0);
+    if (registration->target_number < 0)
+        return false;
+
+    struct fd *epoll = f_get_task_retain(
+            current, registration->epoll_number);
+    if (epoll == NULL)
+        return false;
+    int result = poll_add_fd_unique(epoll->epollfd.poll,
+            registration->target, POLL_READ,
+            (union poll_fd_info) {.num = 1});
+    registration->epoll = epoll;
+    fd_close(epoll);
+    return result == 0;
+}
+
+struct epoll_call_context {
+    struct task *task;
+    fd_t epoll_number;
+    fd_t target_number;
+    int result;
+};
+
+static void *epoll_delete(void *opaque) {
+    struct epoll_call_context *context = opaque;
+    current = context->task;
+    context->result = sys_epoll_ctl(context->epoll_number,
+            2, context->target_number, 0);
+    current = NULL;
+    return NULL;
+}
+
+static void *epoll_wait_immediate(void *opaque) {
+    struct epoll_call_context *context = opaque;
+    current = context->task;
+    context->result = sys_epoll_wait(
+            context->epoll_number, 0, 1, 0);
+    current = NULL;
+    return NULL;
+}
+
+static bool wait_until_epoll_call_retained(
+        const struct epoll_registration *registration) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        if (atomic_load_explicit(&registration->epoll->refcount,
+                    memory_order_acquire) == 2 &&
+                atomic_load_explicit(&registration->target->refcount,
+                    memory_order_acquire) == 2)
             return true;
         sched_yield();
     }
@@ -255,6 +478,7 @@ static int test_ready_add_wakes_waiter(void) {
             context.callback.info == 0xadd,
             "已就绪 ADD 立即唤醒等待线程");
 
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
     pthread_mutex_destroy(&context.sighand.lock.m);
     poll_destroy(poll);
     CHECK(fd_close(fd) == 0, "释放 ADD 唤醒测试文件对象");
@@ -296,9 +520,229 @@ static int test_ready_mod_wakes_waiter(void) {
             context.callback.info == 2,
             "已就绪 MOD 立即唤醒等待线程");
 
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
     pthread_mutex_destroy(&context.sighand.lock.m);
     poll_destroy(poll);
     CHECK(fd_close(fd) == 0, "释放 MOD 唤醒测试文件对象");
+    return 0;
+}
+
+static int test_destroy_wakes_active_waiter(void) {
+    struct poll_gate gate;
+    poll_gate_init(&gate, 0);
+    struct fd *fd = fd_create(&gated_ops);
+    CHECK(fd != NULL, "创建销毁等待者测试文件对象");
+    fd->data = &gate;
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建销毁等待者测试 poll 实例");
+    CHECK(poll_add_fd(poll, fd, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0,
+            "登记会阻塞就绪检查的文件对象");
+
+    struct wait_context waiter_context = {.poll = poll};
+    init_task(&waiter_context.task, &waiter_context.sighand);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL, wait_for_event,
+            &waiter_context) == 0, "启动待销毁 poll 的等待线程");
+    poll_gate_wait_until_entered(&gate);
+
+    struct destroy_context destroy_context = {.poll = poll};
+    atomic_init(&destroy_context.started, false);
+    pthread_t destroyer;
+    CHECK(pthread_create(&destroyer, NULL, destroy_poll,
+            &destroy_context) == 0, "启动并发 poll 销毁线程");
+    bool destroy_started = wait_until_started(&destroy_context.started);
+    poll_gate_release(&gate);
+
+    int waiter_join = pthread_join(waiter, NULL);
+    int destroyer_join = pthread_join(destroyer, NULL);
+    CHECK(destroy_started, "销毁线程已开始执行");
+    CHECK(waiter_join == 0 && destroyer_join == 0,
+            "等待与销毁线程都正常结束");
+    CHECK(waiter_context.result == _EBADF,
+            "销毁会唤醒活动等待者并返回关闭错误");
+
+    pthread_mutex_destroy(&waiter_context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&waiter_context.sighand.lock.m);
+    CHECK(fd_close(fd) == 0, "释放销毁等待者测试文件对象");
+    poll_gate_destroy(&gate);
+    return 0;
+}
+
+static int test_destroy_wakes_all_waiters(void) {
+    enum { waiter_count = 4 };
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建多等待者销毁测试 poll 实例");
+    struct wait_context contexts[waiter_count] = {0};
+    pthread_t waiters[waiter_count];
+    for (unsigned index = 0; index < waiter_count; index++) {
+        contexts[index].poll = poll;
+        init_task(&contexts[index].task, &contexts[index].sighand);
+        CHECK(pthread_create(&waiters[index], NULL,
+                wait_forever_for_event, &contexts[index]) == 0,
+                "启动永久阻塞的 poll 等待线程");
+    }
+    CHECK(wait_until_waiter_count(poll, waiter_count),
+            "四个等待线程都已进入宿主后端");
+
+    struct destroy_context destroy_context = {.poll = poll};
+    atomic_init(&destroy_context.started, false);
+    pthread_t destroyer;
+    CHECK(pthread_create(&destroyer, NULL, destroy_poll,
+            &destroy_context) == 0, "启动多等待者 poll 销毁线程");
+    int join_result = 0;
+    for (unsigned index = 0; index < waiter_count; index++) {
+        join_result |= pthread_join(waiters[index], NULL);
+        join_result |= contexts[index].result != _EBADF;
+        pthread_mutex_destroy(
+                &contexts[index].task.waiting_cond_lock.m);
+        pthread_mutex_destroy(&contexts[index].sighand.lock.m);
+    }
+    join_result |= pthread_join(destroyer, NULL);
+    CHECK(join_result == 0,
+            "一个未消费的电平通知会唤醒并排空全部等待者");
+    return 0;
+}
+
+static int test_destroy_races_with_fd_cleanup(void) {
+    int readiness = 0;
+    struct fd *fd = fd_create(&fake_ops);
+    CHECK(fd != NULL, "创建并发清理测试文件对象");
+    fd->data = &readiness;
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建并发清理测试 poll 实例");
+    CHECK(poll_add_fd(poll, fd, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0,
+            "登记并发清理测试文件对象");
+
+    // 先让最终 fd 关闭拿到 fd 锁并停在 poll 锁上，再并发销毁 poll。
+    lock(&poll->lock);
+    struct close_context close_context = {.fd = fd};
+    pthread_t closer;
+    CHECK(pthread_create(&closer, NULL, close_fd,
+            &close_context) == 0, "启动最终 fd 关闭线程");
+    bool cleanup_blocked = wait_until_fd_poll_locked(fd);
+    if (!cleanup_blocked) {
+        unlock(&poll->lock);
+        pthread_join(closer, NULL);
+        poll_destroy(poll);
+        CHECK(false, "最终 fd 关闭已持有登记锁");
+    }
+
+    struct destroy_context destroy_context = {.poll = poll};
+    atomic_init(&destroy_context.started, false);
+    pthread_t destroyer;
+    int create_result = pthread_create(&destroyer, NULL,
+            destroy_poll, &destroy_context);
+    bool destroy_started = create_result == 0 &&
+            wait_until_started(&destroy_context.started);
+    for (unsigned attempt = 0; attempt < 1000 && destroy_started; attempt++)
+        sched_yield();
+    unlock(&poll->lock);
+
+    int close_join = pthread_join(closer, NULL);
+    int destroy_join = create_result == 0 ?
+            pthread_join(destroyer, NULL) : create_result;
+    CHECK(create_result == 0 && destroy_started,
+            "并发清理期间销毁线程已开始执行");
+    CHECK(close_join == 0 && destroy_join == 0 &&
+            close_context.result == 0,
+            "最终 fd 清理与 poll 销毁只拆除一次登记");
+    return 0;
+}
+
+static int test_epoll_ctl_retains_both_fds(void) {
+    struct epoll_fixture fixture;
+    CHECK(epoll_fixture_init(&fixture), "初始化 epoll ctl 生命周期夹具");
+    int readiness = 0;
+    struct epoll_registration registration;
+    CHECK(epoll_registration_create(&registration,
+            &fake_ops, &readiness), "创建 epoll ctl 测试登记");
+
+    // 让 DEL 停在目标 fd 锁上，确认系统调用已经取得两个独立引用。
+    lock(&registration.target->poll_lock);
+    struct epoll_call_context call = {
+        .task = &fixture.task,
+        .epoll_number = registration.epoll_number,
+        .target_number = registration.target_number,
+    };
+    pthread_t caller;
+    int create_result = pthread_create(&caller, NULL, epoll_delete, &call);
+    bool retained = create_result == 0 &&
+            wait_until_epoll_call_retained(&registration);
+    int epoll_close_result = _EBADF;
+    int target_close_result = _EBADF;
+    bool refs_survived_close = false;
+    if (retained) {
+        epoll_close_result = f_close_task(
+                &fixture.task, registration.epoll_number);
+        target_close_result = f_close_task(
+                &fixture.task, registration.target_number);
+        refs_survived_close =
+                atomic_load_explicit(&registration.epoll->refcount,
+                    memory_order_acquire) == 1 &&
+                atomic_load_explicit(&registration.target->refcount,
+                    memory_order_acquire) == 1;
+    }
+    unlock(&registration.target->poll_lock);
+    int join_result = create_result == 0 ?
+            pthread_join(caller, NULL) : create_result;
+
+    if (!retained) {
+        f_close_task(&fixture.task, registration.target_number);
+        f_close_task(&fixture.task, registration.epoll_number);
+    }
+    epoll_fixture_destroy(&fixture);
+    CHECK(create_result == 0 && retained,
+            "epoll ctl 在进入登记锁前保留 epoll 与目标 fd");
+    CHECK(epoll_close_result == 0 && target_close_result == 0 &&
+            refs_survived_close,
+            "并发关闭表项后系统调用引用继续维持两个对象");
+    CHECK(join_result == 0 && call.result == 0,
+            "DEL 在并发关闭两个表项后安全完成");
+    return 0;
+}
+
+static int test_epoll_wait_retains_epoll_fd(void) {
+    struct epoll_fixture fixture;
+    CHECK(epoll_fixture_init(&fixture), "初始化 epoll wait 生命周期夹具");
+    struct poll_gate gate;
+    poll_gate_init(&gate, 0);
+    struct epoll_registration registration;
+    CHECK(epoll_registration_create(&registration,
+            &gated_ops, &gate), "创建 epoll wait 测试登记");
+
+    struct epoll_call_context call = {
+        .task = &fixture.task,
+        .epoll_number = registration.epoll_number,
+        .target_number = registration.target_number,
+    };
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL,
+            epoll_wait_immediate, &call) == 0,
+            "启动 epoll wait 生命周期线程");
+    poll_gate_wait_until_entered(&gate);
+    bool retained = atomic_load_explicit(&registration.epoll->refcount,
+            memory_order_acquire) == 2;
+    int close_result = f_close_task(
+            &fixture.task, registration.epoll_number);
+    bool survived_close = retained && close_result == 0 &&
+            atomic_load_explicit(&registration.epoll->refcount,
+                memory_order_acquire) == 1;
+    poll_gate_release(&gate);
+    int join_result = pthread_join(waiter, NULL);
+
+    int target_close_result = f_close_task(
+            &fixture.task, registration.target_number);
+    epoll_fixture_destroy(&fixture);
+    poll_gate_destroy(&gate);
+    CHECK(retained && survived_close,
+            "epoll wait 在阻塞检查期间保留 epoll fd");
+    CHECK(join_result == 0 && call.result == 0,
+            "关闭表项后 epoll wait 仍安全返回超时");
+    CHECK(target_close_result == 0,
+            "释放 epoll wait 测试目标文件对象");
     return 0;
 }
 
@@ -353,9 +797,20 @@ int main(void) {
     if (result == 0)
         result = test_ready_mod_wakes_waiter();
     if (result == 0)
+        result = test_destroy_wakes_active_waiter();
+    if (result == 0)
+        result = test_destroy_wakes_all_waiters();
+    if (result == 0)
+        result = test_destroy_races_with_fd_cleanup();
+    if (result == 0)
+        result = test_epoll_ctl_retains_both_fds();
+    if (result == 0)
+        result = test_epoll_wait_retains_epoll_fd();
+    if (result == 0)
         result = test_real_fd_cleanup();
 
     current = NULL;
+    pthread_mutex_destroy(&task.waiting_cond_lock.m);
     pthread_mutex_destroy(&sighand.lock.m);
     return result;
 }
