@@ -305,9 +305,11 @@ ssize_t generic_readlinkat(
     return generic_readlinkat_task(current, at, path, buffer, size);
 }
 
-int generic_mkdirat(struct fd *at, const char *path_raw, mode_t_ mode) {
+int generic_mkdirat_task(struct task *task,
+        struct fd *at, const char *path_raw, mode_t_ mode) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, N_SYMLINK_FOLLOW | N_PARENT_DIR_WRITE);
+    int err = path_normalize_task(task, at, path_raw, path,
+            N_SYMLINK_FOLLOW | N_PARENT_DIR_WRITE);
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
@@ -316,6 +318,10 @@ int generic_mkdirat(struct fd *at, const char *path_raw, mode_t_ mode) {
         err = mount->fs->mkdir(mount, path, mode);
     mount_release(mount);
     return err;
+}
+
+int generic_mkdirat(struct fd *at, const char *path_raw, mode_t_ mode) {
+    return generic_mkdirat_task(current, at, path_raw, mode);
 }
 
 int generic_rmdirat_task(struct task *task,

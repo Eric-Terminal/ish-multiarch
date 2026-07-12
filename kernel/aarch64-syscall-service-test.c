@@ -68,8 +68,10 @@ struct kernel_probe {
     char last_readlink_path[MAX_PATH];
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
+    char last_mkdir_path[MAX_PATH];
     int last_flags;
     int last_mode;
+    int last_mkdir_mode;
     unsigned opens;
     unsigned opened_closes;
     unsigned stat_calls;
@@ -77,6 +79,7 @@ struct kernel_probe {
     unsigned readlink_calls;
     unsigned unlink_calls;
     unsigned rmdir_calls;
+    unsigned mkdir_calls;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
     dword_t ioctl_input;
@@ -399,6 +402,15 @@ static int probe_rmdir(struct mount *mount, const char *path) {
     return 0;
 }
 
+static int probe_mkdir(
+        struct mount *mount, const char *path, mode_t_ mode) {
+    struct kernel_probe *probe = mount->data;
+    probe->mkdir_calls++;
+    strcpy(probe->last_mkdir_path, path);
+    probe->last_mkdir_mode = mode;
+    return 0;
+}
+
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct fd_state *state = fd->data;
     strcpy(buffer, state->path);
@@ -410,6 +422,7 @@ static const struct fs_ops probe_fs = {
     .readlink = probe_readlink,
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
+    .mkdir = probe_mkdir,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -964,6 +977,62 @@ int main(void) {
             memory.read_calls == MAX_PATH && memory.read_bytes == MAX_PATH &&
             kernel.opens == opens_before,
             "前 4096 字节无 NUL 时返回 ENAMETOOLONG");
+
+    static const char mkdir_path[] = "new-directory";
+    memcpy(memory.bytes + path_offset, mkdir_path, sizeof(mkdir_path));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + sizeof(mkdir_path);
+    result = invoke(&fixture, &memory, &fault, 34,
+            UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
+            UINT64_C(0xabcdef00000001ff), 0);
+    CHECK(result == 0 && kernel.mkdir_calls == 1 &&
+            strcmp(kernel.last_mkdir_path, "/work/new-directory") == 0 &&
+            kernel.last_mkdir_mode == 0750 &&
+            memory.read_calls == sizeof(mkdir_path) &&
+            memory.read_bytes == sizeof(mkdir_path) &&
+            memory.max_read_size == 1,
+            "mkdirat 解码低位参数并应用目标任务 cwd 与 umask");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 34, 99,
+            USER_BASE + path_offset, 0777, 0);
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            kernel.mkdir_calls == 1,
+            "mkdirat 空路径在检查 dirfd 前返回 ENOENT");
+
+    static const char mkdir_relative[] = "relative-directory";
+    memcpy(memory.bytes + path_offset,
+            mkdir_relative, sizeof(mkdir_relative));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 34, 99,
+            USER_BASE + path_offset, 0777, 0);
+    CHECK(result == encoded_error(_EBADF) &&
+            memory.read_calls == sizeof(mkdir_relative) &&
+            kernel.mkdir_calls == 1,
+            "mkdirat 复制相对路径后拒绝无效 dirfd");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + 3;
+    result = invoke(&fixture, &memory, &fault, 34, AT_FDCWD_,
+            USER_BASE + path_offset, 0777, 0);
+    CHECK(result == encoded_error(_EFAULT) && kernel.mkdir_calls == 1 &&
+            memory.read_calls == 4 && memory.read_bytes == 3 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "mkdirat 路径故障保持精确 guest fault 且不创建目录");
+
+    static const char mkdir_absolute[] = "/absolute-directory";
+    memcpy(memory.bytes + path_offset,
+            mkdir_absolute, sizeof(mkdir_absolute));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 34, 99,
+            USER_BASE + path_offset, 0705, 0);
+    CHECK(result == 0 && kernel.mkdir_calls == 2 &&
+            strcmp(kernel.last_mkdir_path, "/absolute-directory") == 0 &&
+            kernel.last_mkdir_mode == 0700,
+            "mkdirat 绝对路径从目标 root 解析并忽略无效 dirfd");
 
     reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + path_offset;

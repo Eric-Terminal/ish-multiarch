@@ -51,6 +51,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_DUP3 = 24,
     AARCH64_LINUX_SYS_FCNTL = 25,
     AARCH64_LINUX_SYS_IOCTL = 29,
+    AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
@@ -482,6 +483,20 @@ static qword_t dispatch_unlinkat(
     return syscall_result(file_unlinkat_task(task,
             syscall_fd(syscall->arguments[0]), path,
             raw_flags == AT_REMOVEDIR_));
+}
+
+static qword_t dispatch_mkdirat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_mkdirat_task(task,
+            syscall_fd(syscall->arguments[0]), path,
+            (mode_t_) (dword_t) syscall->arguments[2]));
 }
 
 static qword_t dispatch_chdir(
@@ -1258,6 +1273,8 @@ static qword_t dispatch_syscall(
             return aarch64_linux_dispatch_fcntl(syscall, task);
         case AARCH64_LINUX_SYS_IOCTL:
             return dispatch_ioctl(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_MKDIRAT:
+            return dispatch_mkdirat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNLINKAT:
             return dispatch_unlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CHDIR:

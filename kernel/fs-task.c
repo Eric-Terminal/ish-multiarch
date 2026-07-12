@@ -310,3 +310,25 @@ int file_unlinkat_task(struct task *task, fd_t dirfd,
         fd_close(at);
     return result;
 }
+
+int file_mkdirat_task(struct task *task, fd_t dirfd,
+        const char *path, mode_t_ mode) {
+    if (path[0] == '\0')
+        return _ENOENT;
+    mode &= 0777;
+    apply_umask_task(task, &mode);
+
+    // 绝对路径从目标 root 解析，不检查传入的 dirfd。
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = retained ? f_get_task_retain(task, dirfd) : AT_PWD;
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    int result = generic_mkdirat_task(task, at, path, mode);
+    if (retained)
+        fd_close(at);
+    return result;
+}

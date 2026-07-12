@@ -23,12 +23,15 @@ struct open_probe {
     char last_fstat_path[MAX_PATH];
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
+    char last_mkdir_path[MAX_PATH];
     int last_flags;
     int last_mode;
+    int last_mkdir_mode;
     unsigned opens;
     unsigned closes;
     unsigned unlinks;
     unsigned rmdirs;
+    unsigned mkdirs;
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
@@ -160,11 +163,21 @@ static int probe_rmdir(struct mount *mount, const char *path) {
     return 0;
 }
 
+static int probe_mkdir(
+        struct mount *mount, const char *path, mode_t_ mode) {
+    struct open_probe *probe = mount->data;
+    probe->mkdirs++;
+    strcpy(probe->last_mkdir_path, path);
+    probe->last_mkdir_mode = mode;
+    return 0;
+}
+
 static const struct fs_ops probe_fs = {
     .open = probe_open,
     .readlink = probe_readlink,
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
+    .mkdir = probe_mkdir,
     .stat = probe_stat,
     .fstat = probe_fstat,
     .getpath = probe_getpath,
@@ -475,6 +488,39 @@ int main(void) {
             probe.unlinks == 4 &&
             strcmp(probe.last_unlink_path, "/decoy/compat") == 0,
             "兼容 unlinkat 入口仍使用 current 的 cwd");
+
+    CHECK(file_mkdirat_task(&target.task, 99, "", 0777) == _ENOENT &&
+            probe.mkdirs == 0, "mkdirat 空路径优先返回 ENOENT");
+    CHECK(file_mkdirat_task(
+            &target.task, AT_FDCWD_, "directory", 0777) == 0 &&
+            probe.mkdirs == 1 &&
+            strcmp(probe.last_mkdir_path, "/target/directory") == 0 &&
+            probe.last_mkdir_mode == 0750,
+            "mkdirat 使用目标 cwd 与 umask");
+    CHECK(file_mkdirat_task(&target.task, 0, "nested", 0700) == 0 &&
+            probe.mkdirs == 2 &&
+            strcmp(probe.last_mkdir_path, "/explicit/nested") == 0 &&
+            probe.last_mkdir_mode == 0700,
+            "mkdirat 使用目标任务显式 dirfd");
+    CHECK(file_mkdirat_task(
+            &target.task, 99, "relative", 0777) == _EBADF &&
+            probe.mkdirs == 2,
+            "mkdirat 相对路径拒绝目标任务的无效 dirfd");
+    CHECK(file_mkdirat_task(
+            &target.task, cwd_fd, "child", 0777) == _ENOTDIR &&
+            probe.mkdirs == 2,
+            "mkdirat 相对路径拒绝普通文件 dirfd");
+    CHECK(file_mkdirat_task(
+            &target.task, 99, "/absolute", 0765) == 0 &&
+            probe.mkdirs == 3 &&
+            strcmp(probe.last_mkdir_path, "/sandbox/absolute") == 0 &&
+            probe.last_mkdir_mode == 0740,
+            "mkdirat 绝对路径使用目标 root 并忽略无效 dirfd");
+    CHECK(generic_mkdirat(AT_PWD, "compat", 0701) == 0 &&
+            probe.mkdirs == 4 &&
+            strcmp(probe.last_mkdir_path, "/decoy/compat") == 0 &&
+            probe.last_mkdir_mode == 0701,
+            "兼容 mkdirat 入口仍使用 current 的 cwd");
 
     char cwd[MAX_PATH];
     opens_before = probe.opens;

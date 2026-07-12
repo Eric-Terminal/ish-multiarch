@@ -59,6 +59,8 @@ fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
 int file_unlinkat_task(struct task *task, fd_t dirfd,
         const char *path, bool remove_directory);
+int file_mkdirat_task(struct task *task, fd_t dirfd,
+        const char *path, mode_t_ mode);
 
 #define MAX_PATH 4096
 #define MAX_NAME 256
@@ -126,6 +128,8 @@ ssize_t generic_readlinkat_task(struct task *task, struct fd *at,
 ssize_t generic_readlinkat(
         struct fd *at, const char *path, char *buffer, size_t size);
 int generic_mkdirat(struct fd *at, const char *path, mode_t_ mode);
+int generic_mkdirat_task(struct task *task,
+        struct fd *at, const char *path, mode_t_ mode);
 
 int access_check_task(struct task *task, struct statbuf *stat, int check);
 int access_check(struct statbuf *stat, int check);
