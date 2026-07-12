@@ -333,6 +333,7 @@ void handle_interrupt(int interrupt) {
     while (group->stopped)
         wait_for_ignore_signals(&group->stopped_cond, &group->lock, NULL);
     unlock(&group->lock);
+    signal_notify_group_continue(current);
 }
 
 void dump_maps(void) {

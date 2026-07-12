@@ -7,6 +7,7 @@
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-syscall-service.h"
+#include "kernel/aarch64-wait-service.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
@@ -62,6 +63,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETEGID = 177,
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
+    AARCH64_LINUX_SYS_WAIT4 = 260,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -954,6 +956,9 @@ static qword_t dispatch_syscall(
                     (dword_t) syscall->arguments[0], 0, 0, 0, 0));
         case AARCH64_LINUX_SYS_EXECVE:
             return dispatch_execve(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_WAIT4:
+            return aarch64_linux_dispatch_wait4(
+                    context, syscall, fault);
         default:
             return syscall_result(_ENOSYS);
     }

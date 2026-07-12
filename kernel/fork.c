@@ -49,6 +49,9 @@ static void tgroup_init_copy(
     group->itimer = NULL;
     memset(group->posix_timers, 0, sizeof(group->posix_timers));
     group->doing_group_exit = false;
+    group->stop_code = 0;
+    group->continued = false;
+    group->continue_notification_pending = false;
     group->children_rusage = (struct rusage_) {};
     group->child_exit = (cond_t) {0};
     cond_init(&group->child_exit);

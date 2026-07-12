@@ -158,6 +158,7 @@ noreturn void do_exit_group(int status) {
 
     lock(&group->lock);
     group->stopped = false;
+    group->stop_code = 0;
     notify(&group->stopped_cond);
     unlock(&group->lock);
     unlock(&pids_lock);
@@ -220,6 +221,7 @@ dword_t sys_exit_group(dword_t status) {
 #define WCONTINUED_ (1 << 3)
 #define WNOWAIT_ (1 << 24)
 #define __WALL_ (1 << 30)
+#define WAIT4_OPTIONS_ (WNOHANG_|WUNTRACED_|WCONTINUED_|__WALL_)
 
 #define P_ALL_ 0
 #define P_PID_ 1
@@ -261,22 +263,39 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
     return true;
 }
 
-static bool notify_if_stopped(struct task *task, struct siginfo_ *info_out) {
+static bool notify_if_stopped(struct task *task,
+        struct siginfo_ *info_out, int options) {
     lock(&task->group->lock);
-    bool stopped = task->group->stopped;
+    bool stopped = task->group->stopped &&
+            task->group->stop_code != 0;
+    if (stopped) {
+        info_out->child.status = task->group->stop_code;
+        if (!(options & WNOWAIT_))
+            task->group->stop_code = 0;
+    }
     unlock(&task->group->lock);
-    if (!stopped || task->group->group_exit_code == 0)
-        return false;
-    dword_t exit_code = task->group->group_exit_code;
-    task->group->group_exit_code = 0;
-    info_out->child.status = exit_code;
-    return true;
+    return stopped;
+}
+
+static bool notify_if_continued(struct task *task,
+        struct siginfo_ *info_out, int options) {
+    lock(&task->group->lock);
+    bool continued = task->group->continued;
+    if (continued && !(options & WNOWAIT_))
+        task->group->continued = false;
+    unlock(&task->group->lock);
+    if (continued)
+        info_out->child.status = UINT32_C(0xffff);
+    return continued;
 }
 
 static bool reap_if_needed(struct task *task, struct siginfo_ *info_out, struct rusage_ *rusage_out, int options) {
     assert(task_is_leader(task));
-    if ((options & WUNTRACED_ && notify_if_stopped(task, info_out)) ||
-        (options & WEXITED_ && reap_if_zombie(task, info_out, rusage_out, options))) {
+    if ((options & WEXITED_ && reap_if_zombie(task, info_out, rusage_out, options)) ||
+        (options & WUNTRACED_ &&
+                notify_if_stopped(task, info_out, options)) ||
+        (options & WCONTINUED_ &&
+                notify_if_continued(task, info_out, options))) {
         info_out->sig = SIGCHLD_;
         info_out->payload_kind = SIGNAL_INFO_PAYLOAD_CHILD;
         return true;
@@ -314,7 +333,7 @@ retry:
         struct task *parent;
         list_for_each_entry(&current->group->threads, parent, group_links) {
             struct task *task;
-            list_for_each_entry(&current->children, task, siblings) {
+            list_for_each_entry(&parent->children, task, siblings) {
                 if (!task_is_leader(task))
                     continue;
                 if (idtype == P_PGID_ && task->group->pgid != id)
@@ -381,10 +400,15 @@ dword_t sys_waitid(int_t idtype, pid_t_ id, addr_t info_addr, int_t options) {
     return 0;
 }
 
-dword_t sys_wait4(pid_t_ id, addr_t status_addr, dword_t options, addr_t rusage_addr) {
-    STRACE("wait4(%d, %#x, %#x, %#x)", id, status_addr, options, rusage_addr);
-    if (options & WNOWAIT_)
+sdword_t do_wait4(pid_t_ id, dword_t options,
+        struct wait4_result *result) {
+    assert(result != NULL);
+    *result = (struct wait4_result) {0};
+    if (options & ~WAIT4_OPTIONS_)
         return _EINVAL;
+    // Linux 明确定义该边界为 ESRCH，且不能计算未定义的 -INT_MIN。
+    if (id == INT32_MIN)
+        return _ESRCH;
 
     int idtype;
     if (id > 0)
@@ -399,16 +423,26 @@ dword_t sys_wait4(pid_t_ id, addr_t status_addr, dword_t options, addr_t rusage_
             id = -id;
     }
 
-    struct siginfo_ info = {.child.pid = 0xbaba};
-    struct rusage_ rusage;
-    int_t res = do_wait(idtype, id, &info, &rusage, options | WEXITED_);
-    if (res < 0 || (res == 0 && info.child.pid == 0))
+    struct siginfo_ info = {0};
+    int_t res = do_wait(idtype, id, &info,
+            &result->rusage, options | WEXITED_);
+    if (res < 0)
         return res;
-    if (status_addr != 0 && user_put(status_addr, info.child.status))
-        return _EFAULT;
-    if (rusage_addr != 0 && user_put(rusage_addr, rusage))
-        return _EFAULT;
+    result->status = info.child.status;
     return info.child.pid;
+}
+
+dword_t sys_wait4(pid_t_ id, addr_t status_addr, dword_t options, addr_t rusage_addr) {
+    STRACE("wait4(%d, %#x, %#x, %#x)", id, status_addr, options, rusage_addr);
+    struct wait4_result result;
+    sdword_t waited = do_wait4(id, options, &result);
+    if (waited <= 0)
+        return (dword_t) waited;
+    if (status_addr != 0 && user_put(status_addr, result.status))
+        return _EFAULT;
+    if (rusage_addr != 0 && user_put(rusage_addr, result.rusage))
+        return _EFAULT;
+    return (dword_t) waited;
 }
 
 dword_t sys_waitpid(pid_t_ pid, addr_t status_addr, dword_t options) {

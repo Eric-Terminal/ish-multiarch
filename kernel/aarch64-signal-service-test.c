@@ -582,7 +582,7 @@ static int test_default_stop_and_terminate(void) {
     CHECK(stop.status == GUEST_LINUX_SIGNAL_POLL_STOP &&
             stop.signal == SIGTSTP_ && probe.calls == 0 &&
             fixture.group.stopped &&
-            fixture.group.group_exit_code == (SIGTSTP_ << 8 | 0x7f) &&
+            fixture.group.stop_code == (SIGTSTP_ << 8 | 0x7f) &&
             fixture.task.pending == sig_mask(SIGTERM_) &&
             list_size(&fixture.task.queue) == 1 &&
             sighand_is_unlocked(&fixture.sighand),

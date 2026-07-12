@@ -178,6 +178,9 @@ struct tgroup {
     struct list pgroup;
 
     bool stopped;
+    dword_t stop_code;
+    bool continued;
+    bool continue_notification_pending;
     cond_t stopped_cond;
 
     struct tty *tty;

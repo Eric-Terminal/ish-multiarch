@@ -176,20 +176,20 @@ static int test_default_stop_action(void) {
 
     receive_signals();
     CHECK(fixture.child_group.stopped &&
-            fixture.child_group.group_exit_code ==
+            fixture.child_group.stop_code ==
                     (dword_t) (SIGTSTP_ << 8 | 0x7f) &&
             fixture.child.pending == 0 &&
             list_empty(&fixture.child.queue),
             "普通 SIGTSTP 设置线程组停止状态与 wait 状态码");
 
     fixture.child_group.stopped = false;
-    fixture.child_group.group_exit_code = 0;
+    fixture.child_group.stop_code = 0;
     fixture.child.parent = NULL;
     deliver_signal(&fixture.child, SIGTTIN_,
             (struct siginfo_) {.code = SI_USER_});
     receive_signals();
     CHECK(fixture.child_group.stopped &&
-            fixture.child_group.group_exit_code ==
+            fixture.child_group.stop_code ==
                     (dword_t) (SIGTTIN_ << 8 | 0x7f) &&
             fixture.child.pending == 0 &&
             list_empty(&fixture.child.queue),

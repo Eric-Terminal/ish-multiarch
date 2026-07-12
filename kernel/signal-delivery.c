@@ -29,11 +29,12 @@ static void signal_notify_group_stop(
         return;
 
     lock(&pids_lock);
-    struct task *parent = task->parent;
+    struct task *leader = task->group->leader;
+    struct task *parent = leader->parent;
     if (parent != NULL) {
         notify(&parent->group->child_exit);
         send_signal(parent,
-                task->group->leader->exit_signal, SIGINFO_NIL);
+                leader->exit_signal, SIGINFO_NIL);
     }
     unlock(&pids_lock);
 }
@@ -177,7 +178,9 @@ struct guest_linux_signal_poll_result task_poll_one_signal(
         if (disposition == SIGNAL_DELIVERY_STOP) {
             lock(&task->group->lock);
             task->group->stopped = true;
-            task->group->group_exit_code =
+            task->group->continued = false;
+            task->group->continue_notification_pending = false;
+            task->group->stop_code =
                     (dword_t) signal << 8 | UINT32_C(0x7f);
             unlock(&task->group->lock);
             unlock(&sighand->lock);

@@ -38,6 +38,12 @@ dword_t sys_exit(dword_t status);
 noreturn void do_exit(int status);
 noreturn void do_exit_group(int status);
 dword_t sys_exit_group(dword_t status);
+struct wait4_result {
+    dword_t status;
+    struct rusage_ rusage;
+};
+sdword_t do_wait4(pid_t_ pid, dword_t options,
+        struct wait4_result *result);
 dword_t sys_wait4(pid_t_ pid, addr_t status_addr, dword_t options, addr_t rusage_addr);
 dword_t sys_waitid(int_t idtype, pid_t_ id, addr_t info_addr, int_t options);
 dword_t sys_waitpid(pid_t_ pid, addr_t status_addr, dword_t options);

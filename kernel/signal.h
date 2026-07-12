@@ -113,6 +113,8 @@ struct sigevent_ {
 // send a signal
 // you better make sure the task isn't gonna get freed under me (pids_lock or current)
 void send_signal(struct task *task, int sig, struct siginfo_ info);
+// 子进程从作业控制停止恢复后，在无 pids_lock 的运行安全点通知父组。
+void signal_notify_group_continue(struct task *task);
 // send a signal without regard for whether the signal is blocked or ignored
 void deliver_signal(struct task *task, int sig, struct siginfo_ info);
 // send a signal to current if it's not blocked or ignored, return whether that worked

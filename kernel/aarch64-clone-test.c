@@ -11,6 +11,7 @@
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-resource-wire.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
@@ -25,6 +26,15 @@
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define CLONE_SVC_STEP_COUNT 10
+#define WNOHANG_CHECK_STEP_COUNT 37
+#define PARENT_COMPLETION_STEP_LIMIT 48
+#define WAITID_P_PID 1
+#define WAIT_OPTION_WNOHANG UINT32_C(1)
+#define WAIT_OPTION_WUNTRACED UINT32_C(2)
+#define WAIT_OPTION_WAITID_EXITED UINT32_C(4)
+#define WAIT_OPTION_WCONTINUED UINT32_C(8)
+#define WAIT_OPTION_WNOWAIT UINT32_C(0x01000000)
 
 struct exit_observation {
     atomic_bool called;
@@ -33,8 +43,101 @@ struct exit_observation {
     atomic_int status;
 };
 
+struct failed_write_observation {
+    unsigned calls;
+    qword_t address;
+    dword_t size;
+    dword_t status;
+};
+
 static struct exit_observation observed_exit;
 static const struct fd_ops metadata_fd_ops = {0};
+
+static void reset_exit_observation(void) {
+    atomic_store_explicit(&observed_exit.called,
+            false, memory_order_relaxed);
+    atomic_store_explicit(&observed_exit.resources_released,
+            false, memory_order_relaxed);
+    atomic_store_explicit(&observed_exit.pid,
+            0, memory_order_relaxed);
+    atomic_store_explicit(&observed_exit.status,
+            0, memory_order_relaxed);
+}
+
+static bool exit_observation_matches(pid_t_ pid, int status) {
+    return atomic_load_explicit(&observed_exit.called,
+                    memory_order_acquire) &&
+            atomic_load_explicit(&observed_exit.resources_released,
+                    memory_order_relaxed) &&
+            atomic_load_explicit(&observed_exit.pid,
+                    memory_order_relaxed) == pid &&
+            atomic_load_explicit(&observed_exit.status,
+                    memory_order_relaxed) == status;
+}
+
+static bool wait_for_continue_notification(struct task *task) {
+    for (unsigned i = 0; i < 100000; i++) {
+        lock(&task->group->lock);
+        bool pending = task->group->continue_notification_pending;
+        unlock(&task->group->lock);
+        if (!pending)
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+static bool fail_status_write(void *opaque, qword_t address,
+        const void *source, dword_t size,
+        struct guest_linux_user_fault *fault) {
+    struct failed_write_observation *observation = opaque;
+    observation->calls++;
+    observation->address = address;
+    observation->size = size;
+    if (size == sizeof(observation->status))
+        memcpy(&observation->status, source, sizeof(observation->status));
+    *fault = (struct guest_linux_user_fault) {
+        .address = address + 2,
+        .access = GUEST_MEMORY_WRITE,
+        .kind = GUEST_MEMORY_FAULT_PERMISSION,
+    };
+    return false;
+}
+
+static bool resource_wire_is_fixed_width(void) {
+    const struct rusage_ source = {
+        .utime = {UINT32_C(0x7fffffff), UINT32_C(0x80000000)},
+        .stime = {UINT32_C(0xffffffff), UINT32_C(0x12345678)},
+        .maxrss = UINT32_C(0x80000001),
+        .ixrss = 2,
+        .idrss = 3,
+        .isrss = 4,
+        .minflt = 5,
+        .majflt = 6,
+        .nswap = 7,
+        .inblock = 8,
+        .oublock = 9,
+        .msgsnd = 10,
+        .msgrcv = 11,
+        .nsignals = 12,
+        .nvcsw = 13,
+        .nivcsw = UINT32_C(0xfffffffe),
+    };
+    struct aarch64_linux_rusage wire =
+            aarch64_linux_pack_rusage(&source);
+    return wire.utime.sec == INT32_MAX &&
+            wire.utime.usec == INT32_MIN &&
+            wire.stime.sec == -1 &&
+            wire.stime.usec == UINT32_C(0x12345678) &&
+            wire.maxrss == (sqword_t) INT32_MIN + 1 &&
+            wire.ixrss == 2 && wire.idrss == 3 &&
+            wire.isrss == 4 && wire.minflt == 5 &&
+            wire.majflt == 6 && wire.nswap == 7 &&
+            wire.inblock == 8 && wire.oublock == 9 &&
+            wire.msgsnd == 10 && wire.msgrcv == 11 &&
+            wire.nsignals == 12 && wire.nvcsw == 13 &&
+            wire.nivcsw == -2;
+}
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -139,14 +242,53 @@ static struct task *make_parent(struct tgroup *group) {
 }
 
 static struct aarch64_linux_process *make_process(struct task *task) {
-    // clone 的高位 flags 与 x2-x4 都是垃圾；父返回 PID 后退出，子进入自旋。
+    // 子进程自旋；父进程先无阻塞探测，再用高位栈地址回收并核验 ABI 写回。
     static const dword_t program[] = {
         UINT32_C(0xd2800220), UINT32_C(0xf2fbd5a0),
         UINT32_C(0xd2800001), UINT32_C(0xd2844442),
         UINT32_C(0xf2f55542), UINT32_C(0x92800003),
         UINT32_C(0xd2888884), UINT32_C(0xf2d77764),
         UINT32_C(0xd2801b88), UINT32_C(0xd4000001),
-        UINT32_C(0xb4000080), UINT32_C(0xd2800ba8),
+        UINT32_C(0xb4000a40), UINT32_C(0xaa0003f3),
+        UINT32_C(0xd102c3ff), UINT32_C(0xd28ef104),
+        UINT32_C(0xf2aaacc4), UINT32_C(0xf2c66884),
+        UINT32_C(0xf2e22444), UINT32_C(0xf90003e4),
+        UINT32_C(0x92800005), UINT32_C(0xf9000be5),
+        UINT32_C(0xf9001be5), UINT32_C(0xf9004fe5),
+        UINT32_C(0xf90053e5), UINT32_C(0x92800000),
+        UINT32_C(0xf2e24680), UINT32_C(0x910003e1),
+        UINT32_C(0xd2800022), UINT32_C(0xf2f7dde2),
+        UINT32_C(0x910043e3), UINT32_C(0xd2802088),
+        UINT32_C(0xd4000001), UINT32_C(0xb5000720),
+        UINT32_C(0xf94003e6), UINT32_C(0xeb0400df),
+        UINT32_C(0x540006c1), UINT32_C(0xf9400be6),
+        UINT32_C(0xeb0500df), UINT32_C(0x54000661),
+        UINT32_C(0xf9401be6), UINT32_C(0xeb0500df),
+        UINT32_C(0x54000601), UINT32_C(0xf9404fe6),
+        UINT32_C(0xeb0500df), UINT32_C(0x540005a1),
+        UINT32_C(0xf94053e6), UINT32_C(0xeb0500df),
+        UINT32_C(0x54000541), UINT32_C(0x92800000),
+        UINT32_C(0xf2eacf00), UINT32_C(0x910003e1),
+        UINT32_C(0xd2800002), UINT32_C(0xf2f95fc2),
+        UINT32_C(0x910043e3), UINT32_C(0xd2802088),
+        UINT32_C(0xd4000001), UINT32_C(0xeb13001f),
+        UINT32_C(0x54000401), UINT32_C(0xb94003e6),
+        UINT32_C(0x710024df), UINT32_C(0x540003a1),
+        UINT32_C(0xb94007e6), UINT32_C(0x52866887),
+        UINT32_C(0x72a22447), UINT32_C(0x6b0700df),
+        UINT32_C(0x54000301), UINT32_C(0xf9400be6),
+        UINT32_C(0xeb0500df), UINT32_C(0x540002a0),
+        UINT32_C(0xf9401be6), UINT32_C(0xb5000266),
+        UINT32_C(0xf9404fe6), UINT32_C(0xb5000226),
+        UINT32_C(0xf94053e6), UINT32_C(0xeb0500df),
+        UINT32_C(0x540001c1), UINT32_C(0x92800000),
+        UINT32_C(0xd2800001), UINT32_C(0xd2800022),
+        UINT32_C(0xd2800003), UINT32_C(0xd2802088),
+        UINT32_C(0xd4000001), UINT32_C(0x92800127),
+        UINT32_C(0xeb07001f), UINT32_C(0x540000a1),
+        UINT32_C(0xd2800540), UINT32_C(0xd2800ba8),
+        UINT32_C(0xd4000001), UINT32_C(0x14000000),
+        UINT32_C(0xd2800c60), UINT32_C(0xd2800ba8),
         UINT32_C(0xd4000001), UINT32_C(0x14000000),
         UINT32_C(0x14000000),
     };
@@ -236,17 +378,10 @@ static int run_clone_scenario(void) {
             !task_attach_aarch64_process(parent, process))
         return 22;
     extern void (*exit_hook)(struct task *task, int code);
-    atomic_store_explicit(&observed_exit.called,
-            false, memory_order_relaxed);
-    atomic_store_explicit(&observed_exit.resources_released,
-            false, memory_order_relaxed);
-    atomic_store_explicit(&observed_exit.pid,
-            0, memory_order_relaxed);
-    atomic_store_explicit(&observed_exit.status,
-            0, memory_order_relaxed);
+    reset_exit_observation();
     exit_hook = observe_exit;
     // 第十步执行真实 SVC；runtime 在返回前把父进程 x0 改为子 PID。
-    for (unsigned i = 0; i < 10; i++) {
+    for (unsigned i = 0; i < CLONE_SVC_STEP_COUNT; i++) {
         if (aarch64_task_run_one(parent).action !=
                 AARCH64_TASK_EVENT_CONTINUE)
             return 23;
@@ -280,37 +415,180 @@ static int run_clone_scenario(void) {
     if (!published)
         return 24;
 
-    struct aarch64_task_event parent_event =
-            aarch64_task_run_one(parent);
-    if (parent_event.action != AARCH64_TASK_EVENT_CONTINUE ||
-            aarch64_task_run_one(parent).action !=
-                    AARCH64_TASK_EVENT_CONTINUE)
-        return 25;
-    parent_event = aarch64_task_run_one(parent);
-    if (parent_event.action != AARCH64_TASK_EVENT_EXIT ||
-            parent_event.status !=
-                    ((dword_t) child_pid & UINT32_C(0xff)) << 8)
-        return 26;
-
+    // 先走完 WNOHANG 及 canary 检查；此时子进程仍在自旋，结果必为 0。
+    for (unsigned i = 0; i < WNOHANG_CHECK_STEP_COUNT; i++) {
+        if (aarch64_task_run_one(parent).action !=
+                AARCH64_TASK_EVENT_CONTINUE)
+            return 25;
+    }
     send_signal(child, SIGKILL_, SIGINFO_NIL);
-    dword_t waited = sys_wait4(child_pid, 0, 0, 0);
+    struct aarch64_task_event parent_event = {
+        .action = AARCH64_TASK_EVENT_CONTINUE,
+    };
+    for (unsigned i = 0;
+            i < PARENT_COMPLETION_STEP_LIMIT && parent_event.action ==
+                    AARCH64_TASK_EVENT_CONTINUE; i++)
+        parent_event = aarch64_task_run_one(parent);
     exit_hook = NULL;
-    if (waited != (dword_t) child_pid ||
-            !atomic_load_explicit(&observed_exit.called,
-                    memory_order_acquire) ||
-            !atomic_load_explicit(&observed_exit.resources_released,
-                    memory_order_relaxed) ||
-            atomic_load_explicit(&observed_exit.pid,
-                    memory_order_relaxed) != child_pid ||
-            atomic_load_explicit(&observed_exit.status,
-                    memory_order_relaxed) != SIGKILL_)
-        return 27;
+    if (parent_event.action != AARCH64_TASK_EVENT_EXIT ||
+            parent_event.status != UINT32_C(42) << 8 ||
+            !exit_observation_matches(child_pid, SIGKILL_))
+        return 26;
 
     lock(&pids_lock);
     bool reaped = pid_get_task_zombie(child_pid) == NULL &&
             list_empty(&parent->children);
     unlock(&pids_lock);
-    bool parent_unchanged = reaped &&
+    if (!reaped)
+        return 27;
+
+    struct wait4_result edge_result;
+    if (do_wait4(INT32_MIN, 0, &edge_result) != _ESRCH ||
+            do_wait4(-1, WAIT_OPTION_WAITID_EXITED,
+                    &edge_result) != _EINVAL)
+        return 28;
+
+    dword_t encoded_fault_pid = sys_clone(SIGCHLD_, 0, 0, 0, 0);
+    if ((sdword_t) encoded_fault_pid <= 0)
+        return 29;
+    pid_t_ fault_pid = (pid_t_) encoded_fault_pid;
+    lock(&pids_lock);
+    struct task *fault_child = pid_get_task(fault_pid);
+    bool fault_child_published = fault_child != NULL &&
+            fault_child->parent == parent &&
+            task_has_aarch64_process(fault_child);
+    unlock(&pids_lock);
+    if (!fault_child_published)
+        return 30;
+    reset_exit_observation();
+    exit_hook = observe_exit;
+    send_signal(fault_child, SIGKILL_, SIGINFO_NIL);
+
+    const qword_t failed_status_address = STACK_TOP - 4;
+    struct failed_write_observation failed_write = {0};
+    struct guest_linux_syscall_completion completion = {0};
+    const struct guest_linux_syscall_context context = {
+        .task_opaque = parent,
+        .completion = &completion,
+        .user = {
+            .opaque = &failed_write,
+            .write = fail_status_write,
+        },
+    };
+    const struct guest_linux_syscall syscall = {
+        .number = 260,
+        .arguments = {
+            (qword_t) (dword_t) fault_pid,
+            failed_status_address,
+            0,
+            STACK_TOP - 160,
+        },
+    };
+    struct guest_linux_user_fault fault = {0};
+    qword_t fault_result = ish_aarch64_linux_syscall_service.dispatch(
+            &context, &syscall, &fault);
+    exit_hook = NULL;
+    if (fault_result != (qword_t) (sqword_t) _EFAULT ||
+            failed_write.calls != 1 ||
+            failed_write.address != failed_status_address ||
+            failed_write.size != sizeof(dword_t) ||
+            failed_write.status != SIGKILL_ ||
+            fault.address != failed_status_address + 2 ||
+            fault.access != GUEST_MEMORY_WRITE ||
+            fault.kind != GUEST_MEMORY_FAULT_PERMISSION ||
+            !exit_observation_matches(fault_pid, SIGKILL_) ||
+            do_wait4(fault_pid, WAIT_OPTION_WNOHANG,
+                    &edge_result) != _ECHILD)
+        return 31;
+
+    lock(&pids_lock);
+    bool fault_child_reaped = pid_get_task_zombie(fault_pid) == NULL &&
+            list_empty(&parent->children);
+    unlock(&pids_lock);
+    if (!fault_child_reaped)
+        return 32;
+
+    dword_t encoded_job_pid = sys_clone(SIGCHLD_, 0, 0, 0, 0);
+    if ((sdword_t) encoded_job_pid <= 0)
+        return 33;
+    pid_t_ job_pid = (pid_t_) encoded_job_pid;
+    lock(&pids_lock);
+    struct task *job_child = pid_get_task(job_pid);
+    bool job_child_published = job_child != NULL &&
+            job_child->parent == parent &&
+            task_has_aarch64_process(job_child);
+    unlock(&pids_lock);
+    if (!job_child_published)
+        return 34;
+
+    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    dword_t stop_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
+            WAIT_OPTION_WUNTRACED | WAIT_OPTION_WNOWAIT);
+    sdword_t stopped = do_wait4(
+            job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
+    if (stop_peek != 0 || stopped != job_pid || edge_result.status !=
+            ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
+        return 35;
+    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    dword_t continue_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
+            WAIT_OPTION_WCONTINUED | WAIT_OPTION_WNOWAIT);
+    sdword_t continued = do_wait4(
+            job_pid, WAIT_OPTION_WCONTINUED, &edge_result);
+    bool continue_notified =
+            wait_for_continue_notification(job_child);
+    if (continue_peek != 0 || !continue_notified ||
+            continued != job_pid ||
+            edge_result.status != UINT32_C(0xffff) ||
+            do_wait4(job_pid,
+                    WAIT_OPTION_WNOHANG | WAIT_OPTION_WCONTINUED,
+                    &edge_result) != 0)
+        return 36;
+
+    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    stopped = do_wait4(
+            job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
+    if (stopped != job_pid || edge_result.status !=
+            ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
+        return 37;
+    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    if (!wait_for_continue_notification(job_child))
+        return 38;
+    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    stopped = do_wait4(
+            job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
+    if (stopped != job_pid || edge_result.status !=
+            ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)) ||
+            do_wait4(job_pid,
+                    WAIT_OPTION_WNOHANG | WAIT_OPTION_WCONTINUED,
+                    &edge_result) != 0)
+        return 39;
+
+    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    if (!wait_for_continue_notification(job_child))
+        return 40;
+    reset_exit_observation();
+    exit_hook = observe_exit;
+    send_signal(job_child, SIGKILL_, SIGINFO_NIL);
+    bool job_exited = false;
+    for (unsigned i = 0; i < 100000 && !job_exited; i++) {
+        job_exited = atomic_load_explicit(
+                &observed_exit.called, memory_order_acquire);
+        if (!job_exited)
+            sched_yield();
+    }
+    sdword_t killed = do_wait4(
+            job_pid, WAIT_OPTION_WCONTINUED, &edge_result);
+    exit_hook = NULL;
+    if (!job_exited || killed != job_pid ||
+            edge_result.status != SIGKILL_ ||
+            !exit_observation_matches(job_pid, SIGKILL_))
+        return 41;
+
+    lock(&pids_lock);
+    bool job_child_reaped = pid_get_task_zombie(job_pid) == NULL &&
+            list_empty(&parent->children);
+    unlock(&pids_lock);
+    bool parent_unchanged = job_child_reaped &&
             atomic_load_explicit(&parent->mm->refcount,
                     memory_order_relaxed) == 1 &&
             atomic_load_explicit(&parent->files->refcount,
@@ -324,7 +602,7 @@ static int run_clone_scenario(void) {
                     &ish_aarch64_linux_syscall_service,
                     &ish_aarch64_linux_signal_service);
     if (!parent_unchanged)
-        return 28;
+        return 42;
 
     destroy_parent(parent, &parent_group);
     return 0;
@@ -336,7 +614,7 @@ static bool run_isolated_clone_scenario(void) {
         return false;
     if (host_child == 0) {
         signal(SIGUSR1, SIG_IGN);
-        alarm(15);
+        alarm(30);
         int result = run_clone_scenario();
         alarm(0);
         _exit(result);
@@ -366,6 +644,10 @@ static bool run_isolated_clone_scenario(void) {
 }
 
 int main(void) {
+    if (!resource_wire_is_fixed_width()) {
+        fprintf(stderr, "AArch64 rusage 固定宽度转换测试失败\n");
+        return 1;
+    }
     if (!run_isolated_clone_scenario()) {
         fprintf(stderr, "AArch64 clone 集成测试失败\n");
         return 1;

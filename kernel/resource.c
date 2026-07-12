@@ -142,7 +142,7 @@ dword_t sys_prlimit64(pid_t_ pid, dword_t resource, addr_t new_limit_addr, addr_
 
 struct rusage_ rusage_get_current(void) {
     // only the time fields are currently implemented
-    struct rusage_ rusage;
+    struct rusage_ rusage = {0};
 #if __linux__
     struct rusage usage;
     int err = getrusage(RUSAGE_THREAD, &usage);
@@ -154,7 +154,10 @@ struct rusage_ rusage_get_current(void) {
 #elif __APPLE__
     thread_basic_info_data_t info;
     mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-    thread_info(mach_thread_self(), THREAD_BASIC_INFO, (thread_info_t) &info, &count);
+    kern_return_t error = thread_info(mach_thread_self(),
+            THREAD_BASIC_INFO, (thread_info_t) &info, &count);
+    if (error != KERN_SUCCESS)
+        return rusage;
     rusage.utime.sec = info.user_time.seconds;
     rusage.utime.usec = info.user_time.microseconds;
     rusage.stime.sec = info.system_time.seconds;

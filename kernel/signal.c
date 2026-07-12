@@ -128,10 +128,39 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
 
     if (sig == SIGCONT_ || sig == SIGKILL_) {
         lock(&task->group->lock);
+        bool resumed = sig == SIGCONT_ && task->group->stopped;
         task->group->stopped = false;
+        task->group->stop_code = 0;
+        if (resumed) {
+            task->group->continued = true;
+            task->group->continue_notification_pending = true;
+        }
         notify(&task->group->stopped_cond);
         unlock(&task->group->lock);
     }
+}
+
+void signal_notify_group_continue(struct task *task) {
+    lock(&task->group->lock);
+    bool pending = task->group->continue_notification_pending;
+    unlock(&task->group->lock);
+    if (!pending)
+        return;
+
+    lock(&pids_lock);
+    lock(&task->group->lock);
+    bool should_notify = task->group->continue_notification_pending;
+    if (should_notify)
+        task->group->continue_notification_pending = false;
+    unlock(&task->group->lock);
+    struct task *leader = task->group->leader;
+    struct task *parent = leader->parent;
+    if (should_notify && parent != NULL) {
+        notify(&parent->group->child_exit);
+        send_signal(parent,
+                leader->exit_signal, SIGINFO_NIL);
+    }
+    unlock(&pids_lock);
 }
 
 bool try_self_signal(int sig) {
@@ -307,7 +336,9 @@ static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
         case SIGNAL_DELIVERY_STOP:
             lock(&current->group->lock);
             current->group->stopped = true;
-            current->group->group_exit_code = sig << 8 | 0x7f;
+            current->group->continued = false;
+            current->group->continue_notification_pending = false;
+            current->group->stop_code = sig << 8 | 0x7f;
             unlock(&current->group->lock);
             return true;
 
@@ -468,12 +499,13 @@ void receive_signals(void) {
         unlock(&current->group->lock);
         if (now_stopped) {
             lock(&pids_lock);
-            struct task *parent = current->parent;
+            struct task *leader = current->group->leader;
+            struct task *parent = leader->parent;
             if (parent != NULL) {
                 notify(&parent->group->child_exit);
                 // TODO add siginfo
                 send_signal(parent,
-                        current->group->leader->exit_signal, SIGINFO_NIL);
+                        leader->exit_signal, SIGINFO_NIL);
             }
             unlock(&pids_lock);
         }

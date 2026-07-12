@@ -153,6 +153,7 @@ static struct aarch64_task_event wait_until_continued(
         wait_for_ignore_signals(
                 &group->stopped_cond, &group->lock, NULL);
     unlock(&group->lock);
+    signal_notify_group_continue(task);
     // SIGKILL 会解除停止；恢复 guest 前必须先消费它。
     return aarch64_task_poll_signals(task);
 }
