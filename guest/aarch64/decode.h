@@ -139,6 +139,14 @@ enum aarch64_opcode {
     AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL,
     AARCH64_OP_SCVTF_GENERAL,
     AARCH64_OP_UCVTF_GENERAL,
+    AARCH64_OP_FADD_SCALAR,
+    AARCH64_OP_FSUB_SCALAR,
+    AARCH64_OP_FMUL_SCALAR,
+    AARCH64_OP_FMOV_SCALAR,
+    AARCH64_OP_FCMP_SCALAR,
+    AARCH64_OP_FCMPE_SCALAR,
+    AARCH64_OP_FCVTZS_SCALAR,
+    AARCH64_OP_SCVTF_SCALAR,
 };
 
 enum aarch64_shift_type {
@@ -286,6 +294,11 @@ struct aarch64_decoded {
             byte_t rn;
             byte_t destination_width;
         } integer_to_fp;
+        struct {
+            byte_t rn;
+            byte_t rm;
+            bool zero;
+        } scalar_fp_compare;
         struct {
             byte_t rd;
             qword_t immediate;

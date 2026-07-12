@@ -213,6 +213,105 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t width;
+    } scalar_fp_binary_operations[] = {
+        {UINT32_C(0x1e202800), AARCH64_OP_FADD_SCALAR, 32},
+        {UINT32_C(0x1e602800), AARCH64_OP_FADD_SCALAR, 64},
+        {UINT32_C(0x1e203800), AARCH64_OP_FSUB_SCALAR, 32},
+        {UINT32_C(0x1e603800), AARCH64_OP_FSUB_SCALAR, 64},
+        {UINT32_C(0x1e200800), AARCH64_OP_FMUL_SCALAR, 32},
+        {UINT32_C(0x1e600800), AARCH64_OP_FMUL_SCALAR, 64},
+    };
+    dword_t scalar_fp_binary = word & UINT32_C(0xffe0fc00);
+    for (unsigned i = 0; i < sizeof(scalar_fp_binary_operations) /
+            sizeof(scalar_fp_binary_operations[0]); i++) {
+        if (scalar_fp_binary != scalar_fp_binary_operations[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = scalar_fp_binary_operations[i].opcode,
+            .width = scalar_fp_binary_operations[i].width,
+            .operands.data_processing_2source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t width;
+    } scalar_fp_unary_operations[] = {
+        {UINT32_C(0x1e204000), AARCH64_OP_FMOV_SCALAR, 32},
+        {UINT32_C(0x1e604000), AARCH64_OP_FMOV_SCALAR, 64},
+        {UINT32_C(0x5ea1b800), AARCH64_OP_FCVTZS_SCALAR, 32},
+        {UINT32_C(0x5ee1b800), AARCH64_OP_FCVTZS_SCALAR, 64},
+        {UINT32_C(0x5e21d800), AARCH64_OP_SCVTF_SCALAR, 32},
+        {UINT32_C(0x5e61d800), AARCH64_OP_SCVTF_SCALAR, 64},
+    };
+    dword_t scalar_fp_unary = word & UINT32_C(0xfffffc00);
+    for (unsigned i = 0; i < sizeof(scalar_fp_unary_operations) /
+            sizeof(scalar_fp_unary_operations[0]); i++) {
+        if (scalar_fp_unary != scalar_fp_unary_operations[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = scalar_fp_unary_operations[i].opcode,
+            .width = scalar_fp_unary_operations[i].width,
+            .operands.data_processing_1source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
+        dword_t mask;
+        enum aarch64_opcode opcode;
+        byte_t width;
+        bool zero;
+    } scalar_fp_comparisons[] = {
+        {UINT32_C(0x1e202000), UINT32_C(0xffe0fc1f),
+                AARCH64_OP_FCMP_SCALAR, 32, false},
+        {UINT32_C(0x1e602000), UINT32_C(0xffe0fc1f),
+                AARCH64_OP_FCMP_SCALAR, 64, false},
+        {UINT32_C(0x1e202010), UINT32_C(0xffe0fc1f),
+                AARCH64_OP_FCMPE_SCALAR, 32, false},
+        {UINT32_C(0x1e602010), UINT32_C(0xffe0fc1f),
+                AARCH64_OP_FCMPE_SCALAR, 64, false},
+        {UINT32_C(0x1e202008), UINT32_C(0xfffffc1f),
+                AARCH64_OP_FCMP_SCALAR, 32, true},
+        {UINT32_C(0x1e602008), UINT32_C(0xfffffc1f),
+                AARCH64_OP_FCMP_SCALAR, 64, true},
+        {UINT32_C(0x1e202018), UINT32_C(0xfffffc1f),
+                AARCH64_OP_FCMPE_SCALAR, 32, true},
+        {UINT32_C(0x1e602018), UINT32_C(0xfffffc1f),
+                AARCH64_OP_FCMPE_SCALAR, 64, true},
+    };
+    for (unsigned i = 0; i < sizeof(scalar_fp_comparisons) /
+            sizeof(scalar_fp_comparisons[0]); i++) {
+        if ((word & scalar_fp_comparisons[i].mask) !=
+                scalar_fp_comparisons[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = scalar_fp_comparisons[i].opcode,
+            .width = scalar_fp_comparisons[i].width,
+            .operands.scalar_fp_compare = {
+                .rn = (word >> 5) & 0x1f,
+                .rm = scalar_fp_comparisons[i].zero ? 0 :
+                        (word >> 16) & 0x1f,
+                .zero = scalar_fp_comparisons[i].zero,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e208400)) {
         bool q = ((word >> 30) & 1) != 0;
         byte_t size = (word >> 22) & 3;
