@@ -38,6 +38,7 @@ struct f80_mod_result {
 struct f80_mod_result f80_mod(float80 a, float80 b);
 
 bool f80_lt(float80 a, float80 b);
+bool f80_gt(float80 a, float80 b);
 bool f80_eq(float80 a, float80 b);
 bool f80_uncomparable(float80 a, float80 b);
 

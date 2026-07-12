@@ -351,8 +351,14 @@ static void test_arithmetic_golden(void) {
     check_f80("一除以零", f80_div(one, zero), F80_INF);
     check(!f80_lt(one, neg_one), "一不应小于负一");
     check(f80_lt(neg_one, one), "负一应小于一");
+    check(f80_gt(one, neg_one), "一应大于负一");
     check(f80_eq(zero, f80_bits(0, 0x8000)), "正负零应相等");
     check(f80_uncomparable(F80_NAN, one), "NaN 应不可比较");
+    check(!f80_gt(F80_NAN, one) && !f80_gt(one, F80_NAN),
+        "NaN 不得参与大于关系");
+    float80 unsupported = f80_bits(0, 0x3fff);
+    check(!f80_gt(unsupported, one) && !f80_gt(one, unsupported),
+        "不受支持编码不得参与大于关系");
     suite_end("固定算术向量");
 }
 
@@ -544,6 +550,109 @@ static void test_mod_golden(void) {
             F80_NAN, 0, false, mode);
     }
     suite_end("精确截断余数与 FPREM 商位");
+}
+
+static float80 run_fyl2x(float80 x, float80 y) {
+    struct cpu_state cpu = {0};
+    cpu.fp[0] = x;
+    cpu.fp[1] = y;
+    fpu_yl2x(&cpu);
+    check(cpu.top == 1, "FYL2X 应弹出一个栈元素");
+    return cpu.fp[cpu.top];
+}
+
+static void test_log2_golden(void) {
+    float80 zero = f80_bits(0, 0x0000);
+    float80 neg_zero = f80_bits(0, 0x8000);
+    float80 one = f80_from_int(1);
+    float80 neg_one = f80_from_int(-1);
+    float80 two = f80_from_int(2);
+    float80 neg_two = f80_from_int(-2);
+    float80 three = f80_from_int(3);
+    float80 half = f80_bits(UINT64_C(0x8000000000000000), 0x3ffe);
+    float80 positive_inf = F80_INF;
+    float80 negative_inf = f80_bits(UINT64_C(0x8000000000000000), 0xffff);
+    float80 unsupported = f80_bits(0, 0x3fff);
+    float80 signaling_nan = f80_bits(UINT64_C(0x8000000000000042), 0x7fff);
+    float80 neg_signaling_nan = f80_bits(UINT64_C(0x8000000000001234), 0xffff);
+    float80 quiet_nan = f80_bits(UINT64_C(0xd000000000000077), 0x7fff);
+    float80 expected_signaling_nan =
+        f80_bits(UINT64_C(0xc000000000000042), 0x7fff);
+    float80 expected_neg_signaling_nan =
+        f80_bits(UINT64_C(0xc000000000001234), 0xffff);
+
+    suite_start("二进制对数与 FYL2X 边界");
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        check_f80("不受支持编码的对数", f80_log2(unsupported), F80_NAN);
+        check_f80("正信号 NaN 静默并保留载荷",
+            f80_log2(signaling_nan), expected_signaling_nan);
+        check_f80("负信号 NaN 静默并保留符号载荷",
+            f80_log2(neg_signaling_nan), expected_neg_signaling_nan);
+        check_f80("安静 NaN 保持编码", f80_log2(quiet_nan), quiet_nan);
+        check_f80("正零的对数", f80_log2(zero), negative_inf);
+        check_f80("负零的对数", f80_log2(neg_zero), negative_inf);
+        check_f80("负有限数的对数", f80_log2(neg_one), F80_NAN);
+        check_f80("负无穷的对数", f80_log2(negative_inf), F80_NAN);
+        check_f80("正无穷的对数", f80_log2(positive_inf), positive_inf);
+        check_f80("一的对数", f80_log2(one), zero);
+        check_f80("二的对数", f80_log2(two), one);
+        check_f80("二分之一的对数", f80_log2(half), neg_one);
+        check_f80("最小子正常数的对数", f80_log2(f80_bits(1, 0x0000)),
+            f80_from_int(-16445));
+        check_f80("最小正常数的对数",
+            f80_log2(f80_bits(UINT64_C(0x8000000000000000), 0x0001)),
+            f80_from_int(-16382));
+        check_f80("最大有限二次幂的对数",
+            f80_log2(f80_bits(UINT64_C(0x8000000000000000), 0x7ffe)),
+            f80_from_int(16383));
+
+        float80 log_one_and_quarter = f80_log2(
+            f80_bits(UINT64_C(0xa000000000000000), 0x3fff));
+        float80 log_one_and_half = f80_log2(
+            f80_bits(UINT64_C(0xc000000000000000), 0x3fff));
+        float80 log_one_and_three_quarters = f80_log2(
+            f80_bits(UINT64_C(0xe000000000000000), 0x3fff));
+        check(f80_lt(log_one_and_quarter, log_one_and_half) &&
+                f80_lt(log_one_and_half, log_one_and_three_quarters),
+            "[1,2) 内的对数应严格递增（%s）", rounding_name(mode));
+        check(!f80_log2(f80_bits(UINT64_C(0x8000000000000001), 0x3fff)).sign,
+            "一的后继数对数应为正（%s）", rounding_name(mode));
+        check(f80_log2(f80_bits(UINT64_MAX, 0x3ffe)).sign,
+            "一的前驱数对数应为负（%s）", rounding_name(mode));
+
+        check_f80("FYL2X 精确有限值", run_fyl2x(two, three), three);
+        check_f80("FYL2X 负精确有限值", run_fyl2x(half, three), f80_from_int(-3));
+        check_f80("FYL2X 正零输入", run_fyl2x(zero, two), negative_inf);
+        check_f80("FYL2X 负零输入与负乘数", run_fyl2x(neg_zero, neg_two), positive_inf);
+        check(f80_isnan(run_fyl2x(zero, zero)), "FYL2X 的零乘负无穷应为 NaN");
+        check_f80("FYL2X 正无穷与负乘数",
+            run_fyl2x(positive_inf, neg_two), negative_inf);
+        check(f80_isnan(run_fyl2x(one, positive_inf)),
+            "FYL2X 的无穷乘零应为 NaN");
+        check(f80_isnan(run_fyl2x(neg_one, two)),
+            "FYL2X 的负对数输入应为 NaN");
+        check_f80("FYL2X 传播静默后的 NaN 载荷",
+            run_fyl2x(signaling_nan, one), expected_signaling_nan);
+    }
+
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        for (unsigned exp = 1; exp <= 0x7ffe; exp++) {
+            float80 power = f80_bits(
+                UINT64_C(0x8000000000000000), (uint16_t) exp);
+            check(f80_same(f80_log2(power), f80_from_int((int) exp - 0x3fff)),
+                "正常二次幂对数不精确（%s，存储指数=%u）",
+                rounding_name(mode), exp);
+        }
+        for (int bit = 0; bit < 63; bit++) {
+            float80 power = f80_bits(UINT64_C(1) << bit, 0x0000);
+            check(f80_same(f80_log2(power), f80_from_int(-16445 + bit)),
+                "子正常二次幂对数不精确（%s，位=%d）",
+                rounding_name(mode), bit);
+        }
+    }
+    suite_end("二进制对数与 FYL2X 边界");
 }
 
 static void test_scale_golden(void) {
@@ -750,6 +859,102 @@ static uint64_t next_random(void) {
     random_state ^= random_state >> 7;
     random_state ^= random_state << 17;
     return random_state;
+}
+
+static void test_log2_properties(void) {
+    suite_start("二进制对数固定种子性质");
+    random_state = UINT64_C(0x3bd39e10cb0ef593);
+    for (int i = 0; i < 5000; i++) {
+        uint64_t first_signif = next_random();
+        uint64_t second_signif = next_random();
+        uint16_t exp;
+        if (i & 1) {
+            first_signif |= UINT64_C(1) << 63;
+            second_signif |= UINT64_C(1) << 63;
+            exp = (uint16_t) (1 + next_random() % 0x7ffe);
+        } else {
+            first_signif &= UINT64_MAX >> 1;
+            second_signif &= UINT64_MAX >> 1;
+            if (first_signif == 0)
+                first_signif = 1;
+            if (second_signif == 0)
+                second_signif = 1;
+            exp = 0;
+        }
+        if (first_signif > second_signif) {
+            uint64_t temporary = first_signif;
+            first_signif = second_signif;
+            second_signif = temporary;
+        }
+        float80 lower_input = f80_bits(first_signif, exp);
+        float80 upper_input = f80_bits(second_signif, exp);
+        float80 rounded[4];
+        int shift = __builtin_clzll((unsigned long long) lower_input.signif);
+        int integer = (int) (lower_input.exp == 0 ? 1 : lower_input.exp) -
+            0x3fff - shift;
+        float80 lower_bound = f80_from_int(integer);
+        float80 upper_bound = f80_from_int(integer + 1);
+
+        for (enum f80_rounding_mode mode = round_to_nearest;
+                mode <= round_chop; mode++) {
+            f80_rounding_mode = mode;
+            rounded[mode] = f80_log2(lower_input);
+            check_f80("相同输入结果应确定",
+                f80_log2(lower_input), rounded[mode]);
+            check(!f80_lt(rounded[mode], lower_bound) &&
+                    !f80_gt(rounded[mode], upper_bound),
+                "对数结果超出规格化指数区间（%s，序号=%d）",
+                rounding_name(mode), i);
+        }
+        check(!f80_gt(rounded[round_down], rounded[round_to_nearest]) &&
+                !f80_gt(rounded[round_to_nearest], rounded[round_up]),
+            "对数定向舍入次序错误（序号=%d）", i);
+        enum f80_rounding_mode chop_peer = rounded[round_to_nearest].sign
+            ? round_up : round_down;
+        check(f80_eq(rounded[round_chop], rounded[chop_peer]),
+            "对数向零舍入与同向模式不一致（序号=%d）", i);
+
+        f80_rounding_mode = round_to_nearest;
+        check(!f80_gt(f80_log2(lower_input), f80_log2(upper_input)),
+            "对数单调性错误（序号=%d）", i);
+    }
+
+    f80_rounding_mode = round_to_nearest;
+    random_state = UINT64_C(0xc0ac29b7c97c50dd);
+    for (int i = 0; i < 10000; i++) {
+        uint64_t bits;
+        switch (i & 3) {
+            case 0:
+                bits = ((UINT64_C(1) + next_random() % 0x7fe) << 52) |
+                    (next_random() & UINT64_C(0x000fffffffffffff));
+                break;
+            case 1:
+                bits = next_random() & UINT64_C(0x000fffffffffffff);
+                if (bits == 0)
+                    bits = 1;
+                break;
+            case 2: {
+                uint64_t distance = 1 + next_random() % 0xffff;
+                bits = i & 4
+                    ? UINT64_C(0x3ff0000000000000) - distance
+                    : UINT64_C(0x3ff0000000000000) + distance;
+                break;
+            }
+            default:
+                bits = (UINT64_C(1) + next_random() % 0x7fe) << 52;
+                break;
+        }
+        double input = double_from_bits(bits);
+        double expected = log2(input);
+        double actual = f80_to_double(f80_log2(f80_from_double(input)));
+        double scale = fabs(expected);
+        if (scale < 1)
+            scale = 1;
+        check(fabs(actual - expected) <= 8 * DBL_EPSILON * scale,
+            "binary64 对数参考误差超限（序号=%d，输入=%016" PRIx64 "）",
+            i, bits);
+    }
+    suite_end("二进制对数固定种子性质");
 }
 
 static void test_portable_properties(void) {
@@ -1278,6 +1483,8 @@ static void test_native_x87_oracle(void) {
                 "x87 舍入到整数不一致（%s）", rounding_name(mode));
             check(f80_lt(a, b) == (native_a < native_b),
                 "x87 小于比较不一致（%s）", rounding_name(mode));
+            check(f80_gt(a, b) == (native_a > native_b),
+                "x87 大于比较不一致（%s）", rounding_name(mode));
             check(f80_eq(a, b) == (native_a == native_b),
                 "x87 相等比较不一致（%s）", rounding_name(mode));
         }
@@ -1294,6 +1501,8 @@ int main(void) {
     test_arithmetic_golden();
     test_add_subnormal_golden();
     test_mod_golden();
+    test_log2_golden();
+    test_log2_properties();
     test_scale_golden();
     test_sqrt_golden();
     test_portable_properties();

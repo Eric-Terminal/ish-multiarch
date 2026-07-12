@@ -8,6 +8,7 @@
 #include "misc.h"
 
 typedef unsigned __int128 uint128_t;
+typedef __int128 int128_t;
 
 // If you don't understand why something is the way it is, change it and run
 // the test suite and all will become clear.
@@ -176,6 +177,22 @@ static uint64_t u128_sqrt_floor(uint128_t value, uint128_t *remainder) {
     }
     *remainder = value - (uint128_t) low * low;
     return low;
+}
+
+// 返回平方的高 128 位，并暴露低半部最高位供一位规格化使用。
+static uint128_t u128_square_high(uint128_t value, bool *low_top) {
+    uint64_t low = (uint64_t) value;
+    uint64_t high = (uint64_t) (value >> 64);
+    uint128_t low_square = (uint128_t) low * low;
+    uint128_t cross = (uint128_t) low * high;
+    uint128_t high_square = (uint128_t) high * high;
+    uint128_t middle = (low_square >> 64) + (uint64_t) cross + (uint64_t) cross;
+    uint128_t upper = (cross >> 64) + (cross >> 64) +
+        (uint64_t) high_square + (middle >> 64);
+    uint128_t top = (high_square >> 64) + (upper >> 64);
+
+    *low_top = ((uint64_t) middle >> 63) != 0;
+    return (top << 64) | (uint64_t) upper;
 }
 
 static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
@@ -627,40 +644,54 @@ bool f80_lte(float80 a, float80 b) {
     return f80_lt(a, b) || f80_eq(a, b);
 }
 bool f80_gt(float80 a, float80 b) {
-    return !f80_lte(a, b);
+    return f80_lt(b, a);
 }
 
 float80 f80_log2(float80 x) {
-    float80 zero = f80_from_int(0);
-    float80 one = f80_from_int(1);
-    float80 two = f80_from_int(2);
-    if (f80_isnan(x) || f80_lte(x, zero))
+    if (!f80_is_supported(x))
         return F80_NAN;
-
-    int ipart = 0;
-    while (f80_lt(x, one)) {
-        ipart--;
-        x = f80_mul(x, two);
+    if (f80_isnan(x)) {
+        x.signif |= UINT64_C(1) << 62;
+        return x;
     }
-    while (f80_gt(x, two)) {
-        ipart++;
-        x = f80_div(x, two);
+    if (f80_iszero(x)) {
+        float80 negative_infinity = F80_INF;
+        negative_infinity.sign = 1;
+        return negative_infinity;
     }
-    float80 res = f80_from_int(ipart);
+    if (x.sign)
+        return F80_NAN;
+    if (f80_isinf(x))
+        return x;
 
-    float80 bit = one;
-    while (f80_gt(bit, zero)) {
-        while (f80_lte(x, two) && f80_gt(bit, zero)) {
-            x = f80_mul(x, x);
-            bit = f80_div(bit, two);
+    int shift = __builtin_clzll((unsigned long long) x.signif);
+    uint64_t normalized_signif = x.signif << shift;
+    int integer = unbias_denormal(x.exp) - shift;
+    if (normalized_signif == CURSED_BIT)
+        return f80_from_int(integer);
+
+    enum { fraction_bits = 80 };
+    uint128_t signif = (uint128_t) normalized_signif << 64;
+    uint128_t fraction = 0;
+    // 逐次平方固定生成二进制小数位；一般有限结果是确定性近似，不承诺正确舍入。
+    for (int bit = 0; bit < fraction_bits; bit++) {
+        bool low_top;
+        uint128_t high = u128_square_high(signif, &low_top);
+        if (high >> 127 != 0) {
+            fraction |= (uint128_t) 1 << (fraction_bits - 1 - bit);
+            signif = high;
+        } else {
+            signif = (high << 1) | low_top;
         }
-        float80 oldres = res;
-        res = f80_add(res, bit);
-        if (oldres.signif == res.signif && oldres.exp == res.exp && oldres.sign == res.sign)
-            break;
-        x = f80_div(x, two);
     }
-    return res;
+
+    int128_t fixed = (int128_t) integer * ((int128_t) 1 << fraction_bits) +
+        (int128_t) fraction;
+    int sign = fixed < 0;
+    uint128_t magnitude = sign
+        ? (uint128_t) (-(fixed + 1)) + 1
+        : (uint128_t) fixed;
+    return u128_normalize_round(magnitude, 127 - fraction_bits, sign);
 }
 
 float80 f80_sqrt(float80 x) {
