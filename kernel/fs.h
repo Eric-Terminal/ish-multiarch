@@ -66,8 +66,11 @@ struct attr {
         AT_NO_AUTOMOUNT_ | AT_EMPTY_PATH_ | AT_STATX_SYNC_TYPE_)
 
 struct fd *generic_open(const char *path, int flags, int mode);
+struct fd *generic_open_exec(const char *path);
 struct fd *generic_openat_task(struct task *task, struct fd *at,
         const char *path, int flags, int mode);
+struct fd *generic_openat_exec_task(struct task *task,
+        struct fd *at, const char *path);
 struct fd *generic_openat(struct fd *at, const char *path, int flags, int mode);
 int generic_getpath(struct fd *fd, char *buf);
 int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw);

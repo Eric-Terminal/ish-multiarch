@@ -270,6 +270,8 @@ void handle_interrupt(int interrupt) {
             STRACE("%d call %-3d ", current->pid, syscall_num);
             int result = syscall_table[syscall_num](cpu->ebx, cpu->ecx, cpu->edx, cpu->esi, cpu->edi, cpu->ebp);
             STRACE(" = 0x%x\n", result);
+            if (task_has_aarch64_exec_candidate(current))
+                return;
             cpu->eax = result;
         }
     } else if (interrupt == INT_GPF) {
@@ -322,6 +324,9 @@ void handle_interrupt(int interrupt) {
         sys_exit(interrupt);
     }
 
+    // exec 候选必须先回到架构选择安全点，不能用旧 CPU/页表处理信号。
+    if (task_has_aarch64_exec_candidate(current))
+        return;
     receive_signals();
     struct tgroup *group = current->group;
     lock(&group->lock);

@@ -21,6 +21,9 @@ struct task {
     struct cpu_state cpu;
     // 非空时由 task 独占；AArch64 CPU 与页表封装在 opaque process 中。
     struct aarch64_linux_process *aarch64_process;
+    // exec 候选在当前 guest 执行栈返回安全点前不得替换或销毁活动映像。
+    struct aarch64_linux_process *aarch64_exec_candidate;
+    struct mm *aarch64_exec_mm;
     struct mm *mm; // locked by general_lock
     struct mem *mem; // pointer to mm.mem, for convenience
     pthread_t thread; // 并发访问必须使用 task_thread_load/store。
@@ -121,9 +124,15 @@ static inline void task_set_mm(struct task *task, struct mm *mm) {
 bool task_has_aarch64_process(const struct task *task);
 // 这些入口仅由未发布 task 的构造线程或 task 自己的执行线程调用。
 // attach 仅在生产服务闭包匹配时接管所有权；失败时所有权仍归调用方。
+// stage 同时接管 process 与预分配 metadata mm，commit 只能在执行栈安全点调用。
 // take 将所有权交还调用方且不销毁。
 bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process);
+bool task_stage_aarch64_exec(struct task *task,
+        struct aarch64_linux_process *process, struct mm *mm);
+bool task_has_aarch64_exec_candidate(const struct task *task);
+void task_commit_aarch64_exec(struct task *task);
+void task_discard_aarch64_exec(struct task *task);
 struct aarch64_linux_process *task_take_aarch64_process(
         struct task *task);
 void task_release_aarch64_process(struct task *task);

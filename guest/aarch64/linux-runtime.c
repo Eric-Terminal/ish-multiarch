@@ -124,18 +124,31 @@ static enum guest_linux_signal_install_status install_signal_frame(
     return GUEST_LINUX_SIGNAL_INSTALL_COMPLETE;
 }
 
-static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
+struct service_dispatch_result {
+    qword_t return_value;
+    bool replaced_image;
+};
+
+static struct service_dispatch_result dispatch_service(
+        const struct guest_linux_syscall *syscall,
         struct guest_tlb *tlb, const struct aarch64_linux_services *services,
         const struct aarch64_linux_task *task,
         guest_addr_t stack_pointer,
         struct guest_memory_fault *fault) {
     if (services == NULL || services->syscalls == NULL ||
-            services->syscalls->dispatch == NULL)
-        return linux_error(GUEST_LINUX_ENOSYS);
+            services->syscalls->dispatch == NULL) {
+        return (struct service_dispatch_result) {
+            .return_value = linux_error(GUEST_LINUX_ENOSYS),
+        };
+    }
+    struct guest_linux_syscall_completion completion = {
+        .disposition = GUEST_LINUX_SYSCALL_RETURN,
+    };
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = services->syscalls->runtime_opaque,
         .task_opaque = task->service_opaque,
         .stack_pointer = stack_pointer,
+        .completion = &completion,
         .user = {
             .opaque = tlb,
             .read = service_read_user,
@@ -145,12 +158,18 @@ static qword_t dispatch_service(const struct guest_linux_syscall *syscall,
     struct guest_linux_user_fault service_fault = {0};
     qword_t result = services->syscalls->dispatch(
             &context, syscall, &service_fault);
+    assert(completion.disposition <=
+            GUEST_LINUX_SYSCALL_REPLACED_IMAGE);
     *fault = (struct guest_memory_fault) {
         .address = (guest_addr_t) service_fault.address,
         .access = (enum guest_memory_access) service_fault.access,
         .kind = (enum guest_memory_fault_kind) service_fault.kind,
     };
-    return result;
+    return (struct service_dispatch_result) {
+        .return_value = result,
+        .replaced_image = completion.disposition ==
+                GUEST_LINUX_SYSCALL_REPLACED_IMAGE,
+    };
 }
 
 static const struct guest_linux_signal_service *runtime_signal_service(
@@ -328,9 +347,14 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
                 syscall.arguments[0], syscall.arguments[1],
                 syscall.arguments[2]);
     } else {
-        result.return_value = dispatch_service(
+        struct service_dispatch_result service = dispatch_service(
                 &syscall, tlb, runtime->services, task,
                 cpu->sp, &result.fault);
+        if (service.replaced_image) {
+            result.action = AARCH64_LINUX_SYSCALL_EXEC;
+            return result;
+        }
+        result.return_value = service.return_value;
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
     apply_signal_result(&result,

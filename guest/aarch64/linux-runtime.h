@@ -33,6 +33,7 @@ enum aarch64_linux_syscall_action {
     AARCH64_LINUX_SYSCALL_EXIT_GROUP,
     AARCH64_LINUX_SYSCALL_STOP,
     AARCH64_LINUX_SYSCALL_TERMINATE,
+    AARCH64_LINUX_SYSCALL_EXEC,
 };
 
 struct aarch64_linux_syscall_result {

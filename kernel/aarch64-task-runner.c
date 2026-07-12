@@ -37,6 +37,8 @@ static struct aarch64_task_event translate_process_event(
         case AARCH64_LINUX_PROCESS_DATA_FAULT:
         case AARCH64_LINUX_PROCESS_UNDEFINED:
             break;
+        case AARCH64_LINUX_PROCESS_EXEC:
+            return task_event(AARCH64_TASK_EVENT_EXEC, 0);
     }
     assert(false && "同步异常必须在转换 task 事件前处理");
     return task_event(AARCH64_TASK_EVENT_TERMINATE, SIGKILL_);
@@ -136,6 +138,8 @@ struct aarch64_task_event aarch64_task_run_one(struct task *task) {
         case AARCH64_LINUX_PROCESS_STOP:
         case AARCH64_LINUX_PROCESS_TERMINATE:
             return translate_process_event(&result);
+        case AARCH64_LINUX_PROCESS_EXEC:
+            return translate_process_event(&result);
     }
     assert(false && "未知 AArch64 process 状态");
     return task_event(AARCH64_TASK_EVENT_TERMINATE, SIGKILL_);
@@ -153,7 +157,7 @@ static struct aarch64_task_event wait_until_continued(
     return aarch64_task_poll_signals(task);
 }
 
-noreturn void aarch64_task_run_current(void) {
+void aarch64_task_run_current(void) {
     assert(current != NULL && task_has_aarch64_process(current));
     struct aarch64_task_event event =
             aarch64_task_poll_signals(current);
@@ -171,6 +175,9 @@ noreturn void aarch64_task_run_current(void) {
                 break;
             case AARCH64_TASK_EVENT_TERMINATE:
                 do_exit_group((int) event.status);
+            case AARCH64_TASK_EVENT_EXEC:
+                task_commit_aarch64_exec(current);
+                return;
         }
     }
 }

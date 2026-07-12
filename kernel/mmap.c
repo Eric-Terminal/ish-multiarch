@@ -8,12 +8,11 @@
 #include "kernel/mm.h"
 
 struct mm *mm_new(void) {
-    struct mm *mm = malloc(sizeof(struct mm));
+    struct mm *mm = calloc(1, sizeof(struct mm));
     if (mm == NULL)
         return NULL;
     mem_init(&mm->mem);
     mm->start_brk = mm->brk = 0; // should get overwritten by exec
-    mm->exefile = NULL;
     mm->refcount = 1;
     return mm;
 }

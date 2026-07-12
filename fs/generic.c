@@ -31,8 +31,9 @@ bool contains_mount_point(const char *path) {
     return false;
 }
 
-struct fd *generic_openat_task(struct task *task, struct fd *at,
-        const char *path_raw, int flags, int mode) {
+static struct fd *generic_openat_task_access(struct task *task,
+        struct fd *at, const char *path_raw,
+        int flags, int mode, int accmode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)
         return ERR_PTR(_EINVAL);
 
@@ -64,11 +65,10 @@ struct fd *generic_openat_task(struct task *task, struct fd *at,
     fd->type = stat.mode & S_IFMT;
     fd->flags = flags;
 
-    int accmode;
-    if (flags & O_RDWR_) accmode = AC_R | AC_W;
-    else if (flags & O_WRONLY_) accmode = AC_W;
-    else accmode = AC_R;
-    err = access_check_task(task, &stat, accmode);
+    if (accmode == AC_X && !(stat.mode & 0111))
+        err = _EACCES;
+    else
+        err = access_check_task(task, &stat, accmode);
     if (err < 0)
         goto error;
 
@@ -97,6 +97,26 @@ struct fd *generic_openat_task(struct task *task, struct fd *at,
 error:
     fd_close(fd);
     return ERR_PTR(err);
+}
+
+struct fd *generic_openat_task(struct task *task, struct fd *at,
+        const char *path_raw, int flags, int mode) {
+    int accmode;
+    if (flags & O_RDWR_) accmode = AC_R | AC_W;
+    else if (flags & O_WRONLY_) accmode = AC_W;
+    else accmode = AC_R;
+    return generic_openat_task_access(
+            task, at, path_raw, flags, mode, accmode);
+}
+
+struct fd *generic_openat_exec_task(struct task *task,
+        struct fd *at, const char *path) {
+    return generic_openat_task_access(
+            task, at, path, O_RDONLY_, 0, AC_X);
+}
+
+struct fd *generic_open_exec(const char *path) {
+    return generic_openat_exec_task(current, AT_PWD, path);
 }
 
 struct fd *generic_openat(struct fd *at, const char *path_raw, int flags, int mode) {

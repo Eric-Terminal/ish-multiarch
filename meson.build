@@ -146,6 +146,7 @@ if get_option('kernel') == 'ish'
 
         'kernel/fs.c',
         'kernel/fs-task.c',
+        'kernel/aarch64-exec.c',
         'kernel/aarch64-exec-image.c',
         'kernel/aarch64-task-runner.c',
         'kernel/aarch64-signal-service.c',

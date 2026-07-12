@@ -402,7 +402,17 @@ static void test_load_run_and_ownership(void) {
 static void test_static_pie(void) {
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
+    struct aarch64_linux_executable_info info =
+            aarch64_linux_inspect_executable(file, sizeof(file));
+    assert(info.status == AARCH64_LINUX_EXECUTABLE_VALID &&
+            info.elf_error == 0 && info.position_independent == 0);
+    info = aarch64_linux_inspect_executable(NULL, sizeof(file));
+    assert(info.status == AARCH64_LINUX_EXECUTABLE_BAD_ELF &&
+            info.elf_error == AARCH64_ELF64_BAD_IDENTIFICATION);
     put_u16(file + 16, 3);
+    info = aarch64_linux_inspect_executable(file, sizeof(file));
+    assert(info.status == AARCH64_LINUX_EXECUTABLE_VALID &&
+            info.elf_error == 0 && info.position_independent == 1);
     const dword_t program[] = {
         UINT32_C(0xd2800808), UINT32_C(0xd4000001),
         UINT32_C(0xd2800540), UINT32_C(0xd2800ba8),
@@ -993,6 +1003,74 @@ static void test_signal_trampoline_closure(void) {
     aarch64_linux_process_destroy(process);
 }
 
+struct exec_completion_probe {
+    unsigned dispatches;
+    unsigned polls;
+};
+
+static qword_t dispatch_exec_completion(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    use(fault);
+    struct exec_completion_probe *probe = context->runtime_opaque;
+    assert(syscall->number == 64 && context->completion != NULL);
+    context->completion->disposition =
+            GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+    probe->dispatches++;
+    return UINT64_C(0xfeedfacecafebeef);
+}
+
+static struct guest_linux_signal_poll_result poll_exec_completion(
+        const struct guest_linux_signal_context *context,
+        guest_linux_signal_installer installer,
+        void *installer_opaque) {
+    use(installer, installer_opaque);
+    struct exec_completion_probe *probe = context->runtime_opaque;
+    probe->polls++;
+    return (struct guest_linux_signal_poll_result) {
+        .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+    };
+}
+
+static void test_exec_completion_event(void) {
+    byte_t file[TEST_FILE_SIZE];
+    make_test_elf(file);
+    put_u32(file + 0x100, UINT32_C(0xd2800808));
+    put_u32(file + 0x104, UINT32_C(0xd4000001));
+
+    const char *arguments[2];
+    const char *environment[1];
+    byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE];
+    make_default_inputs(arguments, environment, random);
+    struct exec_completion_probe probe = {0};
+    const struct guest_linux_syscall_service syscalls = {
+        .runtime_opaque = &probe,
+        .dispatch = dispatch_exec_completion,
+    };
+    const struct guest_linux_signal_service signals = {
+        .runtime_opaque = &probe,
+        .poll = poll_exec_completion,
+    };
+    struct aarch64_linux_process_config config = make_config(
+            file, sizeof(file), "/bin/process-test", arguments,
+            array_size(arguments), environment,
+            array_size(environment), random);
+    config.syscalls = &syscalls;
+    config.signals = &signals;
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    assert(process != NULL);
+    assert(aarch64_linux_process_run_one(process).status ==
+            AARCH64_LINUX_PROCESS_RUNNABLE);
+    struct aarch64_linux_process_result result =
+            aarch64_linux_process_run_one(process);
+    assert(result.status == AARCH64_LINUX_PROCESS_EXEC &&
+            result.instruction == UINT32_C(0xd4000001) &&
+            probe.dispatches == 1 && probe.polls == 1);
+    aarch64_linux_process_destroy(process);
+}
+
 int main(void) {
     test_load_run_and_ownership();
     test_static_pie();
@@ -1003,5 +1081,6 @@ int main(void) {
     test_exit_group_event();
     test_independent_handler_poll();
     test_signal_trampoline_closure();
+    test_exec_completion_event();
     return 0;
 }

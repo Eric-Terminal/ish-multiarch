@@ -289,6 +289,12 @@ int main(void) {
     decoy.task.euid = 0;
     CHECK(access_check(&permission, AC_W) == 0, "兼容权限入口保留超级用户语义");
     decoy.task.euid = 2000;
+    const int sync_flags = (1 << 20) | (1 << 12);
+    struct fd *sync_read = generic_openat_task(
+            &target.task, AT_PWD, "sync-read", sync_flags, 0);
+    CHECK(!IS_ERR(sync_read) && probe.last_flags == sync_flags,
+            "guest O_SYNC 位不改变只读打开的权限类别");
+    fd_close(sync_read);
 
     struct statbuf target_stat;
     memset(&target_stat, 0xff, sizeof(target_stat));
@@ -405,7 +411,7 @@ int main(void) {
     fd_close(decoy.root);
     fd_close(target.pwd);
     fd_close(target.root);
-    CHECK(probe.opens == 5 && probe.closes == 5,
+    CHECK(probe.opens == 6 && probe.closes == 6,
             "所有成功、拒绝和超限打开都恰好关闭一次");
     CHECK(mount->refcount == 1, "清理阶段仅保留测试持有的 mount 引用");
     mount_release(mount);

@@ -5,6 +5,7 @@
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
@@ -36,6 +37,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETEUID = 175,
     AARCH64_LINUX_SYS_GETGID = 176,
     AARCH64_LINUX_SYS_GETEGID = 177,
+    AARCH64_LINUX_SYS_EXECVE = 221,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -78,6 +80,127 @@ static qword_t copy_path_from_user(
             return 0;
     }
     return syscall_result(_ENAMETOOLONG);
+}
+
+static int copy_string_array_from_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, char *buffer, size_t capacity,
+        size_t *count, size_t *budget, bool normalize_empty,
+        struct guest_linux_user_fault *fault) {
+    *count = 0;
+    size_t used = 0;
+    if (address == 0) {
+        buffer[0] = '\0';
+        size_t required = sizeof(qword_t);
+        if (normalize_empty)
+            required += sizeof(qword_t) + 1;
+        if (*budget < required)
+            return _E2BIG;
+        *budget -= required;
+        if (normalize_empty) {
+            buffer[1] = '\0';
+            *count = 1;
+        }
+        return 0;
+    }
+    while (true) {
+        if (*budget < sizeof(qword_t))
+            return _E2BIG;
+        *budget -= sizeof(qword_t);
+        qword_t pointer_offset = (qword_t) *count * sizeof(qword_t);
+        if (pointer_offset / sizeof(qword_t) != *count ||
+                address > UINT64_MAX - pointer_offset) {
+            user_range_error(fault, address, GUEST_MEMORY_READ);
+            return _EFAULT;
+        }
+        qword_t string_address;
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                address + pointer_offset, &string_address,
+                sizeof(string_address), fault))
+            return _EFAULT;
+        if (string_address == 0)
+            break;
+
+        while (true) {
+            if (used == capacity || *budget == 0)
+                return _E2BIG;
+            if (!context->user.read(context->user.opaque,
+                    string_address, &buffer[used], 1, fault))
+                return _EFAULT;
+            char copied = buffer[used++];
+            (*budget)--;
+            if (copied == '\0')
+                break;
+            if (string_address == UINT64_MAX) {
+                user_range_error(fault,
+                        string_address, GUEST_MEMORY_READ);
+                return _EFAULT;
+            }
+            string_address++;
+        }
+        (*count)++;
+    }
+    if (*count == 0 && normalize_empty) {
+        if (capacity < 2 || *budget < sizeof(qword_t) + 1)
+            return _E2BIG;
+        *budget -= sizeof(qword_t) + 1;
+        buffer[0] = '\0';
+        buffer[1] = '\0';
+        *count = 1;
+        return 0;
+    }
+    if (used == capacity)
+        return _E2BIG;
+    buffer[used] = '\0';
+    return 0;
+}
+
+static qword_t dispatch_execve(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    if (context->completion == NULL)
+        return syscall_result(_EINVAL);
+
+    char filename[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[0], filename, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+
+    char *arguments = malloc(ISH_AARCH64_EXEC_ARG_MAX);
+    char *environment = malloc(ISH_AARCH64_EXEC_ARG_MAX);
+    if (arguments == NULL || environment == NULL) {
+        free(environment);
+        free(arguments);
+        return syscall_result(_ENOMEM);
+    }
+    size_t argument_count;
+    size_t argument_budget = ISH_AARCH64_EXEC_ARG_MAX;
+    int error = copy_string_array_from_user(context,
+            syscall->arguments[1], arguments,
+            ISH_AARCH64_EXEC_ARG_MAX, &argument_count,
+            &argument_budget, true, fault);
+    size_t environment_count = 0;
+    if (error == 0) {
+        error = copy_string_array_from_user(context,
+                syscall->arguments[2], environment,
+                ISH_AARCH64_EXEC_ARG_MAX, &environment_count,
+                &argument_budget, false, fault);
+    }
+    if (error == 0) {
+        error = do_execve(filename, argument_count,
+                arguments, environment);
+        if (error == 0) {
+            assert(task_has_aarch64_exec_candidate(task));
+            context->completion->disposition =
+                    GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+        }
+    }
+    free(environment);
+    free(arguments);
+    return syscall_result(error);
 }
 
 static qword_t dispatch_getcwd(
@@ -548,6 +671,8 @@ static qword_t dispatch_syscall(
             return task->gid;
         case AARCH64_LINUX_SYS_GETEGID:
             return task->egid;
+        case AARCH64_LINUX_SYS_EXECVE:
+            return dispatch_execve(context, syscall, task, fault);
         default:
             return syscall_result(_ENOSYS);
     }

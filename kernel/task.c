@@ -17,28 +17,85 @@ static struct pid pids[MAX_PID + 1] = {};
 lock_t pids_lock = LOCK_INITIALIZER;
 
 bool task_has_aarch64_process(const struct task *task) {
-    return task->aarch64_process != NULL;
+    return __atomic_load_n(
+            &task->aarch64_process, __ATOMIC_ACQUIRE) != NULL;
+}
+
+static bool task_accepts_aarch64_process(struct task *task,
+        struct aarch64_linux_process *process) {
+    return task != NULL && process != NULL &&
+            aarch64_linux_process_uses_services(process,
+                    task->pid, task,
+                    &ish_aarch64_linux_syscall_service,
+                    &ish_aarch64_linux_signal_service);
 }
 
 bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process) {
-    if (task == NULL || process == NULL ||
+    if (!task_accepts_aarch64_process(task, process) ||
             task->aarch64_process != NULL ||
-            !aarch64_linux_process_uses_services(process,
-                    task->pid, task,
-                    &ish_aarch64_linux_syscall_service,
-                    &ish_aarch64_linux_signal_service))
+            task->aarch64_exec_candidate != NULL)
         return false;
     task->aarch64_process = process;
     return true;
 }
 
+bool task_stage_aarch64_exec(struct task *task,
+        struct aarch64_linux_process *process, struct mm *mm) {
+    if (!task_accepts_aarch64_process(task, process) ||
+            mm == NULL ||
+            mm == task->mm ||
+            task->aarch64_exec_candidate != NULL ||
+            task->aarch64_exec_mm != NULL ||
+            task->aarch64_process == process)
+        return false;
+    task->aarch64_exec_candidate = process;
+    task->aarch64_exec_mm = mm;
+    return true;
+}
+
+bool task_has_aarch64_exec_candidate(const struct task *task) {
+    return task->aarch64_exec_candidate != NULL;
+}
+
+void task_commit_aarch64_exec(struct task *task) {
+    assert(task != NULL && task_has_aarch64_exec_candidate(task) &&
+            task->aarch64_exec_mm != NULL);
+    struct aarch64_linux_process *retired = task->aarch64_process;
+
+    // procfs 与 ptrace 先以 pids_lock 固定 task，再读取地址空间元数据。
+    lock(&pids_lock);
+    lock(&task->general_lock);
+    struct mm *retired_mm = task->mm;
+    __atomic_store_n(&task->aarch64_process,
+            task->aarch64_exec_candidate, __ATOMIC_RELEASE);
+    task->aarch64_exec_candidate = NULL;
+    task_set_mm(task, task->aarch64_exec_mm);
+    task->aarch64_exec_mm = NULL;
+    unlock(&task->general_lock);
+    unlock(&pids_lock);
+
+    aarch64_linux_process_destroy(retired);
+    if (retired_mm != NULL)
+        mm_release(retired_mm);
+    // vfork 父任务只能在共享旧 mm 完全退休后恢复。
+    vfork_notify(task);
+}
+
+void task_discard_aarch64_exec(struct task *task) {
+    assert(task != NULL);
+    aarch64_linux_process_destroy(task->aarch64_exec_candidate);
+    if (task->aarch64_exec_mm != NULL)
+        mm_release(task->aarch64_exec_mm);
+    task->aarch64_exec_candidate = NULL;
+    task->aarch64_exec_mm = NULL;
+}
+
 struct aarch64_linux_process *task_take_aarch64_process(
         struct task *task) {
     assert(task != NULL);
-    struct aarch64_linux_process *process = task->aarch64_process;
-    task->aarch64_process = NULL;
-    return process;
+    return __atomic_exchange_n(
+            &task->aarch64_process, NULL, __ATOMIC_ACQ_REL);
 }
 
 void task_release_aarch64_process(struct task *task) {
@@ -91,6 +148,8 @@ struct task *task_create_(struct task *parent) {
     }
     // opaque process 不可通过 task 的结构体浅拷贝共享。
     task->aarch64_process = NULL;
+    task->aarch64_exec_candidate = NULL;
+    task->aarch64_exec_mm = NULL;
 
     task_thread_store(task, zero_init(pthread_t));
     atomic_init(&task->start_ready, false);
@@ -179,6 +238,7 @@ void task_abort_create(struct task *task) {
     assert(pid != NULL && pid->reserved && pid->task == NULL);
     pid->reserved = false;
     unlock(&pids_lock);
+    task_discard_aarch64_exec(task);
     task_release_aarch64_process(task);
     cond_destroy(&task->pause);
     cond_destroy(&task->ptrace.cond);
@@ -186,7 +246,9 @@ void task_abort_create(struct task *task) {
 }
 
 void task_destroy(struct task *task) {
-    assert(task->aarch64_process == NULL);
+    assert(task->aarch64_process == NULL &&
+            task->aarch64_exec_candidate == NULL &&
+            task->aarch64_exec_mm == NULL);
     list_remove(&task->siblings);
     struct pid *pid = pid_slot(task->pid);
     assert(pid != NULL && !pid->reserved && pid->task == task);
@@ -194,22 +256,26 @@ void task_destroy(struct task *task) {
     free(task);
 }
 
-static noreturn void task_run_i386_current(void) {
+static void task_run_i386_current(void) {
     struct cpu_state *cpu = &current->cpu;
     struct tlb tlb = {};
     tlb_refresh(&tlb, &current->mem->mmu);
-    while (true) {
+    while (!task_has_aarch64_exec_candidate(current)) {
         read_wrlock(&current->mem->lock);
         int interrupt = cpu_run_to_interrupt(cpu, &tlb);
         read_wrunlock(&current->mem->lock);
         handle_interrupt(interrupt);
     }
+    task_commit_aarch64_exec(current);
 }
 
 void task_run_current(void) {
-    if (task_has_aarch64_process(current))
-        aarch64_task_run_current();
-    task_run_i386_current();
+    while (true) {
+        if (task_has_aarch64_process(current))
+            aarch64_task_run_current();
+        else
+            task_run_i386_current();
+    }
 }
 
 static void *task_thread(void *task) {

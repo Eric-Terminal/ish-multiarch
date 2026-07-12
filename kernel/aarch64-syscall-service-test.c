@@ -79,6 +79,7 @@ struct task_fixture {
     struct task task;
     struct tgroup group;
     struct fs_info fs;
+    struct guest_linux_syscall_completion completion;
     struct mount *mount;
     struct fd *pwd;
     struct fd *root;
@@ -398,9 +399,11 @@ static qword_t invoke(struct task_fixture *fixture,
         struct user_memory *memory, struct guest_linux_user_fault *fault,
         qword_t number, qword_t argument0, qword_t argument1,
         qword_t argument2, qword_t argument3) {
+    fixture->completion.disposition = GUEST_LINUX_SYSCALL_RETURN;
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = ish_aarch64_linux_syscall_service.runtime_opaque,
         .task_opaque = &fixture->task,
+        .completion = &fixture->completion,
         .user = {
             .opaque = memory,
             .read = read_user,
@@ -915,6 +918,33 @@ int main(void) {
             USER_BASE + metadata_stat_offset, 0);
     CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1,
             "newfstatat 的 NULL 路径需要 EMPTY_PATH");
+
+    const size_t exec_path_offset = 0x100;
+    const size_t empty_string_offset = 0x180;
+    const size_t pointer_table_offset = 0x800;
+    const size_t pointer_count = 7300;
+    strcpy((char *) memory.bytes + exec_path_offset, "/bin/null-argv");
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 221,
+            USER_BASE + exec_path_offset, 0, 0, 0);
+    CHECK(result == encoded_error(_EACCES) &&
+            fixture.completion.disposition == GUEST_LINUX_SYSCALL_RETURN,
+            "execve 接受 NULL argv/envp 并在失败时保持普通返回");
+    strcpy((char *) memory.bytes + exec_path_offset, "/bin/too-many");
+    memory.bytes[empty_string_offset] = '\0';
+    qword_t empty_string_address = USER_BASE + empty_string_offset;
+    for (size_t index = 0; index < pointer_count; index++)
+        memcpy(memory.bytes + pointer_table_offset + index * sizeof(qword_t),
+                &empty_string_address, sizeof(empty_string_address));
+    memset(memory.bytes + pointer_table_offset +
+            pointer_count * sizeof(qword_t), 0, sizeof(qword_t));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 221,
+            USER_BASE + exec_path_offset, USER_BASE + pointer_table_offset,
+            USER_BASE + pointer_table_offset, 0);
+    CHECK(result == encoded_error(_E2BIG) && memory.write_calls == 0 &&
+            fixture.completion.disposition == GUEST_LINUX_SYSCALL_RETURN,
+            "execve 对 argv、envp、字符串和指针表应用同一 ARG_MAX 预算");
 
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 999, 0, 0, 0, 0);

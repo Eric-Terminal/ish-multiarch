@@ -61,6 +61,7 @@ int main(void) {
         .euid = 1001,
         .gid = 1002,
         .egid = 1003,
+        .secure = 1,
         .interpreter_base = INTERPRETER_BASE,
     };
     struct aarch64_linux_stack_result stack;
@@ -144,6 +145,8 @@ int main(void) {
             executable = value;
         } else if (type == GUEST_AT_CLKTCK) {
             assert(value == 100);
+        } else if (type == GUEST_AT_SECURE) {
+            assert(value == config.secure);
         } else {
             assert(value == 0);
         }

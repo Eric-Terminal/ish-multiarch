@@ -13,6 +13,7 @@ enum aarch64_task_event_action {
     AARCH64_TASK_EVENT_EXIT_GROUP,
     AARCH64_TASK_EVENT_STOP,
     AARCH64_TASK_EVENT_TERMINATE,
+    AARCH64_TASK_EVENT_EXEC,
 };
 
 struct aarch64_task_event {
@@ -28,6 +29,6 @@ int aarch64_task_fault_signal(
 // EXIT/EXIT_GROUP 的 status 是 wait 编码，STOP/TERMINATE 则是原始信号号。
 struct aarch64_task_event aarch64_task_run_one(struct task *task);
 struct aarch64_task_event aarch64_task_poll_signals(struct task *task);
-noreturn void aarch64_task_run_current(void);
+void aarch64_task_run_current(void);
 
 #endif

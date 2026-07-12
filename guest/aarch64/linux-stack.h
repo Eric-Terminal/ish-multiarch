@@ -27,6 +27,7 @@ struct aarch64_linux_stack_config {
     dword_t euid;
     dword_t gid;
     dword_t egid;
+    dword_t secure;
     guest_addr_t interpreter_base;
 };
 

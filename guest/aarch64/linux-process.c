@@ -47,6 +47,30 @@ static struct aarch64_linux_interpreter_path_result interpreter_path_result(
     };
 }
 
+struct aarch64_linux_executable_info
+        aarch64_linux_inspect_executable(
+        const void *elf_data, size_t elf_size) {
+    if (elf_data == NULL && elf_size != 0) {
+        return (struct aarch64_linux_executable_info) {
+            .status = AARCH64_LINUX_EXECUTABLE_BAD_ELF,
+            .elf_error = AARCH64_ELF64_BAD_IDENTIFICATION,
+        };
+    }
+    struct aarch64_elf64_image image;
+    enum aarch64_elf64_error error = aarch64_elf64_parse(
+            elf_data, elf_size, &image);
+    if (error != AARCH64_ELF64_OK) {
+        return (struct aarch64_linux_executable_info) {
+            .status = AARCH64_LINUX_EXECUTABLE_BAD_ELF,
+            .elf_error = (dword_t) error,
+        };
+    }
+    return (struct aarch64_linux_executable_info) {
+        .status = AARCH64_LINUX_EXECUTABLE_VALID,
+        .position_independent = image.position_independent ? 1 : 0,
+    };
+}
+
 struct aarch64_linux_interpreter_path_result
         aarch64_linux_copy_interpreter_path(
         const void *elf_data, size_t elf_size,
@@ -296,6 +320,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
         .euid = config->euid,
         .gid = config->gid,
         .egid = config->egid,
+        .secure = config->secure,
         .interpreter_base = interpreter_loaded.load_bias,
     };
     struct aarch64_linux_stack_result stack;
@@ -415,6 +440,9 @@ static void apply_syscall_result(
             break;
         case AARCH64_LINUX_SYSCALL_TERMINATE:
             result->status = AARCH64_LINUX_PROCESS_TERMINATE;
+            break;
+        case AARCH64_LINUX_SYSCALL_EXEC:
+            result->status = AARCH64_LINUX_PROCESS_EXEC;
             break;
     }
 }

@@ -133,21 +133,10 @@ int ish_aarch64_exec_images_read(struct task *task, struct fd *main_fd,
         goto out_destroy;
     }
 
-    struct fd *interpreter_fd = generic_openat_task(
-            task, AT_PWD, interpreter_path, O_RDONLY_, 0);
+    struct fd *interpreter_fd = generic_openat_exec_task(
+            task, AT_PWD, interpreter_path);
     if (IS_ERR(interpreter_fd)) {
         error = (int) PTR_ERR(interpreter_fd);
-        goto out_destroy;
-    }
-    struct statbuf interpreter_stat;
-    error = interpreter_fd->mount->fs->fstat(
-            interpreter_fd, &interpreter_stat);
-    if (error == 0 && !(interpreter_stat.mode & 0111))
-        error = _EACCES;
-    if (error == 0)
-        error = access_check_task(task, &interpreter_stat, AC_X);
-    if (error < 0) {
-        fd_close(interpreter_fd);
         goto out_destroy;
     }
     error = snapshot_fd(interpreter_fd, &images->interpreter);

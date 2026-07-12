@@ -111,8 +111,20 @@ static struct aarch64_linux_process *make_process(
     return aarch64_linux_process_create(&config, NULL);
 }
 
+static bool stage_process(struct task *task,
+        struct aarch64_linux_process *process) {
+    struct mm *mm = mm_new();
+    if (mm == NULL)
+        return false;
+    if (task_stage_aarch64_exec(task, process, mm))
+        return true;
+    mm_release(mm);
+    return false;
+}
+
 int main(void) {
     struct task parent = {.pid = 1000};
+    lock_init(&parent.general_lock);
     struct aarch64_linux_process *first =
             make_process(&parent, parent.pid, true);
     CHECK(first != NULL, "创建首个 opaque process");
@@ -128,6 +140,35 @@ int main(void) {
             "take 原样交还所有权并清空 task");
     CHECK(task_attach_aarch64_process(&parent, taken),
             "take 后可重新交还同一 process");
+
+    struct aarch64_linux_process *replacement =
+            make_process(&parent, parent.pid, true);
+    CHECK(replacement != NULL &&
+            stage_process(&parent, replacement) &&
+            task_has_aarch64_exec_candidate(&parent) &&
+            parent.aarch64_process == first,
+            "exec 候选在安全点前不替换活动 process");
+    struct aarch64_linux_process *duplicate_candidate =
+            make_process(&parent, parent.pid, true);
+    CHECK(duplicate_candidate != NULL &&
+            !stage_process(&parent, duplicate_candidate) &&
+            parent.aarch64_exec_candidate == replacement,
+            "stage 拒绝覆盖尚未提交的 exec 候选");
+    aarch64_linux_process_destroy(duplicate_candidate);
+    task_commit_aarch64_exec(&parent);
+    CHECK(parent.aarch64_process == replacement &&
+            !task_has_aarch64_exec_candidate(&parent),
+            "安全点提交候选并退休旧 process");
+
+    struct aarch64_linux_process *discarded =
+            make_process(&parent, parent.pid, true);
+    CHECK(discarded != NULL &&
+            stage_process(&parent, discarded),
+            "建立可回滚的 exec 候选");
+    task_discard_aarch64_exec(&parent);
+    CHECK(parent.aarch64_process == replacement &&
+            !task_has_aarch64_exec_candidate(&parent),
+            "回滚候选不影响活动 process");
     task_release_aarch64_process(&parent);
     CHECK(!task_has_aarch64_process(&parent),
             "release 销毁并清空 opaque process");
@@ -138,11 +179,19 @@ int main(void) {
     CHECK(inherited != NULL, "创建待验证浅拷贝的 process");
     CHECK(task_attach_aarch64_process(&parent, inherited),
             "为浅拷贝验证接管 process");
+    struct aarch64_linux_process *inherited_candidate =
+            make_process(&parent, parent.pid, true);
+    CHECK(inherited_candidate != NULL &&
+            stage_process(&parent, inherited_candidate),
+            "为浅拷贝验证建立 exec 候选");
     struct task *child = task_create_(&parent);
     CHECK(child != NULL && !task_has_aarch64_process(child) &&
-            parent.aarch64_process == inherited,
-            "task_create_ 不复制父任务 opaque 所有权");
+            !task_has_aarch64_exec_candidate(child) &&
+            parent.aarch64_process == inherited &&
+            parent.aarch64_exec_candidate == inherited_candidate,
+            "task_create_ 不复制父任务活动或候选 opaque 所有权");
     task_abort_create(child);
+    task_discard_aarch64_exec(&parent);
     task_release_aarch64_process(&parent);
 
     struct task *aborted = task_create_(&parent);
@@ -152,6 +201,11 @@ int main(void) {
     CHECK(aborted_process != NULL, "为待中止任务创建 process");
     CHECK(task_attach_aarch64_process(aborted, aborted_process),
             "为待中止任务接管 process");
+    struct aarch64_linux_process *aborted_candidate =
+            make_process(aborted, aborted->pid, true);
+    CHECK(aborted_candidate != NULL &&
+            stage_process(aborted, aborted_candidate),
+            "为待中止任务建立 exec 候选");
     task_abort_create(aborted);
     CHECK(!task_has_aarch64_process(&parent),
             "中止子任务不影响父任务所有权");
@@ -171,5 +225,8 @@ int main(void) {
             !task_has_aarch64_process(&parent),
             "attach 拒绝服务正确但 tid 不匹配的 process");
     aarch64_linux_process_destroy(wrong_tid);
+    mm_release(parent.mm);
+    parent.mm = NULL;
+    parent.mem = NULL;
     return 0;
 }

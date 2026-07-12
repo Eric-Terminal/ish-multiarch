@@ -22,6 +22,10 @@ struct syscall_probe {
     unsigned calls;
 };
 
+struct exec_probe {
+    unsigned calls;
+};
+
 static qword_t encoded_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
@@ -77,6 +81,34 @@ static qword_t dispatch_probe(
     assert(fault->kind == GUEST_MEMORY_FAULT_UNMAPPED);
     probe->calls++;
     return encoded_error(GUEST_LINUX_EIO);
+}
+
+static qword_t dispatch_exec(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    use(fault);
+    struct exec_probe *probe = context->runtime_opaque;
+    assert(syscall->number == 400);
+    assert(context->completion != NULL &&
+            context->completion->disposition ==
+                    GUEST_LINUX_SYSCALL_RETURN);
+    context->completion->disposition =
+            GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+    probe->calls++;
+    return UINT64_C(0xfeedfacecafebeef);
+}
+
+static struct guest_linux_signal_poll_result count_signal_poll(
+        const struct guest_linux_signal_context *context,
+        guest_linux_signal_installer installer,
+        void *installer_opaque) {
+    use(installer, installer_opaque);
+    unsigned *calls = context->runtime_opaque;
+    (*calls)++;
+    return (struct guest_linux_signal_poll_result) {
+        .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+    };
 }
 
 int main(void) {
@@ -329,6 +361,31 @@ int main(void) {
     assert(result.action == AARCH64_LINUX_SYSCALL_EXIT_GROUP);
     assert(result.exit_status == 42);
     assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+
+    struct exec_probe exec_probe = {0};
+    const struct guest_linux_syscall_service exec_service = {
+        .runtime_opaque = &exec_probe,
+        .dispatch = dispatch_exec,
+    };
+    unsigned exec_signal_polls = 0;
+    const struct guest_linux_signal_service exec_signal_service = {
+        .runtime_opaque = &exec_signal_polls,
+        .poll = count_signal_poll,
+    };
+    const struct aarch64_linux_services exec_services = {
+        .syscalls = &exec_service,
+        .signals = &exec_signal_service,
+    };
+    runtime.services = &exec_services;
+    cpu.x[0] = UINT64_C(0x1122334455667788);
+    cpu.x[8] = 400;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(result.action == AARCH64_LINUX_SYSCALL_EXEC &&
+            result.fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            cpu.x[0] == UINT64_C(0x1122334455667788) &&
+            exec_probe.calls == 1 && exec_signal_polls == 0);
+
     guest_page_table_destroy(&table);
     return 0;
 }

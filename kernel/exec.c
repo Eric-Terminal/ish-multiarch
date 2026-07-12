@@ -11,6 +11,7 @@
 
 #include "misc.h"
 #include "kernel/calls.h"
+#include "kernel/aarch64-exec.h"
 #include "kernel/random.h"
 #include "kernel/errno.h"
 #include "fs/fd.h"
@@ -26,6 +27,24 @@ struct exec_args {
     // series of count null-terminated strings, plus an extra null for good measure
     const char *args;
 };
+
+static struct ish_aarch64_exec_identity exec_identity(
+        const struct statbuf *stat) {
+    dword_t euid = current->euid;
+    dword_t egid = current->egid;
+    if (stat->mode & S_ISUID)
+        euid = stat->uid;
+    if ((stat->mode & (S_ISGID | S_IXGRP)) ==
+            (S_ISGID | S_IXGRP))
+        egid = stat->gid;
+    return (struct ish_aarch64_exec_identity) {
+        .uid = current->uid,
+        .euid = euid,
+        .gid = current->gid,
+        .egid = egid,
+        .secure = (euid != current->uid || egid != current->gid) ? 1 : 0,
+    };
+}
 
 static inline dword_t align_stack(dword_t sp);
 static inline ssize_t user_strlen(dword_t p);
@@ -180,7 +199,7 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
             goto out_free_interp;
 
         // open interpreter and read headers
-        interp_fd = generic_open(interp_name, O_RDONLY, 0);
+        interp_fd = generic_open_exec(interp_name);
         if (IS_ERR(interp_fd)) {
             err = PTR_ERR(interp_fd);
             goto out_free_interp;
@@ -472,22 +491,38 @@ static inline int user_memset(addr_t start, byte_t val, dword_t len) {
     return 0;
 }
 
-static int format_exec(struct fd *fd, const char *file, struct exec_args argv, struct exec_args envp) {
+static int format_exec(struct fd *fd, const char *file,
+        struct exec_args argv, struct exec_args envp,
+        const struct ish_aarch64_exec_identity *identity) {
+    if (task_has_aarch64_process(current)) {
+        return ish_aarch64_exec_stage(current, fd, file,
+                argv.count, argv.args, envp.count, envp.args, identity);
+    }
     int err = elf_exec(fd, file, argv, envp);
     if (err != _ENOEXEC)
         return err;
-    // other formats would go here
-    return _ENOEXEC;
+    return ish_aarch64_exec_stage(current, fd, file,
+            argv.count, argv.args, envp.count, envp.args, identity);
 }
 
-static int shebang_exec(struct fd *fd, const char *file, struct exec_args argv, struct exec_args envp) {
+static int shebang_exec(struct fd *fd, const char *file,
+        struct exec_args argv, struct exec_args envp,
+        struct ish_aarch64_exec_identity *identity) {
     // read the first 128 bytes to get the shebang line out of
     if (fd->ops->lseek(fd, 0, SEEK_SET))
         return _EIO;
     char header[128];
-    int size = fd->ops->read(fd, header, sizeof(header) - 1);
-    if (size < 0)
-        return _EIO;
+    size_t size = 0;
+    while (size < sizeof(header) - 1 &&
+            memchr(header, '\n', size) == NULL) {
+        ssize_t chunk = fd->ops->read(
+                fd, header + size, sizeof(header) - 1 - size);
+        if (chunk < 0)
+            return _EIO;
+        if (chunk == 0)
+            break;
+        size += (size_t) chunk;
+    }
     header[size] = '\0';
 
     // only look at the first line
@@ -551,16 +586,24 @@ static int shebang_exec(struct fd *fd, const char *file, struct exec_args argv, 
     memcpy(new_argv_buf + n, argv_rest.args, args_rest_size);
     new_argv.count += argv_rest.count;
 
-    struct fd *interpreter_fd = generic_open(interpreter, O_RDONLY_, 0);
+    struct fd *interpreter_fd = generic_open_exec(interpreter);
     if (IS_ERR(interpreter_fd))
         return PTR_ERR(interpreter_fd);
-    int err = format_exec(interpreter_fd, interpreter, new_argv, envp);
+    struct statbuf interpreter_stat;
+    int err = interpreter_fd->mount->fs->fstat(
+            interpreter_fd, &interpreter_stat);
+    if (err == 0) {
+        *identity = exec_identity(&interpreter_stat);
+        // 映像来自解释器，AT_EXECFN 仍保留最初请求的脚本路径。
+        err = format_exec(
+                interpreter_fd, file, new_argv, envp, identity);
+    }
     fd_close(interpreter_fd);
     return err;
 }
 
 int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) {
-    struct fd *fd = generic_open(file, O_RDONLY, 0);
+    struct fd *fd = generic_open_exec(file);
     if (IS_ERR(fd))
         return PTR_ERR(fd);
 
@@ -571,28 +614,20 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
         return err;
     }
 
-    // if nobody has permission to execute, it should be safe to not execute
-    if (!(stat.mode & 0111)) {
-        fd_close(fd);
-        return _EACCES;
-    }
-
-    err = format_exec(fd, file, argv, envp);
+    struct ish_aarch64_exec_identity identity = exec_identity(&stat);
+    err = format_exec(fd, file, argv, envp, &identity);
     if (err == _ENOEXEC)
-        err = shebang_exec(fd, file, argv, envp);
+        err = shebang_exec(fd, file, argv, envp, &identity);
     fd_close(fd);
     if (err < 0)
         return err;
 
-    // setuid/setgid
-    if (stat.mode & S_ISUID) {
-        current->suid = current->euid;
-        current->euid = stat.uid;
-    }
-    if (stat.mode & S_ISGID) {
-        current->sgid = current->egid;
-        current->egid = stat.gid;
-    }
+    // identity 与候选初始栈来自同一次最终映像权限判定。
+    current->euid = identity.euid;
+    current->egid = identity.egid;
+    // Linux 在文件身份变换后把有效 ID 保存为 saved-set ID。
+    current->suid = current->euid;
+    current->sgid = current->egid;
 
     // save current->comm
     lock(&current->general_lock);
@@ -613,7 +648,8 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
     task_signal_exec_reset(current);
 
     current->did_exec = true;
-    vfork_notify(current);
+    if (!task_has_aarch64_exec_candidate(current))
+        vfork_notify(current);
 
     if (current->ptrace.traced) {
         lock(&pids_lock);
@@ -630,6 +666,11 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
 }
 
 int do_execve(const char *file, size_t argc, const char *argv_p, const char *envp_p) {
+    const char empty_argument[] = "\0";
+    if (argc == 0) {
+        argc = 1;
+        argv_p = empty_argument;
+    }
     struct exec_args argv = {.count = argc, .args = argv_p};
     struct exec_args envp = {.args = envp_p};
     while (*envp_p != '\0') {

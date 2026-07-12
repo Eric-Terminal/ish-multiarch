@@ -42,10 +42,14 @@ int main(void) {
     qword_t runtime = UINT64_C(0x1020304050607080);
     qword_t task = UINT64_C(0x8877665544332211);
     qword_t user = UINT64_C(0x0f1e2d3c4b5a6978);
+    struct guest_linux_syscall_completion completion = {
+        .disposition = GUEST_LINUX_SYSCALL_RETURN,
+    };
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = &runtime,
         .task_opaque = &task,
         .stack_pointer = UINT64_C(0xfedcba9876543210),
+        .completion = &completion,
         .user = {
             .opaque = &user,
             .read = read_probe,
@@ -65,5 +69,7 @@ int main(void) {
     assert(fault.address == UINT64_C(0xd123456789abcdef));
     assert(fault.access == UINT32_C(0xa1b2c3d4));
     assert(fault.kind == UINT32_C(0xe5f60718));
+    assert(completion.disposition ==
+            GUEST_LINUX_SYSCALL_REPLACED_IMAGE);
     return 0;
 }

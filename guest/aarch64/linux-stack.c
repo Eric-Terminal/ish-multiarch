@@ -166,7 +166,7 @@ enum aarch64_linux_stack_error aarch64_linux_build_initial_stack(
         {GUEST_AT_PLATFORM, platform_address},
         {GUEST_AT_HWCAP, 0},
         {GUEST_AT_CLKTCK, 100},
-        {GUEST_AT_SECURE, 0},
+        {GUEST_AT_SECURE, config->secure},
         {GUEST_AT_RANDOM, random_address},
         {GUEST_AT_HWCAP2, 0},
         {GUEST_AT_EXECFN, executable_address},

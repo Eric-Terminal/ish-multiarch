@@ -46,6 +46,18 @@ struct aarch64_linux_interpreter_path_result {
     qword_t required_size;
 };
 
+enum aarch64_linux_executable_status {
+    AARCH64_LINUX_EXECUTABLE_VALID,
+    AARCH64_LINUX_EXECUTABLE_BAD_ELF,
+};
+
+struct aarch64_linux_executable_info {
+    dword_t status;
+    dword_t elf_error;
+    dword_t position_independent;
+    dword_t reserved;
+};
+
 struct aarch64_linux_process_config {
     const void *elf_data;
     size_t elf_size;
@@ -65,6 +77,7 @@ struct aarch64_linux_process_config {
     dword_t euid;
     dword_t gid;
     dword_t egid;
+    dword_t secure;
     pid_t_ tid;
     void *task_opaque;
     const struct guest_linux_syscall_service *syscalls;
@@ -86,6 +99,7 @@ enum aarch64_linux_process_status {
     AARCH64_LINUX_PROCESS_FETCH_FAULT,
     AARCH64_LINUX_PROCESS_DATA_FAULT,
     AARCH64_LINUX_PROCESS_UNDEFINED,
+    AARCH64_LINUX_PROCESS_EXEC,
 };
 
 struct aarch64_linux_process_result {
@@ -117,6 +131,9 @@ struct aarch64_linux_interpreter_path_result
         aarch64_linux_copy_interpreter_path(
         const void *elf_data, size_t elf_size,
         char *destination, size_t capacity);
+struct aarch64_linux_executable_info
+        aarch64_linux_inspect_executable(
+        const void *elf_data, size_t elf_size);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
 // 核对 create 时复制的 tid、服务闭包与 task opaque；不比较描述符地址。
@@ -136,7 +153,8 @@ struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
 _Static_assert(sizeof(enum aarch64_linux_process_error_stage) == 4 &&
         sizeof(enum aarch64_linux_process_status) == 4 &&
         sizeof(enum aarch64_linux_interpreter_config_error) == 4 &&
-        sizeof(enum aarch64_linux_interpreter_path_status) == 4,
+        sizeof(enum aarch64_linux_interpreter_path_status) == 4 &&
+        sizeof(enum aarch64_linux_executable_status) == 4,
         "AArch64 process 状态枚举必须保持 32 位");
 _Static_assert(offsetof(struct aarch64_linux_process_error, stage) == 0 &&
         offsetof(struct aarch64_linux_process_error, detail) == 4 &&
@@ -151,6 +169,14 @@ _Static_assert(offsetof(struct aarch64_linux_interpreter_path_result,
         sizeof(struct aarch64_linux_interpreter_path_result) == 16 &&
         _Alignof(struct aarch64_linux_interpreter_path_result) == 8,
         "AArch64 解释器路径结果必须保持固定 DTO 布局");
+_Static_assert(offsetof(struct aarch64_linux_executable_info,
+                status) == 0 &&
+        offsetof(struct aarch64_linux_executable_info, elf_error) == 4 &&
+        offsetof(struct aarch64_linux_executable_info,
+                position_independent) == 8 &&
+        sizeof(struct aarch64_linux_executable_info) == 16 &&
+        _Alignof(struct aarch64_linux_executable_info) == 4,
+        "AArch64 可执行映像信息必须保持固定 DTO 布局");
 _Static_assert(sizeof(((struct aarch64_linux_process_config *) 0)->
                 load_bias) == 8 &&
         sizeof(((struct aarch64_linux_process_config *) 0)->
