@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "fs/tty.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
@@ -72,6 +73,12 @@ struct kernel_probe {
     unsigned readlink_calls;
     unsigned unlink_calls;
     unsigned rmdir_calls;
+    unsigned ioctl_calls;
+    dword_t last_ioctl_command;
+    dword_t ioctl_input;
+    dword_t ioctl_output;
+    dword_t ioctl_scalar;
+    int ioctl_result;
     struct statbuf stat;
 };
 
@@ -252,9 +259,45 @@ static int probe_close(struct fd *fd) {
     return 0;
 }
 
+static ssize_t probe_ioctl_size(int command) {
+    switch ((dword_t) command) {
+        case FIONREAD_:
+        case TIOCSPTLCK_:
+        case TIOCGPTN_:
+            return sizeof(dword_t);
+        case TCFLSH_:
+            return 0;
+    }
+    return _ENOTTY;
+}
+
+static int probe_ioctl(struct fd *fd, int command, void *argument) {
+    struct fd_state *state = fd->data;
+    struct kernel_probe *kernel = state->kernel;
+    kernel->ioctl_calls++;
+    kernel->last_ioctl_command = (dword_t) command;
+    if (kernel->ioctl_result < 0)
+        return kernel->ioctl_result;
+    switch ((dword_t) command) {
+        case TIOCSPTLCK_:
+            kernel->ioctl_input = *(const dword_t *) argument;
+            return 0;
+        case FIONREAD_:
+        case TIOCGPTN_:
+            *(dword_t *) argument = kernel->ioctl_output;
+            return 0;
+        case TCFLSH_:
+            kernel->ioctl_scalar = (dword_t) (uintptr_t) argument;
+            return 0;
+    }
+    return _ENOTTY;
+}
+
 static const struct fd_ops probe_fd_ops = {
     .read = probe_read,
     .write = probe_write,
+    .ioctl_size = probe_ioctl_size,
+    .ioctl = probe_ioctl,
     .close = probe_close,
 };
 
@@ -477,6 +520,7 @@ static const byte_t expected_stat[128] = {
 
 int main(void) {
     struct kernel_probe kernel = {
+        .ioctl_output = UINT32_C(0x78563412),
         .stat = {
             .dev = UINT64_C(0x0102030405060708),
             .inode = UINT64_C(0x1112131415161718),
@@ -534,6 +578,146 @@ int main(void) {
             "close 使用低 32 位 fd 并释放目标表项");
     CHECK(invoke(&fixture, &memory, &fault, 57, 1, 0, 0, 0) ==
             encoded_error(_EBADF), "重复 close 符号扩展 EBADF");
+
+    // ioctl 依据命令方向在宿主缓冲中执行，不把 64 位 guest 地址当作宿主指针。
+    const size_t ioctl_offset = 0x40;
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 29, 99,
+            FIONREAD_, UINT64_MAX, 0);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0 &&
+            memory.write_calls == 0 && kernel.ioctl_calls == 0,
+            "ioctl 的无效 fd 优先于命令和 guest 指针");
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            UINT64_C(0xabcdef0100001234), UINT64_MAX, 0);
+    CHECK(result == encoded_error(_ENOTTY) && memory.read_calls == 0 &&
+            memory.write_calls == 0 && kernel.ioctl_calls == 0,
+            "ioctl 按低 32 位拒绝未知命令且不访问 guest 指针");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + ioctl_offset;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            UINT64_C(0xabcdef010000541b), USER_BASE + ioctl_offset, 0);
+    dword_t ioctl_value;
+    memcpy(&ioctl_value, memory.bytes + ioctl_offset, sizeof(ioctl_value));
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 1 && memory.write_bytes == 4 &&
+            ioctl_value == kernel.ioctl_output && kernel.ioctl_calls == 1 &&
+            kernel.last_ioctl_command == FIONREAD_,
+            "输出型 ioctl 不预读 guest 并按低 32 位解码命令");
+
+    reset_user_access(&memory);
+    unsigned ioctl_calls_before = kernel.ioctl_calls;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            TIOCGPTN_, AARCH64_LINUX_USER_ADDRESS_MAX - 1, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            kernel.ioctl_calls == ioctl_calls_before + 1 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX - 1 &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "输出型 ioctl 在后端完成后拒绝跨越用户上限的写回");
+
+    memset(memory.bytes + ioctl_offset, 0xa5, sizeof(dword_t));
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + ioctl_offset + 2;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            TIOCGPTN_, USER_BASE + ioctl_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 1 &&
+            memory.bytes[ioctl_offset] == 0x12 &&
+            memory.bytes[ioctl_offset + 1] == 0x34 &&
+            memory.bytes[ioctl_offset + 2] == 0xa5 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "输出型 ioctl 保持部分写回并传播精确 guest 故障");
+
+    ioctl_value = UINT32_C(0x01020304);
+    memcpy(memory.bytes + ioctl_offset, &ioctl_value, sizeof(ioctl_value));
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + ioctl_offset;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            UINT64_C(0x1234567840045431), USER_BASE + ioctl_offset, 0);
+    CHECK(result == 0 && memory.read_calls == 1 && memory.read_bytes == 4 &&
+            memory.write_calls == 0 &&
+            kernel.ioctl_input == ioctl_value &&
+            kernel.last_ioctl_command == TIOCSPTLCK_,
+            "输入型编码 ioctl 只读取 guest 并保持完整 64 位地址");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + ioctl_offset + 1;
+    ioctl_calls_before = kernel.ioctl_calls;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            TIOCSPTLCK_, USER_BASE + ioctl_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            kernel.ioctl_calls == ioctl_calls_before &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "输入型 ioctl 在后端执行前传播 guest 读取故障");
+
+    ioctl_value = 1;
+    memcpy(memory.bytes + ioctl_offset, &ioctl_value, sizeof(ioctl_value));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            FIONBIO_, USER_BASE + ioctl_offset, 0);
+    CHECK(result == 0 && (fd_getflags(f_get_task(&fixture.task, 0)) &
+            O_NONBLOCK_) && kernel.ioctl_calls == ioctl_calls_before,
+            "FIONBIO 在目标 fd 上启用非阻塞且不进入后端 ioctl");
+    ioctl_value = 0;
+    memcpy(memory.bytes + ioctl_offset, &ioctl_value, sizeof(ioctl_value));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            FIONBIO_, USER_BASE + ioctl_offset, 0);
+    CHECK(result == 0 && !(fd_getflags(f_get_task(&fixture.task, 0)) &
+            O_NONBLOCK_), "FIONBIO 可在目标 fd 上清除非阻塞");
+
+    struct task decoy_task = {.files = fdtable_new(1)};
+    CHECK(!IS_ERR(decoy_task.files), "ioctl 诱饵任务 fd 表初始化成功");
+    struct fd *ioctl_fd = f_get_task_retain(&fixture.task, 0);
+    CHECK(ioctl_fd != NULL, "ioctl 目标 fd 保持引用成功");
+    current = &decoy_task;
+    CHECK(file_ioctl_fd_task(&fixture.task, 0, ioctl_fd,
+            FIOCLEX_, NULL, 0) == 0 &&
+            bit_test(0, fixture.task.files->cloexec) &&
+            !bit_test(0, decoy_task.files->cloexec),
+            "ioctl helper 修改目标任务而非 current 的 fd 标志");
+    fd_close(ioctl_fd);
+    current = &fixture.task;
+    fdtable_release(decoy_task.files);
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            FIONCLEX_, UINT64_MAX, 0);
+    CHECK(result == 0 && !bit_test(0, fixture.task.files->cloexec) &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "FIONCLEX 不访问参数并清除目标任务 close-on-exec");
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            FIOCLEX_, UINT64_MAX, 0);
+    CHECK(result == 0 && bit_test(0, fixture.task.files->cloexec) &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "FIOCLEX 不访问参数并设置目标任务 close-on-exec");
+    CHECK(invoke(&fixture, &memory, &fault, 29, 0,
+            FIONCLEX_, UINT64_MAX, 0) == 0,
+            "FIONCLEX 清理测试设置的 close-on-exec 标志");
+
+    ioctl_calls_before = kernel.ioctl_calls;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            UINT64_C(0xabcdef010000540b),
+            UINT64_C(0x1234567800000002), 0);
+    CHECK(result == 0 && kernel.ioctl_calls == ioctl_calls_before + 1 &&
+            kernel.last_ioctl_command == TCFLSH_ &&
+            kernel.ioctl_scalar == 2 && memory.read_calls == 0 &&
+            memory.write_calls == 0,
+            "无缓冲 ioctl 按低 32 位传递标量且不触碰 guest 内存");
+
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + ioctl_offset;
+    kernel.ioctl_result = _EIO;
+    ioctl_calls_before = kernel.ioctl_calls;
+    result = invoke(&fixture, &memory, &fault, 29, 0,
+            FIONREAD_, USER_BASE + ioctl_offset, 0);
+    CHECK(result == encoded_error(_EIO) &&
+            kernel.ioctl_calls == ioctl_calls_before + 1 &&
+            memory.write_calls == 0,
+            "输出型 ioctl 的后端错误优先于 guest 写回故障");
+    kernel.ioctl_result = 0;
 
     static const char plain_path[] = "plain";
     memcpy(memory.bytes + path_offset, plain_path, sizeof(plain_path));

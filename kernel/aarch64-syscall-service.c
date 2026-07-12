@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "fs/fd.h"
+#include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
@@ -47,6 +48,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_DUP = 23,
     AARCH64_LINUX_SYS_DUP3 = 24,
     AARCH64_LINUX_SYS_FCNTL = 25,
+    AARCH64_LINUX_SYS_IOCTL = 29,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
@@ -517,6 +519,94 @@ static qword_t dispatch_readlinkat(
             syscall->arguments[2], buffer, (dword_t) length, fault))
         return syscall_result(_EFAULT);
     return (qword_t) length;
+}
+
+enum aarch64_linux_ioctl_direction {
+    AARCH64_LINUX_IOCTL_INPUT = 1,
+    AARCH64_LINUX_IOCTL_OUTPUT = 2,
+};
+
+static dword_t ioctl_direction(dword_t command, size_t size) {
+    switch (command) {
+        case TCGETS_:
+        case TIOCGPGRP_:
+        case TIOCGWINSZ_:
+        case FIONREAD_:
+            return AARCH64_LINUX_IOCTL_OUTPUT;
+        case TCSETS_:
+        case TCSETSW_:
+        case TCSETSF_:
+        case TIOCSPGRP_:
+        case TIOCSWINSZ_:
+        case TIOCPKT_:
+        case FIONBIO_:
+            return AARCH64_LINUX_IOCTL_INPUT;
+    }
+    dword_t encoded = command >> 30;
+    if (encoded != 0)
+        return encoded;
+    return size == 0 ? 0 :
+            AARCH64_LINUX_IOCTL_INPUT | AARCH64_LINUX_IOCTL_OUTPUT;
+}
+
+static qword_t dispatch_ioctl(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    fd_t fd_number = syscall_fd(syscall->arguments[0]);
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return syscall_result(_EBADF);
+
+    dword_t command = (dword_t) syscall->arguments[1];
+    ssize_t buffer_size = file_ioctl_size_fd(fd, command);
+    if (buffer_size < 0) {
+        fd_close(fd);
+        return syscall_result(buffer_size);
+    }
+    assert((qword_t) buffer_size <= UINT32_MAX);
+
+    dword_t size = (dword_t) buffer_size;
+    dword_t direction = ioctl_direction(command, size);
+    byte_t *buffer = size == 0 ? NULL : malloc(size);
+    if (size != 0 && buffer == NULL) {
+        fd_close(fd);
+        return syscall_result(_ENOMEM);
+    }
+    if (size != 0 && direction & AARCH64_LINUX_IOCTL_INPUT) {
+        if (!aarch64_user_range_fits(syscall->arguments[2], size)) {
+            free(buffer);
+            fd_close(fd);
+            return user_range_error(
+                    fault, syscall->arguments[2], GUEST_MEMORY_READ);
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[2], buffer, size, fault)) {
+            free(buffer);
+            fd_close(fd);
+            return syscall_result(_EFAULT);
+        }
+    }
+
+    int result = file_ioctl_fd_task(task, fd_number, fd,
+            command, buffer, (dword_t) syscall->arguments[2]);
+    if (result >= 0 && size != 0 &&
+            direction & AARCH64_LINUX_IOCTL_OUTPUT) {
+        if (!aarch64_user_range_fits(syscall->arguments[2], size)) {
+            free(buffer);
+            fd_close(fd);
+            return user_range_error(
+                    fault, syscall->arguments[2], GUEST_MEMORY_WRITE);
+        }
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                syscall->arguments[2], buffer, size, fault))
+            result = _EFAULT;
+    }
+    free(buffer);
+    fd_close(fd);
+    return syscall_result(result);
 }
 
 static qword_t dispatch_read(
@@ -1065,6 +1155,8 @@ static qword_t dispatch_syscall(
             return aarch64_linux_dispatch_dup3(syscall, task);
         case AARCH64_LINUX_SYS_FCNTL:
             return aarch64_linux_dispatch_fcntl(syscall, task);
+        case AARCH64_LINUX_SYS_IOCTL:
+            return dispatch_ioctl(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNLINKAT:
             return dispatch_unlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CHDIR:

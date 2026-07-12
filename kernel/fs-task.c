@@ -223,6 +223,49 @@ ssize_t file_readlinkat_task(struct task *task, fd_t dirfd,
     return result;
 }
 
+ssize_t file_ioctl_size_fd(struct fd *fd, dword_t command) {
+    switch (command) {
+        case FIONBIO_:
+            return sizeof(dword_t);
+        case FIOCLEX_:
+        case FIONCLEX_:
+            return 0;
+    }
+    if (fd->ops->ioctl_size == NULL || fd->ops->ioctl == NULL)
+        return _ENOTTY;
+    return fd->ops->ioctl_size((int) command);
+}
+
+int file_ioctl_fd_task(struct task *task, fd_t fd_number, struct fd *fd,
+        dword_t command, void *buffer, dword_t scalar) {
+    if (command == FIONBIO_) {
+        int flags = fd_getflags(fd);
+        if (*(const dword_t *) buffer != 0)
+            flags |= O_NONBLOCK_;
+        else
+            flags &= ~O_NONBLOCK_;
+        return fd_setflags(fd, flags);
+    }
+    if (command == FIOCLEX_ || command == FIONCLEX_) {
+        struct fdtable *table = task->files;
+        lock(&table->lock);
+        if (fdtable_get(table, fd_number) != fd) {
+            unlock(&table->lock);
+            return _EBADF;
+        }
+        if (command == FIOCLEX_)
+            bit_set((size_t) fd_number, table->cloexec);
+        else
+            bit_clear((size_t) fd_number, table->cloexec);
+        unlock(&table->lock);
+        return 0;
+    }
+    if (fd->ops->ioctl == NULL)
+        return _ENOTTY;
+    void *argument = buffer != NULL ? buffer : (void *) (uintptr_t) scalar;
+    return fd->ops->ioctl(fd, (int) command, argument);
+}
+
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)

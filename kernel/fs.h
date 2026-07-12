@@ -51,6 +51,10 @@ int file_chdir_task(struct task *task, const char *path);
 int file_fchdir_task(struct task *task, fd_t fd);
 ssize_t file_readlinkat_task(struct task *task, fd_t dirfd,
         const char *path, char *buffer, size_t size);
+// 调用期间 fd 必须保持引用；有缓冲命令使用 buffer，其余命令使用低 32 位 scalar。
+ssize_t file_ioctl_size_fd(struct fd *fd, dword_t command);
+int file_ioctl_fd_task(struct task *task, fd_t fd_number, struct fd *fd,
+        dword_t command, void *buffer, dword_t scalar);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
 int file_unlinkat_task(struct task *task, fd_t dirfd,
