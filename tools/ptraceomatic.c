@@ -467,6 +467,11 @@ int main(int argc, char *const argv[]) {
         fprintf(stderr, "%s\n", strerror(-err));
         return err;
     }
+    if (task_has_aarch64_process(current) ||
+            task_has_aarch64_exec_candidate(current)) {
+        fprintf(stderr, "ptraceomatic only supports i386 guest executables\n");
+        return 1;
+    }
 
     // execute the traced program in a new process and throw up some sockets
     char exec_path[MAX_PATH];
