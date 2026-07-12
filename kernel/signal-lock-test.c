@@ -217,6 +217,72 @@ static int test_sigkill_releases_ptrace_stop(void) {
     return 0;
 }
 
+#define REALTIME_SENDERS 4
+#define REALTIME_SIGNALS_PER_SENDER 64
+
+struct realtime_sender {
+    struct task *task;
+    int sender;
+};
+
+static void *send_realtime_signals(void *opaque) {
+    struct realtime_sender *sender = opaque;
+    for (int sequence = 0;
+            sequence < REALTIME_SIGNALS_PER_SENDER; sequence++) {
+        deliver_signal(sender->task, SIGRTMIN_, (struct siginfo_) {
+            .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+            .kill = {.pid = sender->sender, .uid = (uid_t_) sequence},
+        });
+    }
+    return NULL;
+}
+
+static int test_concurrent_realtime_queue(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture, false, 0);
+    fixture.child.blocked = sig_mask(SIGRTMIN_);
+
+    pthread_t threads[REALTIME_SENDERS];
+    struct realtime_sender senders[REALTIME_SENDERS];
+    for (int index = 0; index < REALTIME_SENDERS; index++) {
+        senders[index] = (struct realtime_sender) {
+            .task = &fixture.child,
+            .sender = index,
+        };
+        CHECK(pthread_create(&threads[index], NULL,
+                        send_realtime_signals, &senders[index]) == 0,
+                "创建并发实时信号发送线程");
+    }
+    for (int index = 0; index < REALTIME_SENDERS; index++) {
+        CHECK(pthread_join(threads[index], NULL) == 0,
+                "回收并发实时信号发送线程");
+    }
+
+    const unsigned long expected =
+            REALTIME_SENDERS * REALTIME_SIGNALS_PER_SENDER;
+    CHECK(fixture.child.pending == sig_mask(SIGRTMIN_) &&
+            list_size(&fixture.child.queue) == expected,
+            "并发发送的同号实时信号无折叠或丢失");
+
+    bool pending_consistent = true;
+    unsigned long remaining = expected;
+    lock(&fixture.child.sighand->lock);
+    while (!list_empty(&fixture.child.queue)) {
+        struct sigqueue *queued = list_first_entry(
+                &fixture.child.queue, struct sigqueue, queue);
+        signal_dequeue_locked(&fixture.child, queued);
+        remaining--;
+        pending_consistent = pending_consistent &&
+                sigset_has(fixture.child.pending, SIGRTMIN_) ==
+                        (remaining != 0);
+    }
+    unlock(&fixture.child.sighand->lock);
+    CHECK(pending_consistent && remaining == 0 && fixture.child.pending == 0,
+            "并发队列逐项消费时 pending 位保持一致");
+    return 0;
+}
+
 typedef int (*isolated_test_fn)(void);
 
 // 锁回归可能死锁或触发 UAF；host 子进程与 alarm 将其转换成有界测试失败。
@@ -262,5 +328,7 @@ int main(void) {
     failures += !run_isolated("默认停止动作", test_default_stop_action);
     failures += !run_isolated("SIGKILL 解除 ptrace 停顿",
             test_sigkill_releases_ptrace_stop);
+    failures += !run_isolated("并发实时信号排队",
+            test_concurrent_realtime_queue);
     return failures == 0 ? 0 : 1;
 }

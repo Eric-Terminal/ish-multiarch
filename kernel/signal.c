@@ -53,14 +53,16 @@ enum signal_delivery_disposition signal_disposition_locked(
 }
 
 static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ info) {
-    if (sigset_has(task->pending, sig))
+    if (sig < SIGRTMIN_ && sigset_has(task->pending, sig))
         return;
 
-    sigset_add(&task->pending, sig);
     struct sigqueue *sigqueue = malloc(sizeof(struct sigqueue));
+    if (sigqueue == NULL)
+        return;
     sigqueue->info = info;
     sigqueue->info.sig = sig;
     list_add_tail(&task->queue, &sigqueue->queue);
+    sigset_add(&task->pending, sig);
 
     if (sigset_has(task->blocked & ~task->waiting, sig) && signal_is_blockable(sig))
         return;
@@ -457,22 +459,14 @@ void receive_signals(void) {
     }
 
     while (true) {
-        struct sigqueue *sigqueue = NULL;
-        struct sigqueue *candidate;
-        list_for_each_entry(&current->queue, candidate, queue) {
-            if (!sigset_has(blocked, candidate->info.sig)) {
-                sigqueue = candidate;
-                break;
-            }
-        }
+        struct sigqueue *sigqueue =
+                signal_select_unblocked_locked(current, blocked);
         if (sigqueue == NULL)
             break;
 
         struct siginfo_ info = sigqueue->info;
         int sig = info.sig;
-        list_remove(&sigqueue->queue);
-        sigset_del(&current->pending, sig);
-        free(sigqueue);
+        signal_dequeue_locked(current, sigqueue);
 
         if (current->ptrace.traced && sig != SIGKILL_) {
             // This notifies the parent, goes to sleep, and waits for the
@@ -855,10 +849,8 @@ static bool dequeue_waited_signal(
     list_for_each_entry(&task->queue, sigqueue, queue) {
         if (sigqueue->info.sig != selected)
             continue;
-        list_remove(&sigqueue->queue);
-        sigset_del(&task->pending, sigqueue->info.sig);
         *info = sigqueue->info;
-        free(sigqueue);
+        signal_dequeue_locked(task, sigqueue);
         return true;
     }
     assert(false && "pending 位必须有对应的信号队列节点");

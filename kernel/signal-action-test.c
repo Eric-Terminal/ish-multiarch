@@ -488,6 +488,57 @@ int main(void) {
             "sigtimedwait 优先消费最低编号目标并保留其他节点");
 
     clear_pending_signals(&task);
+    const int realtime_signal = SIGRTMIN_ + 2;
+    const sigset_t_ realtime_wait_set = sig_mask(realtime_signal);
+    CHECK(user_put(wait_set_address, realtime_wait_set) == 0,
+            "写入实时信号等待集合");
+    task.blocked = realtime_wait_set;
+    for (pid_t_ sender = 101; sender <= 103; sender++) {
+        deliver_signal(&task, realtime_signal, (struct siginfo_) {
+            .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+            .kill = {.pid = sender, .uid = (uid_t_) (sender + 1000)},
+        });
+    }
+    CHECK(task.pending == realtime_wait_set &&
+            list_size(&task.queue) == 3,
+            "同号实时信号逐个排队且共享 pending 位");
+    for (pid_t_ sender = 101; sender <= 103; sender++) {
+        result = sys_rt_sigtimedwait(wait_set_address,
+                wait_info_address, 0, sizeof(sigset_t_));
+        CHECK(result == (dword_t) realtime_signal &&
+                user_get(wait_info_address, waited_info) == 0 &&
+                waited_info.sig == realtime_signal &&
+                waited_info.kill.pid == sender &&
+                waited_info.kill.uid == (uid_t_) (sender + 1000) &&
+                list_size(&task.queue) == (unsigned long) (103 - sender) &&
+                sigset_has(task.pending, realtime_signal) == (sender < 103),
+                "同号实时信号按发送顺序消费并延迟清除 pending 位");
+    }
+
+    const sigset_t_ standard_wait_set = sig_mask(SIGUSR1_);
+    CHECK(user_put(wait_set_address, standard_wait_set) == 0,
+            "写入传统信号等待集合");
+    task.blocked = standard_wait_set;
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 201, .uid = 1201},
+    });
+    deliver_signal(&task, SIGUSR1_, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 202, .uid = 1202},
+    });
+    result = sys_rt_sigtimedwait(wait_set_address,
+            wait_info_address, 0, sizeof(sigset_t_));
+    CHECK(result == SIGUSR1_ &&
+            user_get(wait_info_address, waited_info) == 0 &&
+            waited_info.kill.pid == 201 && waited_info.kill.uid == 1201 &&
+            task.pending == 0 && list_empty(&task.queue),
+            "传统信号仍合并并保留首个实例的信息");
+
+    clear_pending_signals(&task);
     const sigset_t_ synchronous_wait_set =
             sig_mask(SIGUSR1_) | sig_mask(SIGSEGV_);
     task.blocked = synchronous_wait_set;

@@ -74,6 +74,8 @@ _Static_assert(sizeof(struct signal_action) == 32,
 #define	SIGIO_     29
 #define	SIGPWR_    30
 #define SIGSYS_    31
+#define SIGRTMIN_  32
+#define SIGRTMAX_  NUM_SIGS
 
 #define SI_USER_ 0
 #define SI_TIMER_ -2
@@ -102,6 +104,14 @@ struct sigqueue {
     struct list queue;
     struct siginfo_ info;
 };
+
+// 调用方持有 sighand->lock；普通信号优先，
+// 实时信号按编号与入队顺序选择。
+struct sigqueue *signal_select_unblocked_locked(
+        struct task *task, sigset_t_ blocked);
+// 删除一个队列节点，并仅在同号节点全部消费后清除 pending 位。
+void signal_dequeue_locked(
+        struct task *task, struct sigqueue *queued);
 
 struct sigevent_ {
     union sigval_ value;

@@ -18,6 +18,33 @@ static struct sigqueue *find_queued_signal(
     return NULL;
 }
 
+struct sigqueue *signal_select_unblocked_locked(
+        struct task *task, sigset_t_ blocked) {
+    struct sigqueue *selected_realtime = NULL;
+    struct sigqueue *queued;
+    list_for_each_entry(&task->queue, queued, queue) {
+        int signal = queued->info.sig;
+        if (sigset_has(blocked, signal))
+            continue;
+        if (signal < SIGRTMIN_)
+            return queued;
+        if (selected_realtime == NULL ||
+                signal < selected_realtime->info.sig) {
+            selected_realtime = queued;
+        }
+    }
+    return selected_realtime;
+}
+
+void signal_dequeue_locked(
+        struct task *task, struct sigqueue *queued) {
+    int signal = queued->info.sig;
+    list_remove(&queued->queue);
+    if (find_queued_signal(task, signal) == NULL)
+        sigset_del(&task->pending, signal);
+    free(queued);
+}
+
 static void signal_notify_group_stop(
         struct task *task, bool was_stopped) {
     if (was_stopped)
@@ -114,12 +141,7 @@ static struct sigqueue *select_signal(
         return fatal;
     }
 
-    struct sigqueue *candidate;
-    list_for_each_entry(&task->queue, candidate, queue) {
-        if (!sigset_has(blocked, candidate->info.sig))
-            return candidate;
-    }
-    return NULL;
+    return signal_select_unblocked_locked(task, blocked);
 }
 
 static struct guest_linux_signal_poll_result poll_result(
@@ -157,9 +179,7 @@ struct guest_linux_signal_poll_result task_poll_one_signal(
 
         struct siginfo_ info = queued->info;
         int signal = info.sig;
-        list_remove(&queued->queue);
-        sigset_del(&task->pending, signal);
-        free(queued);
+        signal_dequeue_locked(task, queued);
 
         if (task->ptrace.traced && signal != SIGKILL_) {
             signal_ptrace_stop_locked(signal, &info);

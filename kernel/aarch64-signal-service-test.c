@@ -310,6 +310,94 @@ static int test_one_handler_per_poll(void) {
     return 0;
 }
 
+static int test_realtime_queue_priority_and_fifo(void) {
+    struct signal_fixture fixture;
+    struct installer_probe probe;
+    init_fixture(&fixture);
+
+    const int realtime_low = SIGRTMIN_ + 1;
+    const int realtime_high = SIGRTMIN_ + 3;
+    fixture.sighand.action[SIGUSR1_] = (struct signal_action) {
+        .handler = HANDLER_ONE,
+        .flags = SA_NODEFER_,
+    };
+    fixture.sighand.action[realtime_low] = (struct signal_action) {
+        .handler = HANDLER_ONE,
+        .flags = SA_NODEFER_,
+    };
+    fixture.sighand.action[realtime_high] = (struct signal_action) {
+        .handler = HANDLER_TWO,
+        .flags = SA_NODEFER_,
+    };
+
+    deliver_signal(&fixture.task, realtime_high, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 401, .uid = 1401},
+    });
+    deliver_signal(&fixture.task, realtime_low, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 301, .uid = 1301},
+    });
+    deliver_signal(&fixture.task, realtime_low, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 302, .uid = 1302},
+    });
+    deliver_signal(&fixture.task, SIGUSR1_, (struct siginfo_) {
+        .code = SI_USER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+        .kill = {.pid = 201, .uid = 1201},
+    });
+    CHECK(fixture.task.pending ==
+                    (sig_mask(SIGUSR1_) | sig_mask(realtime_low) |
+                     sig_mask(realtime_high)) &&
+            list_size(&fixture.task.queue) == 4,
+            "实时信号保留同号节点并与传统信号共享位图索引");
+
+    init_probe(&probe, &fixture.task);
+    struct guest_linux_signal_poll_result result =
+            poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER &&
+            result.signal == SIGUSR1_ &&
+            probe.deliveries[0].info.kill.pid == 201 &&
+            fixture.task.pending ==
+                    (sig_mask(realtime_low) | sig_mask(realtime_high)) &&
+            list_size(&fixture.task.queue) == 3,
+            "传统信号优先于已经排队的实时信号");
+
+    init_probe(&probe, &fixture.task);
+    result = poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER &&
+            result.signal == realtime_low &&
+            probe.deliveries[0].info.kill.pid == 301 &&
+            fixture.task.pending ==
+                    (sig_mask(realtime_low) | sig_mask(realtime_high)) &&
+            list_size(&fixture.task.queue) == 2,
+            "先投递编号较低的实时信号并保留同号 pending 位");
+
+    init_probe(&probe, &fixture.task);
+    result = poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER &&
+            result.signal == realtime_low &&
+            probe.deliveries[0].info.kill.pid == 302 &&
+            fixture.task.pending == sig_mask(realtime_high) &&
+            list_size(&fixture.task.queue) == 1,
+            "同号实时信号按发送顺序投递且末项消费后清位");
+
+    init_probe(&probe, &fixture.task);
+    result = poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_HANDLER &&
+            result.signal == realtime_high &&
+            probe.deliveries[0].info.kill.pid == 401 &&
+            fixture.task.pending == 0 && list_empty(&fixture.task.queue),
+            "低编号实时信号耗尽后投递高编号实时信号");
+
+    destroy_fixture(&fixture);
+    return 0;
+}
+
 static dword_t exported_payload_kind(dword_t internal_kind) {
     switch (internal_kind) {
         case SIGNAL_INFO_PAYLOAD_KILL:
@@ -968,6 +1056,8 @@ int main(void) {
     if (test_ignore_then_handler_in_same_poll() != 0)
         return 1;
     if (test_one_handler_per_poll() != 0)
+        return 1;
+    if (test_realtime_queue_priority_and_fifo() != 0)
         return 1;
     if (test_complete_delivery_dto() != 0)
         return 1;
