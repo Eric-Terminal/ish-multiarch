@@ -1154,6 +1154,47 @@ int main(void) {
             strcmp(cwd, "/work/next") == 0,
             "chdir 更新目标 cwd 并接管新目录 fd 的唯一引用");
 
+    kernel.stat.mode = S_IFDIR;
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 50,
+            UINT64_C(0xa5a5a5a500000000), UINT64_MAX, UINT64_MAX,
+            UINT64_MAX);
+    CHECK(result == encoded_error(_ENOTDIR) &&
+            memory.read_calls == 0 && memory.write_calls == 0 &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work/next") == 0,
+            "fchdir 按低 32 位解码 fd 并拒绝普通文件");
+    CHECK(invoke(&fixture, &memory, &fault, 50, 99, 0, 0, 0) ==
+            encoded_error(_EBADF),
+            "fchdir 对无效描述符返回 EBADF");
+
+    kernel.stat.mode = S_IFDIR | 0500;
+    fd_t held_directory = file_openat_task(
+            &fixture.task, AT_FDCWD_, "held", O_DIRECTORY_, 0);
+    CHECK(held_directory == 1 &&
+            strcmp(kernel.last_path, "/work/next/held") == 0,
+            "安装用于 fchdir 的可搜索目录描述符");
+    kernel.stat.mode = S_IFDIR;
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 50,
+            UINT64_C(0x1122334400000001), UINT64_MAX, UINT64_MAX,
+            UINT64_MAX);
+    CHECK(result == encoded_error(_EACCES) &&
+            memory.read_calls == 0 && memory.write_calls == 0 &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work/next") == 0,
+            "fchdir 重新检查当前凭据的目录搜索权限并保持 cwd");
+
+    kernel.stat.mode = S_IFDIR | 0100;
+    result = invoke(&fixture, &memory, &fault, 50,
+            UINT64_C(0x5566778800000001), UINT64_MAX, UINT64_MAX,
+            UINT64_MAX);
+    CHECK(result == 0 && memory.read_calls == 0 &&
+            memory.write_calls == 0 &&
+            fs_getcwd_task(&fixture.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/work/next/held") == 0,
+            "fchdir 保留目录引用并只更新目标任务 cwd");
+
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 999, 0, 0, 0, 0);
     CHECK(result == encoded_error(_ENOSYS) && memory.read_calls == 0 &&

@@ -504,12 +504,25 @@ int main(void) {
             strcmp(probe.last_path, "/sandbox/absolute") == 0 &&
             probe.last_flags == O_DIRECTORY_,
             "chdir 跟随末端符号链接并允许仅有执行权限的目录");
-    target.pwd = target.fs.pwd;
     CHECK(fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
             strcmp(cwd, "/sandbox/absolute") == 0 &&
             fs_getcwd_task(&decoy.task, cwd, sizeof(cwd)) > 0 &&
             strcmp(cwd, "/decoy") == 0,
             "chdir 只更新目标任务 cwd，诱饵任务保持不变");
+
+    probe.file_mode = S_IFDIR;
+    CHECK(file_fchdir_task(&target.task, 0) == _EACCES &&
+            fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/sandbox/absolute") == 0,
+            "fchdir 使用目标任务凭据拒绝不可搜索目录并保持 cwd");
+    probe.file_mode = S_IFDIR | 0100;
+    CHECK(file_fchdir_task(&target.task, 0) == 0 &&
+            fs_getcwd_task(&target.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/explicit") == 0 &&
+            fs_getcwd_task(&decoy.task, cwd, sizeof(cwd)) > 0 &&
+            strcmp(cwd, "/decoy") == 0,
+            "fchdir 只更新显式目标任务并保留诱饵任务 cwd");
+    target.pwd = target.fs.pwd;
 
     current = NULL;
     fdtable_release(decoy.task.files);

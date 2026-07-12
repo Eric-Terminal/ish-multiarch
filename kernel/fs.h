@@ -48,6 +48,7 @@ int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 int file_chdir_task(struct task *task, const char *path);
+int file_fchdir_task(struct task *task, fd_t fd);
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode);
 int file_unlinkat_task(struct task *task, fd_t dirfd,

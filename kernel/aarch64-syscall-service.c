@@ -49,6 +49,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FCNTL = 25,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_CHDIR = 49,
+    AARCH64_LINUX_SYS_FCHDIR = 50,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_PIPE2 = 59,
@@ -1033,6 +1034,9 @@ static qword_t dispatch_syscall(
             return dispatch_unlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CHDIR:
             return dispatch_chdir(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FCHDIR:
+            return syscall_result(file_fchdir_task(
+                    task, syscall_fd(syscall->arguments[0])));
         case AARCH64_LINUX_SYS_OPENAT:
             return dispatch_openat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOSE:

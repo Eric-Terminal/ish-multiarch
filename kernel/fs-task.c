@@ -183,6 +183,27 @@ int file_chdir_task(struct task *task, const char *path) {
     return 0;
 }
 
+int file_fchdir_task(struct task *task, fd_t fd_number) {
+    struct fd *directory = f_get_task_retain(task, fd_number);
+    if (directory == NULL)
+        return _EBADF;
+    if (!S_ISDIR(directory->type)) {
+        fd_close(directory);
+        return _ENOTDIR;
+    }
+
+    struct statbuf stat;
+    int error = file_fstat_fd(directory, &stat);
+    if (error == 0)
+        error = access_check_task(task, &stat, AC_X);
+    if (error < 0) {
+        fd_close(directory);
+        return error;
+    }
+    fs_chdir(task->fs, directory);
+    return 0;
+}
+
 fd_t file_openat_task(struct task *task, fd_t dirfd,
         const char *path, int flags, mode_t_ mode) {
     if (flags & O_RDWR_ && flags & O_WRONLY_)
