@@ -16,7 +16,8 @@
 #pragma STDC FENV_ACCESS ON
 #endif
 
-#if LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384 && \
+#if (defined(__i386__) || defined(__x86_64__)) && \
+        LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384 && \
         defined(__SIZEOF_LONG_DOUBLE__) && __SIZEOF_LONG_DOUBLE__ >= 10 && \
         defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
         __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -333,6 +334,111 @@ static void test_arithmetic_golden(void) {
     suite_end("固定算术向量");
 }
 
+static void test_scale_golden(void) {
+    float80 zero = f80_bits(0, 0x0000);
+    float80 neg_zero = f80_bits(0, 0x8000);
+    float80 one = f80_bits(UINT64_C(0x8000000000000000), 0x3fff);
+    float80 neg_one = f80_bits(UINT64_C(0x8000000000000000), 0xbfff);
+    float80 two = f80_bits(UINT64_C(0x8000000000000000), 0x4000);
+    float80 half = f80_bits(UINT64_C(0x8000000000000000), 0x3ffe);
+    float80 max = f80_bits(UINT64_MAX, 0x7ffe);
+    float80 neg_max = f80_bits(UINT64_MAX, 0xfffe);
+    float80 min_subnormal = f80_bits(1, 0x0000);
+    float80 neg_min_subnormal = f80_bits(1, 0x8000);
+    float80 max_subnormal = f80_bits(UINT64_C(0x7fffffffffffffff), 0x0000);
+    float80 infinity = F80_INF;
+    float80 neg_infinity = f80_bits(UINT64_C(0x8000000000000000), 0xffff);
+
+    suite_start("缩放边界");
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        float80 positive_overflow =
+            mode == round_down || mode == round_chop ? max : infinity;
+        float80 negative_overflow =
+            mode == round_up || mode == round_chop ? neg_max : neg_infinity;
+        float80 positive_underflow = mode == round_up ? min_subnormal : zero;
+        float80 negative_underflow = mode == round_down ? neg_min_subnormal : neg_zero;
+
+        check_f80("最大有限数按 INT_MAX 缩放",
+            f80_scale(max, INT_MAX), positive_overflow);
+        check_f80("负最大有限数按 INT_MAX 缩放",
+            f80_scale(neg_max, INT_MAX), negative_overflow);
+        check_f80("精确二次幂按 INT_MAX 缩放",
+            f80_scale(one, INT_MAX), positive_overflow);
+        check_f80("最小子正常数按 INT_MIN 缩放",
+            f80_scale(min_subnormal, INT_MIN), positive_underflow);
+        check_f80("负最小子正常数按 INT_MIN 缩放",
+            f80_scale(neg_min_subnormal, INT_MIN), negative_underflow);
+
+        check_f80("正零按 INT_MIN 缩放", f80_scale(zero, INT_MIN), zero);
+        check_f80("正零按 INT_MAX 缩放", f80_scale(zero, INT_MAX), zero);
+        check_f80("负零按 INT_MIN 缩放", f80_scale(neg_zero, INT_MIN), neg_zero);
+        check_f80("负零按 INT_MAX 缩放", f80_scale(neg_zero, INT_MAX), neg_zero);
+        check_f80("正无穷按 INT_MIN 缩放", f80_scale(infinity, INT_MIN), infinity);
+        check_f80("正无穷按 INT_MAX 缩放", f80_scale(infinity, INT_MAX), infinity);
+        check_f80("负无穷按 INT_MIN 缩放", f80_scale(neg_infinity, INT_MIN), neg_infinity);
+        check_f80("负无穷按 INT_MAX 缩放", f80_scale(neg_infinity, INT_MAX), neg_infinity);
+        check(f80_isnan(f80_scale(F80_NAN, INT_MAX)), "NaN 缩放后应保持 NaN 类别");
+        check(f80_isnan(f80_scale(f80_bits(0, 0x3fff), INT_MIN)),
+            "不受支持编码缩放后应为 NaN");
+
+        check_f80("最小子正常数缩放零", f80_scale(min_subnormal, 0), min_subnormal);
+        check_f80("最大子正常数缩放零", f80_scale(max_subnormal, 0), max_subnormal);
+        check_f80("最小子正常数放大一位", f80_scale(min_subnormal, 1),
+            f80_bits(2, 0x0000));
+        check_f80("最小子正常数缩小一位",
+            f80_scale(min_subnormal, -1), positive_underflow);
+        check_f80("负最小子正常数缩小一位",
+            f80_scale(neg_min_subnormal, -1), negative_underflow);
+
+        check(f80_isnan(f80_scale_by_float(one, F80_NAN)),
+            "FSCALE 的 ST1 为 NaN 时结果应为 NaN");
+        check(f80_isnan(f80_scale_by_float(F80_NAN, one)),
+            "FSCALE 的 ST0 为 NaN 时结果应为 NaN");
+        check(f80_isnan(f80_scale_by_float(one, f80_bits(0, 0x3fff))),
+            "FSCALE 的 ST1 为不受支持编码时结果应为 NaN");
+        check(f80_isnan(f80_scale_by_float(f80_bits(0, 0x3fff), one)),
+            "FSCALE 的 ST0 为不受支持编码时结果应为 NaN");
+
+        check_f80("一按正无穷缩放", f80_scale_by_float(one, infinity), infinity);
+        check_f80("负一按正无穷缩放", f80_scale_by_float(neg_one, infinity), neg_infinity);
+        check_f80("一按负无穷缩放", f80_scale_by_float(one, neg_infinity), zero);
+        check_f80("负一按负无穷缩放", f80_scale_by_float(neg_one, neg_infinity), neg_zero);
+        check(f80_isnan(f80_scale_by_float(zero, infinity)),
+            "正零按正无穷缩放应为 NaN");
+        check(f80_isnan(f80_scale_by_float(neg_zero, infinity)),
+            "负零按正无穷缩放应为 NaN");
+        check_f80("正零按负无穷缩放", f80_scale_by_float(zero, neg_infinity), zero);
+        check_f80("负零按负无穷缩放", f80_scale_by_float(neg_zero, neg_infinity), neg_zero);
+        check_f80("正无穷按正无穷缩放",
+            f80_scale_by_float(infinity, infinity), infinity);
+        check_f80("负无穷按正无穷缩放",
+            f80_scale_by_float(neg_infinity, infinity), neg_infinity);
+        check(f80_isnan(f80_scale_by_float(infinity, neg_infinity)),
+            "正无穷按负无穷缩放应为 NaN");
+        check(f80_isnan(f80_scale_by_float(neg_infinity, neg_infinity)),
+            "负无穷按负无穷缩放应为 NaN");
+
+        check_f80("一按最大有限数缩放",
+            f80_scale_by_float(one, max), positive_overflow);
+        check_f80("一按负最大有限数缩放",
+            f80_scale_by_float(one, neg_max), positive_underflow);
+        check_f80("正零按最大有限数缩放", f80_scale_by_float(zero, max), zero);
+        check_f80("正无穷按负最大有限数缩放",
+            f80_scale_by_float(infinity, neg_max), infinity);
+        check_f80("一按正一点五缩放", f80_scale_by_float(
+            one, f80_bits(UINT64_C(0xc000000000000000), 0x3fff)), two);
+        check_f80("一按负一点五缩放", f80_scale_by_float(
+            one, f80_bits(UINT64_C(0xc000000000000000), 0xbfff)), half);
+        check_f80("一按正 2^63 缩放", f80_scale_by_float(
+            one, f80_bits(UINT64_C(0x8000000000000000), 0x403e)), positive_overflow);
+        check_f80("一按负 2^63 缩放", f80_scale_by_float(
+            one, f80_bits(UINT64_C(0x8000000000000000), 0xc03e)), positive_underflow);
+        check(f80_rounding_mode == mode, "FSCALE 转换 ST1 后未恢复舍入模式");
+    }
+    suite_end("缩放边界");
+}
+
 static uint64_t random_state = UINT64_C(0x243f6a8885a308d3);
 
 static uint64_t next_random(void) {
@@ -384,6 +490,22 @@ static float80 f80_from_native(long double value) {
     return result;
 }
 
+static float80 native_x87_fscale(float80 x, float80 scale) {
+    long double native_x = native_from_f80(x);
+    long double native_scale = native_from_f80(scale);
+    long double native_result;
+    __asm__ volatile(
+        "fldt %[scale]\n\t"
+        "fldt %[x]\n\t"
+        "fscale\n\t"
+        "fstpt %[result]\n\t"
+        "fstp %%st(0)"
+        : [result] "=m" (native_result)
+        : [x] "m" (native_x), [scale] "m" (native_scale)
+        : "st");
+    return f80_from_native(native_result);
+}
+
 static bool native_result_same(float80 actual, float80 expected) {
     return (f80_isnan(actual) && f80_isnan(expected)) || f80_same(actual, expected);
 }
@@ -399,12 +521,72 @@ static int native_rounding_mode(enum f80_rounding_mode mode) {
 }
 
 static void test_native_x87_oracle(void) {
+    static const struct {
+        float80 input;
+        int scale;
+    } scale_cases[] = {
+        {{.signif = UINT64_MAX, .signExp = 0x7ffe}, INT_MAX},
+        {{.signif = UINT64_MAX, .signExp = 0xfffe}, INT_MAX},
+        {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff}, INT_MAX},
+        {{.signif = 1, .signExp = 0x0000}, INT_MIN},
+        {{.signif = 1, .signExp = 0x8000}, INT_MIN},
+        {{.signif = 0, .signExp = 0x0000}, INT_MIN},
+        {{.signif = 0, .signExp = 0x8000}, INT_MAX},
+        {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x7fff}, INT_MIN},
+        {{.signif = UINT64_C(0x8000000000000000), .signExp = 0xffff}, INT_MAX},
+        {{.signif = 1, .signExp = 0x0000}, 0},
+        {{.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000}, 0},
+        {{.signif = 1, .signExp = 0x0000}, 1},
+        {{.signif = 1, .signExp = 0x0000}, -1},
+        {{.signif = 1, .signExp = 0x8000}, -1},
+    };
+    static const float80 fscale_values[] = {
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+        {.signif = 0, .signExp = 0x0000},
+        {.signif = 0, .signExp = 0x8000},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x7fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0xffff},
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0x7fff},
+        {.signif = 0, .signExp = 0x3fff},
+    };
+    static const float80 fscale_scales[] = {
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0x7fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x7fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0xffff},
+        {.signif = UINT64_MAX, .signExp = 0x7ffe},
+        {.signif = UINT64_MAX, .signExp = 0xfffe},
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0x3fff},
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0xbfff},
+        {.signif = 0, .signExp = 0x3fff},
+    };
+
     suite_start("原生 x87 参考");
     for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
         f80_rounding_mode = mode;
         int native_mode = native_rounding_mode(mode);
         check(fesetround(native_mode) == 0 && fegetround() == native_mode,
             "无法设置宿主舍入模式：%s", rounding_name(mode));
+        for (size_t i = 0; i < sizeof(scale_cases) / sizeof(scale_cases[0]); i++) {
+            volatile long double native_input = native_from_f80(scale_cases[i].input);
+            long double native_scaled = scalbnl(native_input, scale_cases[i].scale);
+            check(native_result_same(
+                    f80_scale(scale_cases[i].input, scale_cases[i].scale),
+                    f80_from_native(native_scaled)),
+                "x87 缩放不一致（%s，scale=%d）",
+                rounding_name(mode), scale_cases[i].scale);
+        }
+        for (size_t x = 0; x < sizeof(fscale_values) / sizeof(fscale_values[0]); x++) {
+            for (size_t scale = 0;
+                    scale < sizeof(fscale_scales) / sizeof(fscale_scales[0]); scale++) {
+                float80 expected = native_x87_fscale(
+                    fscale_values[x], fscale_scales[scale]);
+                float80 actual = f80_scale_by_float(
+                    fscale_values[x], fscale_scales[scale]);
+                check(native_result_same(actual, expected),
+                    "x87 FSCALE 不一致（%s，x=%zu，scale=%zu）",
+                    rounding_name(mode), x, scale);
+            }
+        }
         random_state = UINT64_C(0x13198a2e03707344) ^ (uint64_t) mode;
         for (int i = 0; i < 20000; i++) {
             float80 a = f80_bits(next_random() | (UINT64_C(1) << 63),
@@ -446,6 +628,7 @@ int main(void) {
     test_integer_conversions();
     test_round_to_integer();
     test_arithmetic_golden();
+    test_scale_golden();
     test_portable_properties();
 #if HAVE_NATIVE_X87
     test_native_x87_oracle();

@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -38,6 +39,17 @@ __thread enum f80_rounding_mode f80_rounding_mode;
 static bool round_away_from_zero(int sign) {
     return (f80_rounding_mode == round_up && !sign) ||
         (f80_rounding_mode == round_down && sign);
+}
+
+static float80 f80_overflow(int sign) {
+    bool to_max_finite = f80_rounding_mode == round_chop ||
+        (f80_rounding_mode == round_down && !sign) ||
+        (f80_rounding_mode == round_up && sign);
+    float80 f = to_max_finite
+        ? (float80) {.exp = EXP_MAX, .signif = UINT64_MAX}
+        : F80_INF;
+    f.sign = (unsigned) sign;
+    return f;
 }
 
 // shift a 128 bit integer right but using the floating point rounding mode
@@ -165,16 +177,8 @@ static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
         exp = unbias(EXP_DENORMAL);
     } else if (exp - shift > unbias(EXP_MAX)) {
         //printf("0x%.16llx%.16llx ", (unsigned long long) (signif >> 64), (unsigned long long) signif);
-        // too big to represent, so either construct infinity, or round it to the largest representable number
-        float80 f;
-        if (signif == ((uint128_t) 1 << 127))
-            f = F80_INF;
-        else if ((f80_rounding_mode == round_up && sign) || (f80_rounding_mode == round_down && !sign) || f80_rounding_mode == round_chop)
-            f = (float80) {.exp = EXP_MAX, .signif = UINT64_MAX};
-        else
-            f = F80_INF;
-        f.sign = (unsigned) sign;
-        return f;
+        // 超出范围时，精确的二次幂也必须服从当前定向舍入模式。
+        return f80_overflow(sign);
     } else {
         signif <<= shift;
         exp -= shift;
@@ -603,7 +607,66 @@ float80 f80_sqrt(float80 x) {
 float80 f80_scale(float80 x, int scale) {
     if (!f80_is_supported(x) || f80_isnan(x))
         return F80_NAN;
-    return u128_normalize_round((uint128_t) x.signif << 64, unbias(x.exp) + scale, x.sign);
+    if (f80_iszero(x) || f80_isinf(x))
+        return x;
+
+    int shift = __builtin_clzll((unsigned long long) x.signif);
+    int64_t scaled_exp = (int64_t) unbias_denormal(x.exp) + scale;
+    int64_t normalized_exp = scaled_exp - shift;
+    if (normalized_exp > unbias(EXP_MAX))
+        return f80_overflow((int) x.sign);
+    // 低于最小子正常数的一半后，仅定向远离零的模式还能得到非零结果。
+    int min_half_exp = unbias(EXP_MIN) - 64;
+    if (normalized_exp < min_half_exp) {
+        float80 result = {.sign = x.sign};
+        if (round_away_from_zero((int) x.sign))
+            result.signif = 1;
+        return result;
+    }
+    return u128_normalize_round(
+        (uint128_t) x.signif << 64, (int) scaled_exp, (int) x.sign);
+}
+
+float80 f80_scale_by_float(float80 x, float80 scale) {
+    if (!f80_is_supported(x) || !f80_is_supported(scale))
+        return F80_NAN;
+    if (f80_isnan(x))
+        return x;
+    if (f80_isnan(scale))
+        return scale;
+
+    if (f80_isinf(scale)) {
+        if (scale.sign) {
+            if (f80_isinf(x))
+                return F80_NAN;
+            if (f80_iszero(x))
+                return x;
+            return (float80) {.sign = x.sign};
+        }
+        if (f80_iszero(x))
+            return F80_NAN;
+        if (f80_isinf(x))
+            return x;
+        float80 result = F80_INF;
+        result.sign = x.sign;
+        return result;
+    }
+
+    enum f80_rounding_mode old_mode = f80_rounding_mode;
+    f80_rounding_mode = round_chop;
+    int64_t integral_scale = f80_to_int(scale);
+    f80_rounding_mode = old_mode;
+
+    int clamped_scale;
+    if (integral_scale == INT64_MIN)
+        clamped_scale = scale.sign ? INT_MIN : INT_MAX;
+    else if (integral_scale > INT_MAX)
+        clamped_scale = INT_MAX;
+    else if (integral_scale < INT_MIN)
+        clamped_scale = INT_MIN;
+    else
+        clamped_scale = (int) integral_scale;
+    return f80_scale(x, clamped_scale);
 }
 
 void f80_xtract(float80 f, int *exp, float80 *signif) {

@@ -115,11 +115,7 @@ void fpu_prem(struct cpu_state *cpu) {
 }
 
 void fpu_scale(struct cpu_state *cpu) {
-    enum f80_rounding_mode old_mode = f80_rounding_mode;
-    f80_rounding_mode = round_chop;
-    int scale = f80_to_int(ST(1));
-    f80_rounding_mode = old_mode;
-    ST(0) = f80_scale(ST(0), scale);
+    ST(0) = f80_scale_by_float(ST(0), ST(1));
 }
 
 void fpu_rndint(struct cpu_state *cpu) {
