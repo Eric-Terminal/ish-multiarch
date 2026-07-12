@@ -128,6 +128,8 @@ static bool write_user(void *opaque, qword_t address,
     }
     if (memory->fail_write_at != UINT64_MAX &&
             contains_address(address, size, memory->fail_write_at)) {
+        dword_t prefix = (dword_t) (memory->fail_write_at - address);
+        memcpy(memory->bytes + offset, source, prefix);
         *fault = (struct guest_linux_user_fault) {
             .address = memory->fail_write_at,
             .access = GUEST_MEMORY_WRITE,
@@ -236,6 +238,73 @@ int main(void) {
     reset_user(&memory);
     struct guest_linux_user_fault fault;
 
+    const size_t groups_offset = 0x703;
+    fixture.task.ngroups = 3;
+    fixture.task.groups[0] = UINT32_C(7);
+    fixture.task.groups[1] = UINT32_MAX;
+    fixture.task.groups[2] = UINT32_C(0x12345678);
+    reset_user(&memory);
+    qword_t result = invoke(&fixture, &memory, &fault, 158,
+            UINT64_C(0xabcdef01ffffffff), UINT64_MAX, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.write_calls == 0,
+            "getgroups 按低 32 位有符号解释负容量");
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 158,
+            UINT64_C(0x1234567800000000), UINT64_MAX, 0);
+    CHECK(result == 3 && memory.write_calls == 0,
+            "getgroups 的零容量查询只返回附加组数量");
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 158,
+            UINT64_C(0xfeedface00000002), UINT64_MAX, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.write_calls == 0,
+            "getgroups 容量不足时不访问 guest 列表");
+
+    memset(memory.bytes + groups_offset - 1, 0xa5,
+            fixture.task.ngroups * sizeof(uid_t_) + 2);
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 158,
+            UINT64_C(0xfeedface00000004), USER_BASE + groups_offset, 0);
+    CHECK(result == 3 && memory.write_calls == 1 &&
+            memory.max_write_size == 3 * sizeof(uid_t_) &&
+            memcmp(memory.bytes + groups_offset, fixture.task.groups,
+                    3 * sizeof(uid_t_)) == 0,
+            "getgroups 忽略容量高位并按原顺序写出三个 32 位 gid");
+    CHECK(memory.bytes[groups_offset - 1] == 0xa5 &&
+            memory.bytes[groups_offset + 3 * sizeof(uid_t_)] == 0xa5,
+            "getgroups 不修改输出范围外的哨兵");
+
+    memset(memory.bytes + groups_offset, 0xa5,
+            fixture.task.ngroups * sizeof(uid_t_));
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + groups_offset + sizeof(uid_t_);
+    result = invoke(&fixture, &memory, &fault, 158, 3,
+            USER_BASE + groups_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 1 &&
+            memcmp(memory.bytes + groups_offset,
+                    fixture.task.groups, sizeof(uid_t_)) == 0 &&
+            memory.bytes[groups_offset + sizeof(uid_t_)] == 0xa5,
+            "getgroups 保持部分 guest 写回与 EFAULT");
+    CHECK(fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "getgroups 传播精确写回故障");
+
+    reset_user(&memory);
+    qword_t wrapping_groups = UINT64_MAX - sizeof(uid_t_) + 2;
+    result = invoke(&fixture, &memory, &fault, 158, 3,
+            wrapping_groups, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            fault.address == wrapping_groups &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "getgroups 在回绕地址触发回调前返回 EFAULT");
+
+    fixture.task.ngroups = 0;
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 158, 1, UINT64_MAX, 0);
+    CHECK(result == 0 && memory.write_calls == 0,
+            "零附加组不访问无效列表指针");
+
     const size_t vector_offset = 0x100;
     const size_t first_offset = 0x1000;
     const size_t second_offset = 0x3000;
@@ -249,7 +318,7 @@ int main(void) {
 
     reset_io(&io);
     reset_user(&memory);
-    qword_t result = invoke(&fixture, &memory, &fault, 66, 0,
+    result = invoke(&fixture, &memory, &fault, 66, 0,
             USER_BASE + vector_offset, 2);
     CHECK(result == 12 && io.write_calls == 1 &&
             io.write_requests[0] == 12 && io.written_size == 12,

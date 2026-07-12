@@ -51,6 +51,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
+    AARCH64_LINUX_SYS_GETGROUPS = 158,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
@@ -622,6 +623,33 @@ static qword_t dispatch_uname(
     return 0;
 }
 
+static qword_t dispatch_getgroups(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    sdword_t capacity = (sdword_t) (dword_t) syscall->arguments[0];
+    if (capacity < 0)
+        return syscall_result(_EINVAL);
+    assert(task->ngroups <= MAX_GROUPS);
+    if (capacity == 0)
+        return task->ngroups;
+    if ((dword_t) capacity < task->ngroups)
+        return syscall_result(_EINVAL);
+    if (task->ngroups == 0)
+        return 0;
+
+    dword_t size = (dword_t) (
+            task->ngroups * sizeof(task->groups[0]));
+    qword_t address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(address, size))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, task->groups, size, fault))
+        return syscall_result(_EFAULT);
+    return task->ngroups;
+}
+
 static qword_t dispatch_rt_sigprocmask(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -836,6 +864,9 @@ static qword_t dispatch_syscall(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RT_SIGPENDING:
             return dispatch_rt_sigpending(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_GETGROUPS:
+            return dispatch_getgroups(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNAME:
             return dispatch_uname(context, syscall, fault);
