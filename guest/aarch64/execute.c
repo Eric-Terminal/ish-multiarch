@@ -1249,8 +1249,10 @@ static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
             base : adjusted;
     byte_t bytes[8];
 
+    // guest 固定运行在 EL0，未特权形式使用同一权限检查路径，但保留独立 opcode。
     bool load = instruction->opcode == AARCH64_OP_LOAD_IMM12 ||
             instruction->opcode == AARCH64_OP_LOAD_IMM9 ||
+            instruction->opcode == AARCH64_OP_LOAD_UNPRIVILEGED ||
             instruction->opcode == AARCH64_OP_LOAD_REGISTER_OFFSET;
     if (load) {
         if (!guest_tlb_read(tlb, address, bytes, size,
@@ -1757,6 +1759,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_STORE_IMM12:
         case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_STORE_IMM9:
+        case AARCH64_OP_LOAD_UNPRIVILEGED:
+        case AARCH64_OP_STORE_UNPRIVILEGED:
         case AARCH64_OP_LOAD_REGISTER_OFFSET:
         case AARCH64_OP_STORE_REGISTER_OFFSET:
             if (!execute_load_store(cpu, tlb, instruction, &result.fault))

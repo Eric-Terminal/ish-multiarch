@@ -1330,13 +1330,13 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         bool load;
         bool signed_load;
         byte_t register_width;
-        if (vector || mode == 2 || !decode_scalar_transfer(size, operation,
+        if (vector || !decode_scalar_transfer(size, operation,
                 &load, &signed_load, &register_width))
             return false;
         byte_t rn = (word >> 5) & 0x1f;
         byte_t rt = word & 0x1f;
         // 写回与数据寄存器重叠时，架构不保证可移植的执行结果。
-        if (mode != 0 && rn == rt && rn != 31)
+        if ((mode == 1 || mode == 3) && rn == rt && rn != 31)
             return false;
 
         enum aarch64_address_mode address_mode = AARCH64_ADDRESS_OFFSET;
@@ -1344,8 +1344,14 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             address_mode = AARCH64_ADDRESS_POST_INDEX;
         else if (mode == 3)
             address_mode = AARCH64_ADDRESS_PRE_INDEX;
+        enum aarch64_opcode opcode;
+        if (mode == 2)
+            opcode = load ? AARCH64_OP_LOAD_UNPRIVILEGED :
+                    AARCH64_OP_STORE_UNPRIVILEGED;
+        else
+            opcode = load ? AARCH64_OP_LOAD_IMM9 : AARCH64_OP_STORE_IMM9;
         *decoded = (struct aarch64_decoded) {
-            .opcode = load ? AARCH64_OP_LOAD_IMM9 : AARCH64_OP_STORE_IMM9,
+            .opcode = opcode,
             .width = register_width,
             .operands.load_store = {
                 .rt = rt,

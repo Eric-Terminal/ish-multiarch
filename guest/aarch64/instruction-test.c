@@ -724,6 +724,33 @@ static void test_load_store_decode(void) {
     assert(instruction.operands.load_store.offset == -4);
 }
 
+static void test_unprivileged_load_store_decode(void) {
+    struct aarch64_decoded instruction = decode(UINT32_C(0x38100820));
+    assert(instruction.opcode == AARCH64_OP_STORE_UNPRIVILEGED);
+    assert(instruction.width == 32);
+    assert(instruction.operands.load_store.size == 1);
+    assert(instruction.operands.load_store.rn == 1);
+    assert(instruction.operands.load_store.rt == 0);
+    assert(instruction.operands.load_store.offset == -256);
+    assert(instruction.operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+
+    instruction = decode(UINT32_C(0xf8400821));
+    assert(instruction.opcode == AARCH64_OP_LOAD_UNPRIVILEGED);
+    assert(instruction.width == 64);
+    assert(instruction.operands.load_store.size == 8);
+    assert(instruction.operands.load_store.rn == 1);
+    assert(instruction.operands.load_store.rt == 1);
+    assert(instruction.operands.load_store.offset == 0);
+
+    instruction = decode(UINT32_C(0x389ff8a4));
+    assert(instruction.opcode == AARCH64_OP_LOAD_UNPRIVILEGED);
+    assert(instruction.width == 64);
+    assert(instruction.operands.load_store.size == 1);
+    assert(instruction.operands.load_store.signed_load);
+    assert(instruction.operands.load_store.offset == -1);
+}
+
 static void assert_signed_load(dword_t word, enum aarch64_opcode opcode,
         byte_t size, byte_t width, byte_t rn, byte_t rt, int64_t offset,
         enum aarch64_address_mode address_mode) {
@@ -829,6 +856,7 @@ int main(void) {
     test_branches();
     test_conditional_branches();
     test_load_store_decode();
+    test_unprivileged_load_store_decode();
     test_signed_load_decode();
     test_load_store_pair_decode();
     test_svc_decode();
@@ -841,11 +869,9 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0x0b058083), &invalid));
     assert(!aarch64_decode(UINT32_C(0x8bc20020), &invalid));
     assert(!aarch64_decode(UINT32_C(0x0a058083), &invalid));
-    assert(!aarch64_decode(UINT32_C(0xf85f8820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf84084a5), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
     assert(!aarch64_decode(UINT32_C(0x38dfece7), &invalid));
-    assert(!aarch64_decode(UINT32_C(0x389ff820), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb9c00020), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf9800400), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf89f8000), &invalid));
