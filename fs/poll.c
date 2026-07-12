@@ -14,6 +14,8 @@
 
 #include "fs/sockrestart.h"
 
+extern const struct fd_ops socket_fdops;
+
 #if defined(__linux__)
 #include <sys/epoll.h>
 #define HAVE_EPOLL 1
@@ -94,6 +96,20 @@ static void poll_notify_waiters_locked(struct poll *poll) {
     } while (written < 0 && errno == EINTR);
     assert(written == 1 || (written < 0 &&
             (errno == EAGAIN || errno == EWOULDBLOCK)));
+}
+
+// 快照只能从活着的 fd 取得强引用；若最终关闭已将计数
+// 降为零，它会在 poll 解锁后自行拆除登记，不得再复活。
+static bool poll_fd_try_retain(struct fd *fd) {
+    unsigned refcount = atomic_load_explicit(
+            &fd->refcount, memory_order_relaxed);
+    while (refcount != 0) {
+        if (atomic_compare_exchange_weak_explicit(
+                &fd->refcount, &refcount, refcount + 1,
+                memory_order_acquire, memory_order_relaxed))
+            return true;
+    }
+    return false;
 }
 
 bool poll_has_fd(struct poll *poll, struct fd *fd) {
@@ -349,8 +365,29 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
             break;
         }
 
-        // wait for a ready notification
+        // 对 begin 时的登记集合做精确快照；强引用使等待
+        // 期间的 DEL 与最终关闭无法让 end 访问已释放的 fd。
+        size_t listen_wait_capacity = 0;
         list_for_each_entry(&poll_->poll_fds, poll_fd, fds) {
+            if (poll_fd->fd->ops == &socket_fdops)
+                listen_wait_capacity++;
+        }
+        struct fd **listen_waits = NULL;
+        if (listen_wait_capacity != 0) {
+            listen_waits = malloc(
+                    listen_wait_capacity * sizeof(*listen_waits));
+            if (listen_waits == NULL) {
+                res = _ENOMEM;
+                break;
+            }
+        }
+        size_t listen_wait_count = 0;
+        list_for_each_entry(&poll_->poll_fds, poll_fd, fds) {
+            if (poll_fd->fd->ops != &socket_fdops)
+                continue;
+            if (!poll_fd_try_retain(poll_fd->fd))
+                continue;
+            listen_waits[listen_wait_count++] = poll_fd->fd;
             sockrestart_begin_listen_wait(poll_fd->fd);
         }
         unlock(&poll_->lock);
@@ -359,40 +396,51 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         do {
             err = real_poll_wait(&poll_->real, e, sizeof(e)/sizeof(e[0]), timeout);
         } while (sockrestart_should_restart_listen_wait() && errno == EINTR);
+        int wait_errno = errno;
+        for (size_t index = 0; index < listen_wait_count; index++)
+            sockrestart_end_listen_wait(listen_waits[index]);
         lock(&poll_->lock);
-        list_for_each_entry(&poll_->poll_fds, poll_fd, fds) {
-            sockrestart_end_listen_wait(poll_fd->fd);
-        }
 
+        bool stop_waiting = false;
         if (poll_->destroying) {
             res = _EBADF;
-            break;
-        }
-
-        if (err < 0) {
+            stop_waiting = true;
+        } else if (err < 0) {
+            errno = wait_errno;
             res = errno_map();
-            break;
-        }
-        if (err == 0) {
+            stop_waiting = true;
+        } else if (err == 0) {
             // timed out and still nobody is ready
-            break;
-        }
+            stop_waiting = true;
+        } else {
+            // dead with any edge-triggered notifications
+            for (int i = 0; i < err; i++) {
+                struct poll_fd *triggered_poll_fd = rpe_data(&e[i]);
+                if (triggered_poll_fd != NULL &&
+                        triggered_poll_fd->poll != NULL &&
+                        triggered_poll_fd->enabled &&
+                        triggered_poll_fd->types & POLL_EDGETRIGGERED) {
+                    triggered_poll_fd->triggered_types &= ~rpe_events(&e[i]);
+                }
+            }
 
-        // dead with any edge-triggered notifications
-        for (int i = 0; i < err; i++) {
-            struct poll_fd *triggered_poll_fd = rpe_data(&e[i]);
-            if (triggered_poll_fd != NULL && triggered_poll_fd->poll != NULL &&
-                    triggered_poll_fd->enabled &&
-                    triggered_poll_fd->types & POLL_EDGETRIGGERED) {
-                triggered_poll_fd->triggered_types &= ~rpe_events(&e[i]);
+            char fuck;
+            if (read(poll_->notify_pipe[0], &fuck, 1) < 0 &&
+                    errno != EAGAIN) {
+                res = errno_map();
+                stop_waiting = true;
             }
         }
 
-        char fuck;
-        if (read(poll_->notify_pipe[0], &fuck, 1) < 0 && errno != EAGAIN) {
-            res = errno_map();
+        // 先在 poll 锁内消费宿主事件里的登记指针，再在锁外
+        // 释放 fd；最后一个引用可能回调 poll_cleanup_fd。
+        unlock(&poll_->lock);
+        for (size_t index = 0; index < listen_wait_count; index++)
+            fd_close(listen_waits[index]);
+        free(listen_waits);
+        lock(&poll_->lock);
+        if (stop_waiting)
             break;
-        }
     }
 
     // release the pipe

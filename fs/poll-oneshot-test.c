@@ -2,15 +2,19 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "fs/fd.h"
 #include "fs/poll.h"
 #include "fs/real.h"
+#include "fs/sock.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/resource.h"
 #include "kernel/task.h"
+
+extern const struct fd_ops socket_fdops;
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -70,6 +74,25 @@ static int fake_ready(struct fd *fd) {
 static const struct fd_ops fake_ops = {
     .poll = fake_ready,
 };
+
+static bool restart_socket_create(struct fd **fd, int *peer) {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+        return false;
+
+    struct fd *created = fd_create(&socket_fdops);
+    if (created == NULL) {
+        close(sockets[0]);
+        close(sockets[1]);
+        return false;
+    }
+    created->real_fd = sockets[0];
+    // 测试只需要真实宿主套接字的 poll 与重启语义。
+    created->socket.domain = AF_INET_;
+    *fd = created;
+    *peer = sockets[1];
+    return true;
+}
 
 struct poll_gate {
     pthread_mutex_t lock;
@@ -202,6 +225,19 @@ struct close_context {
     struct fd *fd;
     int result;
 };
+
+struct delete_context {
+    struct poll *poll;
+    struct fd *fd;
+    int result;
+};
+
+static void *delete_poll_fd(void *opaque) {
+    struct delete_context *context = opaque;
+    current = NULL;
+    context->result = poll_del_fd(context->poll, context->fd);
+    return NULL;
+}
 
 static void *close_fd(void *opaque) {
     struct close_context *context = opaque;
@@ -527,6 +563,145 @@ static int test_ready_mod_wakes_waiter(void) {
     return 0;
 }
 
+static int test_listen_wait_snapshot_ignores_add(void) {
+    struct fd *first;
+    struct fd *added;
+    int first_peer;
+    int added_peer;
+    CHECK(restart_socket_create(&first, &first_peer) &&
+            restart_socket_create(&added, &added_peer),
+            "创建 ADD 快照测试套接字");
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建 ADD 快照测试 poll 实例");
+    CHECK(poll_add_fd(poll, first, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0,
+            "登记 ADD 快照的初始套接字");
+
+    struct wait_context context = {.poll = poll};
+    init_task(&context.task, &context.sighand);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL, wait_for_event, &context) == 0,
+            "启动 ADD 快照等待线程");
+    CHECK(wait_until_blocked(poll),
+            "ADD 前等待线程已建立 begin 快照");
+
+    CHECK(poll_add_fd(poll, added, POLL_READ,
+            (union poll_fd_info) {.num = 2}) == 0,
+            "等待期间动态添加套接字");
+    CHECK(write(first_peer, "a", 1) == 1,
+            "唤醒 ADD 快照等待线程");
+    CHECK(pthread_join(waiter, NULL) == 0 && context.result == 1,
+            "ADD 快照等待正常投递事件");
+    CHECK(context.task.sockrestart.count == 0,
+            "新增登记不会执行未配对的 end");
+
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&context.sighand.lock.m);
+    poll_destroy(poll);
+    CHECK(fd_close(first) == 0 && fd_close(added) == 0,
+            "释放 ADD 快照测试文件对象");
+    CHECK(close(first_peer) == 0 && close(added_peer) == 0,
+            "释放 ADD 快照测试对端");
+    return 0;
+}
+
+static int test_listen_wait_snapshot_survives_delete(void) {
+    struct fd *first;
+    struct fd *deleted;
+    int first_peer;
+    int deleted_peer;
+    CHECK(restart_socket_create(&first, &first_peer) &&
+            restart_socket_create(&deleted, &deleted_peer),
+            "创建 DEL 快照测试套接字");
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建 DEL 快照测试 poll 实例");
+    CHECK(poll_add_fd(poll, first, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0 &&
+            poll_add_fd(poll, deleted, POLL_READ,
+            (union poll_fd_info) {.num = 2}) == 0,
+            "登记 DEL 快照测试套接字");
+
+    struct wait_context context = {.poll = poll};
+    init_task(&context.task, &context.sighand);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL, wait_for_event, &context) == 0,
+            "启动 DEL 快照等待线程");
+    CHECK(wait_until_blocked(poll),
+            "DEL 前等待线程已建立 begin 快照");
+
+    struct delete_context deletion = {
+        .poll = poll,
+        .fd = deleted,
+    };
+    pthread_t deleter;
+    CHECK(pthread_create(&deleter, NULL,
+            delete_poll_fd, &deletion) == 0,
+            "启动并发 DEL 线程");
+    CHECK(pthread_join(deleter, NULL) == 0 && deletion.result == 0,
+            "等待期间 DEL 完成登记拆除");
+    CHECK(write(first_peer, "d", 1) == 1,
+            "唤醒 DEL 快照等待线程");
+    CHECK(pthread_join(waiter, NULL) == 0 && context.result == 1,
+            "DEL 快照等待正常投递事件");
+    CHECK(context.task.sockrestart.count == 0,
+            "已删除登记仍执行快照中配对的 end");
+
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&context.sighand.lock.m);
+    poll_destroy(poll);
+    CHECK(fd_close(first) == 0 && fd_close(deleted) == 0,
+            "释放 DEL 快照测试文件对象");
+    CHECK(close(first_peer) == 0 && close(deleted_peer) == 0,
+            "释放 DEL 快照测试对端");
+    return 0;
+}
+
+static int test_listen_wait_snapshot_survives_cleanup(void) {
+    struct fd *first;
+    struct fd *closed;
+    int first_peer;
+    int closed_peer;
+    CHECK(restart_socket_create(&first, &first_peer) &&
+            restart_socket_create(&closed, &closed_peer),
+            "创建 cleanup 快照测试套接字");
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建 cleanup 快照测试 poll 实例");
+    CHECK(poll_add_fd(poll, first, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == 0 &&
+            poll_add_fd(poll, closed, POLL_READ,
+            (union poll_fd_info) {.num = 2}) == 0,
+            "登记 cleanup 快照测试套接字");
+
+    struct wait_context context = {.poll = poll};
+    init_task(&context.task, &context.sighand);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL, wait_for_event, &context) == 0,
+            "启动 cleanup 快照等待线程");
+    CHECK(wait_until_blocked(poll),
+            "cleanup 前等待线程已建立 begin 快照");
+
+    CHECK(fd_close(closed) == 0,
+            "等待期间关闭最后一个外部引用");
+    CHECK(write(first_peer, "c", 1) == 1,
+            "唤醒 cleanup 快照等待线程");
+    CHECK(pthread_join(waiter, NULL) == 0 && context.result == 1,
+            "cleanup 快照等待正常投递事件");
+    CHECK(context.task.sockrestart.count == 0,
+            "最终关闭在快照 end 后才释放文件对象");
+
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&context.sighand.lock.m);
+    poll_destroy(poll);
+    CHECK(fd_close(first) == 0,
+            "释放 cleanup 快照测试文件对象");
+    CHECK(close(first_peer) == 0 && close(closed_peer) == 0,
+            "释放 cleanup 快照测试对端");
+    return 0;
+}
+
 static int test_destroy_wakes_active_waiter(void) {
     struct poll_gate gate;
     poll_gate_init(&gate, 0);
@@ -796,6 +971,12 @@ int main(void) {
         result = test_ready_add_wakes_waiter();
     if (result == 0)
         result = test_ready_mod_wakes_waiter();
+    if (result == 0)
+        result = test_listen_wait_snapshot_ignores_add();
+    if (result == 0)
+        result = test_listen_wait_snapshot_survives_delete();
+    if (result == 0)
+        result = test_listen_wait_snapshot_survives_cleanup();
     if (result == 0)
         result = test_destroy_wakes_active_waiter();
     if (result == 0)
