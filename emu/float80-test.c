@@ -341,6 +341,73 @@ static void test_arithmetic_golden(void) {
     suite_end("固定算术向量");
 }
 
+static void test_add_subnormal_golden(void) {
+    float80 zero = f80_bits(0, 0x0000);
+    float80 neg_zero = f80_bits(0, 0x8000);
+    float80 min_subnormal = f80_bits(1, 0x0000);
+    float80 neg_min_subnormal = f80_bits(1, 0x8000);
+    float80 max_subnormal = f80_bits(UINT64_C(0x7fffffffffffffff), 0x0000);
+    float80 min_normal = f80_bits(UINT64_C(0x8000000000000000), 0x0001);
+    float80 exp_two = f80_bits(UINT64_C(0x8000000000000000), 0x0002);
+    float80 exp_two_odd = f80_bits(UINT64_C(0x8000000000000001), 0x0002);
+    float80 neg_exp_two = f80_bits(UINT64_C(0x8000000000000000), 0x8002);
+
+    suite_start("正常数与子正常数加减边界");
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        check_f80("最小正常数加最大子正常数",
+            f80_add(min_normal, max_subnormal),
+            f80_bits(UINT64_MAX, 0x0001));
+        check_f80("交换操作数后加法一致",
+            f80_add(max_subnormal, min_normal),
+            f80_bits(UINT64_MAX, 0x0001));
+        check_f80("最小正常数减最大子正常数",
+            f80_sub(min_normal, max_subnormal), min_subnormal);
+        check_f80("最小正常数加最小子正常数",
+            f80_add(min_normal, min_subnormal),
+            f80_bits(UINT64_C(0x8000000000000001), 0x0001));
+        check_f80("最小正常数减最小子正常数",
+            f80_sub(min_normal, min_subnormal), max_subnormal);
+        check_f80("最大子正常数加最小子正常数",
+            f80_add(max_subnormal, min_subnormal), min_normal);
+        check_f80("两个最大子正常数相加",
+            f80_add(max_subnormal, max_subnormal),
+            f80_bits(UINT64_C(0xfffffffffffffffe), 0x0001));
+
+        check_f80("偶数末位正常数加半末位",
+            f80_add(exp_two, min_subnormal),
+            f80_bits(mode == round_up
+                ? UINT64_C(0x8000000000000001)
+                : UINT64_C(0x8000000000000000), 0x0002));
+        check_f80("奇数末位正常数加半末位",
+            f80_add(exp_two_odd, min_subnormal),
+            f80_bits(mode == round_to_nearest || mode == round_up
+                ? UINT64_C(0x8000000000000002)
+                : UINT64_C(0x8000000000000001), 0x0002));
+        check_f80("奇数末位正常数减半末位",
+            f80_sub(exp_two_odd, min_subnormal),
+            f80_bits(mode == round_up
+                ? UINT64_C(0x8000000000000001)
+                : UINT64_C(0x8000000000000000), 0x0002));
+        check_f80("负正常数远离零的半末位",
+            f80_sub(neg_exp_two, min_subnormal),
+            f80_bits(mode == round_down
+                ? UINT64_C(0x8000000000000001)
+                : UINT64_C(0x8000000000000000), 0x8002));
+        check_f80("正常数与负子正常数跨边界抵消",
+            f80_add(exp_two, neg_min_subnormal),
+            f80_bits(UINT64_MAX, 0x0001));
+
+        float80 cancelled_zero = mode == round_down ? neg_zero : zero;
+        check_f80("正负零相加", f80_add(zero, neg_zero), cancelled_zero);
+        check_f80("负正零相加", f80_add(neg_zero, zero), cancelled_zero);
+        check_f80("正零减正零", f80_sub(zero, zero), cancelled_zero);
+        check_f80("负零减负零", f80_sub(neg_zero, neg_zero), cancelled_zero);
+        check_f80("两个负零相加", f80_add(neg_zero, neg_zero), neg_zero);
+    }
+    suite_end("正常数与子正常数加减边界");
+}
+
 static void test_scale_golden(void) {
     float80 zero = f80_bits(0, 0x0000);
     float80 neg_zero = f80_bits(0, 0x8000);
@@ -618,6 +685,36 @@ static float80 native_x87_sqrt(float80 x) {
     return f80_from_native(native_result);
 }
 
+static float80 native_x87_add(float80 left, float80 right) {
+    long double native_left = native_from_f80(left);
+    long double native_right = native_from_f80(right);
+    long double native_result;
+    __asm__ volatile(
+        "fldt %[left]\n\t"
+        "fldt %[right]\n\t"
+        "faddp\n\t"
+        "fstpt %[result]"
+        : [result] "=m" (native_result)
+        : [left] "m" (native_left), [right] "m" (native_right)
+        : "st");
+    return f80_from_native(native_result);
+}
+
+static float80 native_x87_sub(float80 left, float80 right) {
+    long double native_left = native_from_f80(left);
+    long double native_right = native_from_f80(right);
+    long double native_result;
+    __asm__ volatile(
+        "fldt %[right]\n\t"
+        "fldt %[left]\n\t"
+        "fsubp\n\t"
+        "fstpt %[result]"
+        : [result] "=m" (native_result)
+        : [left] "m" (native_left), [right] "m" (native_right)
+        : "st");
+    return f80_from_native(native_result);
+}
+
 static bool native_result_same(float80 actual, float80 expected) {
     return (f80_isnan(actual) && f80_isnan(expected)) || f80_same(actual, expected);
 }
@@ -698,6 +795,23 @@ static void test_native_x87_oracle(void) {
         {.signif = 0, .signExp = 0x3fff},
         {.signif = UINT64_C(0x8000000000000000), .signExp = 0xbfff},
     };
+    static const float80 add_values[] = {
+        {.signif = 0, .signExp = 0x0000},
+        {.signif = 0, .signExp = 0x8000},
+        {.signif = 1, .signExp = 0x0000},
+        {.signif = 1, .signExp = 0x8000},
+        {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000},
+        {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x8000},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x8001},
+        {.signif = UINT64_C(0x8000000000000001), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x0002},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x8002},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0xbfff},
+        {.signif = UINT64_MAX, .signExp = 0x7ffe},
+        {.signif = UINT64_MAX, .signExp = 0xfffe},
+    };
 
     suite_start("原生 x87 参考");
     for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
@@ -725,6 +839,62 @@ static void test_native_x87_oracle(void) {
                     "x87 FSCALE 不一致（%s，x=%zu，scale=%zu）",
                     rounding_name(mode), x, scale);
             }
+        }
+        for (size_t left = 0; left < sizeof(add_values) / sizeof(add_values[0]); left++) {
+            for (size_t right = 0; right < sizeof(add_values) / sizeof(add_values[0]); right++) {
+                float80 expected_add = native_x87_add(add_values[left], add_values[right]);
+                float80 expected_sub = native_x87_sub(add_values[left], add_values[right]);
+                check(native_result_same(
+                        f80_add(add_values[left], add_values[right]), expected_add),
+                    "x87 固定加法不一致（%s，left=%zu，right=%zu）",
+                    rounding_name(mode), left, right);
+                check(native_result_same(
+                        f80_sub(add_values[left], add_values[right]), expected_sub),
+                    "x87 固定减法不一致（%s，left=%zu，right=%zu）",
+                    rounding_name(mode), left, right);
+            }
+        }
+        random_state = UINT64_C(0x452821e638d01377) ^ (uint64_t) mode;
+        for (int i = 0; i < 50000; i++) {
+            uint64_t left_signif = next_random();
+            uint64_t right_signif = next_random();
+            uint16_t left_sign = (uint16_t) ((next_random() & 1) << 15);
+            uint16_t right_sign = (uint16_t) ((next_random() & 1) << 15);
+            float80 left;
+            float80 right;
+            switch (i & 3) {
+                case 0:
+                    left_signif &= UINT64_MAX >> 1;
+                    right_signif &= UINT64_MAX >> 1;
+                    left = f80_bits(left_signif == 0 ? 1 : left_signif, left_sign);
+                    right = f80_bits(right_signif == 0 ? 1 : right_signif, right_sign);
+                    break;
+                case 1:
+                    right_signif &= UINT64_MAX >> 1;
+                    left = f80_bits(left_signif | (UINT64_C(1) << 63),
+                        (uint16_t) (1 + next_random() % 2) | left_sign);
+                    right = f80_bits(right_signif == 0 ? 1 : right_signif, right_sign);
+                    break;
+                case 2:
+                    left_signif &= UINT64_MAX >> 1;
+                    left = f80_bits(left_signif == 0 ? 1 : left_signif, left_sign);
+                    right = f80_bits(right_signif | (UINT64_C(1) << 63),
+                        (uint16_t) (1 + next_random() % 2) | right_sign);
+                    break;
+                default:
+                    right_sign = left_sign ^ 0x8000;
+                    left = f80_bits(left_signif | (UINT64_C(1) << 63),
+                        (uint16_t) (0x0001 | left_sign));
+                    right = f80_bits(right_signif | (UINT64_C(1) << 63),
+                        (uint16_t) (0x0001 | right_sign));
+                    break;
+            }
+            float80 expected_add = native_x87_add(left, right);
+            float80 expected_sub = native_x87_sub(left, right);
+            check(native_result_same(f80_add(left, right), expected_add),
+                "x87 随机加法不一致（%s，序号=%d）", rounding_name(mode), i);
+            check(native_result_same(f80_sub(left, right), expected_sub),
+                "x87 随机减法不一致（%s，序号=%d）", rounding_name(mode), i);
         }
         for (size_t left = 0;
                 left < sizeof(division_values) / sizeof(division_values[0]); left++) {
@@ -831,6 +1001,7 @@ int main(void) {
     test_integer_conversions();
     test_round_to_integer();
     test_arithmetic_golden();
+    test_add_subnormal_golden();
     test_scale_golden();
     test_sqrt_golden();
     test_portable_properties();

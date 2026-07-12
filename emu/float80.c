@@ -374,11 +374,17 @@ float80 f80_abs(float80 f) {
 float80 f80_add(float80 a, float80 b) {
     handle_nans(a, b);
 
+    // 子正常数与最小正常数共享有效指数，不能直接用存储指数 0 和 1 对齐。
+    int a_exp = unbias_denormal(a.exp);
+    int b_exp = unbias_denormal(b.exp);
     // a has larger exponent, b has smaller exponent
-    if (a.exp < b.exp) {
+    if (a_exp < b_exp) {
         float80 tmp = a;
         a = b;
         b = tmp;
+        int tmp_exp = a_exp;
+        a_exp = b_exp;
+        b_exp = tmp_exp;
     }
 
     // reduce the number of cases to deal with
@@ -395,10 +401,10 @@ float80 f80_add(float80 a, float80 b) {
     uint128_t a_signif = (uint128_t) a.signif << 64;
     uint128_t b_signif = (uint128_t) b.signif << 64;
     // shift b (smaller exponent) right until the exponents are equal
-    b_signif = u128_shift_right_round(b_signif, a.exp - b.exp, b.sign ^ flipped);
+    b_signif = u128_shift_right_round(b_signif, a_exp - b_exp, b.sign ^ flipped);
 
     int sign = a.sign;
-    int exp = unbias_denormal(a.exp);
+    int exp = a_exp;
     uint128_t signif = a_signif;
     if (!b.sign) {
         // b is positive, so add
@@ -441,7 +447,7 @@ float80 f80_add(float80 a, float80 b) {
 
         // a bizarre special case. from https://twitter.com/tblodt/status/1262145524620234752:
         // > why does 1 - 1 = -0 when the x86 rounding mode is set to "round down"? it's just 0 for any other rounding mode
-        if (signif == 0 && a_signif != 0 && f80_rounding_mode == round_down)
+        if (signif == 0 && f80_rounding_mode == round_down)
             return (float80) {.sign = 1};
 
         // a - a = 0
