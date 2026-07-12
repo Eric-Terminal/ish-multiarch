@@ -137,6 +137,8 @@ enum aarch64_opcode {
     AARCH64_OP_FMOV_SIMD_FROM_GENERAL,
     AARCH64_OP_FMOV_GENERAL_FROM_SIMD_HIGH,
     AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL,
+    AARCH64_OP_SCVTF_GENERAL,
+    AARCH64_OP_UCVTF_GENERAL,
 };
 
 enum aarch64_shift_type {
@@ -279,6 +281,11 @@ struct aarch64_decoded {
             byte_t rd;
             byte_t rn;
         } data_processing_1source;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t destination_width;
+        } integer_to_fp;
         struct {
             byte_t rd;
             qword_t immediate;

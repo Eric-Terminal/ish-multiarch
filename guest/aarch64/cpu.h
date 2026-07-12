@@ -65,6 +65,9 @@ _Static_assert(CPU_OFFSET(v) % 16 == 0,
         "AArch64 向量寄存器组必须按 16 字节对齐");
 
 #define AARCH64_NZCV_MASK UINT32_C(0xf0000000)
+#define AARCH64_FPCR_RMODE_SHIFT 22
+#define AARCH64_FPCR_RMODE_MASK UINT32_C(0x00c00000)
+#define AARCH64_FPSR_IXC UINT32_C(0x00000010)
 
 static inline addr_t cpu_get_pc(const struct cpu_state *cpu) {
     return cpu->pc;

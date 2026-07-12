@@ -180,6 +180,39 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t source_width;
+        byte_t destination_width;
+    } integer_to_fp_conversions[] = {
+        {UINT32_C(0x1e220000), AARCH64_OP_SCVTF_GENERAL, 32, 32},
+        {UINT32_C(0x1e620000), AARCH64_OP_SCVTF_GENERAL, 32, 64},
+        {UINT32_C(0x9e220000), AARCH64_OP_SCVTF_GENERAL, 64, 32},
+        {UINT32_C(0x9e620000), AARCH64_OP_SCVTF_GENERAL, 64, 64},
+        {UINT32_C(0x1e230000), AARCH64_OP_UCVTF_GENERAL, 32, 32},
+        {UINT32_C(0x1e630000), AARCH64_OP_UCVTF_GENERAL, 32, 64},
+        {UINT32_C(0x9e230000), AARCH64_OP_UCVTF_GENERAL, 64, 32},
+        {UINT32_C(0x9e630000), AARCH64_OP_UCVTF_GENERAL, 64, 64},
+    };
+    dword_t integer_to_fp = word & UINT32_C(0xfffffc00);
+    for (unsigned i = 0; i < sizeof(integer_to_fp_conversions) /
+            sizeof(integer_to_fp_conversions[0]); i++) {
+        if (integer_to_fp != integer_to_fp_conversions[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = integer_to_fp_conversions[i].opcode,
+            .width = integer_to_fp_conversions[i].source_width,
+            .operands.integer_to_fp = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .destination_width =
+                        integer_to_fp_conversions[i].destination_width,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e208400)) {
         bool q = ((word >> 30) & 1) != 0;
         byte_t size = (word >> 22) & 3;

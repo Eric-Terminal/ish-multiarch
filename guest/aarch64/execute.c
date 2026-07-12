@@ -722,6 +722,94 @@ static void execute_fmov_transfer(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static bool integer_to_fp_rounds_up(qword_t significand,
+        qword_t remainder, unsigned discarded_bits,
+        bool negative, dword_t fpcr) {
+    if (remainder == 0)
+        return false;
+    dword_t mode = (fpcr & AARCH64_FPCR_RMODE_MASK) >>
+            AARCH64_FPCR_RMODE_SHIFT;
+    if (mode == 1)
+        return !negative;
+    if (mode == 2)
+        return negative;
+    if (mode == 3)
+        return false;
+
+    qword_t halfway = UINT64_C(1) << (discarded_bits - 1);
+    return remainder > halfway ||
+            (remainder == halfway && (significand & 1) != 0);
+}
+
+static qword_t integer_to_fp_bits(qword_t magnitude, bool negative,
+        byte_t destination_width, dword_t fpcr, bool *inexact) {
+    *inexact = false;
+    if (magnitude == 0)
+        return 0;
+
+    unsigned fraction_bits = destination_width == 32 ? 23 : 52;
+    unsigned precision = fraction_bits + 1;
+    unsigned exponent_bias = destination_width == 32 ? 127 : 1023;
+    unsigned exponent = 63U - (unsigned) __builtin_clzll(magnitude);
+    qword_t significand;
+    if (exponent <= fraction_bits) {
+        significand = magnitude << (fraction_bits - exponent);
+    } else {
+        unsigned discarded_bits = exponent - fraction_bits;
+        qword_t discarded_mask =
+                (UINT64_C(1) << discarded_bits) - 1;
+        qword_t remainder = magnitude & discarded_mask;
+        significand = magnitude >> discarded_bits;
+        *inexact = remainder != 0;
+        if (integer_to_fp_rounds_up(significand, remainder,
+                discarded_bits, negative, fpcr)) {
+            significand++;
+            if (significand == (UINT64_C(1) << precision)) {
+                significand >>= 1;
+                exponent++;
+            }
+        }
+    }
+
+    qword_t fraction_mask =
+            (UINT64_C(1) << fraction_bits) - 1;
+    qword_t sign = negative ?
+            UINT64_C(1) << (destination_width - 1) : 0;
+    return sign |
+            (qword_t) (exponent + exponent_bias) << fraction_bits |
+            (significand & fraction_mask);
+}
+
+static void execute_integer_to_fp(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rn = instruction->operands.integer_to_fp.rn;
+    qword_t source = read_register(
+            cpu, rn, instruction->width, false);
+    bool negative = instruction->opcode == AARCH64_OP_SCVTF_GENERAL &&
+            (source & (UINT64_C(1) << (instruction->width - 1))) != 0;
+    qword_t magnitude = source;
+    if (negative) {
+        magnitude = instruction->width == 32 ?
+                (dword_t) (0 - (dword_t) source) : 0 - source;
+    }
+
+    byte_t destination_width =
+            instruction->operands.integer_to_fp.destination_width;
+    bool inexact;
+    qword_t bits = integer_to_fp_bits(magnitude, negative,
+            destination_width, cpu->fpcr, &inexact);
+    union aarch64_vector_reg result = {0};
+    if (destination_width == 32)
+        result.s[0] = (dword_t) bits;
+    else
+        result.d[0] = bits;
+    cpu->v[instruction->operands.integer_to_fp.rd] = result;
+    // 浮点 trap 尚无运行事件通道；默认 Linux FPCR 仅累积 sticky IXC。
+    if (inexact)
+        cpu->fpsr |= AARCH64_FPSR_IXC;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_copy(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_copy.rd;
@@ -1258,6 +1346,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FMOV_GENERAL_FROM_SIMD_HIGH:
         case AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL:
             execute_fmov_transfer(cpu, instruction);
+            break;
+        case AARCH64_OP_SCVTF_GENERAL:
+        case AARCH64_OP_UCVTF_GENERAL:
+            execute_integer_to_fp(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:
         case AARCH64_OP_SDIV:
