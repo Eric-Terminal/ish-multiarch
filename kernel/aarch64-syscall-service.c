@@ -6,6 +6,7 @@
 #include "fs/fd.h"
 #include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
+#include "guest/aarch64/linux-process-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
@@ -25,6 +26,8 @@
 #define AARCH64_LINUX_IO_CHUNK_SIZE 4096
 #define AARCH64_LINUX_IOV_MAX UINT64_C(1024)
 #define AARCH64_LINUX_IOV_TRANSACTION_LIMIT UINT64_C(0x100000)
+#define AARCH64_LINUX_MAX_PID_NS_LEVEL UINT64_C(32)
+#define AARCH64_LINUX_CLONE3_ZERO_CHUNK 32
 #define AARCH64_LINUX_USER_ADDRESS_LIMIT \
     (AARCH64_LINUX_USER_ADDRESS_MAX + UINT64_C(1))
 
@@ -105,6 +108,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
     AARCH64_LINUX_SYS_PREADV2 = 286,
     AARCH64_LINUX_SYS_PWRITEV2 = 287,
+    AARCH64_LINUX_SYS_CLONE3 = 435,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -144,6 +148,131 @@ static bool user_range_fits(qword_t address, qword_t size) {
 static bool aarch64_user_range_fits(qword_t address, qword_t size) {
     return address <= AARCH64_LINUX_USER_ADDRESS_LIMIT &&
             size <= AARCH64_LINUX_USER_ADDRESS_LIMIT - address;
+}
+
+static int check_clone3_zero_tail(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, qword_t size,
+        struct guest_linux_user_fault *fault) {
+    byte_t bytes[AARCH64_LINUX_CLONE3_ZERO_CHUNK];
+    while (size != 0) {
+        dword_t chunk = size < sizeof(bytes) ?
+                (dword_t) size : (dword_t) sizeof(bytes);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                address, bytes, chunk, fault))
+            return _EFAULT;
+        for (dword_t index = 0; index < chunk; index++) {
+            if (bytes[index] != 0)
+                return _E2BIG;
+        }
+        address += chunk;
+        size -= chunk;
+    }
+    return 0;
+}
+
+static int copy_clone3_args_from_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, qword_t size,
+        struct aarch64_linux_clone_args *args,
+        struct guest_linux_user_fault *fault) {
+    if (size > GUEST_MEMORY_PAGE_SIZE)
+        return _E2BIG;
+    if (size < AARCH64_LINUX_CLONE_ARGS_SIZE_VER0)
+        return _EINVAL;
+    if (!aarch64_user_range_fits(address, size)) {
+        (void) user_range_error(fault, address, GUEST_MEMORY_READ);
+        return _EFAULT;
+    }
+
+    if (size > sizeof(*args)) {
+        int error = check_clone3_zero_tail(context,
+                address + sizeof(*args), size - sizeof(*args), fault);
+        if (error < 0)
+            return error;
+    }
+
+    *args = (struct aarch64_linux_clone_args) {0};
+    dword_t copy_size = size < sizeof(*args) ?
+            (dword_t) size : (dword_t) sizeof(*args);
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            address, args, copy_size, fault))
+        return _EFAULT;
+    return 0;
+}
+
+static int validate_clone3_args(
+        const struct aarch64_linux_clone_args *args,
+        qword_t size, qword_t *stack_pointer) {
+    if (args->set_tid_size > AARCH64_LINUX_MAX_PID_NS_LEVEL)
+        return _EINVAL;
+    if ((args->set_tid == 0) != (args->set_tid_size == 0))
+        return _EINVAL;
+    if ((args->exit_signal & ~AARCH64_LINUX_CSIGNAL) != 0)
+        return _EINVAL;
+    if ((args->flags & AARCH64_LINUX_CLONE_INTO_CGROUP) != 0 &&
+            (size < AARCH64_LINUX_CLONE_ARGS_SIZE_VER2 ||
+                    args->cgroup > INT_MAX))
+        return _EINVAL;
+
+    if ((args->flags & (AARCH64_LINUX_CLONE_DETACHED |
+                    (AARCH64_LINUX_CSIGNAL &
+                            ~AARCH64_LINUX_CLONE_NEWTIME))) != 0)
+        return _EINVAL;
+    if ((args->flags & (AARCH64_LINUX_CLONE_SIGHAND |
+                    AARCH64_LINUX_CLONE_CLEAR_SIGHAND)) ==
+            (AARCH64_LINUX_CLONE_SIGHAND |
+                    AARCH64_LINUX_CLONE_CLEAR_SIGHAND))
+        return _EINVAL;
+    if ((args->flags & (AARCH64_LINUX_CLONE_THREAD |
+                    AARCH64_LINUX_CLONE_PARENT)) != 0 &&
+            args->exit_signal != 0)
+        return _EINVAL;
+
+    if ((args->stack == 0) != (args->stack_size == 0))
+        return _EINVAL;
+    if (args->stack != 0 && !aarch64_user_range_fits(
+            args->stack, args->stack_size))
+        return _EINVAL;
+    if (args->exit_signal > NUM_SIGS)
+        return _EINVAL;
+
+    // 当前 PID 分配器不支持请求指定 PID；非零 set_tid 必须显式失败。
+    if (args->set_tid != 0)
+        return _EINVAL;
+    if ((args->flags & ~AARCH64_LINUX_CLONE_SUPPORTED_FLAGS) != 0)
+        return _EINVAL;
+
+    *stack_pointer = args->stack == 0 ? 0 :
+            args->stack + args->stack_size;
+    return 0;
+}
+
+static qword_t dispatch_clone3(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_clone_args args;
+    qword_t size = syscall->arguments[1];
+    int error = copy_clone3_args_from_user(context,
+            syscall->arguments[0], size, &args, fault);
+    if (error < 0)
+        return syscall_result(error);
+
+    qword_t stack_pointer;
+    error = validate_clone3_args(&args, size, &stack_pointer);
+    if (error < 0)
+        return syscall_result(error);
+    if (!task_has_aarch64_process(task))
+        return syscall_result(_EINVAL);
+
+    dword_t legacy_flags = (dword_t) args.flags |
+            (dword_t) args.exit_signal;
+    return syscall_result((sdword_t) sys_clone_aarch64(
+            legacy_flags, stack_pointer, args.parent_tid,
+            args.tls, args.child_tid, fault));
 }
 
 static int copy_iovecs_from_user(
@@ -1787,6 +1916,9 @@ static qword_t dispatch_syscall(
                     (dword_t) syscall->arguments[0],
                     syscall->arguments[1], syscall->arguments[2],
                     syscall->arguments[3], syscall->arguments[4], fault));
+        case AARCH64_LINUX_SYS_CLONE3:
+            return dispatch_clone3(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_EXECVE:
             return dispatch_execve(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WAIT4:

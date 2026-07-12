@@ -303,6 +303,13 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_clone', aarch64_clone_test)
 
+        aarch64_clone3_syscall_test = executable(
+            'aarch64_clone3_syscall_test',
+            'kernel/aarch64-clone3-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_clone3_syscall',
+            aarch64_clone3_syscall_test)
+
         aarch64_exec_image_test = executable(
             'aarch64_exec_image_test',
             'kernel/aarch64-exec-image-test.c',
