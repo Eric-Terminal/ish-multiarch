@@ -238,6 +238,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_file_syscall', aarch64_file_syscall_test)
 
+        aarch64_lseek_syscall_test = executable(
+            'aarch64_lseek_syscall_test',
+            'kernel/aarch64-lseek-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_lseek_syscall', aarch64_lseek_syscall_test)
+
         aarch64_fd_syscall_test = executable(
             'aarch64_fd_syscall_test',
             'kernel/aarch64-fd-syscall-test.c',

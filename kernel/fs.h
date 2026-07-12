@@ -36,6 +36,8 @@ ssize_t file_read_task(struct task *task, fd_t fd, void *buffer, size_t size);
 ssize_t file_read_fd(struct fd *fd, void *buffer, size_t size);
 ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t size);
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size);
+sqword_t file_lseek_task(
+        struct task *task, fd_t fd, sqword_t offset, int whence);
 sqword_t file_getdents_task(struct task *task, fd_t fd,
         file_dirent_emit_t emit, void *opaque);
 int file_write_check_task(struct task *task, fd_t fd);

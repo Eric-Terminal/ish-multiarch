@@ -62,6 +62,22 @@ ssize_t file_write_task(struct task *task, fd_t fd_number,
     return file_write_fd(f_get_task(task, fd_number), buffer, size);
 }
 
+sqword_t file_lseek_task(
+        struct task *task, fd_t fd_number, sqword_t offset, int whence) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    if (fd->ops->lseek == NULL) {
+        fd_close(fd);
+        return _ESPIPE;
+    }
+    lock(&fd->lock);
+    sqword_t result = fd->ops->lseek(fd, offset, whence);
+    unlock(&fd->lock);
+    fd_close(fd);
+    return result;
+}
+
 int file_write_check_fd(struct fd *fd) {
     if (fd == NULL)
         return _EBADF;

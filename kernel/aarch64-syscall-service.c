@@ -53,6 +53,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_PIPE2 = 59,
     AARCH64_LINUX_SYS_GETDENTS64 = 61,
+    AARCH64_LINUX_SYS_LSEEK = 62,
     AARCH64_LINUX_SYS_READ = 63,
     AARCH64_LINUX_SYS_WRITE = 64,
     AARCH64_LINUX_SYS_READV = 65,
@@ -1043,6 +1044,11 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_GETDENTS64:
             return dispatch_getdents64(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_LSEEK:
+            return syscall_result(file_lseek_task(task,
+                    syscall_fd(syscall->arguments[0]),
+                    (sqword_t) syscall->arguments[1],
+                    (sdword_t) (dword_t) syscall->arguments[2]));
         case AARCH64_LINUX_SYS_READ:
             return dispatch_read(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_WRITE:
