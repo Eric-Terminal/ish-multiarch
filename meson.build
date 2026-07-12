@@ -592,7 +592,9 @@ if not meson.is_cross_build()
             'guest/memory/tlb.c',
             'guest/memory/page-table.c',
             'guest/memory/page-table-test.c',
-        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1'])
     test('aarch64_page_table', aarch64_page_table_test)
 
     aarch64_runner_test = executable('aarch64_runner_test', [

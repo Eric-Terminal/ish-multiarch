@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "guest/memory/page-table.h"
 
@@ -68,12 +69,41 @@ static const struct guest_address_space_ops page_table_ops = {
     .resolve_page = resolve_page,
 };
 
+#if defined(GUEST_PAGE_TABLE_TESTING)
+static size_t clone_allocation_fail_at = SIZE_MAX;
+static size_t clone_allocation_count;
+
+void guest_page_table_test_fail_clone_allocation_at(size_t index) {
+    clone_allocation_fail_at = index;
+    clone_allocation_count = 0;
+}
+
+size_t guest_page_table_test_clone_allocation_count(void) {
+    return clone_allocation_count;
+}
+
+static bool clone_allocation_fails(void) {
+    return clone_allocation_count++ == clone_allocation_fail_at;
+}
+
+static void *clone_malloc(size_t size) {
+    return clone_allocation_fails() ? NULL : malloc(size);
+}
+
+static void *clone_calloc(size_t count, size_t size) {
+    return clone_allocation_fails() ? NULL : calloc(count, size);
+}
+#else
+#define clone_malloc malloc
+#define clone_calloc calloc
+#endif
+
 bool guest_page_table_init(struct guest_page_table *table,
         byte_t address_bits) {
     *table = (struct guest_page_table) {0};
     if (address_bits <= GUEST_MEMORY_PAGE_BITS || address_bits > 48)
         return false;
-    table->root = calloc(1, sizeof(*table->root));
+    table->root = clone_calloc(1, sizeof(*table->root));
     if (table->root == NULL)
         return false;
     guest_address_space_init(&table->address_space,
@@ -112,6 +142,89 @@ void guest_page_table_destroy(struct guest_page_table *table) {
     }
     free(table->root);
     table->root = NULL;
+}
+
+static struct guest_page_table_leaf *clone_leaf(
+        const struct guest_page_table_leaf *source) {
+    struct guest_page_table_leaf *copy = clone_calloc(1, sizeof(*copy));
+    if (copy == NULL)
+        return NULL;
+    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
+        const struct guest_page_mapping *source_mapping =
+                &source->entries[i];
+        if (source_mapping->host_page == NULL)
+            continue;
+        struct guest_page_mapping *copy_mapping = &copy->entries[i];
+        copy_mapping->host_page = clone_malloc(GUEST_MEMORY_PAGE_SIZE);
+        if (copy_mapping->host_page == NULL) {
+            destroy_leaf(copy);
+            return NULL;
+        }
+        memcpy(copy_mapping->host_page, source_mapping->host_page,
+                GUEST_MEMORY_PAGE_SIZE);
+        copy_mapping->permissions = source_mapping->permissions;
+    }
+    return copy;
+}
+
+static struct guest_page_table_node *clone_level2(
+        const struct guest_page_table_node *source) {
+    struct guest_page_table_node *copy = clone_calloc(1, sizeof(*copy));
+    if (copy == NULL)
+        return NULL;
+    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
+        if (source->entries[i] == NULL)
+            continue;
+        copy->entries[i] = clone_leaf(source->entries[i]);
+        if (copy->entries[i] == NULL) {
+            destroy_level2(copy);
+            return NULL;
+        }
+    }
+    return copy;
+}
+
+static struct guest_page_table_node *clone_level1(
+        const struct guest_page_table_node *source) {
+    struct guest_page_table_node *copy = clone_calloc(1, sizeof(*copy));
+    if (copy == NULL)
+        return NULL;
+    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
+        if (source->entries[i] == NULL)
+            continue;
+        copy->entries[i] = clone_level2(source->entries[i]);
+        if (copy->entries[i] == NULL) {
+            destroy_level1(copy);
+            return NULL;
+        }
+    }
+    return copy;
+}
+
+bool guest_page_table_clone(struct guest_page_table *destination,
+        const struct guest_page_table *source) {
+    if (destination == NULL || destination == source)
+        return false;
+    *destination = (struct guest_page_table) {0};
+    if (source == NULL || source->root == NULL)
+        return false;
+    if (!guest_page_table_init(destination,
+            source->address_space.address_bits))
+        return false;
+
+    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
+        if (source->root->entries[i] == NULL)
+            continue;
+        destination->root->entries[i] =
+                clone_level1(source->root->entries[i]);
+        if (destination->root->entries[i] == NULL) {
+            guest_page_table_destroy(destination);
+            return false;
+        }
+    }
+    destination->address_space.generation =
+            source->address_space.generation;
+    return true;
 }
 
 static bool valid_page(const struct guest_page_table *table,

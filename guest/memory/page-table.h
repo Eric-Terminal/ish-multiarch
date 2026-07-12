@@ -25,6 +25,13 @@ struct guest_page_range {
 
 bool guest_page_table_init(struct guest_page_table *table,
         byte_t address_bits);
+// 调用者须冻结 source；destination 未初始化，成功后拥有独立 backing，失败后为空。
+bool guest_page_table_clone(struct guest_page_table *destination,
+        const struct guest_page_table *source);
+#if defined(GUEST_PAGE_TABLE_TESTING)
+void guest_page_table_test_fail_clone_allocation_at(size_t index);
+size_t guest_page_table_test_clone_allocation_count(void);
+#endif
 void guest_page_table_destroy(struct guest_page_table *table);
 enum guest_page_table_result guest_page_table_map(
         struct guest_page_table *table, guest_addr_t page_base,
