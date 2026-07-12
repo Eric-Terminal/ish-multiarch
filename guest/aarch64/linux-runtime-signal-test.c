@@ -3,6 +3,7 @@
 
 #include "guest/aarch64/linux-runtime.h"
 #include "guest/aarch64/linux-signal-abi.h"
+#include "guest/linux/errno.h"
 #include "guest/linux/user-memory.h"
 #include "guest/memory/page-table.h"
 
@@ -18,6 +19,8 @@
 #define BRK_BASE UINT64_C(0x0000600000000000)
 #define BRK_LIMIT (BRK_BASE + 2 * GUEST_MEMORY_PAGE_SIZE)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00004000eeee0000)
+#define SYS_READ UINT64_C(63)
+#define SYS_NANOSLEEP UINT64_C(101)
 #define DISABLED_ALTSTACK 2
 #define MAX_INSTALLS 2
 
@@ -40,6 +43,23 @@ struct signal_probe {
 struct poll_bridge {
     struct signal_probe *probe;
 };
+
+struct interrupted_syscall_probe {
+    qword_t number;
+    qword_t result;
+    unsigned calls;
+};
+
+static qword_t return_interrupted_syscall(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    struct interrupted_syscall_probe *probe = context->runtime_opaque;
+    assert(syscall->number == probe->number);
+    assert(fault->kind == GUEST_MEMORY_FAULT_NONE);
+    probe->calls++;
+    return probe->result;
+}
 
 static struct guest_linux_signal_poll_result fake_signal_poll(
         const struct guest_linux_signal_context *context,
@@ -187,6 +207,41 @@ static struct aarch64_linux_syscall_result dispatch_probe(
                     cpu, tlb, runtime, task);
     runtime->services = NULL;
     assert(probe->calls == 1 && probe->saw_context);
+    return result;
+}
+
+static struct aarch64_linux_syscall_result dispatch_interrupted_probe(
+        struct aarch64_linux_runtime *runtime,
+        struct aarch64_linux_task *task,
+        struct guest_tlb *tlb, struct cpu_state *cpu,
+        struct signal_probe *signal_probe,
+        struct interrupted_syscall_probe *syscall_probe) {
+    struct poll_bridge bridge = {.probe = signal_probe};
+    const struct guest_linux_signal_service signal_service = {
+        .runtime_opaque = &bridge,
+        .poll = fake_signal_poll,
+    };
+    const struct guest_linux_syscall_service syscall_service = {
+        .runtime_opaque = syscall_probe,
+        .dispatch = return_interrupted_syscall,
+    };
+    const struct aarch64_linux_services services = {
+        .syscalls = &syscall_service,
+        .signals = &signal_service,
+        .signal_trampoline = SIGNAL_TRAMPOLINE,
+    };
+    signal_probe->expected_runtime_opaque = &bridge;
+    signal_probe->expected_task_opaque = task->service_opaque;
+    signal_probe->watched_cpu = cpu;
+    signal_probe->unpublished_cpu = *cpu;
+    signal_probe->unpublished_cpu.x[0] = syscall_probe->result;
+    runtime->services = &services;
+    struct aarch64_linux_syscall_result result =
+            aarch64_linux_dispatch_syscall(
+                    cpu, tlb, runtime, task);
+    runtime->services = NULL;
+    assert(signal_probe->calls == 1 && signal_probe->saw_context);
+    assert(syscall_probe->calls == 1);
     return result;
 }
 
@@ -465,6 +520,105 @@ int main(void) {
     assert(syscall.signal == normal.info.signal);
     frame = read_frame(&tlb, cpu.sp);
     assert(frame.uc.mcontext.regs[0] == (qword_t) task.tid);
+
+    const qword_t interrupted_result =
+            (qword_t) -(sqword_t) GUEST_LINUX_EINTR;
+    struct guest_linux_signal_delivery restarting = normal;
+    restarting.info.signal = 12;
+    restarting.action.flags |= AARCH64_LINUX_SA_RESTART;
+    cpu = make_cpu(NORMAL_STACK_TOP);
+    cpu.x[8] = SYS_READ;
+    cpu.x[0] = UINT64_C(0x0000600012340000);
+    cpu.x[1] = UINT64_C(0x55aa);
+    struct cpu_state syscall_entry = cpu;
+    struct interrupted_syscall_probe interrupted = {
+        .number = SYS_READ,
+        .result = interrupted_result,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {restarting},
+        .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+        .delivery_count = 1,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = restarting.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    assert(syscall.return_value == interrupted_result &&
+            syscall.signal == restarting.info.signal);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(frame.uc.mcontext.pc == syscall_entry.pc - 4);
+    assert(frame.uc.mcontext.regs[0] == syscall_entry.x[0]);
+    assert(frame.uc.mcontext.regs[1] == syscall_entry.x[1]);
+    assert(frame.uc.mcontext.regs[8] == SYS_READ);
+
+    struct guest_linux_signal_delivery nonrestarting = restarting;
+    nonrestarting.info.signal = 10;
+    nonrestarting.action.flags &= ~AARCH64_LINUX_SA_RESTART;
+    cpu = syscall_entry;
+    interrupted = (struct interrupted_syscall_probe) {
+        .number = SYS_READ,
+        .result = interrupted_result,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {nonrestarting},
+        .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+        .delivery_count = 1,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = nonrestarting.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(frame.uc.mcontext.pc == syscall_entry.pc);
+    assert(frame.uc.mcontext.regs[0] == interrupted_result);
+
+    cpu = syscall_entry;
+    cpu.x[8] = SYS_NANOSLEEP;
+    syscall_entry = cpu;
+    interrupted = (struct interrupted_syscall_probe) {
+        .number = SYS_NANOSLEEP,
+        .result = interrupted_result,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {restarting},
+        .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+        .delivery_count = 1,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = restarting.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(frame.uc.mcontext.pc == syscall_entry.pc);
+    assert(frame.uc.mcontext.regs[0] == interrupted_result);
+
+    struct guest_linux_signal_delivery failed_restart = too_small;
+    failed_restart.action.flags |= AARCH64_LINUX_SA_RESTART;
+    struct guest_linux_signal_delivery forced_after_fault = recovered;
+    forced_after_fault.action.flags |= AARCH64_LINUX_SA_RESTART;
+    cpu = make_cpu(NORMAL_STACK_TOP);
+    cpu.x[8] = SYS_READ;
+    syscall_entry = cpu;
+    interrupted = (struct interrupted_syscall_probe) {
+        .number = SYS_READ,
+        .result = interrupted_result,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {failed_restart, forced_after_fault},
+        .expected = {
+            GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT,
+            GUEST_LINUX_SIGNAL_INSTALL_COMPLETE,
+        },
+        .delivery_count = 2,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = forced_after_fault.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(frame.uc.mcontext.pc == syscall_entry.pc);
+    assert(frame.uc.mcontext.regs[0] == interrupted_result);
 
     cpu = make_cpu(NORMAL_STACK_TOP);
     cpu.x[8] = 178;

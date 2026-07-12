@@ -6,15 +6,31 @@
 #include "guest/linux/errno.h"
 #include "guest/linux/user-memory.h"
 
+#define AARCH64_LINUX_SYS_FCNTL 25
+#define AARCH64_LINUX_SYS_IOCTL 29
+#define AARCH64_LINUX_SYS_OPENAT 56
+#define AARCH64_LINUX_SYS_READ 63
+#define AARCH64_LINUX_SYS_WRITE 64
+#define AARCH64_LINUX_SYS_READV 65
+#define AARCH64_LINUX_SYS_WRITEV 66
+#define AARCH64_LINUX_SYS_PREAD64 67
+#define AARCH64_LINUX_SYS_PWRITE64 68
+#define AARCH64_LINUX_SYS_PREADV 69
+#define AARCH64_LINUX_SYS_PWRITEV 70
 #define AARCH64_LINUX_SYS_EXIT 93
 #define AARCH64_LINUX_SYS_EXIT_GROUP 94
 #define AARCH64_LINUX_SYS_SET_TID_ADDRESS 96
+#define AARCH64_LINUX_SYS_FUTEX 98
 #define AARCH64_LINUX_SYS_RT_SIGRETURN 139
 #define AARCH64_LINUX_SYS_GETTID 178
+#define AARCH64_LINUX_SYS_CONNECT 203
 #define AARCH64_LINUX_SYS_BRK 214
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
+#define AARCH64_LINUX_SYS_WAIT4 260
+#define AARCH64_LINUX_SYS_PREADV2 286
+#define AARCH64_LINUX_SYS_PWRITEV2 287
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
@@ -50,10 +66,12 @@ static bool service_write_user(void *opaque, qword_t address,
 
 struct signal_install_state {
     const struct cpu_state *interrupted;
+    const struct cpu_state *restart;
     struct guest_tlb *tlb;
     struct cpu_state candidate;
     guest_addr_t signal_trampoline;
     bool candidate_valid;
+    bool installer_called;
 };
 
 static bool checked_altstack_top(
@@ -76,11 +94,19 @@ static enum guest_linux_signal_install_status install_signal_frame(
     struct signal_install_state *state = opaque;
     state->candidate_valid = false;
 
+    // 只有导致系统调用中断的第一个 handler 可以决定是否重启；若其
+    // 帧安装失败，随后强制投递的同步故障不得重新执行原系统调用。
+    const struct cpu_state *interrupted = state->interrupted;
+    if (!state->installer_called && state->restart != NULL &&
+            (delivery->action.flags & AARCH64_LINUX_SA_RESTART) != 0)
+        interrupted = state->restart;
+    state->installer_called = true;
+
     guest_addr_t altstack_top;
     if (!checked_altstack_top(&delivery->altstack, &altstack_top))
         return GUEST_LINUX_SIGNAL_INSTALL_FRAME_FAULT;
 
-    guest_addr_t sp = state->interrupted->sp;
+    guest_addr_t sp = interrupted->sp;
     bool altstack_configured = delivery->altstack.size != 0;
     bool on_altstack = altstack_configured &&
             sp > delivery->altstack.base &&
@@ -108,13 +134,13 @@ static enum guest_linux_signal_install_status install_signal_frame(
         .stack_top = enter_altstack ? altstack_top : sp,
         .stack_bottom = on_altstack || enter_altstack ?
                 delivery->altstack.base : 0,
-        .fault_address = state->interrupted->segfault_addr,
+        .fault_address = interrupted->segfault_addr,
     };
     struct cpu_state candidate;
     guest_addr_t frame_address;
     struct guest_memory_fault fault;
     enum aarch64_linux_signal_frame_status status =
-            aarch64_linux_build_rt_sigframe(state->interrupted,
+            aarch64_linux_build_rt_sigframe(interrupted,
                     state->tlb, &wire, &candidate,
                     &frame_address, &fault);
     if (status != AARCH64_LINUX_SIGNAL_FRAME_OK)
@@ -215,10 +241,11 @@ void aarch64_linux_task_init(struct aarch64_linux_task *task, pid_t_ tid,
     };
 }
 
-struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
+static struct guest_linux_signal_poll_result poll_signals_with_restart(
         struct cpu_state *cpu, struct guest_tlb *tlb,
         const struct aarch64_linux_runtime *runtime,
-        const struct aarch64_linux_task *task) {
+        const struct aarch64_linux_task *task,
+        const struct cpu_state *restart) {
     assert(cpu != NULL && tlb != NULL && runtime != NULL && task != NULL);
     const struct guest_linux_signal_service *service =
             runtime_signal_service(runtime);
@@ -231,6 +258,7 @@ struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
     const struct cpu_state interrupted = *cpu;
     struct signal_install_state install = {
         .interrupted = &interrupted,
+        .restart = restart,
         .tlb = tlb,
         .signal_trampoline = runtime->services->signal_trampoline,
     };
@@ -244,6 +272,38 @@ struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
         *cpu = install.candidate;
     }
     return result;
+}
+
+struct guest_linux_signal_poll_result aarch64_linux_poll_signals(
+        struct cpu_state *cpu, struct guest_tlb *tlb,
+        const struct aarch64_linux_runtime *runtime,
+        const struct aarch64_linux_task *task) {
+    return poll_signals_with_restart(
+            cpu, tlb, runtime, task, NULL);
+}
+
+static bool syscall_may_restart(qword_t number) {
+    switch (number) {
+        case AARCH64_LINUX_SYS_FCNTL:
+        case AARCH64_LINUX_SYS_IOCTL:
+        case AARCH64_LINUX_SYS_OPENAT:
+        case AARCH64_LINUX_SYS_READ:
+        case AARCH64_LINUX_SYS_WRITE:
+        case AARCH64_LINUX_SYS_READV:
+        case AARCH64_LINUX_SYS_WRITEV:
+        case AARCH64_LINUX_SYS_PREAD64:
+        case AARCH64_LINUX_SYS_PWRITE64:
+        case AARCH64_LINUX_SYS_PREADV:
+        case AARCH64_LINUX_SYS_PWRITEV:
+        case AARCH64_LINUX_SYS_FUTEX:
+        case AARCH64_LINUX_SYS_CONNECT:
+        case AARCH64_LINUX_SYS_WAIT4:
+        case AARCH64_LINUX_SYS_PREADV2:
+        case AARCH64_LINUX_SYS_PWRITEV2:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static struct aarch64_linux_syscall_result dispatch_rt_sigreturn(
@@ -299,6 +359,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
     assert(runtime != NULL && task != NULL);
     struct guest_linux_syscall syscall;
     aarch64_linux_read_syscall(cpu, &syscall);
+    struct cpu_state restart = *cpu;
     struct aarch64_linux_syscall_result result = {
         .action = AARCH64_LINUX_SYSCALL_RESUME,
         .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
@@ -358,7 +419,15 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = service.return_value;
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
+    const struct cpu_state *restart_state = NULL;
+    if (result.return_value == linux_error(GUEST_LINUX_EINTR) &&
+            syscall_may_restart(syscall.number)) {
+        assert(restart.pc >= 4);
+        restart.pc -= 4;
+        restart_state = &restart;
+    }
     apply_signal_result(&result,
-            aarch64_linux_poll_signals(cpu, tlb, runtime, task));
+            poll_signals_with_restart(
+                    cpu, tlb, runtime, task, restart_state));
     return result;
 }
