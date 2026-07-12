@@ -721,6 +721,17 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_add_sub_extended', aarch64_add_sub_extended_test)
 
+    aarch64_add_sub_carry_test = executable(
+        'aarch64_add_sub_carry_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/add-sub-carry-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_add_sub_carry', aarch64_add_sub_carry_test)
+
     aarch64_system_register_test = executable(
         'aarch64_system_register_test', [
             'guest/memory/address-space.c',

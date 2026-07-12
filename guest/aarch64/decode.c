@@ -714,6 +714,25 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x1fe0fc00)) == UINT32_C(0x1a000000)) {
+        static const enum aarch64_opcode opcodes[] = {
+            AARCH64_OP_ADC,
+            AARCH64_OP_ADCS,
+            AARCH64_OP_SBC,
+            AARCH64_OP_SBCS,
+        };
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcodes[(word >> 29) & 3],
+            .width = (word >> 31) ? 64 : 32,
+            .operands.data_processing_2source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x0a000000)) {
         bool is_64 = word >> 31;
         byte_t operation = (word >> 29) & 3;

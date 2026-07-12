@@ -179,6 +179,40 @@ static void execute_add_sub_extended(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_add_sub_carry(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    qword_t mask = width_mask(width);
+    byte_t rd = instruction->operands.data_processing_2source.rd;
+    qword_t left = read_register(cpu,
+            instruction->operands.data_processing_2source.rn, width, false);
+    qword_t right = read_register(cpu,
+            instruction->operands.data_processing_2source.rm, width, false);
+    bool subtract = instruction->opcode == AARCH64_OP_SBC ||
+            instruction->opcode == AARCH64_OP_SBCS;
+    bool set_flags = instruction->opcode == AARCH64_OP_ADCS ||
+            instruction->opcode == AARCH64_OP_SBCS;
+    // SBC 复用补码加法，旧 C 为一表示本次减法不引入借位。
+    if (subtract)
+        right = ~right & mask;
+
+    qword_t carry_in = (cpu->nzcv >> 29) & 1;
+    __uint128_t sum = (__uint128_t) left + right + carry_in;
+    qword_t result = (qword_t) sum & mask;
+    if (set_flags) {
+        qword_t sign = UINT64_C(1) << (width - 1);
+        bool carry_out = (sum >> width) != 0;
+        bool overflow = (~(left ^ right) & (left ^ result) & sign) != 0;
+        aarch64_set_nzcv(cpu,
+                (result & sign ? UINT32_C(1) << 31 : 0) |
+                (result == 0 ? UINT32_C(1) << 30 : 0) |
+                (carry_out ? UINT32_C(1) << 29 : 0) |
+                (overflow ? UINT32_C(1) << 28 : 0));
+    }
+    write_register(cpu, rd, width, false, result);
+    cpu->pc += 4;
+}
+
 static void execute_logical_shifted(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.logical_shifted.rd;
@@ -1443,6 +1477,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_SUB_EXTENDED_REGISTER:
         case AARCH64_OP_SUBS_EXTENDED_REGISTER:
             execute_add_sub_extended(cpu, instruction);
+            break;
+        case AARCH64_OP_ADC:
+        case AARCH64_OP_ADCS:
+        case AARCH64_OP_SBC:
+        case AARCH64_OP_SBCS:
+            execute_add_sub_carry(cpu, instruction);
             break;
         case AARCH64_OP_AND_SHIFTED_REGISTER:
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
