@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <string.h>
 #include <time.h>
 
@@ -15,6 +16,7 @@
 #include "kernel/aarch64-time-service.h"
 #include "kernel/aarch64-wait-service.h"
 #include "kernel/calls.h"
+#include "kernel/epoll.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/task.h"
@@ -47,6 +49,9 @@ _Static_assert(AARCH64_LINUX_IOV_TRANSACTION_LIMIT <=
 
 enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETCWD = 17,
+    AARCH64_LINUX_SYS_EPOLL_CREATE1 = 20,
+    AARCH64_LINUX_SYS_EPOLL_CTL = 21,
+    AARCH64_LINUX_SYS_EPOLL_PWAIT = 22,
     AARCH64_LINUX_SYS_DUP = 23,
     AARCH64_LINUX_SYS_DUP3 = 24,
     AARCH64_LINUX_SYS_FCNTL = 25,
@@ -810,6 +815,96 @@ static qword_t dispatch_ppoll(
     return syscall_result(result);
 }
 
+static qword_t dispatch_epoll_ctl(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    int_t operation = (int_t) (sdword_t) (dword_t) syscall->arguments[1];
+    struct epoll_event_value event;
+    const struct epoll_event_value *event_pointer = NULL;
+    if (operation == EPOLL_CTL_ADD_ || operation == EPOLL_CTL_MOD_) {
+        qword_t address = syscall->arguments[3];
+        struct aarch64_linux_epoll_event wire;
+        if (!aarch64_user_range_fits(address, sizeof(wire)))
+            return user_range_error(fault, address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                address, &wire, sizeof(wire), fault))
+            return syscall_result(_EFAULT);
+        event = (struct epoll_event_value) {
+            .events = wire.events,
+            .data = wire.data,
+        };
+        event_pointer = &event;
+    }
+    return syscall_result(epoll_ctl_task(task,
+            syscall_fd(syscall->arguments[0]), operation,
+            syscall_fd(syscall->arguments[2]), event_pointer));
+}
+
+static qword_t dispatch_epoll_pwait(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    int_t max_events = (int_t) (sdword_t) (dword_t) syscall->arguments[2];
+    if (max_events <= 0 || max_events >
+            INT_MAX / (int) sizeof(struct aarch64_linux_epoll_event))
+        return syscall_result(_EINVAL);
+
+    qword_t output_size = (qword_t) (dword_t) max_events *
+            sizeof(struct aarch64_linux_epoll_event);
+    if (!aarch64_user_range_fits(syscall->arguments[1], output_size))
+        return user_range_error(
+                fault, syscall->arguments[1], GUEST_MEMORY_WRITE);
+
+    bool has_mask = syscall->arguments[4] != 0;
+    sigset_t_ mask = 0;
+    if (has_mask) {
+        if (syscall->arguments[5] != sizeof(sigset_t_))
+            return syscall_result(_EINVAL);
+        if (!aarch64_user_range_fits(
+                syscall->arguments[4], sizeof(mask)))
+            return user_range_error(
+                    fault, syscall->arguments[4], GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                syscall->arguments[4], &mask, sizeof(mask), fault))
+            return syscall_result(_EFAULT);
+    }
+
+    if (has_mask)
+        sigmask_set_temp_task(task, mask);
+    struct epoll_event_value *events;
+    int_t result = epoll_wait_task(task,
+            syscall_fd(syscall->arguments[0]), max_events,
+            (int_t) (sdword_t) (dword_t) syscall->arguments[3], &events);
+    if (result <= 0) {
+        if (has_mask && result != _EINTR)
+            sigmask_restore_temp_task(task);
+        return syscall_result(result);
+    }
+
+    for (int index = 0; index < result; index++) {
+        struct aarch64_linux_epoll_event wire = {
+            .events = events[index].events,
+            .padding = 0,
+            .data = events[index].data,
+        };
+        memcpy((byte_t *) events +
+                (size_t) index * sizeof(wire), &wire, sizeof(wire));
+    }
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            syscall->arguments[1], events,
+            (dword_t) ((size_t) result *
+                    sizeof(struct aarch64_linux_epoll_event)), fault))
+        result = _EFAULT;
+    free(events);
+    if (has_mask)
+        sigmask_restore_temp_task(task);
+    return syscall_result(result);
+}
+
 static qword_t dispatch_read(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -1543,6 +1638,13 @@ static qword_t dispatch_syscall(
     switch (syscall->number) {
         case AARCH64_LINUX_SYS_GETCWD:
             return dispatch_getcwd(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_EPOLL_CREATE1:
+            return syscall_result(epoll_create_task(task,
+                    (int_t) (sdword_t) (dword_t) syscall->arguments[0]));
+        case AARCH64_LINUX_SYS_EPOLL_CTL:
+            return dispatch_epoll_ctl(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_EPOLL_PWAIT:
+            return dispatch_epoll_pwait(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_DUP:
             return aarch64_linux_dispatch_dup(syscall, task);
         case AARCH64_LINUX_SYS_DUP3:

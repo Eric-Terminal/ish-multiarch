@@ -138,6 +138,8 @@ void receive_signals(void);
 // set the signal mask, restore it to what it was before on the next receive_signals call
 void sigmask_set_temp_task(struct task *task, sigset_t_ mask);
 void sigmask_set_temp(sigset_t_ mask);
+// 无信号结束原子等待时，立即撤销尚未被投递路径消费的临时掩码。
+void sigmask_restore_temp_task(struct task *task);
 // 返回 EINTR 后保留临时掩码，下一次信号投递会恢复原掩码并写入信号帧。
 int_t task_sigsuspend(struct task *task, sigset_t_ mask);
 

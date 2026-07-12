@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -62,6 +63,7 @@ struct io_probe {
     unsigned pwrite_calls;
     size_t pwrite_requests[4];
     off_t pwrite_offsets[4];
+    int poll_events;
 };
 
 #define DIRECTORY_PROBE_CAPACITY 4
@@ -81,6 +83,7 @@ struct directory_probe {
 struct syscall_fixture {
     struct task task;
     struct tgroup group;
+    struct sighand sighand;
 };
 
 static qword_t encoded_error(int error) {
@@ -266,11 +269,17 @@ static ssize_t probe_pwrite(
     return (ssize_t) copied;
 }
 
+static int probe_poll(struct fd *fd) {
+    struct io_probe *probe = fd->data;
+    return probe->poll_events;
+}
+
 static const struct fd_ops probe_fd_ops = {
     .read = probe_read,
     .write = probe_write,
     .pread = probe_pread,
     .pwrite = probe_pwrite,
+    .poll = probe_poll,
 };
 
 static int directory_readdir(struct fd *fd, struct dir_entry *entry) {
@@ -343,14 +352,17 @@ static void reset_io(struct io_probe *probe) {
     probe->pwrite_calls = 0;
     memset(probe->pwrite_requests, 0, sizeof(probe->pwrite_requests));
     memset(probe->pwrite_offsets, 0, sizeof(probe->pwrite_offsets));
+    probe->poll_events = 0;
 }
 
 static bool init_fixture(struct syscall_fixture *fixture,
         struct io_probe *probe) {
     memset(fixture, 0, sizeof(*fixture));
     lock_init(&fixture->group.lock);
+    lock_init(&fixture->sighand.lock);
     fixture->group.limits[RLIMIT_NOFILE_] = (struct rlimit_) {4, 4};
     fixture->task.group = &fixture->group;
+    fixture->task.sighand = &fixture->sighand;
     fixture->task.files = fdtable_new(1);
     if (IS_ERR(fixture->task.files))
         return false;
@@ -408,6 +420,16 @@ static qword_t invoke_positioned(struct syscall_fixture *fixture,
     };
     return ish_aarch64_linux_syscall_service.dispatch(
             &context, &syscall, fault);
+}
+
+static qword_t invoke_epoll(struct syscall_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t number, qword_t epoll_fd, qword_t argument1,
+        qword_t argument2, qword_t argument3,
+        qword_t argument4, qword_t argument5) {
+    return invoke_positioned(fixture, memory, fault, number,
+            epoll_fd, argument1, argument2, argument3,
+            argument4, argument5);
 }
 
 static void store_vectors(struct user_memory *memory, size_t offset,
@@ -489,6 +511,127 @@ int main(void) {
     result = invoke(&fixture, &memory, &fault, 158, 1, UINT64_MAX, 0);
     CHECK(result == 0 && memory.write_calls == 0,
             "零附加组不访问无效列表指针");
+
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 20,
+            UINT32_C(0x40000000), 0, 0);
+    CHECK(result == encoded_error(_EINVAL),
+            "epoll_create1 拒绝 CLOEXEC 之外的标志");
+
+    reset_user(&memory);
+    result = invoke(&fixture, &memory, &fault, 20, O_CLOEXEC_, 0, 0);
+    CHECK((sqword_t) result == 1 &&
+            f_getfd_task(&fixture.task, (fd_t) result) == FD_CLOEXEC_,
+            "epoll_create1 在任务 fd 表安装带 CLOEXEC 的实例");
+    fd_t epoll_fd = (fd_t) result;
+
+    const size_t epoll_event_offset = 0x6000;
+    const size_t epoll_output_offset = 0x6100;
+    const size_t epoll_mask_offset = 0x6200;
+    const qword_t epoll_data = UINT64_C(0xfedcba9876543210);
+    struct aarch64_linux_epoll_event epoll_event = {
+        .events = 1,
+        .padding = UINT32_C(0xa5a5a5a5),
+        .data = epoll_data,
+    };
+    memcpy(memory.bytes + epoll_event_offset,
+            &epoll_event, sizeof(epoll_event));
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 21,
+            epoll_fd, 4, 0, UINT64_MAX, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,
+            "epoll_ctl 对无效操作码返回 EINVAL 且不读取 event");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 21,
+            epoll_fd, 1, epoll_fd,
+            USER_BASE + epoll_event_offset, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            memory.max_read_size == sizeof(epoll_event),
+            "epoll_ctl 拒绝通过重复 fd 监听自身实例");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 21,
+            epoll_fd, 1, 0,
+            USER_BASE + epoll_event_offset, 0, 0);
+    CHECK(result == 0 && memory.read_calls == 1 &&
+            memory.max_read_size == sizeof(epoll_event),
+            "epoll_ctl 从高位 AArch64 地址读取 16 字节 ADD 事件");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, USER_BASE + epoll_output_offset,
+            (qword_t) (INT_MAX / (int) sizeof(epoll_event) + 1),
+            0, 0, 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.write_calls == 0,
+            "epoll_pwait 在分配前拒绝超过 ABI 上限的 maxevents");
+
+    reset_user(&memory);
+    qword_t crossing_epoll_output =
+            AARCH64_LINUX_USER_ADDRESS_MAX - UINT64_C(7);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, crossing_epoll_output, 1, 0, 0, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 0 &&
+            fault.address == crossing_epoll_output &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "epoll_pwait 在等待前拒绝跨越用户地址上限的输出范围");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, USER_BASE + epoll_output_offset, 1, 0,
+            USER_BASE + epoll_mask_offset, sizeof(sigset_t_) / 2);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,
+            "epoll_pwait 严格校验非空信号掩码的长度");
+
+    sigset_t_ epoll_mask = sig_mask(SIGUSR1_);
+    memcpy(memory.bytes + epoll_mask_offset,
+            &epoll_mask, sizeof(epoll_mask));
+    fixture.task.blocked = sig_mask(SIGUSR2_);
+    io.poll_events = 1;
+    memset(memory.bytes + epoll_output_offset, 0xa5,
+            sizeof(struct aarch64_linux_epoll_event));
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, USER_BASE + epoll_output_offset, 1, 0,
+            USER_BASE + epoll_mask_offset, sizeof(sigset_t_));
+    struct aarch64_linux_epoll_event *returned_epoll_event =
+            (void *) (memory.bytes + epoll_output_offset);
+    CHECK(result == 1 && memory.read_calls == 1 &&
+            memory.write_calls == 1 &&
+            memory.max_write_size == sizeof(*returned_epoll_event),
+            "epoll_pwait 从 64 位地址读取掩码并写回一个 AArch64 事件");
+    CHECK(returned_epoll_event->events == 1 &&
+            returned_epoll_event->padding == 0 &&
+            returned_epoll_event->data == epoll_data,
+            "epoll_pwait 保留 64 位用户数据并清零 ABI 填充字段");
+    CHECK(!fixture.task.has_saved_mask &&
+            fixture.task.blocked == sig_mask(SIGUSR2_),
+            "epoll_pwait 无信号返回后恢复原信号掩码");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, USER_BASE + epoll_output_offset,
+            INT_MAX / (int) sizeof(epoll_event), 0, 0, 0);
+    CHECK(result == 1 && memory.write_calls == 1 &&
+            memory.max_write_size == sizeof(epoll_event),
+            "epoll_pwait 对巨大合法 maxevents 使用有界内部批次");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 21,
+            epoll_fd, 2, 0, UINT64_MAX, 0, 0);
+    CHECK(result == 0 && memory.read_calls == 0,
+            "epoll_ctl DEL 忽略 event 指针并移除登记");
+
+    reset_user(&memory);
+    result = invoke_epoll(&fixture, &memory, &fault, 22,
+            epoll_fd, USER_BASE + epoll_output_offset, 1, 0,
+            0, UINT64_MAX);
+    CHECK(result == 0 && memory.write_calls == 0,
+            "epoll_pwait 在无就绪登记时立即返回且忽略空掩码长度");
+    CHECK(f_close_task(&fixture.task, epoll_fd) == 0,
+            "AArch64 epoll 测试实例关闭成功");
 
     const size_t vector_offset = 0x100;
     const size_t first_offset = 0x1000;

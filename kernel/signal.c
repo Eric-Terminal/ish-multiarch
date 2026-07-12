@@ -736,6 +736,15 @@ void sigmask_set_temp(sigset_t_ mask) {
     sigmask_set_temp_task(current, mask);
 }
 
+void sigmask_restore_temp_task(struct task *task) {
+    lock(&task->sighand->lock);
+    if (task->has_saved_mask) {
+        task->blocked = task->saved_mask;
+        task->has_saved_mask = false;
+    }
+    unlock(&task->sighand->lock);
+}
+
 int_t task_sigsuspend(struct task *task, sigset_t_ mask) {
     assert(task != NULL && task == current);
     struct sighand *sighand = task->sighand;

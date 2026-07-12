@@ -14,6 +14,18 @@ _Static_assert(sizeof(struct aarch64_linux_iovec) == 16 &&
         __builtin_offsetof(struct aarch64_linux_iovec, length) == 8,
         "AArch64 Linux iovec ABI 必须固定为两个连续 qword");
 
+struct aarch64_linux_epoll_event {
+    dword_t events;
+    dword_t padding;
+    qword_t data;
+} __attribute__((aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_epoll_event) == 16 &&
+        _Alignof(struct aarch64_linux_epoll_event) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_epoll_event, events) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_epoll_event, data) == 8,
+        "AArch64 Linux epoll_event ABI 必须保留 4 字节对齐填充");
+
 #define AARCH64_LINUX_DIRENT64_NAME_OFFSET 19
 #define AARCH64_LINUX_DIRENT64_ALIGNMENT 8
 #define AARCH64_LINUX_DIRENT64_MAX_SIZE 280
