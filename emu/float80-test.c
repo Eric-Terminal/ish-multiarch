@@ -662,14 +662,24 @@ static void test_xtract_golden(void) {
         snprintf(name, sizeof(name), "安静 NaN（%s）", rounding_name(mode));
         check_xtract_case(name, quiet_nan, quiet_nan, quiet_nan);
         snprintf(name, sizeof(name), "缺少整数位（%s）", rounding_name(mode));
-        check_xtract_case(name, f80_bits(0, 0x3fff), F80_NAN, F80_NAN);
-        snprintf(name, sizeof(name), "伪子正常编码（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(0, 0x3fff),
+            F80_INDEFINITE, F80_INDEFINITE);
+        snprintf(name, sizeof(name), "正伪子正常编码（%s）",
+            rounding_name(mode));
         check_xtract_case(name,
             f80_bits(UINT64_C(0x8000000000000000), 0x0000),
-            F80_NAN, F80_NAN);
+            f80_from_int(-16382),
+            f80_bits(UINT64_C(0x8000000000000000), 0x3fff));
+        snprintf(name, sizeof(name), "负伪子正常编码（%s）",
+            rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0x8123456789abcdef), 0x8000),
+            f80_from_int(-16382),
+            f80_bits(UINT64_C(0x8123456789abcdef), 0xbfff));
         snprintf(name, sizeof(name), "特殊指数缺少整数位（%s）",
             rounding_name(mode));
-        check_xtract_case(name, f80_bits(1, 0x7fff), F80_NAN, F80_NAN);
+        check_xtract_case(name, f80_bits(1, 0x7fff),
+            F80_INDEFINITE, F80_INDEFINITE);
     }
 
     f80_rounding_mode = round_to_nearest;

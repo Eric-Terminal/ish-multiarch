@@ -796,8 +796,11 @@ float80 f80_scale_by_float(float80 x, float80 scale) {
 }
 
 void f80_xtract(float80 f, float80 *exponent, float80 *significand) {
-    if (!f80_is_supported(f)) {
-        *exponent = *significand = F80_NAN;
+    // x87 将伪子正常数视为最小正常指数的另一种编码，而不是无效操作数。
+    bool pseudo_denormal = f.exp == EXP_DENORMAL &&
+            (f.signif & CURSED_BIT) != 0;
+    if (!pseudo_denormal && !f80_is_supported(f)) {
+        *exponent = *significand = F80_INDEFINITE;
         return;
     }
     if (f80_isnan(f)) {
