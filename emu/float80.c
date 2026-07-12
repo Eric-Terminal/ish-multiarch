@@ -795,8 +795,33 @@ float80 f80_scale_by_float(float80 x, float80 scale) {
     return f80_scale(x, clamped_scale);
 }
 
-void f80_xtract(float80 f, int *exp, float80 *signif) {
-    *exp = unbias(f.exp);
-    *signif = f;
-    signif->exp = bias(0);
+void f80_xtract(float80 f, float80 *exponent, float80 *significand) {
+    if (!f80_is_supported(f)) {
+        *exponent = *significand = F80_NAN;
+        return;
+    }
+    if (f80_isnan(f)) {
+        f.signif |= UINT64_C(1) << 62;
+        *exponent = *significand = f;
+        return;
+    }
+    if (f80_iszero(f)) {
+        *exponent = F80_INF;
+        exponent->sign = 1;
+        *significand = f;
+        return;
+    }
+    if (f80_isinf(f)) {
+        *exponent = F80_INF;
+        *significand = f;
+        return;
+    }
+
+    int shift = __builtin_clzll((unsigned long long) f.signif);
+    *exponent = f80_from_int(unbias_denormal(f.exp) - shift);
+    *significand = (float80) {
+        .signif = f.signif << shift,
+        .exp = bias(0),
+        .sign = f.sign,
+    };
 }

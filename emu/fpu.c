@@ -299,11 +299,11 @@ void fpu_cos(struct cpu_state *cpu) {
 }
 
 void fpu_xtract(struct cpu_state *cpu) {
-    int exp;
-    float80 signif;
-    f80_xtract(ST(0), &exp, &signif);
-    ST(0) = f80_from_int(exp);
-    fpush(signif);
+    float80 exponent;
+    float80 significand;
+    f80_xtract(ST(0), &exponent, &significand);
+    ST(0) = exponent;
+    fpush(significand);
 }
 
 void fpu_xam(struct cpu_state *cpu) {

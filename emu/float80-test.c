@@ -561,6 +561,137 @@ static float80 run_fyl2x(float80 x, float80 y) {
     return cpu.fp[cpu.top];
 }
 
+struct xtract_result {
+    float80 exponent;
+    float80 significand;
+};
+
+static struct xtract_result run_xtract(float80 input) {
+    struct xtract_result result;
+    f80_xtract(input, &result.exponent, &result.significand);
+    return result;
+}
+
+static void check_xtract_case(const char *name, float80 input,
+        float80 expected_exponent, float80 expected_significand) {
+    char description[128];
+    struct xtract_result actual = run_xtract(input);
+
+    snprintf(description, sizeof(description), "%s的指数", name);
+    check_f80(description, actual.exponent, expected_exponent);
+    snprintf(description, sizeof(description), "%s的有效数", name);
+    check_f80(description, actual.significand, expected_significand);
+
+    struct cpu_state cpu = {0};
+    cpu.top = 3;
+    cpu.fp[cpu.top] = input;
+    fpu_xtract(&cpu);
+    check(cpu.top == 2, "%s执行 FXTRACT 后栈顶应从 3 变为 2", name);
+    snprintf(description, sizeof(description), "%s的栈顶有效数", name);
+    check_f80(description, cpu.fp[2], expected_significand);
+    snprintf(description, sizeof(description), "%s的次栈顶指数", name);
+    check_f80(description, cpu.fp[3], expected_exponent);
+}
+
+static void test_xtract_golden(void) {
+    float80 positive_inf = F80_INF;
+    float80 negative_inf = f80_bits(UINT64_C(0x8000000000000000), 0xffff);
+    float80 signaling_nan = f80_bits(UINT64_C(0x8000000000000042), 0x7fff);
+    float80 negative_signaling_nan =
+        f80_bits(UINT64_C(0x8000000000001234), 0xffff);
+    float80 quiet_nan = f80_bits(UINT64_C(0xd000000000000077), 0x7fff);
+    float80 quieted_nan = f80_bits(UINT64_C(0xc000000000000042), 0x7fff);
+    float80 negative_quieted_nan =
+        f80_bits(UINT64_C(0xc000000000001234), 0xffff);
+    float80 negative_zero = f80_bits(0, 0x8000);
+
+    suite_start("指数与有效数拆分边界");
+    for (enum f80_rounding_mode mode = round_to_nearest;
+            mode <= round_chop; mode++) {
+        char name[96];
+        f80_rounding_mode = mode;
+
+        snprintf(name, sizeof(name), "正六（%s）", rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0xc000000000000000), 0x4001),
+            f80_from_int(2),
+            f80_bits(UINT64_C(0xc000000000000000), 0x3fff));
+        snprintf(name, sizeof(name), "负六（%s）", rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0xc000000000000000), 0xc001),
+            f80_from_int(2),
+            f80_bits(UINT64_C(0xc000000000000000), 0xbfff));
+        snprintf(name, sizeof(name), "最小正常数（%s）", rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0x8000000000000000), 0x0001),
+            f80_from_int(-16382),
+            f80_bits(UINT64_C(0x8000000000000000), 0x3fff));
+        snprintf(name, sizeof(name), "最小子正常数（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(1, 0x0000), f80_from_int(-16445),
+            f80_bits(UINT64_C(0x8000000000000000), 0x3fff));
+        snprintf(name, sizeof(name), "负最小子正常数（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(1, 0x8000), f80_from_int(-16445),
+            f80_bits(UINT64_C(0x8000000000000000), 0xbfff));
+        snprintf(name, sizeof(name), "最大子正常数（%s）", rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0x7fffffffffffffff), 0x0000),
+            f80_from_int(-16383),
+            f80_bits(UINT64_C(0xfffffffffffffffe), 0x3fff));
+
+        uint64_t denormal_signif = UINT64_C(0x0123456789abcdef);
+        int shift = __builtin_clzll((unsigned long long) denormal_signif);
+        snprintf(name, sizeof(name), "普通子正常数（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(denormal_signif, 0x0000),
+            f80_from_int(-16382 - shift),
+            f80_bits(denormal_signif << shift, 0x3fff));
+
+        snprintf(name, sizeof(name), "正零（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(0, 0x0000), negative_inf,
+            f80_bits(0, 0x0000));
+        snprintf(name, sizeof(name), "负零（%s）", rounding_name(mode));
+        check_xtract_case(name, negative_zero, negative_inf, negative_zero);
+        snprintf(name, sizeof(name), "正无穷（%s）", rounding_name(mode));
+        check_xtract_case(name, positive_inf, positive_inf, positive_inf);
+        snprintf(name, sizeof(name), "负无穷（%s）", rounding_name(mode));
+        check_xtract_case(name, negative_inf, positive_inf, negative_inf);
+        snprintf(name, sizeof(name), "正信号 NaN（%s）", rounding_name(mode));
+        check_xtract_case(name, signaling_nan, quieted_nan, quieted_nan);
+        snprintf(name, sizeof(name), "负信号 NaN（%s）", rounding_name(mode));
+        check_xtract_case(name, negative_signaling_nan,
+            negative_quieted_nan, negative_quieted_nan);
+        snprintf(name, sizeof(name), "安静 NaN（%s）", rounding_name(mode));
+        check_xtract_case(name, quiet_nan, quiet_nan, quiet_nan);
+        snprintf(name, sizeof(name), "缺少整数位（%s）", rounding_name(mode));
+        check_xtract_case(name, f80_bits(0, 0x3fff), F80_NAN, F80_NAN);
+        snprintf(name, sizeof(name), "伪子正常编码（%s）", rounding_name(mode));
+        check_xtract_case(name,
+            f80_bits(UINT64_C(0x8000000000000000), 0x0000),
+            F80_NAN, F80_NAN);
+        snprintf(name, sizeof(name), "特殊指数缺少整数位（%s）",
+            rounding_name(mode));
+        check_xtract_case(name, f80_bits(1, 0x7fff), F80_NAN, F80_NAN);
+    }
+
+    f80_rounding_mode = round_to_nearest;
+    for (unsigned exp = 1; exp <= 0x7ffe; exp++) {
+        struct xtract_result actual = run_xtract(
+            f80_bits(UINT64_C(0x8000000000000000), (uint16_t) exp));
+        check(f80_same(actual.exponent, f80_from_int((int) exp - 0x3fff)) &&
+                f80_same(actual.significand,
+                    f80_bits(UINT64_C(0x8000000000000000), 0x3fff)),
+            "正常二次幂拆分错误（存储指数=%u）", exp);
+    }
+    for (int bit = 0; bit < 63; bit++) {
+        struct xtract_result actual = run_xtract(
+            f80_bits(UINT64_C(1) << bit, 0x0000));
+        check(f80_same(actual.exponent, f80_from_int(-16445 + bit)) &&
+                f80_same(actual.significand,
+                    f80_bits(UINT64_C(0x8000000000000000), 0x3fff)),
+            "子正常二次幂拆分错误（位=%d）", bit);
+    }
+    suite_end("指数与有效数拆分边界");
+}
+
 static void test_log2_golden(void) {
     float80 zero = f80_bits(0, 0x0000);
     float80 neg_zero = f80_bits(0, 0x8000);
@@ -859,6 +990,53 @@ static uint64_t next_random(void) {
     random_state ^= random_state >> 7;
     random_state ^= random_state << 17;
     return random_state;
+}
+
+static void test_xtract_properties(void) {
+    float80 two = f80_from_int(2);
+
+    suite_start("指数拆分固定种子性质");
+    random_state = UINT64_C(0xeb2f572489a31d6c);
+    for (int i = 0; i < 10000; i++) {
+        uint64_t significand = next_random();
+        uint16_t exp;
+        if (i & 1) {
+            significand |= UINT64_C(1) << 63;
+            exp = (uint16_t) (1 + next_random() % 0x7ffe);
+        } else {
+            significand &= UINT64_MAX >> 1;
+            if (significand == 0)
+                significand = 1;
+            exp = 0;
+        }
+        uint16_t sign = (uint16_t) ((next_random() & 1) << 15);
+        float80 input = f80_bits(significand, (uint16_t) (exp | sign));
+        struct xtract_result actual = run_xtract(input);
+        int shift = __builtin_clzll((unsigned long long) significand);
+        int integer = (int) (exp == 0 ? 1 : exp) - 0x3fff - shift;
+
+        check_f80("随机输入的真指数",
+            actual.exponent, f80_from_int(integer));
+        check(actual.significand.exp == 0x3fff &&
+                actual.significand.sign == input.sign &&
+                actual.significand.signif == significand << shift,
+            "随机输入的规格化有效数错误（序号=%d）", i);
+
+        for (enum f80_rounding_mode mode = round_to_nearest;
+                mode <= round_chop; mode++) {
+            f80_rounding_mode = mode;
+            check_f80("FXTRACT 后经 FSCALE 应精确重建原值",
+                f80_scale_by_float(actual.significand, actual.exponent), input);
+        }
+
+        f80_rounding_mode = round_to_nearest;
+        float80 exponent_via_fyl2x = run_fyl2x(two, actual.exponent);
+        check_f80("FYL2X 应精确传递拆出的整数指数",
+            exponent_via_fyl2x, actual.exponent);
+        check_f80("经 FYL2X 传递指数后 FSCALE 仍应精确重建原值",
+            f80_scale_by_float(actual.significand, exponent_via_fyl2x), input);
+    }
+    suite_end("指数拆分固定种子性质");
 }
 
 static void test_log2_properties(void) {
@@ -1501,6 +1679,8 @@ int main(void) {
     test_arithmetic_golden();
     test_add_subnormal_golden();
     test_mod_golden();
+    test_xtract_golden();
+    test_xtract_properties();
     test_log2_golden();
     test_log2_properties();
     test_scale_golden();

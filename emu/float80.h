@@ -51,8 +51,8 @@ float80 f80_sqrt(float80 x);
 float80 f80_scale(float80 x, int scale);
 float80 f80_scale_by_float(float80 x, float80 scale);
 
-// Used to implement fxtract
-void f80_xtract(float80 f, int *exp, float80 *signif);
+// 拆出的两个结果可直接作为浮点栈值交给 FYL2X 与 FSCALE 等后续指令。
+void f80_xtract(float80 f, float80 *exponent, float80 *significand);
 
 enum f80_rounding_mode {
     round_to_nearest = 0,
