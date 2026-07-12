@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -15,6 +17,14 @@
     } \
 } while (0)
 
+struct close_gate {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool entered;
+    bool released;
+    unsigned observed_refcount;
+};
+
 struct io_probe {
     const char *input;
     size_t input_size;
@@ -30,6 +40,8 @@ struct io_probe {
     int path_error;
     qword_t inode;
     const char *path;
+    struct close_gate *close_gate;
+    unsigned close_calls;
 };
 
 struct task_fixture {
@@ -39,8 +51,25 @@ struct task_fixture {
     struct mount mount;
 };
 
+static void wait_for_concurrent_close(struct fd *fd) {
+    struct io_probe *probe = fd->data;
+    struct close_gate *gate = probe->close_gate;
+    if (gate == NULL)
+        return;
+
+    assert(pthread_mutex_lock(&gate->mutex) == 0);
+    gate->entered = true;
+    assert(pthread_cond_signal(&gate->cond) == 0);
+    while (!gate->released)
+        assert(pthread_cond_wait(&gate->cond, &gate->mutex) == 0);
+    gate->observed_refcount = atomic_load_explicit(
+            &fd->refcount, memory_order_relaxed);
+    assert(pthread_mutex_unlock(&gate->mutex) == 0);
+}
+
 static ssize_t probe_read(struct fd *fd, void *buffer, size_t size) {
     struct io_probe *probe = fd->data;
+    wait_for_concurrent_close(fd);
     probe->read_calls++;
     if (probe->read_error != 0)
         return probe->read_error;
@@ -51,6 +80,7 @@ static ssize_t probe_read(struct fd *fd, void *buffer, size_t size) {
 
 static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
     struct io_probe *probe = fd->data;
+    wait_for_concurrent_close(fd);
     probe->write_calls++;
     if (probe->write_error != 0)
         return probe->write_error;
@@ -83,10 +113,22 @@ static off_t_ probe_lseek(struct fd *fd, off_t_ offset, int whence) {
 
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct io_probe *probe = fd->data;
+    wait_for_concurrent_close(fd);
     if (probe->stat_error != 0)
         return probe->stat_error;
     stat->inode = probe->inode;
     stat->mode = S_IFREG | 0644;
+    return 0;
+}
+
+static int probe_getflags(struct fd *fd) {
+    wait_for_concurrent_close(fd);
+    return fd->flags;
+}
+
+static int probe_close(struct fd *fd) {
+    struct io_probe *probe = fd->data;
+    probe->close_calls++;
     return 0;
 }
 
@@ -101,6 +143,8 @@ static int probe_getpath(struct fd *fd, char *buffer) {
 static const struct fd_ops direct_ops = {
     .read = probe_read,
     .write = probe_write,
+    .close = probe_close,
+    .getflags = probe_getflags,
 };
 
 static const struct fd_ops positioned_ops = {
@@ -138,6 +182,116 @@ static struct fd *make_fd(struct task_fixture *fixture,
     fd->mount = &fixture->mount;
     fixture->mount.refcount++;
     return fd;
+}
+
+enum close_race_operation {
+    CLOSE_RACE_READ,
+    CLOSE_RACE_WRITE,
+    CLOSE_RACE_WRITE_CHECK,
+    CLOSE_RACE_FSTAT,
+};
+
+struct close_race_context {
+    struct task *task;
+    enum close_race_operation operation;
+    fd_t fd_number;
+    ssize_t result;
+};
+
+static void *run_close_race_operation(void *opaque) {
+    struct close_race_context *context = opaque;
+    char byte = 'x';
+    struct statbuf stat;
+    switch (context->operation) {
+        case CLOSE_RACE_READ:
+            context->result = file_read_task(context->task,
+                    context->fd_number, &byte, sizeof(byte));
+            break;
+        case CLOSE_RACE_WRITE:
+            context->result = file_write_task(context->task,
+                    context->fd_number, &byte, sizeof(byte));
+            break;
+        case CLOSE_RACE_WRITE_CHECK:
+            context->result = file_write_check_task(
+                    context->task, context->fd_number);
+            break;
+        case CLOSE_RACE_FSTAT:
+            context->result = file_fstat_task(
+                    context->task, context->fd_number, &stat);
+            break;
+    }
+    return NULL;
+}
+
+static bool test_close_during_operation(struct task_fixture *fixture,
+        enum close_race_operation operation) {
+    struct close_gate gate = {0};
+    if (pthread_mutex_init(&gate.mutex, NULL) != 0)
+        return false;
+    if (pthread_cond_init(&gate.cond, NULL) != 0) {
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    struct io_probe probe = {
+        .input = "r",
+        .input_size = 1,
+        .inode = 3,
+        .close_gate = &gate,
+    };
+    struct fd *fd = make_fd(
+            fixture, &probe, &direct_ops, S_IFREG);
+    if (fd == NULL) {
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+    fd->flags = O_RDWR_;
+    fd_t fd_number = f_install_task(&fixture->task, fd, 0);
+    if (fd_number < 0) {
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    struct close_race_context context = {
+        .task = &fixture->task,
+        .operation = operation,
+        .fd_number = fd_number,
+        .result = _EIO,
+    };
+    pthread_t thread;
+    if (pthread_create(
+            &thread, NULL, run_close_race_operation, &context) != 0) {
+        f_close_task(&fixture->task, fd_number);
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    assert(pthread_mutex_lock(&gate.mutex) == 0);
+    while (!gate.entered)
+        assert(pthread_cond_wait(&gate.cond, &gate.mutex) == 0);
+    assert(pthread_mutex_unlock(&gate.mutex) == 0);
+
+    int close_result = f_close_task(&fixture->task, fd_number);
+    bool retained_during_close = probe.close_calls == 0;
+
+    assert(pthread_mutex_lock(&gate.mutex) == 0);
+    gate.released = true;
+    assert(pthread_cond_signal(&gate.cond) == 0);
+    assert(pthread_mutex_unlock(&gate.mutex) == 0);
+    bool joined = pthread_join(thread, NULL) == 0;
+
+    ssize_t expected = operation == CLOSE_RACE_READ ||
+            operation == CLOSE_RACE_WRITE ? 1 : 0;
+    bool passed = close_result == 0 && retained_during_close && joined &&
+            context.result == expected && gate.observed_refcount == 1 &&
+            probe.close_calls == 1 &&
+            f_get_task(&fixture->task, fd_number) == NULL;
+    assert(pthread_cond_destroy(&gate.cond) == 0);
+    assert(pthread_mutex_destroy(&gate.mutex) == 0);
+    return passed;
 }
 
 int main(void) {
@@ -190,6 +344,17 @@ int main(void) {
     CHECK(f_install_task(&target.task, directory_fd, 0) == 2, "目录 fd 安装成功");
     CHECK(f_install_task(&target.task, empty_fd, 0) == 3, "空操作 fd 安装成功");
     current = &decoy.task;
+
+    const enum close_race_operation close_races[] = {
+        CLOSE_RACE_READ,
+        CLOSE_RACE_WRITE,
+        CLOSE_RACE_WRITE_CHECK,
+        CLOSE_RACE_FSTAT,
+    };
+    for (size_t index = 0; index < array_size(close_races); index++) {
+        CHECK(test_close_during_operation(&target, close_races[index]),
+                "fd 表并发关闭不得释放正在操作的文件对象");
+    }
 
     char buffer[16] = {0};
     CHECK(file_read_task(&target.task, 0, buffer, 4) == 4,

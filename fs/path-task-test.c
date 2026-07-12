@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,15 @@
         return 1; \
     } \
 } while (0)
+
+struct path_close_gate {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool entered;
+    bool released;
+    unsigned observed_refcount;
+    unsigned close_calls;
+};
 
 struct open_probe {
     char last_path[MAX_PATH];
@@ -44,6 +55,7 @@ struct file_state {
     struct open_probe *probe;
     const char *path;
     bool owned_path;
+    struct path_close_gate *close_gate;
 };
 
 struct task_fixture {
@@ -56,12 +68,30 @@ struct task_fixture {
 
 static int probe_close(struct fd *fd) {
     struct file_state *state = fd->data;
+    if (state != NULL && state->close_gate != NULL)
+        state->close_gate->close_calls++;
     if (state != NULL && state->owned_path) {
         state->probe->closes++;
         free((void *) state->path);
         free(state);
     }
     return 0;
+}
+
+static void wait_for_path_close(struct fd *fd) {
+    struct file_state *state = fd->data;
+    struct path_close_gate *gate = state->close_gate;
+    if (gate == NULL)
+        return;
+
+    assert(pthread_mutex_lock(&gate->mutex) == 0);
+    gate->entered = true;
+    assert(pthread_cond_signal(&gate->cond) == 0);
+    while (!gate->released)
+        assert(pthread_cond_wait(&gate->cond, &gate->mutex) == 0);
+    gate->observed_refcount = atomic_load_explicit(
+            &fd->refcount, memory_order_relaxed);
+    assert(pthread_mutex_unlock(&gate->mutex) == 0);
 }
 
 static const struct fd_ops probe_fd_ops = {
@@ -117,6 +147,7 @@ static int probe_stat(struct mount *mount, const char *path, struct statbuf *sta
 
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct file_state *state = fd->data;
+    wait_for_path_close(fd);
     strcpy(state->probe->last_fstat_path, state->path);
     *stat = (struct statbuf) {
         .inode = 2,
@@ -129,6 +160,7 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
 
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct file_state *state = fd->data;
+    wait_for_path_close(fd);
     strcpy(buffer, state->path);
     return 0;
 }
@@ -238,6 +270,114 @@ static bool init_fixture(struct task_fixture *fixture, struct mount *mount,
     return true;
 }
 
+enum path_close_race_operation {
+    PATH_CLOSE_RACE_STATAT,
+    PATH_CLOSE_RACE_EMPTY_STATAT,
+    PATH_CLOSE_RACE_OPENAT,
+};
+
+struct path_close_race_context {
+    struct task *task;
+    enum path_close_race_operation operation;
+    fd_t dirfd;
+    sqword_t result;
+};
+
+static void *run_path_close_race(void *opaque) {
+    struct path_close_race_context *context = opaque;
+    struct statbuf stat;
+    switch (context->operation) {
+        case PATH_CLOSE_RACE_STATAT:
+            context->result = file_statat_task(context->task,
+                    context->dirfd, "nested", 0, &stat);
+            break;
+        case PATH_CLOSE_RACE_EMPTY_STATAT:
+            context->result = file_statat_task(context->task,
+                    context->dirfd, "", AT_EMPTY_PATH_, &stat);
+            break;
+        case PATH_CLOSE_RACE_OPENAT:
+            context->result = file_openat_task(context->task,
+                    context->dirfd, "nested", O_RDONLY_, 0);
+            break;
+    }
+    return NULL;
+}
+
+static bool test_path_close_during_operation(struct task_fixture *fixture,
+        struct mount *mount, struct open_probe *probe,
+        enum path_close_race_operation operation) {
+    struct path_close_gate gate = {0};
+    if (pthread_mutex_init(&gate.mutex, NULL) != 0)
+        return false;
+    if (pthread_cond_init(&gate.cond, NULL) != 0) {
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    struct file_state state;
+    struct fd *directory = make_path_fd(
+            mount, &state, probe, "/race");
+    if (directory == NULL) {
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+    state.close_gate = &gate;
+    fd_t dirfd = f_install_task(&fixture->task, directory, 0);
+    if (dirfd < 0) {
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    struct path_close_race_context context = {
+        .task = &fixture->task,
+        .operation = operation,
+        .dirfd = dirfd,
+        .result = _EIO,
+    };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL,
+            run_path_close_race, &context) != 0) {
+        f_close_task(&fixture->task, dirfd);
+        pthread_cond_destroy(&gate.cond);
+        pthread_mutex_destroy(&gate.mutex);
+        return false;
+    }
+
+    assert(pthread_mutex_lock(&gate.mutex) == 0);
+    while (!gate.entered)
+        assert(pthread_cond_wait(&gate.cond, &gate.mutex) == 0);
+    assert(pthread_mutex_unlock(&gate.mutex) == 0);
+
+    int close_result = f_close_task(&fixture->task, dirfd);
+    bool retained_during_close = gate.close_calls == 0;
+
+    assert(pthread_mutex_lock(&gate.mutex) == 0);
+    gate.released = true;
+    assert(pthread_cond_signal(&gate.cond) == 0);
+    assert(pthread_mutex_unlock(&gate.mutex) == 0);
+    bool joined = pthread_join(thread, NULL) == 0;
+
+    bool operation_succeeded = context.result == 0;
+    if (operation == PATH_CLOSE_RACE_OPENAT) {
+        operation_succeeded = context.result >= 0 &&
+                f_close_task(&fixture->task, (fd_t) context.result) == 0;
+    }
+    const char *observed_path = operation == PATH_CLOSE_RACE_STATAT ?
+            probe->last_stat_path : operation == PATH_CLOSE_RACE_OPENAT ?
+            probe->last_path : probe->last_fstat_path;
+    const char *expected_path = operation == PATH_CLOSE_RACE_EMPTY_STATAT ?
+            "/race" : "/race/nested";
+    bool passed = close_result == 0 && retained_during_close && joined &&
+            operation_succeeded && strcmp(observed_path, expected_path) == 0 &&
+            gate.observed_refcount == 1 && gate.close_calls == 1 &&
+            f_get_task(&fixture->task, dirfd) == NULL;
+    assert(pthread_cond_destroy(&gate.cond) == 0);
+    assert(pthread_mutex_destroy(&gate.mutex) == 0);
+    return passed;
+}
+
 int main(void) {
     struct open_probe probe = {
         .owner = 1000,
@@ -283,6 +423,18 @@ int main(void) {
     CHECK(f_install_task(&target.task, explicit_dir, 0) == 0,
             "显式目录 fd 安装成功");
     current = &decoy.task;
+
+    const enum path_close_race_operation path_close_races[] = {
+        PATH_CLOSE_RACE_STATAT,
+        PATH_CLOSE_RACE_EMPTY_STATAT,
+        PATH_CLOSE_RACE_OPENAT,
+    };
+    for (size_t index = 0;
+            index < array_size(path_close_races); index++) {
+        CHECK(test_path_close_during_operation(&target,
+                mount, &probe, path_close_races[index]),
+                "并发关闭 dirfd 不得中断 statat/openat 路径解析");
+    }
 
     CHECK(path_normalize_task(&target.task, AT_PWD, "child", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/target/child") == 0,
@@ -652,7 +804,7 @@ int main(void) {
     fd_close(decoy.root);
     fd_close(target.pwd);
     fd_close(target.root);
-    CHECK(probe.opens == 10 && probe.closes == 10,
+    CHECK(probe.opens == 11 && probe.closes == 11,
             "所有成功、拒绝和超限打开都恰好关闭一次");
     CHECK(mount->refcount == 1, "清理阶段仅保留测试持有的 mount 引用");
     mount_release(mount);

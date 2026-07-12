@@ -7,10 +7,11 @@
 #include "kernel/fs.h"
 #include "kernel/task.h"
 
-static struct fd *at_fd_task(struct task *task, fd_t fd_number) {
+static struct fd *at_fd_task_retain(
+        struct task *task, fd_t fd_number) {
     if (fd_number == AT_FDCWD_)
         return AT_PWD;
-    return f_get_task(task, fd_number);
+    return f_get_task_retain(task, fd_number);
 }
 
 static void apply_umask_task(struct task *task, mode_t_ *mode) {
@@ -39,7 +40,11 @@ ssize_t file_read_fd(struct fd *fd, void *buffer, size_t size) {
 
 ssize_t file_read_task(struct task *task, fd_t fd_number,
         void *buffer, size_t size) {
-    return file_read_fd(f_get_task(task, fd_number), buffer, size);
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    ssize_t result = file_read_fd(fd, buffer, size);
+    if (fd != NULL)
+        fd_close(fd);
+    return result;
 }
 
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
@@ -59,7 +64,11 @@ ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
 
 ssize_t file_write_task(struct task *task, fd_t fd_number,
         const void *buffer, size_t size) {
-    return file_write_fd(f_get_task(task, fd_number), buffer, size);
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    ssize_t result = file_write_fd(fd, buffer, size);
+    if (fd != NULL)
+        fd_close(fd);
+    return result;
 }
 
 sqword_t file_lseek_task(
@@ -109,7 +118,11 @@ int file_read_check_fd(struct fd *fd) {
 }
 
 int file_write_check_task(struct task *task, fd_t fd_number) {
-    return file_write_check_fd(f_get_task(task, fd_number));
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    int result = file_write_check_fd(fd);
+    if (fd != NULL)
+        fd_close(fd);
+    return result;
 }
 
 static int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
@@ -120,7 +133,11 @@ static int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
 }
 
 int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
-    return file_fstat_fd(f_get_task(task, fd_number), stat);
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    int result = file_fstat_fd(fd, stat);
+    if (fd != NULL)
+        fd_close(fd);
+    return result;
 }
 
 int file_statat_task(struct task *task, fd_t dirfd,
@@ -132,31 +149,35 @@ int file_statat_task(struct task *task, fd_t dirfd,
         if (!(flags & AT_EMPTY_PATH_))
             return _ENOENT;
         struct fd *fd;
-        bool retained = false;
         if (dirfd == AT_FDCWD_) {
             lock(&task->fs->lock);
             fd = fd_retain(task->fs->pwd);
             unlock(&task->fs->lock);
-            retained = true;
         } else {
-            fd = f_get_task(task, dirfd);
+            fd = f_get_task_retain(task, dirfd);
         }
         if (fd == NULL)
             return _EBADF;
         int error = file_fstat_fd(fd, stat);
-        if (retained)
-            fd_close(fd);
+        fd_close(fd);
         return error;
     }
 
     // 绝对路径和 openat 一样从目标 root 解析，不检查传入的 dirfd。
-    struct fd *at = path[0] == '/' ? AT_PWD : at_fd_task(task, dirfd);
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
     if (at == NULL)
         return _EBADF;
-    if (at != AT_PWD && !S_ISDIR(at->type))
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
         return _ENOTDIR;
-    return generic_statat_task(task, at, path, stat,
+    }
+    int result = generic_statat_task(task, at, path, stat,
             !(flags & AT_SYMLINK_NOFOLLOW_));
+    if (retained)
+        fd_close(at);
+    return result;
 }
 
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size) {
@@ -278,12 +299,18 @@ fd_t file_openat_task(struct task *task, fd_t dirfd,
     }
 
     // 绝对路径从目标任务根目录解析，Linux 不检查传入的 dirfd。
-    struct fd *at = path[0] == '/' ? AT_PWD : at_fd_task(task, dirfd);
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
     if (at == NULL)
         return _EBADF;
-    if (at != AT_PWD && !S_ISDIR(at->type))
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
         return _ENOTDIR;
+    }
     struct fd *fd = generic_openat_task(task, at, path, flags, mode);
+    if (retained)
+        fd_close(at);
     if (IS_ERR(fd))
         return (fd_t) PTR_ERR(fd);
     return f_install_task(task, fd, flags);
