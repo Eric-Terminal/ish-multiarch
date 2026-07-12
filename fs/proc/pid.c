@@ -279,11 +279,13 @@ static int proc_pid_fd_readlink(struct proc_entry *entry, char *buf) {
     struct task *task = proc_get_task(entry);
     if (task == NULL)
         return _ESRCH;
-    lock(&task->files->lock);
-    struct fd *fd = fdtable_get(task->files, entry->fd);
-    int err = generic_getpath(fd, buf);
-    unlock(&task->files->lock);
+    struct fd *fd = f_get_task_retain(task, entry->fd);
     proc_put_task(task);
+    if (fd == NULL)
+        return _ENOENT;
+
+    int err = generic_getpath(fd, buf);
+    fd_close(fd);
     return err;
 }
 
