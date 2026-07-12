@@ -1,7 +1,19 @@
 #include <assert.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "guest/memory/address-space.h"
+
+_Static_assert((GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE &
+        (GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE - 1)) == 0,
+        "独占保留粒度必须为二次幂");
+_Static_assert(GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE >= 16,
+        "独占保留粒度必须容纳成对独占访问");
+_Static_assert((GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT &
+        (GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT - 1)) == 0,
+        "独占记录桶数必须为二次幂");
+_Static_assert(GUEST_MEMORY_EXCLUSIVE_WAYS > 0,
+        "独占记录每组至少需要一路");
 
 void guest_address_space_init(struct guest_address_space *space,
         const struct guest_address_space_ops *ops, void *opaque,
@@ -21,6 +33,92 @@ void guest_address_space_init(struct guest_address_space *space,
 
 void guest_address_space_changed(struct guest_address_space *space) {
     space->generation++;
+    // 映射世代已经使旧令牌失效，可以一并重置保留记录。
+    memset(space->exclusive_records, 0, sizeof(space->exclusive_records));
+    memset(space->exclusive_next_way, 0, sizeof(space->exclusive_next_way));
+}
+
+static guest_addr_t exclusive_granule(guest_addr_t address) {
+    return address & ~(GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE - 1);
+}
+
+static unsigned exclusive_bucket(guest_addr_t granule_base) {
+    qword_t granule = granule_base >> GUEST_MEMORY_EXCLUSIVE_GRANULE_BITS;
+    granule ^= granule >> 17;
+    granule *= UINT64_C(0x9e3779b97f4a7c15);
+    granule ^= granule >> 32;
+    return (unsigned) (granule &
+            (GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT - 1));
+}
+
+static struct guest_exclusive_record *find_exclusive_record(
+        struct guest_address_space *space, guest_addr_t granule_base) {
+    struct guest_exclusive_record *records =
+            space->exclusive_records[exclusive_bucket(granule_base)];
+    for (unsigned way = 0; way < GUEST_MEMORY_EXCLUSIVE_WAYS; way++) {
+        if (records[way].generation != 0 &&
+                records[way].granule_base == granule_base)
+            return &records[way];
+    }
+    return NULL;
+}
+
+qword_t guest_address_space_track_exclusive(
+        struct guest_address_space *space, guest_addr_t address) {
+    guest_addr_t granule_base = exclusive_granule(address);
+    struct guest_exclusive_record *record =
+            find_exclusive_record(space, granule_base);
+    if (record == NULL) {
+        unsigned bucket = exclusive_bucket(granule_base);
+        for (unsigned way = 0; way < GUEST_MEMORY_EXCLUSIVE_WAYS; way++) {
+            if (space->exclusive_records[bucket][way].generation == 0) {
+                record = &space->exclusive_records[bucket][way];
+                break;
+            }
+        }
+        if (record == NULL) {
+            unsigned way = space->exclusive_next_way[bucket]++ %
+                    GUEST_MEMORY_EXCLUSIVE_WAYS;
+            record = &space->exclusive_records[bucket][way];
+        }
+        *record = (struct guest_exclusive_record) {
+            .granule_base = granule_base,
+            .generation = ++space->exclusive_sequence,
+        };
+    }
+    return record->generation;
+}
+
+bool guest_address_space_exclusive_matches(
+        const struct guest_address_space *space, guest_addr_t address,
+        qword_t generation) {
+    guest_addr_t granule_base = exclusive_granule(address);
+    const struct guest_exclusive_record *records =
+            space->exclusive_records[exclusive_bucket(granule_base)];
+    for (unsigned way = 0; way < GUEST_MEMORY_EXCLUSIVE_WAYS; way++) {
+        if (generation != 0 && records[way].generation == generation &&
+                records[way].granule_base == granule_base)
+            return true;
+    }
+    return false;
+}
+
+void guest_address_space_written(struct guest_address_space *space,
+        guest_addr_t address, size_t size) {
+    assert(size != 0);
+    assert(guest_address_space_contains(space, address, size));
+    guest_addr_t first = exclusive_granule(address);
+    guest_addr_t last = exclusive_granule(
+            address + (guest_addr_t) size - 1);
+    for (guest_addr_t granule = first;;
+            granule += GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE) {
+        struct guest_exclusive_record *record =
+                find_exclusive_record(space, granule);
+        if (record != NULL)
+            record->generation = ++space->exclusive_sequence;
+        if (granule == last)
+            break;
+    }
 }
 
 bool guest_address_space_read_lock(struct guest_address_space *space) {

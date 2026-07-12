@@ -1,4 +1,7 @@
 #include <assert.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "guest/aarch64/decode.h"
@@ -18,9 +21,34 @@ struct test_memory {
     byte_t data[GUEST_MEMORY_PAGE_SIZE];
     byte_t readonly[GUEST_MEMORY_PAGE_SIZE];
     struct test_page pages[2];
+    pthread_rwlock_t lock;
     struct guest_address_space space;
     struct guest_tlb tlb;
 };
+
+static bool read_lock(void *opaque) {
+    struct test_memory *memory = opaque;
+    assert(pthread_rwlock_rdlock(&memory->lock) == 0);
+    return true;
+}
+
+static void read_unlock(void *opaque, bool locked) {
+    struct test_memory *memory = opaque;
+    assert(locked);
+    assert(pthread_rwlock_unlock(&memory->lock) == 0);
+}
+
+static bool write_lock(void *opaque) {
+    struct test_memory *memory = opaque;
+    assert(pthread_rwlock_wrlock(&memory->lock) == 0);
+    return true;
+}
+
+static void write_unlock(void *opaque, bool locked) {
+    struct test_memory *memory = opaque;
+    assert(locked);
+    assert(pthread_rwlock_unlock(&memory->lock) == 0);
+}
 
 static enum guest_memory_fault_kind resolve_test_page(void *opaque,
         guest_addr_t page_base, enum guest_memory_access access,
@@ -40,11 +68,16 @@ static enum guest_memory_fault_kind resolve_test_page(void *opaque,
 }
 
 static const struct guest_address_space_ops test_ops = {
+    .read_lock = read_lock,
+    .read_unlock = read_unlock,
+    .write_lock = write_lock,
+    .write_unlock = write_unlock,
     .resolve_page = resolve_test_page,
 };
 
 static void init_test_memory(struct test_memory *memory) {
     *memory = (struct test_memory) {0};
+    assert(pthread_rwlock_init(&memory->lock, NULL) == 0);
     memory->pages[0] = (struct test_page) {
         .address = DATA_PAGE,
         .host_page = memory->data,
@@ -57,6 +90,10 @@ static void init_test_memory(struct test_memory *memory) {
     };
     guest_address_space_init(&memory->space, &test_ops, memory, 48);
     guest_tlb_init(&memory->tlb, &memory->space);
+}
+
+static void destroy_test_memory(struct test_memory *memory) {
+    assert(pthread_rwlock_destroy(&memory->lock) == 0);
 }
 
 static dword_t encode_load(unsigned size_shift, bool acquire,
@@ -230,7 +267,10 @@ static void test_all_sizes(struct test_memory *memory) {
         assert(cpu.exclusive.address == DATA_PAGE + offset);
         assert(cpu.exclusive.size == size);
         assert(cpu.exclusive.value_low == original);
+        assert(cpu.exclusive.address_space == &memory->space);
         assert(cpu.exclusive.mapping_epoch == memory->space.generation);
+        assert(guest_address_space_exclusive_matches(&memory->space,
+                DATA_PAGE + offset, cpu.exclusive.write_epoch));
 
         cpu.x[3] = replacement;
         cpu.x[4] = UINT64_MAX;
@@ -281,7 +321,7 @@ static void test_monitor_failures(struct test_memory *memory) {
 
     cpu.x[0] = UINT32_C(0x12345678);
     assert_retired(memory, &cpu, UINT32_C(0xb9000020));
-    assert(!cpu.exclusive.valid);
+    assert(cpu.exclusive.valid);
     cpu.x[3] = UINT32_C(0x87654321);
     cpu.x[4] = UINT64_MAX;
     assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
@@ -317,6 +357,229 @@ static void test_monitor_failures(struct test_memory *memory) {
     cpu.x[4] = UINT64_MAX;
     assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
     assert(cpu.x[4] == 1);
+}
+
+static void test_aba_invalidates_reservation(struct test_memory *memory) {
+    size_t offset = 576;
+    put_value(memory->data + offset, 0, 4);
+    struct cpu_state cpu = {.pc = UINT64_C(0x2400)};
+    cpu.x[1] = DATA_PAGE + offset;
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    qword_t reservation_generation = cpu.exclusive.write_epoch;
+
+    byte_t intermediate[4];
+    byte_t original[4];
+    put_value(intermediate, 1, sizeof(intermediate));
+    put_value(original, 0, sizeof(original));
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset,
+            intermediate, sizeof(intermediate), &fault));
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset,
+            original, sizeof(original), &fault));
+    assert(!guest_address_space_exclusive_matches(&memory->space,
+            DATA_PAGE + offset, reservation_generation));
+
+    cpu.x[3] = 2;
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+    assert(get_value(memory->data + offset, 4) == 0);
+}
+
+static void test_same_granule_write_invalidates_reservation(
+        struct test_memory *memory) {
+    size_t offset = 608;
+    put_value(memory->data + offset, 3, 4);
+    struct cpu_state cpu = {.pc = UINT64_C(0x2600)};
+    cpu.x[1] = DATA_PAGE + offset;
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+
+    byte_t unrelated[4];
+    put_value(unrelated, 9, sizeof(unrelated));
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset + 8,
+            unrelated, sizeof(unrelated), &fault));
+    cpu.x[3] = 4;
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+    assert(get_value(memory->data + offset, 4) == 3);
+
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+    byte_t same_value[4];
+    put_value(same_value, 3, sizeof(same_value));
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset,
+            same_value, sizeof(same_value), &fault));
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 1);
+    assert(get_value(memory->data + offset, 4) == 3);
+}
+
+static void test_unrelated_store_preserves_reservation(
+        struct test_memory *memory) {
+    size_t reserved_offset = 768;
+    size_t unrelated_offset = 800;
+    put_value(memory->data + reserved_offset, 5, 4);
+    put_value(memory->data + unrelated_offset, 0, 4);
+    struct cpu_state cpu = {.pc = UINT64_C(0x2700)};
+    cpu.x[1] = DATA_PAGE + reserved_offset;
+    assert_retired(memory, &cpu, encode_load(2, false, 2, 1));
+
+    cpu.x[0] = 11;
+    cpu.x[1] = DATA_PAGE + unrelated_offset;
+    assert_retired(memory, &cpu, UINT32_C(0xb9000020));
+    assert(cpu.exclusive.valid);
+    assert(get_value(memory->data + unrelated_offset, 4) == 11);
+
+    cpu.x[1] = DATA_PAGE + reserved_offset;
+    cpu.x[3] = 6;
+    cpu.x[4] = UINT64_MAX;
+    assert_retired(memory, &cpu, encode_store(2, false, 4, 3, 1));
+    assert(cpu.x[4] == 0);
+    assert(get_value(memory->data + reserved_offset, 4) == 6);
+}
+
+static void test_exact_granule_tracking(struct test_memory *memory) {
+    enum { reservation_count = GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT + 1 };
+    memory->pages[1].permissions |= GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
+    memset(memory->data, 0, sizeof(memory->data));
+    memory->readonly[0] = 0;
+
+    struct guest_tlb_exclusive_token tokens[reservation_count];
+    byte_t values[reservation_count];
+    struct guest_memory_fault fault;
+    for (unsigned index = 0; index < reservation_count; index++) {
+        guest_addr_t address = DATA_PAGE +
+                index * GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE;
+        assert(guest_tlb_load_exclusive(&memory->tlb, address,
+                &values[index], 1, &tokens[index], &fault));
+        assert(values[index] == 0);
+    }
+
+    byte_t replacement = 1;
+    for (unsigned index = 0; index < reservation_count; index++) {
+        guest_addr_t address = DATA_PAGE +
+                index * GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE;
+        assert(guest_tlb_store_exclusive(&memory->tlb, address,
+                &values[index], &replacement, 1, tokens[index], &fault) ==
+                GUEST_TLB_EXCLUSIVE_STORED);
+    }
+
+    memory->pages[1].permissions &= ~GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
+}
+
+static void test_two_reservations_have_one_winner(
+        struct test_memory *memory) {
+    size_t offset = 832;
+    put_value(memory->data + offset, 0, 4);
+    struct cpu_state cpus[2] = {
+        {.pc = UINT64_C(0x2750)},
+        {.pc = UINT64_C(0x2750)},
+    };
+    for (unsigned index = 0; index < array_size(cpus); index++) {
+        cpus[index].x[1] = DATA_PAGE + offset;
+        assert_retired(memory, &cpus[index],
+                encode_load(2, true, 2, 1));
+        cpus[index].x[3] = index + 1;
+        cpus[index].x[4] = UINT64_MAX;
+    }
+
+    assert_retired(memory, &cpus[0], encode_store(2, true, 4, 3, 1));
+    assert_retired(memory, &cpus[1], encode_store(2, true, 4, 3, 1));
+    assert(cpus[0].x[4] == 0 && cpus[1].x[4] == 1);
+    assert(get_value(memory->data + offset, 4) == 1);
+}
+
+struct increment_context {
+    struct guest_tlb tlb;
+    struct aarch64_decoded load;
+    struct aarch64_decoded store;
+    atomic_bool *start;
+    atomic_uint *first_loads;
+    atomic_uint *failures;
+    guest_addr_t address;
+    unsigned participants;
+    unsigned iterations;
+};
+
+static void *increment_exclusively(void *opaque) {
+    struct increment_context *context = opaque;
+    struct cpu_state cpu = {0};
+    cpu.x[1] = context->address;
+    while (!atomic_load_explicit(context->start, memory_order_acquire)) {
+    }
+
+    for (unsigned iteration = 0; iteration < context->iterations;
+            iteration++) {
+        unsigned attempts = 0;
+        do {
+            struct aarch64_execute_result result = aarch64_execute(
+                    &cpu, &context->tlb, &context->load);
+            assert(result.stop == AARCH64_EXECUTE_RETIRED);
+            if (iteration == 0 && attempts == 0) {
+                atomic_fetch_add_explicit(context->first_loads, 1,
+                        memory_order_release);
+                while (atomic_load_explicit(context->first_loads,
+                        memory_order_acquire) != context->participants)
+                    sched_yield();
+            }
+            cpu.x[3] = (dword_t) cpu.x[2] + 1;
+            result = aarch64_execute(
+                    &cpu, &context->tlb, &context->store);
+            assert(result.stop == AARCH64_EXECUTE_RETIRED);
+            attempts++;
+            if (cpu.x[4] != 0) {
+                atomic_fetch_add_explicit(context->failures, 1,
+                        memory_order_relaxed);
+                sched_yield();
+            }
+            assert(attempts < 100000);
+        } while (cpu.x[4] != 0);
+    }
+    return NULL;
+}
+
+static void test_concurrent_increment(struct test_memory *memory) {
+    enum { thread_count = 2, iterations = 10000 };
+    size_t offset = 704;
+    byte_t zero[4] = {0};
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(&memory->tlb, DATA_PAGE + offset,
+            zero, sizeof(zero), &fault));
+
+    atomic_bool start;
+    atomic_uint first_loads;
+    atomic_uint failures;
+    atomic_init(&start, false);
+    atomic_init(&first_loads, 0);
+    atomic_init(&failures, 0);
+    struct increment_context contexts[thread_count];
+    pthread_t threads[thread_count];
+    for (unsigned index = 0; index < thread_count; index++) {
+        contexts[index] = (struct increment_context) {
+            .load = decode(encode_load(2, true, 2, 1)),
+            .store = decode(encode_store(2, true, 4, 3, 1)),
+            .start = &start,
+            .first_loads = &first_loads,
+            .failures = &failures,
+            .address = DATA_PAGE + offset,
+            .participants = thread_count,
+            .iterations = iterations,
+        };
+        guest_tlb_init(&contexts[index].tlb, &memory->space);
+        assert(pthread_create(&threads[index], NULL,
+                increment_exclusively, &contexts[index]) == 0);
+    }
+
+    atomic_store_explicit(&start, true, memory_order_release);
+    for (unsigned index = 0; index < thread_count; index++)
+        assert(pthread_join(threads[index], NULL) == 0);
+    assert(get_value(memory->data + offset, 4) ==
+            thread_count * iterations);
+    assert(atomic_load_explicit(&failures, memory_order_relaxed) != 0);
 }
 
 static void test_barrier_and_clrex(struct test_memory *memory) {
@@ -419,8 +682,15 @@ int main(void) {
     test_all_sizes(&memory);
     test_zero_register_and_sp(&memory);
     test_monitor_failures(&memory);
+    test_aba_invalidates_reservation(&memory);
+    test_same_granule_write_invalidates_reservation(&memory);
+    test_unrelated_store_preserves_reservation(&memory);
+    test_exact_granule_tracking(&memory);
+    test_two_reservations_have_one_winner(&memory);
+    test_concurrent_increment(&memory);
     test_barrier_and_clrex(&memory);
     test_faults(&memory);
     test_musl_lock_sequence(&memory);
+    destroy_test_memory(&memory);
     return 0;
 }

@@ -39,6 +39,7 @@ int main(void) {
 
     guest_address_space_init(&space, &test_ops, &mapping, 48);
     assert(space.generation == 1);
+    assert(space.exclusive_sequence == 0);
     assert(guest_address_space_contains(&space, TEST_PAGE,
             GUEST_MEMORY_PAGE_SIZE));
     assert(guest_address_space_contains(&space,
@@ -63,7 +64,47 @@ int main(void) {
             GUEST_MEMORY_READ, &view) == GUEST_MEMORY_FAULT_ALIGNMENT);
     assert(mapping.calls == 3);
 
+    qword_t first_generation;
+    qword_t adjacent_generation;
+    first_generation = guest_address_space_track_exclusive(
+            &space, TEST_PAGE);
+    adjacent_generation = guest_address_space_track_exclusive(&space,
+            TEST_PAGE + GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE);
+    assert(first_generation != adjacent_generation);
+    guest_address_space_written(&space, TEST_PAGE + 4, 1);
+    assert(!guest_address_space_exclusive_matches(
+            &space, TEST_PAGE, first_generation));
+    assert(guest_address_space_exclusive_matches(&space,
+            TEST_PAGE + GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE,
+            adjacent_generation));
+
     guest_address_space_changed(&space);
     assert(space.generation == 2);
+    assert(!guest_address_space_exclusive_matches(&space,
+            TEST_PAGE + GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE,
+            adjacent_generation));
+
+    enum {
+        reservation_capacity = GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT *
+                GUEST_MEMORY_EXCLUSIVE_WAYS,
+        reservation_count = reservation_capacity + 1,
+    };
+    qword_t generations[reservation_count];
+    for (unsigned index = 0; index < reservation_count; index++) {
+        guest_addr_t address = TEST_PAGE +
+                index * GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE;
+        generations[index] = guest_address_space_track_exclusive(
+                &space, address);
+    }
+    unsigned retained = 0;
+    for (unsigned index = 0; index < reservation_count; index++) {
+        guest_addr_t address = TEST_PAGE +
+                index * GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE;
+        if (guest_address_space_exclusive_matches(
+                &space, address, generations[index]))
+            retained++;
+    }
+    assert(retained != 0 && retained <= reservation_capacity &&
+            retained < reservation_count);
     return 0;
 }

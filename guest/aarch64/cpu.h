@@ -10,6 +10,8 @@
 #include <stddef.h>
 #endif
 
+struct guest_address_space;
+
 union aarch64_vector_reg {
     __uint128_t q;
     qword_t d[2];
@@ -27,7 +29,9 @@ struct aarch64_exclusive_monitor {
     guest_addr_t address;
     qword_t value_low;
     qword_t value_high;
+    const struct guest_address_space *address_space;
     qword_t mapping_epoch;
+    qword_t write_epoch;
     byte_t size;
     bool valid;
 };
@@ -128,19 +132,23 @@ static inline void aarch64_set_fpsr(struct cpu_state *cpu, dword_t fpsr) {
 }
 
 static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t address,
-        byte_t size, qword_t value_low, qword_t value_high, qword_t mapping_epoch) {
+        byte_t size, qword_t value_low, qword_t value_high,
+        const struct guest_address_space *address_space,
+        qword_t mapping_epoch, qword_t write_epoch) {
     cpu->exclusive.address = address;
     cpu->exclusive.size = size;
     cpu->exclusive.value_low = value_low;
     cpu->exclusive.value_high = value_high;
+    cpu->exclusive.address_space = address_space;
     cpu->exclusive.mapping_epoch = mapping_epoch;
+    cpu->exclusive.write_epoch = write_epoch;
     cpu->exclusive.valid = true;
 }
 
 static inline bool aarch64_exclusive_matches(const struct cpu_state *cpu,
-        guest_addr_t address, byte_t size, qword_t mapping_epoch) {
+        guest_addr_t address, byte_t size) {
     return cpu->exclusive.valid && cpu->exclusive.address == address &&
-            cpu->exclusive.size == size && cpu->exclusive.mapping_epoch == mapping_epoch;
+            cpu->exclusive.size == size;
 }
 
 static inline void aarch64_clear_exclusive(struct cpu_state *cpu) {

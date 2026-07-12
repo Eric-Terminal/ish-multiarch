@@ -387,6 +387,9 @@ static void test_independent_clone(void) {
         sibling_leaf[i] = (byte_t) (i * 41 + 13);
         sibling_level2[i] = (byte_t) (i * 43 + 17);
     }
+    qword_t source_reservation;
+    source_reservation = guest_address_space_track_exclusive(
+            &source.address_space, HIGH_PAGE);
 
     guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
     struct guest_page_table copy;
@@ -398,6 +401,10 @@ static void test_independent_clone(void) {
             source.address_space.address_bits);
     assert(copy.address_space.generation ==
             source.address_space.generation);
+    assert(guest_address_space_exclusive_matches(&source.address_space,
+            HIGH_PAGE, source_reservation));
+    assert(!guest_address_space_exclusive_matches(&copy.address_space,
+            HIGH_PAGE, source_reservation));
     assert(copy.address_space.opaque == &copy &&
             source.address_space.opaque == &source);
 

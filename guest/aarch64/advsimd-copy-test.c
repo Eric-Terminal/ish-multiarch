@@ -183,6 +183,7 @@ static struct cpu_state make_cpu(void) {
         .exclusive = {
             .address = UINT64_C(0x4000),
             .mapping_epoch = 7,
+            .write_epoch = 11,
             .size = 8,
             .valid = true,
         },

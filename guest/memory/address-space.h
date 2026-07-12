@@ -12,6 +12,13 @@
 #define GUEST_MEMORY_PAGE_BITS 12
 #define GUEST_MEMORY_PAGE_SIZE (UINT64_C(1) << GUEST_MEMORY_PAGE_BITS)
 #define GUEST_MEMORY_PAGE_MASK (GUEST_MEMORY_PAGE_SIZE - 1)
+#define GUEST_MEMORY_EXCLUSIVE_GRANULE_BITS 4
+#define GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE \
+    (UINT64_C(1) << GUEST_MEMORY_EXCLUSIVE_GRANULE_BITS)
+#define GUEST_MEMORY_EXCLUSIVE_BUCKET_BITS 6
+#define GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT \
+    (1 << GUEST_MEMORY_EXCLUSIVE_BUCKET_BITS)
+#define GUEST_MEMORY_EXCLUSIVE_WAYS 4
 
 enum guest_memory_access {
     GUEST_MEMORY_READ = 1 << 0,
@@ -51,10 +58,22 @@ struct guest_address_space_ops {
             struct guest_page_view *view);
 };
 
+struct guest_exclusive_record {
+    guest_addr_t granule_base;
+    qword_t generation;
+};
+
 struct guest_address_space {
     const struct guest_address_space_ops *ops;
     void *opaque;
     qword_t generation;
+    qword_t exclusive_sequence;
+    // 完整粒度 tag 隔离无关写；组满轮换只会让旧 STXR 保守失败。
+    // 固定容量同时避免 guest 用大量 LDXR 地址制造宿主内存增长。
+    struct guest_exclusive_record exclusive_records
+            [GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT]
+            [GUEST_MEMORY_EXCLUSIVE_WAYS];
+    byte_t exclusive_next_way[GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT];
     byte_t address_bits;
 };
 
@@ -62,6 +81,13 @@ void guest_address_space_init(struct guest_address_space *space,
         const struct guest_address_space_ops *ops, void *opaque,
         byte_t address_bits);
 void guest_address_space_changed(struct guest_address_space *space);
+qword_t guest_address_space_track_exclusive(
+        struct guest_address_space *space, guest_addr_t address);
+bool guest_address_space_exclusive_matches(
+        const struct guest_address_space *space, guest_addr_t address,
+        qword_t generation);
+void guest_address_space_written(struct guest_address_space *space,
+        guest_addr_t address, size_t size);
 bool guest_address_space_read_lock(struct guest_address_space *space);
 void guest_address_space_read_unlock(
         struct guest_address_space *space, bool locked);

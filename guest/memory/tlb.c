@@ -152,6 +152,44 @@ bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
     return true;
 }
 
+static bool exclusive_access_fits_granule(
+        guest_addr_t address, size_t size) {
+    assert(size != 0);
+    return size <= GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE -
+            (size_t) (address &
+                    (GUEST_MEMORY_EXCLUSIVE_GRANULE_SIZE - 1));
+}
+
+bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
+        guest_addr_t address, void *destination, size_t size,
+        struct guest_tlb_exclusive_token *token,
+        struct guest_memory_fault *fault) {
+    assert(token != NULL);
+    assert(size <= GUEST_TLB_MAX_ACCESS_SIZE);
+    assert(exclusive_access_fits_granule(address, size));
+    *token = (struct guest_tlb_exclusive_token) {0};
+    bool locked = guest_address_space_write_lock(tlb->address_space);
+    struct guest_tlb_access_chunk chunks[2];
+    unsigned chunk_count;
+    if (!prepare_access(tlb, address, size, GUEST_MEMORY_READ,
+            chunks, &chunk_count, fault)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return false;
+    }
+
+    byte_t *output = destination;
+    for (unsigned i = 0; i < chunk_count; i++) {
+        memcpy(output, chunks[i].host, chunks[i].size);
+        output += chunks[i].size;
+    }
+    token->address_space = tlb->address_space;
+    token->mapping_generation = tlb->address_space->generation;
+    token->write_generation = guest_address_space_track_exclusive(
+            tlb->address_space, address);
+    guest_address_space_write_unlock(tlb->address_space, locked);
+    return true;
+}
+
 bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
         const void *source, size_t size, struct guest_memory_fault *fault) {
     bool locked = guest_address_space_write_lock(tlb->address_space);
@@ -168,6 +206,51 @@ bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
         memcpy(chunks[i].host, input, chunks[i].size);
         input += chunks[i].size;
     }
+    if (size != 0)
+        guest_address_space_written(tlb->address_space, address, size);
     guest_address_space_write_unlock(tlb->address_space, locked);
     return true;
+}
+
+enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
+        struct guest_tlb *tlb, guest_addr_t address,
+        const void *expected, const void *replacement, size_t size,
+        struct guest_tlb_exclusive_token token,
+        struct guest_memory_fault *fault) {
+    assert(size != 0 && size <= GUEST_TLB_MAX_ACCESS_SIZE);
+    assert(exclusive_access_fits_granule(address, size));
+    bool locked = guest_address_space_write_lock(tlb->address_space);
+    if (tlb->address_space != token.address_space ||
+            tlb->address_space->generation != token.mapping_generation ||
+            !guest_address_space_exclusive_matches(tlb->address_space,
+                    address, token.write_generation)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_EXCLUSIVE_FAILED;
+    }
+
+    struct guest_tlb_access_chunk chunks[2];
+    unsigned chunk_count;
+    if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+            chunks, &chunk_count, fault)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_EXCLUSIVE_FAULT;
+    }
+
+    const byte_t *expected_bytes = expected;
+    for (unsigned i = 0; i < chunk_count; i++) {
+        if (memcmp(chunks[i].host, expected_bytes, chunks[i].size) != 0) {
+            guest_address_space_write_unlock(tlb->address_space, locked);
+            return GUEST_TLB_EXCLUSIVE_FAILED;
+        }
+        expected_bytes += chunks[i].size;
+    }
+
+    const byte_t *replacement_bytes = replacement;
+    for (unsigned i = 0; i < chunk_count; i++) {
+        memcpy(chunks[i].host, replacement_bytes, chunks[i].size);
+        replacement_bytes += chunks[i].size;
+    }
+    guest_address_space_written(tlb->address_space, address, size);
+    guest_address_space_write_unlock(tlb->address_space, locked);
+    return GUEST_TLB_EXCLUSIVE_STORED;
 }
