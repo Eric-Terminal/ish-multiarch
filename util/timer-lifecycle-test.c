@@ -487,6 +487,32 @@ static int test_absolute_deadline_is_not_rebased(void) {
     return 0;
 }
 
+static int test_deadline_slice_preserves_wide_absolute_time(void) {
+    const struct timer_time started = {
+        .sec = 100,
+        .nsec = 900000000,
+    };
+    const struct timer_time duration = {
+        .sec = (int64_t) INT32_MAX + 2,
+        .nsec = 500000000,
+    };
+    const struct timer_time deadline = timer_time_add(started, duration);
+    struct timespec slice;
+    CHECK(timer_time_deadline_slice(deadline, started, &slice) &&
+            slice.tv_sec == INT32_MAX && slice.tv_nsec == 0,
+            "超长 64 位期限的首个宿主分片不超过 32 位 time_t 上限");
+
+    const struct timer_time after_first_slice = timer_time_add(
+            started, (struct timer_time) {.sec = INT32_MAX});
+    CHECK(timer_time_deadline_slice(
+                    deadline, after_first_slice, &slice) &&
+            slice.tv_sec == 2 && slice.tv_nsec == 500000000,
+            "宿主分片结束后继续使用原绝对截止时间计算剩余时长");
+    CHECK(!timer_time_deadline_slice(deadline, deadline, &slice),
+            "达到绝对截止时间后不再创建等待分片");
+    return 0;
+}
+
 struct group_cleanup_state {
     atomic_uint callback_count;
 };
@@ -595,6 +621,9 @@ int main(void) {
             "64 位时间极值", test_timer_time_saturates_at_64_bit_limits);
     failures += !run_isolated(
             "绝对截止时间", test_absolute_deadline_is_not_rebased);
+    failures += !run_isolated(
+            "宽期限等待分片",
+            test_deadline_slice_preserves_wide_absolute_time);
     failures += !run_isolated(
             "线程组定时器清理", test_group_cleanup_retires_all_timers);
     return failures == 0 ? 0 : 1;

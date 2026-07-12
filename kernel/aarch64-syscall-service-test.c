@@ -1293,6 +1293,38 @@ int main(void) {
             UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
             0, 0) == encoded_error(_EINVAL),
             "ppoll 拒绝负的 64 位秒数");
+    poll_timeout.sec = 0;
+    poll_timeout.nsec = -1;
+    memcpy(memory.bytes + poll_timeout_offset,
+            &poll_timeout, sizeof(poll_timeout));
+    reset_user_access(&memory);
+    CHECK(invoke_five(&fixture, &memory, &fault, 73,
+            UINT64_MAX, 0, USER_BASE + poll_timeout_offset,
+            0, 0) == encoded_error(_EINVAL),
+            "ppoll 拒绝负的 64 位纳秒数");
+
+    poll_timeout = (struct aarch64_linux_timespec) {
+        .sec = (sqword_t) INT32_MAX + 123,
+        .nsec = 456789012,
+    };
+    struct pollfd_ wide_timeout_pollfd = {
+        .fd = 0,
+        .events = POLL_READ,
+        .revents = UINT16_MAX,
+    };
+    memcpy(memory.bytes + poll_timeout_offset,
+            &poll_timeout, sizeof(poll_timeout));
+    memcpy(memory.bytes + poll_offset,
+            &wide_timeout_pollfd, sizeof(wide_timeout_pollfd));
+    io.poll_events = POLL_READ;
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 73,
+            USER_BASE + poll_offset, 1,
+            USER_BASE + poll_timeout_offset, 0, 0);
+    memcpy(&wide_timeout_pollfd, memory.bytes + poll_offset,
+            sizeof(wide_timeout_pollfd));
+    CHECK(result == 1 && wide_timeout_pollfd.revents == POLL_READ,
+            "ppoll 接受超过 32 位 time_t 上限的 64 位超时且不阻塞就绪 fd");
 
     reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + poll_timeout_offset + 8;

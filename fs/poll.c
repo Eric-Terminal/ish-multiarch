@@ -297,27 +297,11 @@ static bool poll_timeout_valid(const struct timespec *timeout) {
 
 static bool poll_deadline_remaining(
         struct timer_time deadline, struct timespec *slice) {
-    struct timer_time remaining = timer_time_subtract(
-            deadline,
-            timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)));
-    if (!timer_time_positive(remaining))
-        return false;
-
-    if (slice != NULL) {
-        int64_t seconds = remaining.sec;
-        long nanoseconds = (long) remaining.nsec;
-        // watchOS arm64_32 的 time_t 只有 32 位；统一分片也避免把
-        // 过大的相对时长直接交给不同宿主后端。
-        if (seconds > INT32_MAX) {
-            seconds = INT32_MAX;
-            nanoseconds = 0;
-        }
-        *slice = (struct timespec) {
-            .tv_sec = (time_t) seconds,
-            .tv_nsec = nanoseconds,
-        };
-    }
-    return true;
+    struct timer_time now = timer_time_from_timespec(
+            timespec_now(CLOCK_MONOTONIC));
+    if (slice != NULL)
+        return timer_time_deadline_slice(deadline, now, slice);
+    return timer_time_positive(timer_time_subtract(deadline, now));
 }
 
 static int poll_wait_deadline(struct poll *poll_,

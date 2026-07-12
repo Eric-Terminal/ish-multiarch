@@ -857,18 +857,6 @@ static qword_t dispatch_ioctl(
     return syscall_result(result);
 }
 
-static struct timespec ppoll_host_timeout(
-        struct aarch64_linux_timespec timeout) {
-    sqword_t seconds = timeout.sec;
-    // watchOS arm64_32 的 time_t 为 32 位，超长等待以宿主最大单次时长执行。
-    if (sizeof(time_t) == sizeof(int32_t) && seconds > INT32_MAX)
-        seconds = INT32_MAX;
-    return (struct timespec) {
-        .tv_sec = (time_t) seconds,
-        .tv_nsec = (long) timeout.nsec,
-    };
-}
-
 static qword_t dispatch_pselect6(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -1076,8 +1064,8 @@ static qword_t dispatch_ppoll(
             nfds > UINT32_MAX / sizeof(struct pollfd_))
         return syscall_result(_EINVAL);
 
-    struct timespec timeout;
-    struct timespec *timeout_pointer = NULL;
+    struct timer_time deadline;
+    const struct timer_time *deadline_pointer = NULL;
     if (syscall->arguments[2] != 0) {
         struct aarch64_linux_timespec wire;
         if (!aarch64_user_range_fits(
@@ -1091,8 +1079,11 @@ static qword_t dispatch_ppoll(
         if (wire.sec < 0 || wire.nsec < 0 ||
                 wire.nsec >= INT64_C(1000000000))
             return syscall_result(_EINVAL);
-        timeout = ppoll_host_timeout(wire);
-        timeout_pointer = &timeout;
+        deadline = timer_time_add(
+                timer_time_from_timespec(
+                        timespec_now(CLOCK_MONOTONIC)),
+                (struct timer_time) {wire.sec, wire.nsec});
+        deadline_pointer = &deadline;
     }
 
     sigset_t_ mask = 0;
@@ -1130,8 +1121,8 @@ static qword_t dispatch_ppoll(
     bool has_mask = syscall->arguments[3] != 0;
     if (has_mask)
         sigmask_set_temp_task(task, mask);
-    sqword_t result = file_poll_task(
-            task, polls, (size_t) nfds, timeout_pointer);
+    sqword_t result = file_poll_until_task(
+            task, polls, (size_t) nfds, deadline_pointer);
     if (result >= 0 && byte_count != 0) {
         if (!aarch64_user_range_fits(syscall->arguments[0], byte_count)) {
             free(polls);

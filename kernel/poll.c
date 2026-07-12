@@ -265,8 +265,9 @@ static int poll_event_callback(void *context, int types, union poll_fd_info info
     return res;
 }
 
-sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
-        size_t nfds, struct timespec *timeout) {
+static sqword_t file_poll_task_wait(struct task *task,
+        struct pollfd_ *polls, size_t nfds, struct timespec *timeout,
+        const struct timer_time *deadline) {
     assert(task != NULL && task == current && task->sighand != NULL);
     struct fd **files = calloc(nfds, sizeof(*files));
     if (nfds != 0 && files == NULL)
@@ -319,10 +320,17 @@ sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
     }
     struct poll_context context = {polls, files, nfds};
     struct timespec immediate = {0};
-    if (invalid != 0)
+    if (invalid != 0) {
         timeout = &immediate;
-    error = poll_wait_signal_safe(
-            poll, poll_event_callback, &context, timeout);
+        deadline = NULL;
+    }
+    if (deadline != NULL) {
+        error = poll_wait_until_signal_safe(
+                poll, poll_event_callback, &context, deadline);
+    } else {
+        error = poll_wait_signal_safe(
+                poll, poll_event_callback, &context, timeout);
+    }
     if (error >= 0) {
         error = 0;
         for (size_t i = 0; i < nfds; i++)
@@ -337,6 +345,16 @@ out:
             fd_close(files[i]);
     free(files);
     return error;
+}
+
+sqword_t file_poll_task(struct task *task, struct pollfd_ *polls,
+        size_t nfds, struct timespec *timeout) {
+    return file_poll_task_wait(task, polls, nfds, timeout, NULL);
+}
+
+sqword_t file_poll_until_task(struct task *task, struct pollfd_ *polls,
+        size_t nfds, const struct timer_time *deadline) {
+    return file_poll_task_wait(task, polls, nfds, NULL, deadline);
 }
 
 dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout) {

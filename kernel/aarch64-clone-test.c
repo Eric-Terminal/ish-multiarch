@@ -366,35 +366,73 @@ static bool write_guest_timespec(struct aarch64_linux_process *process,
 static unsigned exercise_futex_edges(struct task *parent) {
     const qword_t word = STACK_TOP - UINT64_C(0x300);
     const qword_t timeout = word + 16;
+    const qword_t invalid = UINT64_C(1) << 48;
     struct guest_linux_user_fault fault = {0};
     if (!aarch64_linux_process_write_u32(
             parent->aarch64_process, word, 7, &fault))
         return 1;
+    fault.address = UINT64_MAX;
+    if (sys_futex_aarch64(word + 1, 128, 7,
+            invalid, 0, 0, &fault) != (dword_t) _EINVAL ||
+            fault.address != UINT64_MAX)
+        return 2;
+    if (sys_futex_aarch64(word + 1, 129, 1,
+            0, 0, 0, &fault) != (dword_t) _EINVAL)
+        return 3;
+    if (sys_futex_aarch64(word, 131, 0,
+            1, word + 1, 0, &fault) != (dword_t) _EINVAL ||
+            sys_futex_aarch64(word, 132, 0,
+                    1, word + 1, 7, &fault) != (dword_t) _EINVAL)
+        return 4;
+    if (sys_futex_aarch64(word, 129, 1,
+                    0, 0, 0, &fault) != 0 ||
+            sys_futex_aarch64(word + 4, 129, 1,
+                    0, 0, 0, &fault) != 0)
+        return 5;
     if (sys_futex_aarch64(word, 128, 8, 0, 0, 0, &fault) !=
             (dword_t) _EAGAIN)
-        return 2;
+        return 6;
 
-    const qword_t invalid = UINT64_C(1) << 48;
     fault = (struct guest_linux_user_fault) {0};
     if (sys_futex_aarch64(invalid, 128, 0, 0, 0, 0, &fault) !=
                     (dword_t) _EFAULT ||
             fault.address != invalid ||
             fault.access != GUEST_MEMORY_READ ||
             fault.kind != GUEST_MEMORY_FAULT_ADDRESS_SIZE)
-        return 3;
+        return 7;
 
     if (!write_guest_timespec(
             parent->aarch64_process, timeout, -1, 0) ||
             sys_futex_aarch64(word, 128, 7,
                     timeout, 0, 0, &fault) != (dword_t) _EINVAL)
-        return 4;
+        return 8;
+    if (!write_guest_timespec(
+            parent->aarch64_process, timeout, 0, -1) ||
+            sys_futex_aarch64(word, 128, 7,
+                    timeout, 0, 0, &fault) != (dword_t) _EINVAL)
+        return 9;
+    if (!write_guest_timespec(
+            parent->aarch64_process, timeout, 0, 1000000000) ||
+            sys_futex_aarch64(word, 128, 7,
+                    timeout, 0, 0, &fault) != (dword_t) _EINVAL)
+        return 10;
+    if (!write_guest_timespec(
+            parent->aarch64_process, timeout, 0, 0) ||
+            sys_futex_aarch64(word, 128, 7,
+                    timeout, 0, 0, &fault) != (dword_t) _ETIMEDOUT)
+        return 11;
+    if (!write_guest_timespec(parent->aarch64_process, timeout,
+            (sqword_t) INT32_MAX + 123, 456789012) ||
+            sys_futex_aarch64(word, 128, 8,
+                    timeout, 0, 0, &fault) != (dword_t) _EAGAIN)
+        return 12;
     if (!write_guest_timespec(
             parent->aarch64_process, timeout, 0, 1000000) ||
             sys_futex_aarch64(word, 128, 7,
                     timeout, 0, 0, &fault) != (dword_t) _ETIMEDOUT)
-        return 5;
+        return 13;
     return sys_futex_aarch64(
-            word, 129, 1, 0, 0, 0, &fault) == 0 ? 0 : 6;
+            word, 129, 1, 0, 0, 0, &fault) == 0 ? 0 : 14;
 }
 
 static bool exercise_thread_clone(struct task *parent) {

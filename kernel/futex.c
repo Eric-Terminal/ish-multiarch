@@ -1,10 +1,12 @@
 #include "kernel/calls.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-time-abi.h"
+#include "util/timer.h"
 
 #define FUTEX_WAIT_ 0
 #define FUTEX_WAKE_ 1
 #define FUTEX_REQUEUE_ 3
+#define FUTEX_CMP_REQUEUE_ 4
 #define FUTEX_PRIVATE_FLAG_ 128
 #define FUTEX_CMD_MASK_ ~(FUTEX_PRIVATE_FLAG_)
 
@@ -132,6 +134,7 @@ static int futex_load(struct futex *futex, dword_t *out,
 
 static int futex_wait(struct futex_key key, dword_t val,
         struct timespec *timeout,
+        const struct timer_time *deadline,
         struct guest_linux_user_fault *fault) {
     struct futex *futex = futex_get(key);
     if (futex == NULL)
@@ -147,7 +150,21 @@ static int futex_wait(struct futex_key key, dword_t val,
         wait.cond = COND_INITIALIZER;
         wait.futex = futex;
         list_add_tail(&futex->queue, &wait.queue);
-        err = wait_for(&wait.cond, &futex_lock, timeout);
+        if (deadline == NULL) {
+            err = wait_for(&wait.cond, &futex_lock, timeout);
+        } else {
+            do {
+                struct timespec slice;
+                struct timer_time now = timer_time_from_timespec(
+                        timespec_now(CLOCK_MONOTONIC));
+                if (!timer_time_deadline_slice(
+                        *deadline, now, &slice)) {
+                    err = _ETIMEDOUT;
+                    break;
+                }
+                err = wait_for(&wait.cond, &futex_lock, &slice);
+            } while (err == _ETIMEDOUT);
+        }
         futex = wait.futex;
         list_remove_safe(&wait.queue);
     }
@@ -228,7 +245,7 @@ dword_t sys_futex(addr_t uaddr, dword_t op, dword_t val, addr_t timeout_or_val2,
         case FUTEX_WAIT_:
             STRACE("futex(FUTEX_WAIT, %#x, %d, 0x%x {%ds %dns}) = ...\n", uaddr, val, timeout_or_val2, timeout.tv_sec, timeout.tv_nsec);
             return futex_wait(i386_futex_key(uaddr), val,
-                    timeout_or_val2 ? &timeout : NULL, NULL);
+                    timeout_or_val2 ? &timeout : NULL, NULL, NULL);
         case FUTEX_WAKE_:
             STRACE("futex(FUTEX_WAKE, %#x, %d)", uaddr, val);
             return futex_wakelike(op & FUTEX_CMD_MASK_,
@@ -250,24 +267,33 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
         struct guest_linux_user_fault *fault) {
     struct aarch64_linux_process *process = current->aarch64_process;
     assert(process != NULL);
-    struct timespec timeout = {0};
-    struct timespec *timeout_pointer = NULL;
-    if ((op & FUTEX_CMD_MASK_) == FUTEX_WAIT_ && timeout_or_val2 != 0) {
+    dword_t command = op & FUTEX_CMD_MASK_;
+    if ((uaddr & (sizeof(dword_t) - 1)) != 0)
+        return _EINVAL;
+    if ((command == FUTEX_REQUEUE_ || command == FUTEX_CMP_REQUEUE_) &&
+            (uaddr2 & (sizeof(dword_t) - 1)) != 0)
+        return _EINVAL;
+    struct timer_time deadline;
+    const struct timer_time *deadline_pointer = NULL;
+    if (command == FUTEX_WAIT_ && timeout_or_val2 != 0) {
         struct aarch64_linux_timespec wire;
         if (!aarch64_linux_process_read_memory(process,
                 timeout_or_val2, &wire, sizeof(wire), fault))
             return _EFAULT;
-        timeout.tv_sec = (time_t) wire.sec;
-        timeout.tv_nsec = (long) wire.nsec;
-        if ((sqword_t) timeout.tv_sec != wire.sec || wire.sec < 0 ||
+        if (wire.sec < 0 ||
                 wire.nsec < 0 || wire.nsec >= 1000000000)
             return _EINVAL;
-        timeout_pointer = &timeout;
+        deadline = timer_time_add(
+                timer_time_from_timespec(
+                        timespec_now(CLOCK_MONOTONIC)),
+                (struct timer_time) {wire.sec, wire.nsec});
+        deadline_pointer = &deadline;
     }
     struct futex_key key = aarch64_futex_key(process, uaddr);
-    switch (op & FUTEX_CMD_MASK_) {
+    switch (command) {
         case FUTEX_WAIT_:
-            return futex_wait(key, val, timeout_pointer, fault);
+            return futex_wait(
+                    key, val, NULL, deadline_pointer, fault);
         case FUTEX_WAKE_:
             return futex_wakelike(FUTEX_WAKE_, key, val, 0,
                     (struct futex_key) {0});

@@ -108,6 +108,28 @@ static inline bool timer_time_positive(struct timer_time time) {
     return time.sec > 0 || (time.sec == 0 && time.nsec > 0);
 }
 
+// 将 64 位绝对截止时间转换为宿主可表达的单次相对等待；调用方在
+// 分片超时后重新传入当前时间，绝对期限不会因宿主 time_t 较窄而重置。
+static inline bool timer_time_deadline_slice(
+        struct timer_time deadline, struct timer_time now,
+        struct timespec *slice) {
+    struct timer_time remaining = timer_time_subtract(deadline, now);
+    if (!timer_time_positive(remaining))
+        return false;
+
+    int64_t seconds = remaining.sec;
+    int64_t nanoseconds = remaining.nsec;
+    if (seconds > INT32_MAX) {
+        seconds = INT32_MAX;
+        nanoseconds = 0;
+    }
+    *slice = (struct timespec) {
+        .tv_sec = (time_t) seconds,
+        .tv_nsec = (long) nanoseconds,
+    };
+    return true;
+}
+
 struct timer {
     clockid_t clockid;
     struct timer_time end;
