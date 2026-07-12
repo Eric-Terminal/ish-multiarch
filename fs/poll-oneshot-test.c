@@ -75,6 +75,10 @@ static const struct fd_ops fake_ops = {
     .poll = fake_ready,
 };
 
+static const struct fd_ops invalid_real_ops = {
+    .poll = realfs_poll,
+};
+
 static bool restart_socket_create(struct fd **fd, int *peer) {
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
@@ -957,6 +961,25 @@ static int test_real_fd_cleanup(void) {
     return 0;
 }
 
+static int test_real_fd_registration_error(void) {
+    struct fd *invalid = fd_create(&invalid_real_ops);
+    CHECK(invalid != NULL, "创建无效真实文件对象");
+    invalid->real_fd = -1;
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "为无效真实文件创建 poll 实例");
+    CHECK(poll_add_fd(poll, invalid, POLL_READ,
+            (union poll_fd_info) {.num = 9}) == _EBADF,
+            "真实后端逐项传播无效 fd 登记错误");
+    CHECK(list_empty(&poll->poll_fds) &&
+            list_empty(&invalid->poll_fds),
+            "登记失败不留下半初始化关联");
+
+    poll_destroy(poll);
+    CHECK(fd_close(invalid) == 0, "释放无效真实文件对象");
+    return 0;
+}
+
 int main(void) {
     struct task task;
     struct sighand sighand;
@@ -989,6 +1012,8 @@ int main(void) {
         result = test_epoll_wait_retains_epoll_fd();
     if (result == 0)
         result = test_real_fd_cleanup();
+    if (result == 0)
+        result = test_real_fd_registration_error();
 
     current = NULL;
     pthread_mutex_destroy(&task.waiting_cond_lock.m);

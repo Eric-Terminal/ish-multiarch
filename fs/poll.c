@@ -562,7 +562,40 @@ static int real_poll_update(struct real_poll *real, int fd, int types, void *dat
             e[i].flags |= EV_CLEAR;
     }
 
-    return kevent(real->fd, e, 3, e, 3, NULL);
+    int receipt_count = kevent(real->fd, e, 3, e, 3, NULL);
+    if (receipt_count < 0)
+        return -1;
+
+    for (int index = 0; index < receipt_count; index++) {
+        if (!(e[index].flags & EV_ERROR)) {
+            errno = EIO;
+            return -1;
+        }
+        int receipt_error = (int) e[index].data;
+        if (receipt_error == 0)
+            continue;
+
+        bool deleting;
+        if (e[index].filter == EVFILT_READ)
+            deleting = !(types & (POLL_READ | POLL_HUP));
+        else if (e[index].filter == EVFILT_WRITE)
+            deleting = !(types & POLL_WRITE);
+        else if (e[index].filter == EVFILT_EXCEPT)
+            deleting = !(types & POLL_ERR);
+        else {
+            errno = EIO;
+            return -1;
+        }
+        if (deleting && receipt_error == ENOENT)
+            continue;
+        errno = receipt_error;
+        return -1;
+    }
+    if (receipt_count != 3) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
 }
 
 static int real_poll_wait(struct real_poll *real, struct real_poll_event *events, int max, struct timespec *timeout) {
