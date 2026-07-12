@@ -76,13 +76,23 @@ static void poll_fd_free(struct poll_fd *poll_fd) {
 }
 
 bool poll_has_fd(struct poll *poll, struct fd *fd) {
-    return poll_find_fd(poll, fd) != NULL;
+    lock(&poll->lock);
+    bool found = poll_find_fd(poll, fd) != NULL;
+    unlock(&poll->lock);
+    return found;
 }
 
-int poll_add_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info info) {
+static int poll_add_fd_impl(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info, bool unique) {
     int err;
     lock(&fd->poll_lock);
     lock(&poll->lock);
+
+    if (unique && poll_find_fd(poll, fd) != NULL) {
+        err = _EEXIST;
+        goto out;
+    }
 
     struct poll_fd *poll_fd;
     if (!list_empty(&poll->pollfd_freelist)) {
@@ -100,11 +110,12 @@ int poll_add_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     poll_fd->types = types;
     poll_fd->info = info;
     poll_fd->triggered_types = 0;
+    poll_fd->enabled = true;
 
     if (poll_fd_is_real(poll_fd)) {
         err = real_poll_update(&poll->real, fd->real_fd, types, poll_fd);
         if (err < 0) {
-            free(poll_fd);
+            poll_fd_free(poll_fd);
             err = errno_map();
             goto out;
         }
@@ -120,6 +131,18 @@ out:
     return err;
 }
 
+int poll_add_fd(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info) {
+    return poll_add_fd_impl(poll, fd, types, info, false);
+}
+
+int poll_add_fd_unique(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info) {
+    return poll_add_fd_impl(poll, fd, types, info, true);
+}
+
 int poll_del_fd(struct poll *poll, struct fd *fd) {
     int err;
     lock(&fd->poll_lock);
@@ -130,7 +153,7 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
         goto out;
     }
 
-    if (poll_fd_is_real(poll_fd)) {
+    if (poll_fd->enabled && poll_fd_is_real(poll_fd)) {
         err = real_poll_update(&poll->real, fd->real_fd, 0, poll_fd);
         if (err < 0) {
             err = errno_map();
@@ -169,7 +192,8 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
 
     poll_fd->types = types;
     poll_fd->info = info;
-    poll_fd->triggered_types &= types;
+    poll_fd->triggered_types = 0;
+    poll_fd->enabled = true;
 
     err = 0;
 out:
@@ -182,13 +206,14 @@ void poll_cleanup_fd(struct fd *fd) {
     lock(&fd->poll_lock);
     struct poll_fd *poll_fd, *tmp;
     list_for_each_entry_safe(&fd->poll_fds, poll_fd, tmp, polls) {
-        lock(&poll_fd->poll->lock);
-        if (poll_fd_is_real(poll_fd))
-            real_poll_update(&poll_fd->poll->real, fd->real_fd, 0, poll_fd);
+        struct poll *poll = poll_fd->poll;
+        lock(&poll->lock);
+        if (poll_fd->enabled && poll_fd_is_real(poll_fd))
+            real_poll_update(&poll->real, fd->real_fd, 0, poll_fd);
         list_remove(&poll_fd->polls);
         list_remove(&poll_fd->fds);
-        unlock(&poll_fd->poll->lock);
         poll_fd_free(poll_fd);
+        unlock(&poll->lock);
     }
     unlock(&fd->poll_lock);
 }
@@ -199,12 +224,15 @@ void poll_wakeup(struct fd *fd, int events) {
     list_for_each_entry(&fd->poll_fds, poll_fd, polls) {
         struct poll *poll = poll_fd->poll;
         lock(&poll->lock);
+        if (!poll_fd->enabled) {
+            unlock(&poll->lock);
+            continue;
+        }
         if (poll_fd->types & POLL_EDGETRIGGERED)
             poll_fd->triggered_types &= ~events;
         if (poll->notify_pipe[1] != -1)
             write(poll->notify_pipe[1], "", 1);
         unlock(&poll->lock);
-        // oneshot?
     }
     unlock(&fd->poll_lock);
 }
@@ -230,6 +258,8 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         // check if any fds are ready
         struct poll_fd *poll_fd, *tmp;
         list_for_each_entry_safe(&poll_->poll_fds, poll_fd, tmp, fds) {
+            if (!poll_fd->enabled)
+                continue;
             struct fd *fd = poll_fd->fd;
             int poll_types = 0;
             if (fd->ops->poll)
@@ -239,24 +269,20 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
                 poll_types &= ~poll_fd->triggered_types;
             }
             if (poll_types) {
-                if (callback(context, poll_types, poll_fd->info) == 1)
+                bool delivered = callback(
+                        context, poll_types, poll_fd->info) == 1;
+                if (delivered)
                     res++;
 
-                // The real poll does not actually get the FDs set as oneshot.
-                // But this loop is done while holding the lock, so only one
-                // thread can get each oneshot event. This doesn't solve the
-                // thundering herd problem at all, but at least the semantics
-                // are right. I'll just leave that as a TODO.
-                if (poll_fd->types & POLL_ONESHOT) {
-                    list_remove(&poll_fd->polls);
-                    list_remove(&poll_fd->fds);
-                    if (poll_fd_is_real(poll_fd)) {
-                        real_poll_update(&poll_->real, fd->real_fd, 0, NULL);
-                    }
-                    free(poll_fd);
+                // 宿主后端不直接使用 oneshot；持有 poll 锁可确保只有一个等待者
+                // 消费本次事件。登记对象必须保留，MOD 才能按 Linux 语义重置它。
+                if (delivered && poll_fd->types & POLL_ONESHOT) {
+                    if (poll_fd_is_real(poll_fd))
+                        real_poll_update(&poll_->real, fd->real_fd, 0, poll_fd);
+                    poll_fd->enabled = false;
                 }
 
-                if (poll_fd->types & POLL_EDGETRIGGERED) {
+                if (delivered && poll_fd->types & POLL_EDGETRIGGERED) {
                     poll_fd->triggered_types |= poll_types;
                 }
             }
@@ -300,6 +326,7 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         for (int i = 0; i < err; i++) {
             struct poll_fd *triggered_poll_fd = rpe_data(&e[i]);
             if (triggered_poll_fd != NULL && triggered_poll_fd->poll != NULL &&
+                    triggered_poll_fd->enabled &&
                     triggered_poll_fd->types & POLL_EDGETRIGGERED) {
                 triggered_poll_fd->triggered_types &= ~rpe_events(&e[i]);
             }
@@ -437,4 +464,3 @@ static int rpe_events(struct real_poll_event *rpe) {
 static void real_poll_close(struct real_poll *real) {
     close(real->fd);
 }
-

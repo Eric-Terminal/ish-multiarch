@@ -213,6 +213,10 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        poll_oneshot_test = executable(
+            'poll_oneshot_test', 'fs/poll-oneshot-test.c', dependencies: ish)
+        test('poll_oneshot', poll_oneshot_test)
+
         fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
         test('fs_task', fs_task_test)
 

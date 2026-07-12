@@ -44,6 +44,8 @@ struct poll_fd {
     // returned its bits are set here, and those bits are ignored on the next
     // call to poll_wait. The bits are cleared by poll_wakeup.
     int triggered_types;
+    // 单次触发后保留登记对象但停止投递，直到 MOD 显式重置。
+    bool enabled;
 
     // locked by containing struct fd
     struct poll *poll;
@@ -73,6 +75,10 @@ struct poll_event {
 struct poll *poll_create(void);
 bool poll_has_fd(struct poll *poll, struct fd *fd);
 int poll_add_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info info);
+// epoll ADD 使用该入口，在同一临界区内检查并建立唯一登记。
+int poll_add_fd_unique(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info);
 int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info info);
 int poll_del_fd(struct poll *poll, struct fd *fd);
 // Indicates that the specified events have been triggered. Each call will
