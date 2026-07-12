@@ -55,15 +55,7 @@ static void signal_notify_group_stop(
     if (!now_stopped)
         return;
 
-    lock(&pids_lock);
-    struct task *leader = task->group->leader;
-    struct task *parent = leader->parent;
-    if (parent != NULL) {
-        notify(&parent->group->child_exit);
-        send_signal(parent,
-                leader->exit_signal, SIGINFO_NIL);
-    }
-    unlock(&pids_lock);
+    signal_notify_parent_child_state(task);
 }
 
 static struct guest_linux_signal_info export_signal_info(

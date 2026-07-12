@@ -29,6 +29,16 @@ static bool exit_tgroup(struct task *task) {
 
 void (*exit_hook)(struct task *task, int code) = NULL;
 
+// 调用方持有 pids_lock；该路径同时供 wait 与自动回收使用。
+static void release_reaped_task_locked(struct task *task) {
+    cond_destroy(&task->group->child_exit);
+    cond_destroy(&task->group->stopped_cond);
+    task_leave_session(task);
+    list_remove(&task->group->pgroup);
+    free(task->group);
+    task_destroy(task);
+}
+
 static struct task *find_new_parent(struct task *task) {
     struct task *new_parent;
     list_for_each_entry(&task->group->threads, new_parent, group_links) {
@@ -112,6 +122,7 @@ noreturn void do_exit(int status) {
     }
 
     bool group_dead = exit_tgroup(current);
+    bool auto_reap = false;
     if (group_dead) {
         // notify parent that we died
         struct task *parent = leader->parent;
@@ -119,18 +130,24 @@ noreturn void do_exit(int status) {
             // init died
             halt_system();
         } else {
-            leader->zombie = true;
+            bool send_exit_signal;
+            auto_reap = signal_parent_child_exit_policy_locked(
+                    parent, leader->exit_signal, &send_exit_signal);
+            leader->zombie = !auto_reap;
             notify(&parent->group->child_exit);
+            dword_t exit_code = leader->exit_code;
+            if (leader->group->doing_group_exit)
+                exit_code = leader->group->group_exit_code;
             struct siginfo_ info = {
                 .code = SI_KERNEL_,
                 .payload_kind = SIGNAL_INFO_PAYLOAD_CHILD,
-                .child.pid = current->pid,
-                .child.uid = current->uid,
-                .child.status = current->exit_code,
+                .child.pid = leader->pid,
+                .child.uid = leader->uid,
+                .child.status = exit_code,
                 .child.utime = clock_from_timeval(group_rusage.utime),
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };
-            if (leader->exit_signal != 0)
+            if (send_exit_signal)
                 send_signal(parent, leader->exit_signal, info);
         }
 
@@ -141,6 +158,8 @@ noreturn void do_exit(int status) {
     vfork_notify(current);
     if (current != leader)
         task_destroy(current);
+    if (group_dead && auto_reap)
+        release_reaped_task_locked(leader);
     unlock(&pids_lock);
 
     pthread_exit(NULL);
@@ -261,13 +280,7 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
     if (options & WNOWAIT_)
         return true;
 
-    // tear down group
-    cond_destroy(&task->group->child_exit);
-    task_leave_session(task);
-    list_remove(&task->group->pgroup);
-    free(task->group);
-
-    task_destroy(task);
+    release_reaped_task_locked(task);
     return true;
 }
 

@@ -142,6 +142,50 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
     }
 }
 
+// 调用方持有 pids_lock，动作读取遵循 pids_lock -> sighand->lock。
+static struct signal_action signal_parent_action_locked(
+        struct task *parent, int signal) {
+    struct sighand *sighand = parent->sighand;
+    lock(&sighand->lock);
+    struct signal_action action = sighand->action[signal];
+    unlock(&sighand->lock);
+    return action;
+}
+
+void signal_notify_parent_child_state(struct task *task) {
+    lock(&pids_lock);
+    struct task *leader = task->group->leader;
+    struct task *parent = leader->parent;
+    if (parent != NULL) {
+        notify(&parent->group->child_exit);
+
+        bool send_state_signal = leader->exit_signal != 0;
+        if (leader->exit_signal == SIGCHLD_) {
+            struct signal_action action =
+                    signal_parent_action_locked(parent, SIGCHLD_);
+            send_state_signal = action.handler != SIG_IGN_ &&
+                    !(action.flags & SA_NOCLDSTOP_);
+        }
+        if (send_state_signal)
+            send_signal(parent, leader->exit_signal, SIGINFO_NIL);
+    }
+    unlock(&pids_lock);
+}
+
+bool signal_parent_child_exit_policy_locked(
+        struct task *parent, int exit_signal, bool *send_exit_signal) {
+    assert(parent != NULL && send_exit_signal != NULL);
+    *send_exit_signal = exit_signal != 0;
+    if (exit_signal != SIGCHLD_)
+        return false;
+
+    struct signal_action action =
+            signal_parent_action_locked(parent, SIGCHLD_);
+    bool explicitly_ignored = action.handler == SIG_IGN_;
+    *send_exit_signal = !explicitly_ignored;
+    return explicitly_ignored || (action.flags & SA_NOCLDWAIT_);
+}
+
 void signal_notify_group_continue(struct task *task) {
     lock(&task->group->lock);
     bool pending = task->group->continue_notification_pending;
@@ -149,20 +193,13 @@ void signal_notify_group_continue(struct task *task) {
     if (!pending)
         return;
 
-    lock(&pids_lock);
     lock(&task->group->lock);
     bool should_notify = task->group->continue_notification_pending;
     if (should_notify)
         task->group->continue_notification_pending = false;
     unlock(&task->group->lock);
-    struct task *leader = task->group->leader;
-    struct task *parent = leader->parent;
-    if (should_notify && parent != NULL) {
-        notify(&parent->group->child_exit);
-        send_signal(parent,
-                leader->exit_signal, SIGINFO_NIL);
-    }
-    unlock(&pids_lock);
+    if (should_notify)
+        signal_notify_parent_child_state(task);
 }
 
 bool try_self_signal(int sig) {
@@ -482,18 +519,8 @@ void receive_signals(void) {
         lock(&current->group->lock);
         bool now_stopped = current->group->stopped;
         unlock(&current->group->lock);
-        if (now_stopped) {
-            lock(&pids_lock);
-            struct task *leader = current->group->leader;
-            struct task *parent = leader->parent;
-            if (parent != NULL) {
-                notify(&parent->group->child_exit);
-                // TODO add siginfo
-                send_signal(parent,
-                        leader->exit_signal, SIGINFO_NIL);
-            }
-            unlock(&pids_lock);
-        }
+        if (now_stopped)
+            signal_notify_parent_child_state(current);
     }
 }
 

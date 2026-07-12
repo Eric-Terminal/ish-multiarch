@@ -13,6 +13,8 @@ typedef qword_t sigset_t_;
 #define SIG_DFL_ 0
 #define SIG_IGN_ 1
 
+#define SA_NOCLDSTOP_ 1
+#define SA_NOCLDWAIT_ 2
 #define SA_SIGINFO_ 4
 #define SA_ONSTACK_ UINT64_C(0x08000000)
 #define SA_NODEFER_ 0x40000000
@@ -125,6 +127,11 @@ struct sigevent_ {
 void send_signal(struct task *task, int sig, struct siginfo_ info);
 // 子进程从作业控制停止恢复后，在无 pids_lock 的运行安全点通知父组。
 void signal_notify_group_continue(struct task *task);
+// 子进程停止或继续后唤醒父组；调用方不得持有 pids、group 或 sighand 锁。
+void signal_notify_parent_child_state(struct task *task);
+// 调用方持有 pids_lock；返回是否自动回收，并写出是否生成退出信号。
+bool signal_parent_child_exit_policy_locked(
+        struct task *parent, int exit_signal, bool *send_exit_signal);
 // send a signal without regard for whether the signal is blocked or ignored
 void deliver_signal(struct task *task, int sig, struct siginfo_ info);
 // send a signal to current if it's not blocked or ignored, return whether that worked

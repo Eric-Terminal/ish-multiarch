@@ -368,6 +368,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('signal_lock', signal_lock_test)
 
+        child_exit_policy_test = executable(
+            'child_exit_policy_test',
+            'kernel/child-exit-policy-test.c',
+            dependencies: ish)
+        test('child_exit_policy', child_exit_policy_test)
+
         user_test = executable(
             'user_test',
             'kernel/user-test.c',

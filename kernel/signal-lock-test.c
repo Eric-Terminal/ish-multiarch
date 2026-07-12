@@ -85,6 +85,40 @@ struct stop_controller {
     atomic_int action_result;
 };
 
+struct child_event_waiter {
+    struct tgroup *parent_group;
+    atomic_bool ready;
+    atomic_bool woken;
+};
+
+static void *wait_for_child_event(void *opaque) {
+    struct child_event_waiter *waiter = opaque;
+    current = NULL;
+    lock(&pids_lock);
+    atomic_store_explicit(&waiter->ready, true, memory_order_release);
+    int result = wait_for_ignore_signals(
+            &waiter->parent_group->child_exit, &pids_lock, NULL);
+    atomic_store_explicit(&waiter->woken,
+            result == 0, memory_order_release);
+    unlock(&pids_lock);
+    return NULL;
+}
+
+static bool start_child_event_waiter(
+        struct child_event_waiter *waiter, pthread_t *thread,
+        struct tgroup *parent_group) {
+    *waiter = (struct child_event_waiter) {
+        .parent_group = parent_group,
+    };
+    atomic_init(&waiter->ready, false);
+    atomic_init(&waiter->woken, false);
+    if (pthread_create(thread, NULL, wait_for_child_event, waiter) != 0)
+        return false;
+    while (!atomic_load_explicit(&waiter->ready, memory_order_acquire))
+        sched_yield();
+    return true;
+}
+
 static void *continue_traced_task(void *opaque) {
     struct stop_controller *controller = opaque;
     while (true) {
@@ -194,6 +228,75 @@ static int test_default_stop_action(void) {
             fixture.child.pending == 0 &&
             list_empty(&fixture.child.queue),
             "无父任务仍可完成默认停止而不解引用空指针");
+    return 0;
+}
+
+static int test_nocldstop_preserves_wait_state(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture, false, SIGCHLD_);
+    fixture.parent.blocked = sig_mask(SIGCHLD_);
+    const struct signal_action action = {
+        .handler = UINT64_C(0x1234),
+        .flags = SA_NOCLDSTOP_,
+    };
+    CHECK(task_sigaction(&fixture.parent,
+                    SIGCHLD_, &action, NULL) == 0,
+            "安装 SA_NOCLDSTOP 动作");
+
+    struct child_event_waiter stop_waiter;
+    pthread_t stop_thread;
+    CHECK(start_child_event_waiter(&stop_waiter,
+                    &stop_thread, &fixture.parent_group),
+            "创建停止事件等待线程");
+    deliver_signal(&fixture.child, SIGTSTP_, SIGINFO_NIL);
+    receive_signals();
+    CHECK(pthread_join(stop_thread, NULL) == 0 &&
+            atomic_load_explicit(&stop_waiter.woken,
+                    memory_order_acquire),
+            "SA_NOCLDSTOP 仍唤醒停止事件等待者");
+    CHECK(fixture.child_group.stopped &&
+            fixture.child_group.stop_code ==
+                    (dword_t) (SIGTSTP_ << 8 | 0x7f) &&
+            fixture.parent.pending == 0 &&
+            list_empty(&fixture.parent.queue),
+            "SA_NOCLDSTOP 保留停止 wait 状态且不排队 SIGCHLD");
+
+    struct child_event_waiter continue_waiter;
+    pthread_t continue_thread;
+    CHECK(start_child_event_waiter(&continue_waiter,
+                    &continue_thread, &fixture.parent_group),
+            "创建继续事件等待线程");
+    send_signal(&fixture.child, SIGCONT_, SIGINFO_NIL);
+    signal_notify_group_continue(&fixture.child);
+    CHECK(pthread_join(continue_thread, NULL) == 0 &&
+            atomic_load_explicit(&continue_waiter.woken,
+                    memory_order_acquire),
+            "SA_NOCLDSTOP 仍唤醒继续事件等待者");
+    CHECK(!fixture.child_group.stopped &&
+            fixture.child_group.continued &&
+            !fixture.child_group.continue_notification_pending &&
+            fixture.parent.pending == 0 &&
+            list_empty(&fixture.parent.queue),
+            "SA_NOCLDSTOP 保留继续 wait 状态且不排队 SIGCHLD");
+    return 0;
+}
+
+static int test_nocldstop_does_not_affect_other_exit_signal(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture, false, SIGUSR1_);
+    fixture.parent.blocked = sig_mask(SIGUSR1_);
+    fixture.parent_sighand.action[SIGCHLD_] =
+            (struct signal_action) {
+                .handler = UINT64_C(0x1234),
+                .flags = SA_NOCLDSTOP_,
+            };
+
+    deliver_signal(&fixture.child, SIGTSTP_, SIGINFO_NIL);
+    receive_signals();
+    CHECK(fixture.child_group.stopped &&
+            sigset_has(fixture.parent.pending, SIGUSR1_) &&
+            list_size(&fixture.parent.queue) == 1,
+            "SA_NOCLDSTOP 不影响非 SIGCHLD 的停止通知信号");
     return 0;
 }
 
@@ -326,6 +429,10 @@ int main(void) {
     failures += !run_isolated("并发 SIG_IGN 删除后继节点",
             test_concurrent_ignore_removes_successor);
     failures += !run_isolated("默认停止动作", test_default_stop_action);
+    failures += !run_isolated("SA_NOCLDSTOP 保留 wait 状态",
+            test_nocldstop_preserves_wait_state);
+    failures += !run_isolated("SA_NOCLDSTOP 仅作用于 SIGCHLD",
+            test_nocldstop_does_not_affect_other_exit_signal);
     failures += !run_isolated("SIGKILL 解除 ptrace 停顿",
             test_sigkill_releases_ptrace_stop);
     failures += !run_isolated("并发实时信号排队",
