@@ -140,6 +140,9 @@ void sigmask_set_temp_task(struct task *task, sigset_t_ mask);
 void sigmask_set_temp(sigset_t_ mask);
 // 无信号结束原子等待时，立即撤销尚未被投递路径消费的临时掩码。
 void sigmask_restore_temp_task(struct task *task);
+// 调用方持有 sighand 锁；返回等待期间用于选择中断信号的掩码，
+// 同时把任务可见掩码恢复为写入 handler 帧的原值。
+sigset_t_ signal_prepare_delivery_locked(struct task *task);
 // 返回 EINTR 后保留临时掩码，下一次信号投递会恢复原掩码并写入信号帧。
 int_t task_sigsuspend(struct task *task, sigset_t_ mask);
 

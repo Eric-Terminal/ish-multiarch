@@ -447,16 +447,7 @@ void receive_signals(void) {
     struct sighand *sighand = current->sighand;
     lock(&sighand->lock);
 
-    // A saved mask means that the last system call was a call like sigsuspend
-    // that changes the mask during the call. Only ignore a signal right now if
-    // it was both blocked during the call and should still be blocked after
-    // the call.
-    sigset_t_ blocked = current->blocked;
-    if (current->has_saved_mask) {
-        blocked &= current->saved_mask;
-        current->has_saved_mask = false;
-        current->blocked = current->saved_mask;
-    }
+    sigset_t_ blocked = signal_prepare_delivery_locked(current);
 
     while (true) {
         struct sigqueue *sigqueue =
@@ -743,6 +734,15 @@ void sigmask_restore_temp_task(struct task *task) {
         task->has_saved_mask = false;
     }
     unlock(&task->sighand->lock);
+}
+
+sigset_t_ signal_prepare_delivery_locked(struct task *task) {
+    sigset_t_ selection_mask = task->blocked;
+    if (task->has_saved_mask) {
+        task->blocked = task->saved_mask;
+        task->has_saved_mask = false;
+    }
+    return selection_mask;
 }
 
 int_t task_sigsuspend(struct task *task, sigset_t_ mask) {

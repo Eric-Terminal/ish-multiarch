@@ -207,7 +207,8 @@ int_t sys_epoll_wait(fd_t epoll_f, addr_t events_addr,
 
 int_t sys_epoll_pwait(fd_t epoll_f, addr_t events_addr, int_t max_events, int_t timeout, addr_t sigmask_addr, dword_t sigsetsize) {
     sigset_t_ mask;
-    if (sigmask_addr != 0) {
+    bool has_mask = sigmask_addr != 0;
+    if (has_mask) {
         if (sigsetsize != sizeof(sigset_t_))
             return _EINVAL;
         if (user_get(sigmask_addr, mask))
@@ -215,7 +216,11 @@ int_t sys_epoll_pwait(fd_t epoll_f, addr_t events_addr, int_t max_events, int_t 
         sigmask_set_temp(mask);
     }
 
-    return sys_epoll_wait(epoll_f, events_addr, max_events, timeout);
+    int_t result = sys_epoll_wait(
+            epoll_f, events_addr, max_events, timeout);
+    if (has_mask && result != _EINTR)
+        sigmask_restore_temp_task(current);
+    return result;
 }
 
 static int epoll_close(struct fd *fd) {

@@ -163,12 +163,8 @@ struct guest_linux_signal_poll_result task_poll_one_signal(
 
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
-    sigset_t_ selection_mask = task->blocked;
-    if (task->has_saved_mask) {
-        selection_mask &= task->saved_mask;
-        task->has_saved_mask = false;
-        task->blocked = task->saved_mask;
-    }
+    sigset_t_ selection_mask =
+            signal_prepare_delivery_locked(task);
 
     while (true) {
         struct sigqueue *queued = select_signal(task, selection_mask);

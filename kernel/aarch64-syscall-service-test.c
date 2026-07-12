@@ -1011,15 +1011,23 @@ int main(void) {
         .revents = UINT16_MAX,
     };
     memcpy(memory.bytes + poll_offset, pollfds, sizeof(pollfds[0]));
+    sigset_t_ write_fault_mask = 0;
+    memcpy(memory.bytes + poll_mask_offset,
+            &write_fault_mask, sizeof(write_fault_mask));
+    fixture.task.blocked = sig_mask(SIGUSR1_);
+    fixture.task.has_saved_mask = false;
     reset_user_access(&memory);
     memory.fail_write_at = USER_BASE + poll_offset + 6;
     result = invoke_five(&fixture, &memory, &fault, 73,
             USER_BASE + poll_offset, 1,
-            USER_BASE + poll_timeout_offset, 0, 0);
+            USER_BASE + poll_timeout_offset,
+            USER_BASE + poll_mask_offset, sizeof(sigset_t_));
     CHECK(result == encoded_error(_EFAULT) && memory.write_calls == 1 &&
             fault.address == memory.fail_write_at &&
-            fault.access == GUEST_MEMORY_WRITE,
-            "ppoll 在等待完成后传播 pollfd 部分写回故障");
+            fault.access == GUEST_MEMORY_WRITE &&
+            fixture.task.blocked == sig_mask(SIGUSR1_) &&
+            !fixture.task.has_saved_mask,
+            "ppoll 在写回故障后传播错误并恢复原掩码");
 
     const sigset_t_ high_signal_bit = sig_mask(NUM_SIGS);
     sigset_t_ poll_mask = high_signal_bit | sig_mask(SIGUSR2_) |
@@ -1033,12 +1041,9 @@ int main(void) {
             USER_BASE + poll_offset, 1,
             USER_BASE + poll_timeout_offset,
             USER_BASE + poll_mask_offset, sizeof(sigset_t_));
-    CHECK(result == 1 && fixture.task.has_saved_mask &&
-            fixture.task.saved_mask == sig_mask(SIGUSR1_) &&
-            fixture.task.blocked == (high_signal_bit | sig_mask(SIGUSR2_)),
-            "ppoll 临时安装目标任务掩码并保持不可阻塞信号规则");
-    fixture.task.blocked = fixture.task.saved_mask;
-    fixture.task.has_saved_mask = false;
+    CHECK(result == 1 && !fixture.task.has_saved_mask &&
+            fixture.task.blocked == sig_mask(SIGUSR1_),
+            "ppoll 无信号返回后恢复目标任务的原掩码");
 
     static const char plain_path[] = "plain";
     memcpy(memory.bytes + path_offset, plain_path, sizeof(plain_path));

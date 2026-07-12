@@ -227,6 +227,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('select_lifecycle', select_lifecycle_test)
 
+        sigmask_wait_test = executable(
+            'sigmask_wait_test',
+            'kernel/sigmask-wait-test.c',
+            dependencies: ish)
+        test('sigmask_wait', sigmask_wait_test)
+
         fs_task_test = executable('fs_task_test', 'kernel/fs-task-test.c', dependencies: ish)
         test('fs_task', fs_task_test)
 

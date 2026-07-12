@@ -795,7 +795,8 @@ static qword_t dispatch_ppoll(
         }
     }
 
-    if (syscall->arguments[3] != 0)
+    bool has_mask = syscall->arguments[3] != 0;
+    if (has_mask)
         sigmask_set_temp_task(task, mask);
     sqword_t result = file_poll_task(
             task, polls, (size_t) nfds, timeout_pointer);
@@ -812,6 +813,8 @@ static qword_t dispatch_ppoll(
             result = _EFAULT;
     }
     free(polls);
+    if (has_mask && result != _EINTR)
+        sigmask_restore_temp_task(task);
     return syscall_result(result);
 }
 

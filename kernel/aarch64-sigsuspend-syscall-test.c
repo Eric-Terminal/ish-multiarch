@@ -316,8 +316,7 @@ static int test_signal_after_wait_registration(
         struct signal_fixture *fixture) {
     const qword_t address = USER_BASE + 5;
     const sigset_t_ high_signal_bit = sig_mask(NUM_SIGS);
-    const sigset_t_ original =
-            sig_mask(SIGUSR1_) | sig_mask(SIGUSR2_);
+    const sigset_t_ original = sig_mask(SIGUSR2_);
     struct user_probe probe;
     struct guest_linux_user_fault fault;
     reset_probe(&probe);
