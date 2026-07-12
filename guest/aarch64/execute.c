@@ -1561,6 +1561,28 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_RORV:
             execute_data_processing_2source(cpu, instruction);
             break;
+        case AARCH64_OP_MRS_FPCR:
+            write_register(cpu, instruction->operands.system_register.rt,
+                    64, false, aarch64_get_fpcr(cpu));
+            cpu->pc += 4;
+            break;
+        case AARCH64_OP_MSR_FPCR:
+            aarch64_set_fpcr(cpu, (dword_t) read_register(cpu,
+                    instruction->operands.system_register.rt,
+                    64, false));
+            cpu->pc += 4;
+            break;
+        case AARCH64_OP_MRS_FPSR:
+            write_register(cpu, instruction->operands.system_register.rt,
+                    64, false, aarch64_get_fpsr(cpu));
+            cpu->pc += 4;
+            break;
+        case AARCH64_OP_MSR_FPSR:
+            aarch64_set_fpsr(cpu, (dword_t) read_register(cpu,
+                    instruction->operands.system_register.rt,
+                    64, false));
+            cpu->pc += 4;
+            break;
         case AARCH64_OP_MRS_TPIDR_EL0:
             write_register(cpu, instruction->operands.system_register.rt,
                     64, false, cpu->tpidr_el0);

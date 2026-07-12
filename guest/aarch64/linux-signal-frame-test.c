@@ -226,6 +226,20 @@ int main(void) {
     assert(resume.altstack.reserved == 0);
     assert(resume.altstack.size == delivery.altstack.size);
 
+    struct aarch64_linux_rt_sigframe normalized_frame = frame;
+    struct aarch64_linux_fpsimd_context *normalized_fpsimd =
+            (struct aarch64_linux_fpsimd_context *)
+                    normalized_frame.uc.mcontext.reserved;
+    normalized_fpsimd->fpcr = UINT32_MAX;
+    normalized_fpsimd->fpsr = UINT32_MAX;
+    write_frame(&tlb, frame_address, &normalized_frame);
+    assert(aarch64_linux_decode_rt_sigreturn(
+            &returning_cpu, &tlb, &resume, &fault) ==
+            AARCH64_LINUX_SIGNAL_FRAME_OK);
+    assert(resume.cpu.fpcr == AARCH64_FPCR_WRITE_MASK);
+    assert(resume.cpu.fpsr == AARCH64_FPSR_WRITE_MASK);
+    write_frame(&tlb, frame_address, &frame);
+
     struct cpu_state misaligned_cpu = handler_cpu;
     misaligned_cpu.sp += 8;
     assert_bad_decode(&misaligned_cpu, &tlb,
@@ -326,6 +340,17 @@ int main(void) {
     frame = read_frame(&tlb, frame_address);
     const struct aarch64_linux_siginfo zero_info = {0};
     assert(memcmp(&frame.info, &zero_info, sizeof(zero_info)) == 0);
+
+    struct cpu_state noncanonical_cpu = no_siginfo_cpu;
+    noncanonical_cpu.fpcr = UINT32_MAX;
+    noncanonical_cpu.fpsr = UINT32_MAX;
+    assert(aarch64_linux_build_rt_sigframe(&noncanonical_cpu, &tlb,
+            &delivery, &handler_cpu, &frame_address, &fault) ==
+            AARCH64_LINUX_SIGNAL_FRAME_OK);
+    frame = read_frame(&tlb, frame_address);
+    memcpy(&fpsimd, frame.uc.mcontext.reserved, sizeof(fpsimd));
+    assert(fpsimd.fpcr == AARCH64_FPCR_WRITE_MASK);
+    assert(fpsimd.fpsr == AARCH64_FPSR_WRITE_MASK);
 
     struct cpu_state output_sentinel;
     memset(&output_sentinel, 0x5a, sizeof(output_sentinel));

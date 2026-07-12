@@ -147,6 +147,26 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         };
         return true;
     }
+    if (system_register == UINT32_C(0xd53b4400) ||
+            system_register == UINT32_C(0xd51b4400)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = system_register == UINT32_C(0xd53b4400) ?
+                    AARCH64_OP_MRS_FPCR : AARCH64_OP_MSR_FPCR,
+            .width = 64,
+            .operands.system_register.rt = word & 0x1f,
+        };
+        return true;
+    }
+    if (system_register == UINT32_C(0xd53b4420) ||
+            system_register == UINT32_C(0xd51b4420)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = system_register == UINT32_C(0xd53b4420) ?
+                    AARCH64_OP_MRS_FPSR : AARCH64_OP_MSR_FPSR,
+            .width = 64,
+            .operands.system_register.rt = word & 0x1f,
+        };
+        return true;
+    }
 
     static const struct {
         dword_t bits;

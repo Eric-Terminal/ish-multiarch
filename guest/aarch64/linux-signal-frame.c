@@ -53,8 +53,8 @@ static struct aarch64_linux_fpsimd_context pack_fpsimd(
             .magic = AARCH64_LINUX_FPSIMD_MAGIC,
             .size = sizeof(struct aarch64_linux_fpsimd_context),
         },
-        .fpsr = cpu->fpsr,
-        .fpcr = cpu->fpcr,
+        .fpsr = aarch64_get_fpsr(cpu),
+        .fpcr = aarch64_get_fpcr(cpu),
     };
     memcpy(fpsimd.vregs, cpu->v, sizeof(fpsimd.vregs));
     return fpsimd;
@@ -188,8 +188,8 @@ enum aarch64_linux_signal_frame_status aarch64_linux_decode_rt_sigreturn(
     aarch64_set_nzcv(&candidate_cpu,
             (dword_t) frame.uc.mcontext.pstate);
     memcpy(candidate_cpu.v, fpsimd.vregs, sizeof(candidate_cpu.v));
-    candidate_cpu.fpsr = fpsimd.fpsr;
-    candidate_cpu.fpcr = fpsimd.fpcr;
+    aarch64_set_fpsr(&candidate_cpu, fpsimd.fpsr);
+    aarch64_set_fpcr(&candidate_cpu, fpsimd.fpcr);
     aarch64_clear_exclusive(&candidate_cpu);
 
     *resume = (struct aarch64_linux_signal_resume) {

@@ -38,6 +38,26 @@ static void test_decode(void) {
         assert(instruction.opcode == AARCH64_OP_MSR_TPIDR_EL0);
         assert(instruction.width == 64);
         assert(instruction.operands.system_register.rt == rt);
+
+        instruction = decode(UINT32_C(0xd53b4400) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MRS_FPCR);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
+
+        instruction = decode(UINT32_C(0xd51b4400) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MSR_FPCR);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
+
+        instruction = decode(UINT32_C(0xd53b4420) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MRS_FPSR);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
+
+        instruction = decode(UINT32_C(0xd51b4420) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MSR_FPSR);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
     }
 
     static const dword_t unsupported[] = {
@@ -48,6 +68,8 @@ static void test_decode(void) {
         UINT32_C(0xd53bd0a0), UINT32_C(0xd51bd0a0),
         UINT32_C(0xd53bd140), UINT32_C(0xd53bc040),
         UINT32_C(0xd53ad040), UINT32_C(0xd533d040),
+        UINT32_C(0xd53b43e0), UINT32_C(0xd51b43e0),
+        UINT32_C(0xd53b4440), UINT32_C(0xd51b4440),
     };
     for (size_t i = 0; i < array_size(unsupported); i++) {
         struct aarch64_decoded instruction;
@@ -60,6 +82,8 @@ static void test_execute(void) {
         .pc = UINT64_C(0x1000),
         .sp = UINT64_C(0xfedcba9876543210),
         .nzcv = UINT32_C(0xb0000000),
+        .fpcr = UINT32_MAX,
+        .fpsr = UINT32_MAX,
         .tpidr_el0 = UINT64_C(0x123456789abcdef0),
     };
     cpu.x[2] = UINT64_MAX;
@@ -70,6 +94,37 @@ static void test_execute(void) {
     cpu.x[30] = UINT64_C(0x7766554433221100);
     execute_instruction(&cpu, UINT32_C(0xd53b00ff));
     assert(cpu.x[30] == UINT64_C(0x7766554433221100));
+
+    execute_instruction(&cpu, UINT32_C(0xd53b4403));
+    assert(cpu.x[3] == AARCH64_FPCR_WRITE_MASK);
+
+    execute_instruction(&cpu, UINT32_C(0xd53b4424));
+    assert(cpu.x[4] == AARCH64_FPSR_WRITE_MASK);
+
+    cpu.x[30] = UINT64_C(0x1020304050607080);
+    execute_instruction(&cpu, UINT32_C(0xd53b441f));
+    execute_instruction(&cpu, UINT32_C(0xd53b443f));
+    assert(cpu.x[30] == UINT64_C(0x1020304050607080));
+    assert(cpu.fpcr == UINT32_MAX);
+    assert(cpu.fpsr == UINT32_MAX);
+
+    cpu.x[5] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0xd51b4405));
+    assert(cpu.fpcr == AARCH64_FPCR_WRITE_MASK);
+    assert(cpu.fpsr == UINT32_MAX);
+    assert(cpu.x[5] == UINT64_MAX);
+
+    cpu.x[6] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0xd51b4426));
+    assert(cpu.fpcr == AARCH64_FPCR_WRITE_MASK);
+    assert(cpu.fpsr == AARCH64_FPSR_WRITE_MASK);
+    assert(cpu.nzcv == UINT32_C(0xb0000000));
+    assert(cpu.x[6] == UINT64_MAX);
+
+    execute_instruction(&cpu, UINT32_C(0xd51b441f));
+    execute_instruction(&cpu, UINT32_C(0xd51b443f));
+    assert(cpu.fpcr == 0);
+    assert(cpu.fpsr == 0);
 
     execute_instruction(&cpu, UINT32_C(0xd53bd040));
     assert(cpu.x[0] == UINT64_C(0x123456789abcdef0));
@@ -89,7 +144,7 @@ static void test_execute(void) {
 
     execute_instruction(&cpu, UINT32_C(0xd51bd05f));
     assert(cpu.tpidr_el0 == 0);
-    assert(cpu.pc == UINT64_C(0x101c));
+    assert(cpu.pc == UINT64_C(0x103c));
     assert(cpu.sp == UINT64_C(0xfedcba9876543210));
     assert(cpu.nzcv == UINT32_C(0xb0000000));
 }

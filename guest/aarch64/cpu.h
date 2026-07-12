@@ -65,15 +65,27 @@ _Static_assert(CPU_OFFSET(v) % 16 == 0,
         "AArch64 向量寄存器组必须按 16 字节对齐");
 
 #define AARCH64_NZCV_MASK UINT32_C(0xf0000000)
+#define AARCH64_FPCR_AHP UINT32_C(0x04000000)
 #define AARCH64_FPCR_RMODE_SHIFT 22
 #define AARCH64_FPCR_RMODE_MASK UINT32_C(0x00c00000)
 #define AARCH64_FPCR_FZ UINT32_C(0x01000000)
 #define AARCH64_FPCR_DN UINT32_C(0x02000000)
+// guest HWCAP 未声明 FP16 等可选扩展，且没有异常陷阱通道；相关位按 RAZ/WI 处理。
+#define AARCH64_FPCR_WRITE_MASK \
+    (AARCH64_FPCR_AHP | AARCH64_FPCR_DN | AARCH64_FPCR_FZ | \
+            AARCH64_FPCR_RMODE_MASK)
+#define AARCH64_FPSR_QC UINT32_C(0x08000000)
 #define AARCH64_FPSR_IOC UINT32_C(0x00000001)
+#define AARCH64_FPSR_DZC UINT32_C(0x00000002)
 #define AARCH64_FPSR_OFC UINT32_C(0x00000004)
 #define AARCH64_FPSR_UFC UINT32_C(0x00000008)
 #define AARCH64_FPSR_IXC UINT32_C(0x00000010)
 #define AARCH64_FPSR_IDC UINT32_C(0x00000080)
+// AArch64-only guest 暴露基础累计异常状态与饱和标志，保留位始终为零。
+#define AARCH64_FPSR_WRITE_MASK \
+    (AARCH64_FPSR_QC | AARCH64_FPSR_IDC | AARCH64_FPSR_IXC | \
+            AARCH64_FPSR_UFC | AARCH64_FPSR_OFC | \
+            AARCH64_FPSR_DZC | AARCH64_FPSR_IOC)
 
 static inline addr_t cpu_get_pc(const struct cpu_state *cpu) {
     return cpu->pc;
@@ -97,6 +109,22 @@ static inline dword_t aarch64_get_nzcv(const struct cpu_state *cpu) {
 
 static inline void aarch64_set_nzcv(struct cpu_state *cpu, dword_t nzcv) {
     cpu->nzcv = nzcv & AARCH64_NZCV_MASK;
+}
+
+static inline dword_t aarch64_get_fpcr(const struct cpu_state *cpu) {
+    return cpu->fpcr & AARCH64_FPCR_WRITE_MASK;
+}
+
+static inline void aarch64_set_fpcr(struct cpu_state *cpu, dword_t fpcr) {
+    cpu->fpcr = fpcr & AARCH64_FPCR_WRITE_MASK;
+}
+
+static inline dword_t aarch64_get_fpsr(const struct cpu_state *cpu) {
+    return cpu->fpsr & AARCH64_FPSR_WRITE_MASK;
+}
+
+static inline void aarch64_set_fpsr(struct cpu_state *cpu, dword_t fpsr) {
+    cpu->fpsr = fpsr & AARCH64_FPSR_WRITE_MASK;
 }
 
 static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t address,
