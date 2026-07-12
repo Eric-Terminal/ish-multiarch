@@ -516,6 +516,16 @@ if not meson.is_cross_build()
         link_with: libish_aarch64_core)
     test('aarch64_linux_process', aarch64_linux_process_test)
 
+    aarch64_linux_process_fork_test = executable(
+        'aarch64_linux_process_fork_test',
+        aarch64_core_src + ['guest/aarch64/linux-process-fork-test.c'],
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1',
+            '-DAARCH64_LINUX_PROCESS_TESTING=1'])
+    test('aarch64_linux_process_fork',
+        aarch64_linux_process_fork_test)
+
     aarch64_linux_dynamic_process_test = executable(
         'aarch64_linux_dynamic_process_test',
         'guest/aarch64/linux-dynamic-process-test.c',

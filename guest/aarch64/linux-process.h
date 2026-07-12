@@ -84,6 +84,11 @@ struct aarch64_linux_process_config {
     const struct guest_linux_signal_service *signals;
 };
 
+struct aarch64_linux_process_fork_config {
+    pid_t_ tid;
+    void *task_opaque;
+};
+
 struct aarch64_linux_interpreter_image {
     const void *data;
     size_t size;
@@ -125,6 +130,16 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
         const struct aarch64_linux_process_config *config,
         const struct aarch64_linux_interpreter_image *interpreter,
         struct aarch64_linux_process_error *error);
+/*
+ * 调用方须冻结 parent 并停在完整 guest 状态的安全点。成功时子进程
+ * 拥有独立地址空间，继承服务闭包与架构状态，并从 x0 == 0 继续执行；
+ * 父进程不变。服务描述符按值复制，但其 runtime_opaque 后端仍由调用方
+ * 持有并须覆盖子进程生命周期。
+ */
+struct aarch64_linux_process *aarch64_linux_process_fork(
+        const struct aarch64_linux_process *parent,
+        const struct aarch64_linux_process_fork_config *config,
+        struct aarch64_linux_process_error *error);
 // required_size 包含末尾 NUL；destination 为 NULL 可只查询长度，返回
 // BUFFER_TOO_SMALL；任何缓冲区不足情形都不写入部分路径。
 struct aarch64_linux_interpreter_path_result
@@ -142,6 +157,14 @@ bool aarch64_linux_process_uses_services(
         pid_t_ tid, const void *task_opaque,
         const struct guest_linux_syscall_service *syscalls,
         const struct guest_linux_signal_service *signals);
+#if defined(AARCH64_LINUX_PROCESS_TESTING)
+bool aarch64_linux_process_test_has_owned_state(
+        const struct aarch64_linux_process *process,
+        pid_t_ tid, const void *task_opaque,
+        guest_addr_t clear_child_tid,
+        guest_addr_t signal_trampoline,
+        bool require_empty_tlb);
+#endif
 // fault/undefined 不推进 PC；undefined 的 fault.address 保存精确 PC。
 // 调用方排入同步信号后应先调用 poll_signals。
 struct aarch64_linux_process_result aarch64_linux_process_run_one(

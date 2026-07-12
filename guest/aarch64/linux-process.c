@@ -201,6 +201,34 @@ static void copy_services(struct aarch64_linux_process *process,
     process->services.signal_trampoline = signal_trampoline;
 }
 
+static void copy_fork_services(struct aarch64_linux_process *child,
+        const struct aarch64_linux_process *parent) {
+    if (parent->services.syscalls != NULL) {
+        child->syscall_service = *parent->services.syscalls;
+        child->services.syscalls = &child->syscall_service;
+    }
+    if (parent->services.signals != NULL) {
+        child->signal_service = *parent->services.signals;
+        child->services.signals = &child->signal_service;
+    }
+    child->services.signal_trampoline =
+            parent->services.signal_trampoline;
+}
+
+static void copy_fork_cpu(struct cpu_state *child,
+        const struct cpu_state *parent) {
+    memcpy(child->x, parent->x, sizeof(child->x));
+    memcpy(child->v, parent->v, sizeof(child->v));
+    child->sp = parent->sp;
+    child->pc = parent->pc;
+    child->nzcv = parent->nzcv;
+    child->fpcr = parent->fpcr;
+    child->fpsr = parent->fpsr;
+    child->tpidr_el0 = parent->tpidr_el0;
+    child->x[0] = 0;
+    aarch64_clear_exclusive(child);
+}
+
 struct aarch64_linux_process *aarch64_linux_process_create(
         const struct aarch64_linux_process_config *config,
         struct aarch64_linux_process_error *error) {
@@ -349,6 +377,39 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
     return process;
 }
 
+struct aarch64_linux_process *aarch64_linux_process_fork(
+        const struct aarch64_linux_process *parent,
+        const struct aarch64_linux_process_fork_config *config,
+        struct aarch64_linux_process_error *error) {
+    set_error(error, AARCH64_LINUX_PROCESS_ERROR_NONE, 0);
+    if (parent == NULL || config == NULL || config->tid <= 0 ||
+            config->tid > AARCH64_LINUX_MAX_TID) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ARGUMENT, 0);
+        return NULL;
+    }
+
+    struct aarch64_linux_process *child = calloc(1, sizeof(*child));
+    if (child == NULL) {
+        set_error(error, AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+        return NULL;
+    }
+    if (!guest_page_table_clone(&child->page_table,
+            &parent->page_table))
+        return create_failed(child, error,
+                AARCH64_LINUX_PROCESS_ERROR_ALLOCATION, 0);
+
+    copy_fork_services(child, parent);
+    child->runtime = parent->runtime;
+    child->runtime.memory.page_table = &child->page_table;
+    child->runtime.services = &child->services;
+    aarch64_linux_task_init(&child->task,
+            config->tid, config->task_opaque);
+    guest_tlb_init(&child->tlb, &child->page_table.address_space);
+    aarch64_runner_init(&child->runner, &child->tlb);
+    copy_fork_cpu(&child->cpu, &parent->cpu);
+    return child;
+}
+
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process) {
     if (process == NULL)
@@ -381,6 +442,47 @@ bool aarch64_linux_process_uses_services(
             owned_signals->restore == signals->restore &&
             owned_signals->bad_frame == signals->bad_frame;
 }
+
+#if defined(AARCH64_LINUX_PROCESS_TESTING)
+bool aarch64_linux_process_test_has_owned_state(
+        const struct aarch64_linux_process *process,
+        pid_t_ tid, const void *task_opaque,
+        guest_addr_t clear_child_tid,
+        guest_addr_t signal_trampoline,
+        bool require_empty_tlb) {
+    if (process == NULL)
+        return false;
+    bool owns_syscalls = process->services.syscalls == NULL ||
+            process->services.syscalls == &process->syscall_service;
+    bool owns_signals = process->services.signals == NULL ||
+            process->services.signals == &process->signal_service;
+    bool tlb_is_empty = true;
+    for (unsigned i = 0; i < GUEST_TLB_SIZE; i++) {
+        if (process->tlb.entries[i].valid) {
+            tlb_is_empty = false;
+            break;
+        }
+    }
+    return owns_syscalls && owns_signals &&
+            process->page_table.address_space.opaque ==
+                    &process->page_table &&
+            process->tlb.address_space ==
+                    &process->page_table.address_space &&
+            process->tlb.observed_generation ==
+                    process->page_table.address_space.generation &&
+            (!require_empty_tlb || tlb_is_empty) &&
+            process->runner.tlb == &process->tlb &&
+            process->runtime.memory.page_table ==
+                    &process->page_table &&
+            process->runtime.services == &process->services &&
+            process->services.signal_trampoline == signal_trampoline &&
+            process->task.tid == tid &&
+            process->task.service_opaque == task_opaque &&
+            process->task.clear_child_tid == clear_child_tid &&
+            process->cpu.mmu == NULL &&
+            process->cpu.poked_ptr == NULL && !process->cpu._poked;
+}
+#endif
 
 static struct aarch64_linux_process_result process_result(
         enum aarch64_linux_process_status status) {
