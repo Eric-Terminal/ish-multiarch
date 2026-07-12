@@ -725,16 +725,28 @@ static void sigmask_set(struct task *task, sigset_t_ set) {
     task->blocked = (set & ~UNBLOCKABLE_MASK);
 }
 
-static void sigmask_set_temp_unlocked(sigset_t_ mask) {
-    current->saved_mask = current->blocked;
-    current->has_saved_mask = true;
-    sigmask_set(current, mask);
+static void sigmask_set_temp_unlocked(
+        struct task *task, sigset_t_ mask) {
+    task->saved_mask = task->blocked;
+    task->has_saved_mask = true;
+    sigmask_set(task, mask);
 }
 
 void sigmask_set_temp(sigset_t_ mask) {
     lock(&current->sighand->lock);
-    sigmask_set_temp_unlocked(mask);
+    sigmask_set_temp_unlocked(current, mask);
     unlock(&current->sighand->lock);
+}
+
+int_t task_sigsuspend(struct task *task, sigset_t_ mask) {
+    assert(task != NULL && task == current);
+    struct sighand *sighand = task->sighand;
+    lock(&sighand->lock);
+    sigmask_set_temp_unlocked(task, mask);
+    while (wait_for(&task->pause, &sighand->lock, NULL) != _EINTR)
+        continue;
+    unlock(&sighand->lock);
+    return _EINTR;
 }
 
 int task_sigprocmask(struct task *task, dword_t how,
@@ -812,13 +824,9 @@ int_t sys_rt_sigsuspend(addr_t mask_addr, uint_t size) {
         return _EFAULT;
     STRACE("sigsuspend(0x%llx) = ...\n", (long long) mask);
 
-    lock(&current->sighand->lock);
-    sigmask_set_temp_unlocked(mask);
-    while (wait_for(&current->pause, &current->sighand->lock, NULL) != _EINTR)
-        continue;
-    unlock(&current->sighand->lock);
+    int error = task_sigsuspend(current, mask);
     STRACE("%d done sigsuspend", current->pid);
-    return _EINTR;
+    return error;
 }
 
 int_t sys_pause(void) {

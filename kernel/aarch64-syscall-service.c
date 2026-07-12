@@ -7,6 +7,7 @@
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-fd-service.h"
+#include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-wait-service.h"
 #include "kernel/calls.h"
@@ -55,6 +56,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_SIGALTSTACK = 132,
+    AARCH64_LINUX_SYS_RT_SIGSUSPEND = 133,
     AARCH64_LINUX_SYS_RT_SIGACTION = 134,
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
@@ -933,6 +935,9 @@ static qword_t dispatch_syscall(
             return dispatch_fstat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_SIGALTSTACK:
             return dispatch_sigaltstack(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RT_SIGSUSPEND:
+            return aarch64_linux_dispatch_rt_sigsuspend(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RT_SIGACTION:
             return dispatch_rt_sigaction(

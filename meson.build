@@ -249,6 +249,13 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_process_syscall', aarch64_process_syscall_test)
 
+        aarch64_sigsuspend_syscall_test = executable(
+            'aarch64_sigsuspend_syscall_test',
+            'kernel/aarch64-sigsuspend-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_sigsuspend_syscall',
+            aarch64_sigsuspend_syscall_test)
+
         aarch64_clone_test = executable(
             'aarch64_clone_test',
             'kernel/aarch64-clone-test.c',
