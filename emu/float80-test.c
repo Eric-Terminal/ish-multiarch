@@ -446,6 +446,98 @@ static void test_scale_golden(void) {
     suite_end("缩放边界");
 }
 
+static void test_sqrt_golden(void) {
+    static const struct {
+        const char *name;
+        float80 input;
+        float80 expected[4];
+    } cases[] = {
+        {"最小子正常数", {.signif = 1, .signExp = 0x0000},
+            {{.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x1fe0},
+             {.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x1fe0},
+             {.signif = UINT64_C(0xb504f333f9de6485), .signExp = 0x1fe0},
+             {.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x1fe0}}},
+        {"最大子正常数", {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000},
+            {{.signif = UINT64_MAX, .signExp = 0x1fff},
+             {.signif = UINT64_C(0xfffffffffffffffe), .signExp = 0x1fff},
+             {.signif = UINT64_MAX, .signExp = 0x1fff},
+             {.signif = UINT64_C(0xfffffffffffffffe), .signExp = 0x1fff}}},
+        {"最小正常数", {.signif = UINT64_C(0x8000000000000000), .signExp = 0x0001},
+            {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000}}},
+        {"最小正常数加一末位",
+            {.signif = UINT64_C(0x8000000000000001), .signExp = 0x0001},
+            {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000001), .signExp = 0x2000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x2000}}},
+        {"二", {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+            {{.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xb504f333f9de6485), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xb504f333f9de6484), .signExp = 0x3fff}}},
+        {"三", {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000},
+            {{.signif = UINT64_C(0xddb3d742c265539e), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xddb3d742c265539d), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xddb3d742c265539e), .signExp = 0x3fff},
+             {.signif = UINT64_C(0xddb3d742c265539d), .signExp = 0x3fff}}},
+        {"最大有限数", {.signif = UINT64_MAX, .signExp = 0x7ffe},
+            {{.signif = UINT64_MAX, .signExp = 0x5ffe},
+             {.signif = UINT64_MAX, .signExp = 0x5ffe},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x5fff},
+             {.signif = UINT64_MAX, .signExp = 0x5ffe}}},
+        {"一的前一数", {.signif = UINT64_MAX, .signExp = 0x3ffe},
+            {{.signif = UINT64_MAX, .signExp = 0x3ffe},
+             {.signif = UINT64_MAX, .signExp = 0x3ffe},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+             {.signif = UINT64_MAX, .signExp = 0x3ffe}}},
+        {"一的后一数", {.signif = UINT64_C(0x8000000000000001), .signExp = 0x3fff},
+            {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+             {.signif = UINT64_C(0x8000000000000001), .signExp = 0x3fff},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff}}},
+        {"四的前一数", {.signif = UINT64_MAX, .signExp = 0x4000},
+            {{.signif = UINT64_MAX, .signExp = 0x3fff},
+             {.signif = UINT64_MAX, .signExp = 0x3fff},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_MAX, .signExp = 0x3fff}}},
+        {"四", {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4001},
+            {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000}}},
+        {"四的后一数", {.signif = UINT64_C(0x8000000000000001), .signExp = 0x4001},
+            {{.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000001), .signExp = 0x4000},
+             {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000}}},
+    };
+
+    suite_start("平方根边界");
+    for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
+        f80_rounding_mode = mode;
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+            check_f80(cases[i].name, f80_sqrt(cases[i].input), cases[i].expected[mode]);
+
+        float80 zero = f80_bits(0, 0x0000);
+        float80 neg_zero = f80_bits(0, 0x8000);
+        float80 infinity = F80_INF;
+        check_f80("正零平方根", f80_sqrt(zero), zero);
+        check_f80("负零平方根", f80_sqrt(neg_zero), neg_zero);
+        check_f80("正无穷平方根", f80_sqrt(infinity), infinity);
+        check(f80_isnan(f80_sqrt(f80_bits(
+            UINT64_C(0x8000000000000000), 0xbfff))), "负有限数平方根应为 NaN");
+        check(f80_isnan(f80_sqrt(f80_bits(
+            UINT64_C(0x8000000000000000), 0xffff))), "负无穷平方根应为 NaN");
+        check(f80_isnan(f80_sqrt(F80_NAN)), "NaN 平方根应为 NaN");
+        check(f80_isnan(f80_sqrt(f80_bits(0, 0x3fff))),
+            "不受支持编码平方根应为 NaN");
+    }
+    suite_end("平方根边界");
+}
+
 static uint64_t random_state = UINT64_C(0x243f6a8885a308d3);
 
 static uint64_t next_random(void) {
@@ -513,6 +605,19 @@ static float80 native_x87_fscale(float80 x, float80 scale) {
     return f80_from_native(native_result);
 }
 
+static float80 native_x87_sqrt(float80 x) {
+    long double native_x = native_from_f80(x);
+    long double native_result;
+    __asm__ volatile(
+        "fldt %[x]\n\t"
+        "fsqrt\n\t"
+        "fstpt %[result]"
+        : [result] "=m" (native_result)
+        : [x] "m" (native_x)
+        : "st");
+    return f80_from_native(native_result);
+}
+
 static bool native_result_same(float80 actual, float80 expected) {
     return (f80_isnan(actual) && f80_isnan(expected)) || f80_same(actual, expected);
 }
@@ -575,6 +680,24 @@ static void test_native_x87_oracle(void) {
         {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
         {.signif = UINT64_MAX, .signExp = 0x7ffe},
     };
+    static const float80 sqrt_values[] = {
+        {.signif = 1, .signExp = 0x0000},
+        {.signif = UINT64_C(0x0123456789abcdef), .signExp = 0x0000},
+        {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000001), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x4000},
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0x4000},
+        {.signif = UINT64_MAX, .signExp = 0x7ffe},
+        {.signif = 0, .signExp = 0x0000},
+        {.signif = 0, .signExp = 0x8000},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x7fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0xffff},
+        {.signif = UINT64_C(0xc000000000000000), .signExp = 0x7fff},
+        {.signif = 0, .signExp = 0x3fff},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0xbfff},
+    };
 
     suite_start("原生 x87 参考");
     for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
@@ -615,6 +738,28 @@ static void test_native_x87_oracle(void) {
                     "x87 固定除法不一致（%s，left=%zu，right=%zu）",
                     rounding_name(mode), left, right);
             }
+        }
+        for (size_t i = 0; i < sizeof(sqrt_values) / sizeof(sqrt_values[0]); i++) {
+            float80 expected = native_x87_sqrt(sqrt_values[i]);
+            float80 actual = f80_sqrt(sqrt_values[i]);
+            check(native_result_same(actual, expected),
+                "x87 固定平方根不一致（%s，序号=%zu）", rounding_name(mode), i);
+        }
+        random_state = UINT64_C(0x082efa98ec4e6c89) ^ (uint64_t) mode;
+        for (int i = 0; i < 50000; i++) {
+            uint64_t signif = next_random();
+            float80 value;
+            if (i & 1) {
+                value = f80_bits(signif | (UINT64_C(1) << 63),
+                    (uint16_t) (1 + next_random() % 0x7ffe));
+            } else {
+                signif &= UINT64_MAX >> 1;
+                value = f80_bits(signif == 0 ? 1 : signif, 0x0000);
+            }
+            float80 expected = native_x87_sqrt(value);
+            float80 actual = f80_sqrt(value);
+            check(native_result_same(actual, expected),
+                "x87 随机平方根不一致（%s，序号=%d）", rounding_name(mode), i);
         }
         random_state = UINT64_C(0xa4093822299f31d0) ^ (uint64_t) mode;
         for (int i = 0; i < 50000; i++) {
@@ -687,6 +832,7 @@ int main(void) {
     test_round_to_integer();
     test_arithmetic_golden();
     test_scale_golden();
+    test_sqrt_golden();
     test_portable_properties();
 #if HAVE_NATIVE_X87
     test_native_x87_oracle();

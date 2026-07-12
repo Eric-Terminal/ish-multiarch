@@ -163,6 +163,21 @@ static int u128_clz(uint128_t x) {
     return zeros;
 }
 
+static uint64_t u128_sqrt_floor(uint128_t value, uint128_t *remainder) {
+    uint64_t low = 0;
+    uint64_t high = UINT64_MAX;
+    while (low < high) {
+        uint64_t middle = low + (high - low) / 2 + 1;
+        uint128_t square = (uint128_t) middle * middle;
+        if (square <= value)
+            low = middle;
+        else
+            high = middle - 1;
+    }
+    *remainder = value - (uint128_t) low * low;
+    return low;
+}
+
 static float80 u128_normalize_round(uint128_t signif, int exp, int sign) {
     if (signif == 0)
         return (float80) {.sign = (unsigned) sign};
@@ -595,22 +610,39 @@ float80 f80_log2(float80 x) {
 }
 
 float80 f80_sqrt(float80 x) {
+    if (!f80_is_supported(x) || f80_isnan(x))
+        return F80_NAN;
     if (f80_iszero(x))
         return x;
-    if (f80_isnan(x) || x.sign)
+    if (x.sign)
         return F80_NAN;
-    // for a rough guess, just cut the exponent by 2
-    float80 guess = x;
-    guess.exp = bias(unbias(guess.exp) / 2);
-    // now converge on the answer, using newton's method
-    float80 old_guess;
-    float80 two = f80_from_int(2);
-    int i = 0;
-    do {
-        old_guess = guess;
-        guess = f80_div(f80_add(guess, f80_div(x, guess)), two);
-    } while (!f80_eq(guess, old_guess) && i++ < 100);
-    return guess;
+    if (f80_isinf(x))
+        return x;
+
+    int shift = __builtin_clzll((unsigned long long) x.signif);
+    uint64_t signif = x.signif << shift;
+    int exp = unbias_denormal(x.exp) - shift;
+    int result_exp = exp / 2;
+    if (exp < 0 && exp % 2 != 0)
+        result_exp--;
+    int odd = exp - 2 * result_exp;
+
+    // 规范化输入为 S×2^(E-63)，再把目标 64 位有效数化为 sqrt(S×2^(63+odd))。
+    uint128_t radicand = (uint128_t) signif << (63 + odd);
+    uint128_t remainder;
+    uint64_t root = u128_sqrt_floor(radicand, &remainder);
+    bool increment =
+        (f80_rounding_mode == round_to_nearest && remainder > root) ||
+        (f80_rounding_mode == round_up && remainder != 0);
+    if (increment) {
+        if (root == UINT64_MAX) {
+            root = UINT64_C(1) << 63;
+            result_exp++;
+        } else {
+            root++;
+        }
+    }
+    return (float80) {.signif = root, .exp = bias(result_exp)};
 }
 
 float80 f80_scale(float80 x, int scale) {
