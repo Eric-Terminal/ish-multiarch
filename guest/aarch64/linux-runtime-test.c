@@ -304,6 +304,17 @@ int main(void) {
     assert(mapped_permissions ==
             (GUEST_MEMORY_READ | GUEST_MEMORY_WRITE));
 
+    memset(mapped_page, 0xa5, GUEST_MEMORY_PAGE_SIZE);
+    cpu.x[8] = 233;
+    cpu.x[0] = mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_MADV_DONTNEED;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0 && mapped_page[0] == 0 &&
+            mapped_page[GUEST_MEMORY_PAGE_SIZE - 1] == 0);
+    assert(probe.calls == 1);
+
     cpu.x[8] = 226;
     cpu.x[0] = mapped;
     cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;

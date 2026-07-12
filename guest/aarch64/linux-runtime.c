@@ -28,6 +28,7 @@
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
+#define AARCH64_LINUX_SYS_MADVISE 233
 #define AARCH64_LINUX_SYS_WAIT4 260
 #define AARCH64_LINUX_SYS_PREADV2 286
 #define AARCH64_LINUX_SYS_PWRITEV2 287
@@ -408,6 +409,10 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = guest_linux_mprotect(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],
                 syscall.arguments[2]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MADVISE) {
+        result.return_value = guest_linux_madvise(runtime->memory,
+                syscall.arguments[0], syscall.arguments[1],
+                (dword_t) syscall.arguments[2]);
     } else {
         struct service_dispatch_result service = dispatch_service(
                 &syscall, tlb, runtime->services, task,

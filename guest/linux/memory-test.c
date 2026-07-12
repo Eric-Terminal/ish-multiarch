@@ -406,6 +406,80 @@ static void test_brk_with_hole(void) {
     guest_page_table_destroy(&table);
 }
 
+static void test_madvise(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    struct guest_linux_mm memory;
+    guest_linux_mm_init(&memory, &table, BRK_BASE, BRK_LIMIT);
+    guest_addr_t base = (guest_addr_t) memory.mmap_base +
+            64 * GUEST_MEMORY_PAGE_SIZE;
+    qword_t flags = GUEST_LINUX_MAP_PRIVATE |
+            GUEST_LINUX_MAP_ANONYMOUS | GUEST_LINUX_MAP_FIXED;
+    assert(guest_linux_mmap(&memory, base,
+            3 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            flags, UINT64_MAX, 0) == base);
+
+    byte_t *first = lookup_page(&table, base,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    byte_t *middle = lookup_page(&table,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    byte_t *last = lookup_page(&table,
+            base + 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    memset(first, 0x11, GUEST_MEMORY_PAGE_SIZE);
+    memset(middle, 0x22, GUEST_MEMORY_PAGE_SIZE);
+    memset(last, 0x33, GUEST_MEMORY_PAGE_SIZE);
+
+    qword_t generation = table.address_space.generation;
+    qword_t reservation = guest_address_space_track_exclusive(
+            &table.address_space, base + GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_madvise(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE + 1,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert(first[0] == 0x11 && middle[0] == 0 && last[0] == 0);
+    assert(table.address_space.generation == generation);
+    assert(!guest_address_space_exclusive_matches(
+            &table.address_space,
+            base + GUEST_MEMORY_PAGE_SIZE, reservation));
+    lookup_page(&table, base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+
+    first[0] = 0x44;
+    assert(guest_linux_madvise(&memory, base,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MADV_RANDOM) == 0);
+    assert(first[0] == 0x44);
+
+    middle[0] = 0x55;
+    last[0] = 0x66;
+    assert(guest_linux_munmap(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE) == 0);
+    assert(guest_linux_madvise(&memory, base,
+            3 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            encoded_error(GUEST_LINUX_ENOMEM));
+    assert(first[0] == 0 && last[0] == 0);
+
+    assert(guest_linux_madvise(&memory, base + 1, 0,
+            GUEST_LINUX_MADV_NORMAL) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_madvise(&memory, base, 0, UINT32_MAX) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_madvise(&memory, base, 0,
+            GUEST_LINUX_MADV_NORMAL) == 0);
+    assert(guest_linux_madvise(&memory, TOP_PAGE,
+            GUEST_MEMORY_PAGE_SIZE + 1,
+            GUEST_LINUX_MADV_NORMAL) ==
+            encoded_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_madvise(&memory, base, UINT64_MAX,
+            GUEST_LINUX_MADV_NORMAL) ==
+            encoded_error(GUEST_LINUX_EINVAL));
+    guest_page_table_destroy(&table);
+}
+
 struct concurrency_context {
     struct guest_page_table *table;
     guest_addr_t address;
@@ -473,6 +547,7 @@ int main(void) {
     test_mmap_validation();
     test_mprotect_and_munmap();
     test_brk_with_hole();
+    test_madvise();
     test_concurrent_access_and_protection();
     return 0;
 }

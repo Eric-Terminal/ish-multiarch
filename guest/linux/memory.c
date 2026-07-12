@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <string.h>
 
 #include "guest/linux/errno.h"
 #include "guest/linux/memory.h"
@@ -321,6 +322,63 @@ qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
     bool locked = guest_page_table_write_lock(memory->page_table);
     qword_t result = guest_linux_mprotect_unlocked(
             memory, address, length, protection);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    return result;
+}
+
+static bool madvise_supported(dword_t advice) {
+    return advice == GUEST_LINUX_MADV_NORMAL ||
+            advice == GUEST_LINUX_MADV_RANDOM ||
+            advice == GUEST_LINUX_MADV_SEQUENTIAL ||
+            advice == GUEST_LINUX_MADV_WILLNEED ||
+            advice == GUEST_LINUX_MADV_DONTNEED;
+}
+
+static qword_t guest_linux_madvise_unlocked(
+        struct guest_linux_mm *memory, guest_addr_t address,
+        qword_t length, dword_t advice) {
+    if (!madvise_supported(advice) ||
+            ((qword_t) address & GUEST_MEMORY_PAGE_MASK) != 0)
+        return linux_error(GUEST_LINUX_EINVAL);
+    if (length == 0)
+        return 0;
+
+    qword_t count;
+    if (!page_count(length, &count))
+        return linux_error(GUEST_LINUX_EINVAL);
+    if (!valid_range(memory, address, count))
+        return linux_error(GUEST_LINUX_ENOMEM);
+
+    bool has_hole = false;
+    for (qword_t index = 0; index < count; index++) {
+        guest_addr_t page = address +
+                (index << GUEST_MEMORY_PAGE_BITS);
+        byte_t *host_page;
+        unsigned permissions;
+        enum guest_page_table_result lookup =
+                guest_page_table_lookup(memory->page_table,
+                        page, &host_page, &permissions);
+        if (lookup == GUEST_PAGE_TABLE_NOT_MAPPED) {
+            has_hole = true;
+            continue;
+        }
+        assert(lookup == GUEST_PAGE_TABLE_OK);
+        use(permissions);
+        if (advice == GUEST_LINUX_MADV_DONTNEED) {
+            memset(host_page, 0, GUEST_MEMORY_PAGE_SIZE);
+            guest_address_space_written(
+                    &memory->page_table->address_space,
+                    page, GUEST_MEMORY_PAGE_SIZE);
+        }
+    }
+    return has_hole ? linux_error(GUEST_LINUX_ENOMEM) : 0;
+}
+
+qword_t guest_linux_madvise(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, dword_t advice) {
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_madvise_unlocked(
+            memory, address, length, advice);
     guest_page_table_write_unlock(memory->page_table, locked);
     return result;
 }
