@@ -496,8 +496,17 @@ float80 f80_div(float80 a, float80 b) {
         int extra_bits = 0;
         if (signif != 0) {
             extra_bits = u128_clz(signif);
-            signif <<= extra_bits;
-            signif |= (remainder << extra_bits) / b.signif;
+            for (int bit = 0; bit < extra_bits; bit++) {
+                signif <<= 1;
+                remainder <<= 1;
+                if (remainder >= b.signif) {
+                    remainder -= b.signif;
+                    signif |= 1;
+                }
+            }
+            // 未生成的商位仍非零时，最低位记录粘滞信息供最终舍入使用。
+            if (remainder != 0)
+                signif |= 1;
         }
         int exp = unbias_denormal(a.exp) - unbias_denormal(b.exp) + 63 - b_trailing - extra_bits;
         f = u128_normalize_round(signif, exp, a.sign ^ b.sign);

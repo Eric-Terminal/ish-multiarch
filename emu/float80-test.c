@@ -309,6 +309,13 @@ static void test_arithmetic_golden(void) {
         float80 expected_third =
             mode == round_up || mode == round_to_nearest ? third_near : third_low;
         check_f80("一除以三", f80_div(one, f80_from_int(3)), expected_third);
+        float80 min_normal_plus_ulp =
+            f80_bits(UINT64_C(0x8000000000000001), 0x0001);
+        float80 tiny_quotient = f80_bits(
+            mode == round_up ? UINT64_MAX : UINT64_C(0xfffffffffffffffe),
+            0x3fbf);
+        check_f80("最小子正常数除以最小正常数加一末位",
+            f80_div(f80_bits(1, 0x0000), min_normal_plus_ulp), tiny_quotient);
         check_f80("一点五乘二", f80_mul(
             f80_bits(UINT64_C(0xc000000000000000), 0x3fff), two),
             f80_bits(UINT64_C(0xc000000000000000), 0x4000));
@@ -559,6 +566,15 @@ static void test_native_x87_oracle(void) {
         {.signif = UINT64_C(0xc000000000000000), .signExp = 0xbfff},
         {.signif = 0, .signExp = 0x3fff},
     };
+    static const float80 division_values[] = {
+        {.signif = 1, .signExp = 0x0000},
+        {.signif = UINT64_C(0x0123456789abcdef), .signExp = 0x0000},
+        {.signif = UINT64_C(0x7fffffffffffffff), .signExp = 0x0000},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000001), .signExp = 0x0001},
+        {.signif = UINT64_C(0x8000000000000000), .signExp = 0x3fff},
+        {.signif = UINT64_MAX, .signExp = 0x7ffe},
+    };
 
     suite_start("原生 x87 参考");
     for (enum f80_rounding_mode mode = round_to_nearest; mode <= round_chop; mode++) {
@@ -586,6 +602,48 @@ static void test_native_x87_oracle(void) {
                     "x87 FSCALE 不一致（%s，x=%zu，scale=%zu）",
                     rounding_name(mode), x, scale);
             }
+        }
+        for (size_t left = 0;
+                left < sizeof(division_values) / sizeof(division_values[0]); left++) {
+            for (size_t right = 0;
+                    right < sizeof(division_values) / sizeof(division_values[0]); right++) {
+                volatile long double native_left = native_from_f80(division_values[left]);
+                volatile long double native_right = native_from_f80(division_values[right]);
+                float80 expected = f80_from_native(native_left / native_right);
+                float80 actual = f80_div(division_values[left], division_values[right]);
+                check(native_result_same(actual, expected),
+                    "x87 固定除法不一致（%s，left=%zu，right=%zu）",
+                    rounding_name(mode), left, right);
+            }
+        }
+        random_state = UINT64_C(0xa4093822299f31d0) ^ (uint64_t) mode;
+        for (int i = 0; i < 50000; i++) {
+            uint64_t left_signif = next_random();
+            uint64_t right_signif = next_random();
+            uint16_t left_sign = (uint16_t) ((next_random() & 1) << 15);
+            uint16_t right_sign = (uint16_t) ((next_random() & 1) << 15);
+            float80 left;
+            float80 right;
+            if (i & 1) {
+                left = f80_bits(left_signif | (UINT64_C(1) << 63),
+                    (uint16_t) (1 + next_random() % 0x7ffe) | left_sign);
+            } else {
+                left_signif &= UINT64_MAX >> 1;
+                left = f80_bits(left_signif == 0 ? 1 : left_signif, left_sign);
+            }
+            if (i & 2) {
+                right = f80_bits(right_signif | (UINT64_C(1) << 63),
+                    (uint16_t) (1 + next_random() % 0x7ffe) | right_sign);
+            } else {
+                right_signif &= UINT64_MAX >> 1;
+                right = f80_bits(right_signif == 0 ? 1 : right_signif, right_sign);
+            }
+            volatile long double native_left = native_from_f80(left);
+            volatile long double native_right = native_from_f80(right);
+            float80 expected = f80_from_native(native_left / native_right);
+            float80 actual = f80_div(left, right);
+            check(native_result_same(actual, expected),
+                "x87 随机除法不一致（%s，序号=%d）", rounding_name(mode), i);
         }
         random_state = UINT64_C(0x13198a2e03707344) ^ (uint64_t) mode;
         for (int i = 0; i < 20000; i++) {
