@@ -224,6 +224,12 @@ if get_option('kernel') == 'ish'
             'platform/apple-runtime-link-smoke.c',
             dependencies: ish,
             link_args: ['-Wl,-fatal_warnings'])
+        apple_runtime_force_link_smoke = executable(
+            'apple_runtime_force_link_smoke',
+            'platform/apple-runtime-link-smoke.c',
+            link_whole: [libish, libish_emu, libfakefs],
+            dependencies: dependencies,
+            link_args: ['-Wl,-fatal_warnings'])
     endif
 
     if not meson.is_cross_build()
