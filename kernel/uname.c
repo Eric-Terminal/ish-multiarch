@@ -3,9 +3,7 @@
 #include "kernel/calls.h"
 #include "platform/platform.h"
 
-#if __APPLE__
-#include <sys/sysctl.h>
-#elif __linux__
+#if __linux__
 #include <sys/sysinfo.h>
 #endif
 
@@ -41,13 +39,8 @@ dword_t sys_sethostname(addr_t UNUSED(hostname_addr), dword_t UNUSED(hostname_le
 }
 
 #if __APPLE__
-static uint64_t get_total_ram(void) {
-    uint64_t total_ram;
-    sysctl((int []) {CTL_DEBUG, HW_PHYSMEM}, 2, &total_ram, NULL, NULL, 0);
-    return total_ram;
-}
 static void sysinfo_specific(struct sys_info *info) {
-    info->totalram = get_total_ram();
+    info->totalram = get_mem_usage().total;
     // TODO: everything else
 }
 #elif __linux__

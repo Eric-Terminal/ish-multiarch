@@ -61,6 +61,16 @@ if not meson.is_cross_build()
     test('aarch64_core_link', aarch64_core_link_smoke)
 endif
 
+if host_machine.system() == 'darwin'
+    darwin_platform_link_smoke = executable('darwin_platform_link_smoke', [
+            'platform/darwin.c',
+            'platform/darwin-link-smoke.c',
+        ], include_directories: includes)
+    if not meson.is_cross_build()
+        test('darwin_platform_link', darwin_platform_link_smoke)
+    endif
+endif
+
 if not get_option('core_only')
 threads = dependency('threads')
 librt = cc.find_library('rt', required: false)
