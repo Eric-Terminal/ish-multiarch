@@ -2,6 +2,7 @@
 
 # Try to figure out the user's PATH to pick up their installed utilities.
 export PATH="$PATH:$(sudo -u "$USER" -i printenv PATH)"
+source "$SRCROOT/tools/apple-meson-arch.sh"
 
 mkdir -p "$MESON_BUILD_DIR"
 cd "$MESON_BUILD_DIR"
@@ -16,9 +17,7 @@ if [[ $? -ne 0 ]]; then
     done
     arch_args="${arch_args%%, }"
     meson_arch=${ARCHS%% *}
-    case "$meson_arch" in
-        arm64) meson_arch=aarch64 ;;
-    esac
+    apple_meson_architecture "$meson_arch"
     cat | tee $crossfile <<-EOF
     [binaries]
     c = 'clang'
@@ -26,8 +25,8 @@ if [[ $? -ne 0 ]]; then
 
     [host_machine]
     system = 'darwin'
-    cpu_family = '$meson_arch'
-    cpu = '$meson_arch'
+    cpu_family = '$APPLE_MESON_CPU_FAMILY'
+    cpu = '$APPLE_MESON_CPU'
     endian = 'little'
 
     [built-in options]

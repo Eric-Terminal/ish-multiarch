@@ -470,6 +470,9 @@ foreach script : gdb_scripts
 endforeach
 
 if not meson.is_cross_build()
+    apple_meson_arch_test = find_program('tools/apple-meson-arch-test.sh')
+    test('apple_meson_arch', apple_meson_arch_test)
+
     # test for floating point library
     float80_test = executable('float80_test',
         ['emu/float80.c', 'emu/fpu.c', 'emu/float80-test.c'], dependencies: [libm])
