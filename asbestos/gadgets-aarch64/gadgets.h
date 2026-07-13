@@ -22,6 +22,14 @@ _tlb .req x2
 _addr .req w3
 _xaddr .req x3
 
+#if __SIZEOF_POINTER__ == 4
+#define HOST_PTR_REG(reg32, reg64) reg32
+#elif __SIZEOF_POINTER__ == 8
+#define HOST_PTR_REG(reg32, reg64) reg64
+#else
+#error "unsupported host pointer size"
+#endif
+
 .extern fiber_exit
 
 .macro .gadget name

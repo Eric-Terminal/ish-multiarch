@@ -49,11 +49,12 @@
 .purgem x
 
 .pushsection_rodata
+.align_host_pointer
 .global NAME(si_gadgets)
 NAME(si_gadgets):
 .irp reg, REG_LIST
     .irp times, 1,2,4,8
-        .quad NAME(gadget_si_\reg\()_\times)
+        .host_pointer NAME(gadget_si_\reg\()_\times)
     .endr
 .endr
 .popsection

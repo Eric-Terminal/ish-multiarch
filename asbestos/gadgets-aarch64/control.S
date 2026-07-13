@@ -60,10 +60,10 @@
     cmp _ip, 0
     b.lt 1f
     sub x8, _ip, FIBER_BLOCK_code
-    str x8, [_cpu, LOCAL_last_block]
+    str HOST_PTR_REG(w8, x8), [_cpu, LOCAL_last_block]
     gret
 1:
-    str x8, [_cpu, LOCAL_last_block]
+    str HOST_PTR_REG(w8, x8), [_cpu, LOCAL_last_block]
     // fallthrough
 2:
     mov eip, _tmp

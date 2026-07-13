@@ -38,6 +38,25 @@
 #endif
 .endm
 
+// Gadget 表保存的是宿主函数指针，而不是固定宽度的 fiber_cell_t。
+#if __SIZEOF_POINTER__ == 4
+.macro .align_host_pointer
+    .p2align 2
+.endm
+.macro .host_pointer value
+    .long \value
+.endm
+#elif __SIZEOF_POINTER__ == 8
+.macro .align_host_pointer
+    .p2align 3
+.endm
+.macro .host_pointer value
+    .quad \value
+.endm
+#else
+#error "unsupported host pointer size"
+#endif
+
 #if __APPLE__
 #define NAME(x) _##x
 #else
@@ -57,6 +76,7 @@
 # an array of gadgets
 .macro _gadget_array_start name
     .pushsection_rodata
+    .align_host_pointer
     .type_compat \name\()_gadgets,@object
     .global.name \name\()_gadgets
 .endm
@@ -66,7 +86,7 @@
         .ifndef NAME(gadget_\type\()_\arg)
             .set NAME(gadget_\type\()_\arg), 0
         .endif
-        .quad NAME(gadget_\type\()_\arg)
+        .host_pointer NAME(gadget_\type\()_\arg)
     .endr
 .endm
 
