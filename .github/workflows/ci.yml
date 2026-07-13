@@ -43,7 +43,7 @@ jobs:
       matrix:
         kernel: [ish, linux]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
         with:
             submodules: true
       - name: Install dependencies
@@ -55,9 +55,54 @@ jobs:
       - name: Build
         if: matrix.kernel == 'ish'
         run: xcodebuild -project iSH.xcodeproj -scheme iSH -arch arm64 -sdk iphoneos CODE_SIGNING_ALLOWED=NO
-      - name: 验证 Apple 完整库
+      - name: 验证 Apple 四切片与 XCFramework
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
+      - name: 验证 watchOS Xcode 最终链接
+        if: matrix.kernel == 'ish'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts="$PWD/build-apple-core"
+          products="$RUNNER_TEMP/ish-watch-products"
+          common=(
+            -project iSH.xcodeproj
+            -scheme iSHWatchLinkSmoke
+            -configuration Release
+            CODE_SIGNING_ALLOWED=NO
+            ONLY_ACTIVE_ARCH=NO
+            ISH_WATCH_ARTIFACT_ROOT="$artifacts"
+            SYMROOT="$products"
+          )
+
+          xcodebuild "${common[@]}" -sdk watchos \
+            ARCHS="arm64 arm64_32" WATCHOS_DEPLOYMENT_TARGET=10.0 build
+          xcodebuild "${common[@]}" -sdk watchsimulator \
+            ARCHS="arm64 x86_64" WATCHOS_DEPLOYMENT_TARGET=10.0 build
+
+          device="$products/Release-watchos/iSHWatchLinkSmoke.app/iSHWatchLinkSmoke"
+          simulator="$products/Release-watchsimulator/iSHWatchLinkSmoke.app/iSHWatchLinkSmoke"
+          xcrun lipo "$device" -verify_arch arm64_32 arm64
+          xcrun lipo "$simulator" -verify_arch arm64 x86_64
+
+          verify_slice() {
+            local binary=$1
+            local arch=$2
+            local platform=$3
+            local minos=$4
+            local metadata
+            local symbols
+            metadata=$(xcrun vtool -arch "$arch" -show-build "$binary")
+            grep -q "platform $platform" <<< "$metadata"
+            grep -q "minos $minos" <<< "$metadata"
+            symbols=$(xcrun nm -arch "$arch" "$binary")
+            grep -q ' _become_first_process$' <<< "$symbols"
+          }
+
+          verify_slice "$device" arm64_32 WATCHOS 10.0
+          verify_slice "$device" arm64 WATCHOS 26.0
+          verify_slice "$simulator" arm64 WATCHOSSIMULATOR 10.0
+          verify_slice "$simulator" x86_64 WATCHOSSIMULATOR 10.0
       - name: Build
         if: matrix.kernel == 'linux'
         run: xcodebuild -project iSH.xcodeproj -scheme iSH+Linux -arch x86_64 -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO
