@@ -66,13 +66,18 @@ ssize_t file_pread_fd(struct fd *fd, void *buffer,
         result = _ESPIPE;
     } else {
         off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        result = saved_offset < 0 ? saved_offset :
-                fd->ops->lseek(fd, offset, LSEEK_SET);
-        if (result >= 0) {
-            result = fd->ops->read(fd, buffer, size);
+        if (saved_offset < 0) {
+            result = (int) saved_offset;
+        } else {
+            off_t_ positioned = fd->ops->lseek(
+                    fd, offset, LSEEK_SET);
+            result = positioned < 0 ? (int) positioned :
+                    fd->ops->read(fd, buffer, size);
+        }
+        if (saved_offset >= 0) {
             off_t_ restored = fd->ops->lseek(
                     fd, saved_offset, LSEEK_SET);
-            assert(restored >= 0);
+            assert(restored == saved_offset);
         }
     }
     unlock(&fd->lock);
@@ -119,13 +124,18 @@ ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
         result = _ESPIPE;
     } else {
         off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        result = saved_offset < 0 ? saved_offset :
-                fd->ops->lseek(fd, offset, LSEEK_SET);
-        if (result >= 0) {
-            result = fd->ops->write(fd, buffer, size);
+        if (saved_offset < 0) {
+            result = (int) saved_offset;
+        } else {
+            off_t_ positioned = fd->ops->lseek(
+                    fd, offset, LSEEK_SET);
+            result = positioned < 0 ? (int) positioned :
+                    fd->ops->write(fd, buffer, size);
+        }
+        if (saved_offset >= 0) {
             off_t_ restored = fd->ops->lseek(
                     fd, saved_offset, LSEEK_SET);
-            assert(restored >= 0);
+            assert(restored == saved_offset);
         }
     }
     unlock(&fd->lock);

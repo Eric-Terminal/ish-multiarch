@@ -32,6 +32,7 @@ struct directory_probe {
     qword_t inodes[2];
     size_t count;
     size_t position;
+    off_t_ cookie_base;
     size_t error_position;
     int error;
     unsigned seek_calls;
@@ -50,16 +51,18 @@ static int probe_readdir(struct fd *fd, struct dir_entry *entry) {
     return 1;
 }
 
-static unsigned long probe_telldir(struct fd *fd) {
+static off_t_ probe_telldir(struct fd *fd) {
     struct directory_probe *probe = fd->data;
-    return (unsigned long) probe->position;
+    return probe->cookie_base + (off_t_) probe->position;
 }
 
-static void probe_seekdir(struct fd *fd, unsigned long position) {
+static void probe_seekdir(struct fd *fd, off_t_ position) {
     struct directory_probe *probe = fd->data;
-    assert(position <= probe->count);
+    assert(position >= probe->cookie_base);
+    off_t_ relative = position - probe->cookie_base;
+    assert((qword_t) relative <= probe->count);
     probe->seek_calls++;
-    probe->position = (size_t) position;
+    probe->position = (size_t) relative;
 }
 
 static const struct fd_ops directory_ops = {
@@ -107,6 +110,7 @@ int main(void) {
         .names = {"a", "second"},
         .inodes = {UINT64_C(0x1020304050607080), 22},
         .count = 2,
+        .cookie_base = INT64_C(0x100000000),
     };
     struct fd *directory_fd = make_fd(
             &directory_ops, &directory, S_IFDIR);
@@ -143,12 +147,17 @@ int main(void) {
             "读回第一条 legacy 记录");
     struct legacy_dirent64 *first = (void *) output;
     CHECK(first->inode == directory.inodes[0] &&
-            first->next_offset == 1 && first->length == 21 &&
+            first->next_offset == UINT64_C(0x100000001) &&
+            first->length == 21 &&
             first->type == 0 && strcmp(first->name, "a") == 0,
-            "legacy 适配器保持既有未对齐线格式");
+            "legacy 适配器保持未对齐线格式和 64 位目录 cookie");
     CHECK(sys_getdents64(0, OUTPUT_PAGE, 26) == 26 &&
             directory.position == 2,
             "容量不足重试从第二条 legacy 记录继续");
+    CHECK(user_read(OUTPUT_PAGE, output, 26) == 0 &&
+            ((struct legacy_dirent64 *) output)->next_offset ==
+                    UINT64_C(0x100000002),
+            "第二条 legacy 记录继续保留 64 位目录 cookie");
     CHECK(sys_getdents64(0, UINT32_MAX, UINT32_MAX) == 0,
             "legacy EOF 不访问无效 guest 指针");
 

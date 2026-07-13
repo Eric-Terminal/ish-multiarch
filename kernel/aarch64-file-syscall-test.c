@@ -73,6 +73,7 @@ struct directory_probe {
     qword_t inodes[DIRECTORY_PROBE_CAPACITY];
     size_t count;
     size_t position;
+    off_t_ cookie_base;
     size_t error_position;
     int error;
     unsigned read_calls;
@@ -297,16 +298,18 @@ static int directory_readdir(struct fd *fd, struct dir_entry *entry) {
     return 1;
 }
 
-static unsigned long directory_telldir(struct fd *fd) {
+static off_t_ directory_telldir(struct fd *fd) {
     struct directory_probe *probe = fd->data;
-    return (unsigned long) probe->position;
+    return probe->cookie_base + (off_t_) probe->position;
 }
 
-static void directory_seekdir(struct fd *fd, unsigned long position) {
+static void directory_seekdir(struct fd *fd, off_t_ position) {
     struct directory_probe *probe = fd->data;
-    assert(position <= probe->count);
+    assert(position >= probe->cookie_base);
+    off_t_ relative = position - probe->cookie_base;
+    assert((qword_t) relative <= probe->count);
     probe->seek_calls++;
-    probe->position = (size_t) position;
+    probe->position = (size_t) relative;
 }
 
 static int directory_close(struct fd *fd) {
@@ -1222,6 +1225,7 @@ int main(void) {
         .names = {"a", "second", maximum_name},
         .inodes = {UINT64_C(0x1020304050607080), 22, 33},
         .count = 3,
+        .cookie_base = INT64_C(0x100000000),
     };
     struct fd *directory_object = create_directory_fd(&directory);
     CHECK(directory_object != NULL, "目录探针描述符创建成功");
@@ -1262,7 +1266,8 @@ int main(void) {
             (void *) (memory.bytes + directory_offset);
     CHECK(result == 24 && directory.position == 1 &&
             memory.write_calls == 1 && first->inode == directory.inodes[0] &&
-            first->next_offset == 1 && first->length == 24 &&
+            first->next_offset == INT64_C(0x100000001) &&
+            first->length == 24 &&
             first->type == 0 && strcmp(first->name, "a") == 0,
             "短名称目录记录使用 24 字节线格式和下一位置 cookie");
     for (size_t index = 21; index < 24; index++)
@@ -1278,7 +1283,8 @@ int main(void) {
             (void *) (memory.bytes + directory_offset);
     CHECK(result == 32 && directory.position == 2 &&
             second->inode == directory.inodes[1] &&
-            second->next_offset == 2 && second->length == 32 &&
+            second->next_offset == INT64_C(0x100000002) &&
+            second->length == 32 &&
             strcmp(second->name, "second") == 0,
             "容量不足后重试从未消费的第二条记录继续");
 
@@ -1295,7 +1301,8 @@ int main(void) {
     CHECK(result == 336 && directory.position == 3 &&
             memory.write_calls == 3 && first->length == 24 &&
             second->length == 32 && third->length == 280 &&
-            third->next_offset == 3 && strcmp(third->name, maximum_name) == 0,
+            third->next_offset == INT64_C(0x100000003) &&
+            strcmp(third->name, maximum_name) == 0,
             "低 32 位最大容量不分配巨型缓冲并输出三条记录");
     for (size_t index = 50; index < 56; index++)
         CHECK(memory.bytes[directory_offset + index] == 0,

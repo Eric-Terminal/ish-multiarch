@@ -62,11 +62,11 @@ static void tmp_inode_cleanup(struct tmp_inode *inode) {
 struct tmp_dirent {
     char name[MAX_NAME + 1];
     struct tmp_inode *inode;
-    unsigned long index;
+    off_t_ index;
 
     struct tmp_dirent *parent;
     struct list children;
-    unsigned long next_index;
+    off_t_ next_index;
 
     struct refcount refcount;
     lock_t lock;
@@ -94,6 +94,10 @@ static int tmpfs_dir_link(struct tmp_dirent *dir, const char *name, struct tmp_i
     if (!S_ISDIR(dir->inode->stat.mode)) {
         tmp_inode_release(child);
         return _ENOTDIR;
+    }
+    if (dir->next_index == INT64_MAX) {
+        tmp_inode_release(child);
+        return _EOVERFLOW;
     }
     struct tmp_dirent *new_dirent = malloc(sizeof(struct tmp_dirent));
     if (new_dirent == NULL) {
@@ -188,7 +192,8 @@ static struct tmp_dirent *tmpfs_lookup_parent(struct mount *mount, const char *p
 
 static int tmpfs_file_resize(struct tmp_inode *file, size_t size) {
     assert(S_ISREG(file->stat.mode));
-    size_t old_size = file->stat.size;
+    assert(file->stat.size <= SIZE_MAX);
+    size_t old_size = (size_t) file->stat.size;
     void *new_data = realloc(file->file_data, size);
     if (new_data == NULL)
         return _ENOMEM;
@@ -391,14 +396,22 @@ static ssize_t tmpfs_read(struct fd *fd, void *buf, size_t bufsize) {
         goto out;
     assert(S_ISREG(inode->stat.mode));
 
-    if (bufsize > inode->stat.size - fd->offset) {
-        bufsize = inode->stat.size - fd->offset;
-        if (fd->offset >= inode->stat.size)
-            bufsize = 0;
+    if (fd->offset < 0) {
+        res = _EINVAL;
+        goto out;
     }
-    memcpy(buf, inode->file_data + fd->offset, bufsize);
-    fd->offset += bufsize;
-    res = bufsize;
+    qword_t offset = (qword_t) fd->offset;
+    if (offset >= inode->stat.size) {
+        bufsize = 0;
+    } else {
+        qword_t remaining = inode->stat.size - offset;
+        if (remaining < bufsize)
+            bufsize = (size_t) remaining;
+    }
+    if (bufsize != 0)
+        memcpy(buf, inode->file_data + (size_t) offset, bufsize);
+    fd->offset += (off_t_) bufsize;
+    res = (ssize_t) bufsize;
 
 out:
     unlock(&inode->lock);
@@ -414,14 +427,31 @@ static ssize_t tmpfs_write(struct fd *fd, const void *buf, size_t bufsize) {
         goto out;
     assert(S_ISREG(inode->stat.mode));
 
-    if (inode->stat.size < fd->offset + bufsize) {
-        res = tmpfs_file_resize(inode, fd->offset + bufsize);
+    if (fd->offset < 0 || (qword_t) fd->offset > SIZE_MAX) {
+        res = _EFBIG;
+        goto out;
+    }
+    size_t offset = (size_t) fd->offset;
+    size_t new_size;
+    if (__builtin_add_overflow(offset, bufsize, &new_size)) {
+        res = _EFBIG;
+        goto out;
+    }
+#if SIZE_MAX > INT64_MAX
+    if (new_size > INT64_MAX) {
+        res = _EFBIG;
+        goto out;
+    }
+#endif
+    if (inode->stat.size < new_size) {
+        res = tmpfs_file_resize(inode, new_size);
         if (res < 0)
             goto out;
     }
-    memcpy(inode->file_data + fd->offset, buf, bufsize);
-    fd->offset += bufsize;
-    res = bufsize;
+    if (bufsize != 0)
+        memcpy(inode->file_data + offset, buf, bufsize);
+    fd->offset = (off_t_) new_size;
+    res = (ssize_t) bufsize;
 
 out:
     unlock(&inode->lock);
@@ -429,11 +459,12 @@ out:
 }
 
 static off_t_ tmpfs_lseek(struct fd *fd, off_t_ off, int whence) {
-    qword_t size = 0;
+    off_t_ size = 0;
     if (whence == LSEEK_END) {
         struct tmp_inode *inode = tmpfs_fd_inode(fd);
         lock(&inode->lock);
-        size = inode->stat.size;
+        assert(inode->stat.size <= INT64_MAX);
+        size = (off_t_) inode->stat.size;
         unlock(&inode->lock);
     }
 
@@ -470,13 +501,13 @@ out:
     return res;
 }
 
-static unsigned long tmpfs_telldir(struct fd *fd) {
+static off_t_ tmpfs_telldir(struct fd *fd) {
     if (fd->tmpfs.dir_pos == NULL)
-        return (unsigned long) -1;
+        return INT64_MAX;
     return fd->tmpfs.dir_pos->index;
 }
 
-static void tmpfs_seekdir(struct fd *fd, unsigned long ptr) {
+static void tmpfs_seekdir(struct fd *fd, off_t_ ptr) {
     struct tmp_dirent *dir = fd->tmpfs.dirent;
     lock(&dir->lock);
     assert(S_ISDIR(dir->inode->stat.mode));

@@ -355,21 +355,21 @@ int generic_rmdirat(struct fd *at, const char *path_raw) {
     return generic_rmdirat_task(current, at, path_raw);
 }
 
-int generic_seek(struct fd *fd, off_t_ off, int whence, size_t size) {
-    off_t_ new_off = fd->offset;
+int generic_seek(struct fd *fd, off_t_ off, int whence, off_t_ size) {
+    off_t_ base;
     if (whence == LSEEK_SET) {
-        fd->offset = off;
+        base = 0;
     } else if (whence == LSEEK_CUR) {
-        if (__builtin_add_overflow(new_off, off, &new_off) || new_off < 0)
-            return _EINVAL;
-        fd->offset = new_off;
+        base = fd->offset;
     } else if (whence == LSEEK_END) {
-        new_off = size + off;
-        if (new_off < 0)
-            return _EINVAL;
-        fd->offset = new_off;
+        base = size;
     } else {
         return _EINVAL;
     }
+
+    off_t_ new_off;
+    if (__builtin_add_overflow(base, off, &new_off) || new_off < 0)
+        return _EINVAL;
+    fd->offset = new_off;
     return 0;
 }

@@ -20,7 +20,7 @@ struct fd {
     const struct fd_ops *ops;
     struct list poll_fds;
     lock_t poll_lock;
-    unsigned long offset;
+    off_t_ offset;
 
     // fd data
     union {
@@ -153,10 +153,10 @@ struct fd_ops {
     int (*readdir)(struct fd *fd, struct dir_entry *entry);
     // Return an opaque value representing the current point in the directory stream
     // optional, fd->offset will be used instead
-    unsigned long (*telldir)(struct fd *fd);
+    off_t_ (*telldir)(struct fd *fd);
     // Seek to the location represented by a pointer returned from telldir
     // optional, fd->offset will be used instead
-    void (*seekdir)(struct fd *fd, unsigned long ptr);
+    void (*seekdir)(struct fd *fd, off_t_ ptr);
 
     // map the file
     int (*mmap)(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off_t offset, int prot, int flags);

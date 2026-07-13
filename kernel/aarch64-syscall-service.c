@@ -1727,7 +1727,7 @@ struct aarch64_getdents_context {
 };
 
 static sqword_t emit_aarch64_dirent(void *opaque,
-        const struct dir_entry *entry, unsigned long next_position) {
+        const struct dir_entry *entry, off_t_ next_position) {
     struct aarch64_getdents_context *context = opaque;
     size_t name_size = strlen(entry->name) + 1;
     size_t unaligned = AARCH64_LINUX_DIRENT64_NAME_OFFSET + name_size;
@@ -1741,7 +1741,7 @@ static sqword_t emit_aarch64_dirent(void *opaque,
     byte_t record[AARCH64_LINUX_DIRENT64_MAX_SIZE] = {0};
     struct aarch64_linux_dirent64 *wire = (void *) record;
     wire->inode = entry->inode;
-    wire->next_offset = (sqword_t) (qword_t) next_position;
+    wire->next_offset = next_position;
     wire->length = (word_t) length;
     wire->type = 0;
     memcpy(record + AARCH64_LINUX_DIRENT64_NAME_OFFSET,

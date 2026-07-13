@@ -3,6 +3,7 @@
 #include "fs/poll.h"
 #include "fs/dyndev.h"
 #include "kernel/errno.h"
+#include "kernel/fs.h"
 #include "debug.h"
 
 /**
@@ -137,17 +138,18 @@ static ssize_t clipboard_read(clip_fd *fd, void *buf, size_t bufsize) {
             return _EIO;
         }
 
-        size_t remaining = length - fd->offset;
-        if ((size_t) fd->offset > length)
-            remaining = 0;
+        if (fd->offset < 0 || (qword_t) fd->offset >= length)
+            return 0;
+        size_t offset = (size_t) fd->offset;
+        size_t remaining = length - offset;
 
         size_t n = bufsize;
         if (n > remaining)
             n = remaining;
 
         if (n != 0) {
-            memcpy(buf, data + fd->offset, n);
-            fd->offset += n;
+            memcpy(buf, data + offset, n);
+            fd->offset += (off_t_) n;
         }
 
         return n;
@@ -155,7 +157,12 @@ static ssize_t clipboard_read(clip_fd *fd, void *buf, size_t bufsize) {
 }
 
 static ssize_t clipboard_write(clip_fd *fd, const void *buf, size_t bufsize) {
-    size_t new_len = fd->offset + bufsize;
+    if (fd->offset < 0 || (qword_t) fd->offset > SIZE_MAX)
+        return _EFBIG;
+    size_t offset = (size_t) fd->offset;
+    size_t new_len;
+    if (__builtin_add_overflow(offset, bufsize, &new_len))
+        return _EFBIG;
     size_t old_len = fd_priv(fd).buffer_len;
 
     if (old_len > new_len) {
@@ -167,19 +174,18 @@ static ssize_t clipboard_write(clip_fd *fd, const void *buf, size_t bufsize) {
     }
 
     // fill the hole between new offset and old len
-    if (old_len < fd->offset) {
-        memset(fd_priv(fd).buffer + old_len, '\0', fd->offset - old_len);
+    if (old_len < offset) {
+        memset(fd_priv(fd).buffer + old_len, '\0', offset - old_len);
     }
 
-    memcpy(fd_priv(fd).buffer + fd->offset, buf, bufsize);
-    fd->offset += bufsize;
+    memcpy(fd_priv(fd).buffer + offset, buf, bufsize);
+    fd->offset = (off_t_) (offset + bufsize);
     fd_priv(fd).buffer_len = new_len;
 
     return bufsize;
 }
 
 static off_t_ clipboard_lseek(clip_fd *fd, off_t_ off, int whence) {
-    off_t_ old_off = fd->offset;
     size_t length = 0;
 
     if (whence != LSEEK_SET || off != 0) {
@@ -190,28 +196,9 @@ static off_t_ clipboard_lseek(clip_fd *fd, off_t_ off, int whence) {
         }
     }
 
-    switch (whence) {
-    case LSEEK_SET:
-        fd->offset = off;
-        break;
-
-    case LSEEK_CUR:
-        fd->offset += off;
-        break;
-
-    case LSEEK_END:
-        fd->offset = length + off;
-        break;
-
-    default:
-        return _EINVAL;
-    }
-
-    if (fd->offset < 0) {
-        fd->offset = old_off;
-        return _EINVAL;
-    }
-
+    int error = generic_seek(fd, off, whence, (off_t_) length);
+    if (error < 0)
+        return error;
     return fd->offset;
 }
 
@@ -234,7 +221,7 @@ static int clipboard_open(int major, int minor, clip_fd *fd) {
             return (int) len;
         }
         if (fd->flags & O_APPEND_) {
-            fd->offset = (size_t) len;
+            fd->offset = (off_t_) len;
         }
     }
 

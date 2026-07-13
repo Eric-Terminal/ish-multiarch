@@ -16,7 +16,7 @@ struct dir_entry;
 
 // 回调在目标 fd 的位置锁内执行：返回正记录长度表示已提交，负值表示需要回滚。
 typedef sqword_t (*file_dirent_emit_t)(void *opaque,
-        const struct dir_entry *entry, unsigned long next_position);
+        const struct dir_entry *entry, off_t_ next_position);
 
 struct fs_info {
     atomic_uint refcount;
@@ -121,7 +121,7 @@ int generic_renameat_task(struct task *task,
         struct fd *dst_at, const char *dst);
 int generic_symlinkat(const char *target, struct fd *at, const char *link);
 int generic_mknodat(struct fd *at, const char *path, mode_t_ mode, dev_t_ dev);
-int generic_seek(struct fd *fd, off_t_ off, int whence, size_t size);
+int generic_seek(struct fd *fd, off_t_ off, int whence, off_t_ size);
 #define AC_R 4
 #define AC_W 2
 #define AC_X 1

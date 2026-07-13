@@ -301,7 +301,9 @@ static int devpts_fsetattr(struct fd *fd, struct attr attr) {
 static int devpts_readdir(struct fd *fd, struct dir_entry *entry) {
     assert(fd->devpts.num == -1); // there shouldn't be anything to list but the root
 
-    int pty_num = fd->offset;
+    if (fd->offset < 0 || fd->offset >= MAX_PTYS)
+        return 0;
+    int pty_num = (int) fd->offset;
     while (pty_num < MAX_PTYS && !devpts_pty_exists(pty_num))
         pty_num++;
     if (pty_num >= MAX_PTYS)

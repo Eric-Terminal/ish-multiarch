@@ -7,14 +7,14 @@
 #include "fs/fd.h"
 
 // 调用者持有 fd->lock，保证读取、输出与必要的游标回滚不可被 lseek 穿插。
-static unsigned long fd_telldir_locked(struct fd *fd) {
-    unsigned long off = fd->offset;
+static off_t_ fd_telldir_locked(struct fd *fd) {
+    off_t_ off = fd->offset;
     if (fd->ops->telldir)
         off = fd->ops->telldir(fd);
     return off;
 }
 
-static void fd_seekdir_locked(struct fd *fd, unsigned long off) {
+static void fd_seekdir_locked(struct fd *fd, off_t_ off) {
     fd->offset = off;
     if (fd->ops->seekdir)
         fd->ops->seekdir(fd, off);
@@ -37,8 +37,8 @@ struct linux_dirent64_ {
 
 size_t fill_dirent_32(void *dirent_data, ino_t inode, off_t_ offset, const char *name, int type) {
     struct linux_dirent_ *dirent = dirent_data;
-    dirent->inode = inode;
-    dirent->offset = offset;
+    dirent->inode = (dword_t) inode;
+    dirent->offset = (dword_t) offset;
     dirent->reclen = offsetof(struct linux_dirent_, name) +
         strlen(name) + 2; // name, null terminator, type
     strcpy(dirent->name, name);
@@ -49,7 +49,7 @@ size_t fill_dirent_32(void *dirent_data, ino_t inode, off_t_ offset, const char 
 size_t fill_dirent_64(void *dirent_data, ino_t inode, off_t_ offset, const char *name, int type) {
     struct linux_dirent64_ *dirent = dirent_data;
     dirent->inode = inode;
-    dirent->offset = offset;
+    dirent->offset = (qword_t) offset;
     dirent->reclen = offsetof(struct linux_dirent64_, name) +
         strlen(name) + 1; // name, null terminator
     dirent->type = type;
@@ -70,7 +70,7 @@ sqword_t file_getdents_task(struct task *task, fd_t fd_number,
     sqword_t completed = 0;
     lock(&fd->lock);
     while (true) {
-        unsigned long before = fd_telldir_locked(fd);
+        off_t_ before = fd_telldir_locked(fd);
         struct dir_entry entry;
         int error = fd->ops->readdir(fd, &entry);
         if (error <= 0) {
@@ -82,7 +82,7 @@ sqword_t file_getdents_task(struct task *task, fd_t fd_number,
             break;
         }
 
-        unsigned long next = fd_telldir_locked(fd);
+        off_t_ next = fd_telldir_locked(fd);
         sqword_t emitted = emit(opaque, &entry, next);
         assert(emitted != 0);
         if (emitted < 0) {
@@ -106,16 +106,17 @@ struct legacy_getdents_context {
 };
 
 static sqword_t emit_legacy_dirent(void *opaque,
-        const struct dir_entry *entry, unsigned long next_position) {
+        const struct dir_entry *entry, off_t_ next_position) {
     struct legacy_getdents_context *context = opaque;
     byte_t data[sizeof(struct linux_dirent64_) + NAME_MAX + 4];
     size_t length = context->fill(data, entry->inode,
-            (off_t_) next_position, entry->name, 0);
+            next_position, entry->name, 0);
     if (length > context->remaining)
         return _EINVAL;
     if (context->printed < 20) {
-        STRACE(" {inode=%llu, offset=%lu, name=%s, type=0, reclen=%zu}",
-                (unsigned long long) entry->inode, next_position,
+        STRACE(" {inode=%llu, offset=%lld, name=%s, type=0, reclen=%zu}",
+                (unsigned long long) entry->inode,
+                (long long) next_position,
                 entry->name, length);
         context->printed++;
     }

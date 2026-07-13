@@ -283,7 +283,7 @@ static ssize_t copy_file_bytes(struct fd *fd, void *buffer,
 static ssize_t probe_read(struct fd *fd, void *buffer, size_t size) {
     ssize_t read = copy_file_bytes(fd, buffer, size, fd->offset);
     if (read > 0)
-        fd->offset += (unsigned long) read;
+        fd->offset += (off_t_) read;
     return read;
 }
 
@@ -299,14 +299,14 @@ static off_t_ probe_lseek(struct fd *fd, off_t_ offset, int whence) {
     if (whence == LSEEK_SET) {
         next = offset;
     } else if (whence == LSEEK_CUR) {
-        if (__builtin_add_overflow((off_t_) fd->offset, offset, &next))
+        if (__builtin_add_overflow(fd->offset, offset, &next))
             return _EINVAL;
     } else {
         return _EINVAL;
     }
-    if (next < 0 || (qword_t) next > ULONG_MAX)
+    if (next < 0)
         return _EINVAL;
-    fd->offset = (unsigned long) next;
+    fd->offset = next;
     return next;
 }
 

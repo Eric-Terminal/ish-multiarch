@@ -17,6 +17,9 @@
     } \
 } while (0)
 
+_Static_assert(sizeof(((struct fd *) 0)->offset) == sizeof(off_t_),
+        "fd 顺序位置必须使用完整 guest 文件偏移宽度");
+
 struct close_gate {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -33,6 +36,8 @@ struct io_probe {
     unsigned read_calls;
     unsigned write_calls;
     off_t_ positioned_offset;
+    off_t_ sequential_read_offset;
+    off_t_ sequential_write_offset;
     unsigned seek_calls;
     int read_error;
     int write_error;
@@ -71,6 +76,7 @@ static ssize_t probe_read(struct fd *fd, void *buffer, size_t size) {
     struct io_probe *probe = fd->data;
     wait_for_concurrent_close(fd);
     probe->read_calls++;
+    probe->sequential_read_offset = fd->offset;
     if (probe->read_error != 0)
         return probe->read_error;
     size_t copied = size < probe->input_size ? size : probe->input_size;
@@ -82,6 +88,7 @@ static ssize_t probe_write(struct fd *fd, const void *buffer, size_t size) {
     struct io_probe *probe = fd->data;
     wait_for_concurrent_close(fd);
     probe->write_calls++;
+    probe->sequential_write_offset = fd->offset;
     if (probe->write_error != 0)
         return probe->write_error;
     size_t copied = size < sizeof(probe->output) ? size : sizeof(probe->output);
@@ -423,22 +430,44 @@ int main(void) {
     CHECK(fs_getcwd_task(&target.task, cwd, sizeof(cwd)) == 8,
             "getpath 失败后必须释放 fs 锁");
 
-    positioned_fd->offset = 7;
+    const off_t_ large_offset = INT64_C(0x100000005);
+    CHECK(generic_seek(positioned_fd, large_offset,
+            LSEEK_SET, 0) == 0 && positioned_fd->offset == large_offset,
+            "SEEK_SET 保留超过 4 GiB 的文件位置");
+    CHECK(generic_seek(positioned_fd, 7, LSEEK_CUR, 0) == 0 &&
+            positioned_fd->offset == large_offset + 7,
+            "SEEK_CUR 跨越 4 GiB 后保持 64 位位置");
+    off_t_ unchanged_offset = positioned_fd->offset;
+    CHECK(generic_seek(positioned_fd, INT64_MAX, LSEEK_CUR, 0) == _EINVAL &&
+            positioned_fd->offset == unchanged_offset,
+            "SEEK_CUR 溢出失败且不修改原位置");
+    CHECK(generic_seek(positioned_fd, -1, LSEEK_SET, 0) == _EINVAL &&
+            positioned_fd->offset == unchanged_offset,
+            "SEEK_SET 拒绝负位置且不修改原位置");
+    CHECK(generic_seek(positioned_fd, 11, LSEEK_END,
+            large_offset) == 0 &&
+            positioned_fd->offset == large_offset + 11,
+            "SEEK_END 接受超过 4 GiB 的文件大小");
+
+    positioned_fd->offset = large_offset;
     memset(buffer, 0, sizeof(buffer));
     CHECK(file_read_task(&target.task, 1, buffer, sizeof(buffer)) == 3,
             "pread 回退返回底层部分读取长度");
-    CHECK(positioned_io.positioned_offset == 7 && positioned_fd->offset == 10 &&
+    CHECK(positioned_io.positioned_offset == large_offset &&
+            positioned_fd->offset == large_offset + 3 &&
             positioned_io.seek_calls == 1, "pread 回退按实际读取量推进 offset");
     CHECK(file_write_task(&target.task, 1, "xy", 2) == 2,
             "pwrite 回退返回底层写入长度");
-    CHECK(positioned_io.positioned_offset == 10 && positioned_fd->offset == 12 &&
+    CHECK(positioned_io.positioned_offset == large_offset + 3 &&
+            positioned_fd->offset == large_offset + 5 &&
             positioned_io.seek_calls == 2, "pwrite 回退按实际写入量推进 offset");
     positioned_io.read_error = _EIO;
     positioned_io.write_error = _ENOSPC;
     CHECK(file_read_task(&target.task, 1, buffer, 1) == _EIO &&
             file_write_task(&target.task, 1, buffer, 1) == _ENOSPC,
             "positioned I/O 保持底层错误");
-    CHECK(positioned_fd->offset == 12 && positioned_io.seek_calls == 2,
+    CHECK(positioned_fd->offset == large_offset + 5 &&
+            positioned_io.seek_calls == 2,
             "positioned I/O 失败时不得推进 offset");
 
     positioned_fd->flags = O_RDWR_;
@@ -447,24 +476,33 @@ int main(void) {
     memset(buffer, 0, sizeof(buffer));
     CHECK(file_pread_fd(positioned_fd, buffer, 3, 19) == 3 &&
             positioned_io.positioned_offset == 19 &&
-            positioned_fd->offset == 12,
+            positioned_fd->offset == large_offset + 5,
             "显式 pread 回调使用指定位置且不改变顺序 offset");
     CHECK(file_pwrite_fd(positioned_fd, "ab", 2, 23) == 2 &&
             positioned_io.positioned_offset == 23 &&
-            positioned_fd->offset == 12,
+            positioned_fd->offset == large_offset + 5,
             "显式 pwrite 回调使用指定位置且不改变顺序 offset");
 
-    seekable_fd->offset = 41;
+    const off_t_ seekable_saved_offset = INT64_C(0x180000029);
+    const off_t_ seekable_read_offset = INT64_C(0x180000007);
+    const off_t_ seekable_write_offset = INT64_C(0x180000009);
+    seekable_fd->offset = seekable_saved_offset;
     memset(buffer, 0, sizeof(buffer));
-    CHECK(file_pread_fd(seekable_fd, buffer, 4, 7) == 4 &&
+    CHECK(file_pread_fd(seekable_fd, buffer, 4,
+            seekable_read_offset) == 4 &&
             memcmp(buffer, "seek", 4) == 0 &&
-            seekable_fd->offset == 41 && seekable_io.seek_calls == 3,
-            "read+lseek 回退读取后恢复共享顺序 offset");
-    CHECK(file_pwrite_fd(seekable_fd, "back", 4, 9) == 4 &&
+            seekable_io.sequential_read_offset == seekable_read_offset &&
+            seekable_fd->offset == seekable_saved_offset &&
+            seekable_io.seek_calls == 3,
+            "read+lseek 回退保留 64 位目标并恢复共享顺序 offset");
+    CHECK(file_pwrite_fd(seekable_fd, "back", 4,
+            seekable_write_offset) == 4 &&
             seekable_io.output_size == 4 &&
             memcmp(seekable_io.output, "back", 4) == 0 &&
-            seekable_fd->offset == 41 && seekable_io.seek_calls == 6,
-            "write+lseek 回退写入后恢复共享顺序 offset");
+            seekable_io.sequential_write_offset == seekable_write_offset &&
+            seekable_fd->offset == seekable_saved_offset &&
+            seekable_io.seek_calls == 6,
+            "write+lseek 回退保留 64 位目标并恢复共享顺序 offset");
     CHECK(file_pread_fd(target_fd, buffer, 1, 0) == _ESPIPE &&
             file_pwrite_fd(target_fd, buffer, 1, 0) == _ESPIPE,
             "不可定位的顺序 fd 对显式偏移返回 ESPIPE");

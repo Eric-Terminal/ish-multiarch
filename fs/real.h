@@ -34,8 +34,8 @@ ssize_t realfs_read(struct fd *fd, void *buf, size_t bufsize);
 ssize_t realfs_write(struct fd *fd, const void *buf, size_t bufsize);
 
 int realfs_readdir(struct fd *fd, struct dir_entry *entry);
-unsigned long realfs_telldir(struct fd *fd);
-void realfs_seekdir(struct fd *fd, unsigned long ptr);
+off_t_ realfs_telldir(struct fd *fd);
+void realfs_seekdir(struct fd *fd, off_t_ ptr);
 
 off_t realfs_lseek(struct fd *fd, off_t offset, int whence);
 

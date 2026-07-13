@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -175,18 +176,21 @@ int realfs_readdir(struct fd *fd, struct dir_entry *entry) {
     return 1;
 }
 
-unsigned long realfs_telldir(struct fd *fd) {
+off_t_ realfs_telldir(struct fd *fd) {
     realfs_opendir(fd);
-    return telldir(fd->dir);
+    return (off_t_) telldir(fd->dir);
 }
 
-void realfs_seekdir(struct fd *fd, unsigned long ptr) {
+void realfs_seekdir(struct fd *fd, off_t_ ptr) {
     realfs_opendir(fd);
-    seekdir(fd->dir, ptr);
+    assert(ptr >= LONG_MIN && ptr <= LONG_MAX);
+    seekdir(fd->dir, (long) ptr);
 }
 
 off_t realfs_lseek(struct fd *fd, off_t offset, int whence) {
     if (fd->dir != NULL && whence == LSEEK_SET) {
+        if (offset < LONG_MIN || offset > LONG_MAX)
+            return _EOVERFLOW;
         realfs_seekdir(fd, offset);
         return offset;
     }

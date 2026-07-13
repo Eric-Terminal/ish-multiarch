@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
 #include "kernel/calls.h"
@@ -112,8 +113,13 @@ static off_t_ proc_seek(struct fd *fd, off_t_ off, int whence) {
     int err = proc_refresh_data(fd);
     if (err < 0)
         return err;
+#if SIZE_MAX > INT64_MAX
+    if (fd->proc.data.size > INT64_MAX)
+        return _EOVERFLOW;
+#endif
 
-    err = generic_seek(fd, off, whence, fd->proc.data.size);
+    err = generic_seek(
+            fd, off, whence, (off_t_) fd->proc.data.size);
     if (err < 0)
         return err;
 
@@ -133,14 +139,17 @@ static ssize_t proc_pread(struct fd *fd, void *buf, size_t bufsize, off_t off) {
     const char *data = fd->proc.data.data;
     assert(data != NULL);
 
-    size_t remaining = fd->proc.data.size - off;
-    if ((size_t) off > fd->proc.data.size)
-        remaining = 0;
+    if (off < 0)
+        return _EINVAL;
+    if ((uint64_t) off >= fd->proc.data.size)
+        return 0;
+    size_t position = (size_t) off;
+    size_t remaining = fd->proc.data.size - position;
     size_t n = bufsize;
     if (n > remaining)
         n = remaining;
 
-    memcpy(buf, data + off, n);
+    memcpy(buf, data + position, n);
     return n;
 }
 
@@ -188,10 +197,15 @@ static ssize_t proc_pwrite(struct fd *fd, const void *buf, size_t bufsize, off_t
 }
 
 static int proc_readdir(struct fd *fd, struct dir_entry *entry) {
+    if (fd->offset < 0 || (qword_t) fd->offset > ULONG_MAX)
+        return 0;
+
     struct proc_entry proc_entry = {0};
-    bool any_left = proc_dir_read(&fd->proc.entry, &fd->offset, &proc_entry);
+    unsigned long index = (unsigned long) fd->offset;
+    bool any_left = proc_dir_read(&fd->proc.entry, &index, &proc_entry);
     if (!any_left)
         return 0;
+    fd->offset = (off_t_) index;
     proc_entry_getname(&proc_entry, entry->name);
     entry->inode = proc_entry.meta->inode;
     proc_entry_cleanup(&proc_entry);
