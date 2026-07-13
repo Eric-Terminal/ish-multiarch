@@ -2,7 +2,7 @@
 
 ## 范围与状态
 
-本分支基于官方 iSH 历史继续开发，保留原有 i386 guest，并增加独立的 AArch64 Linux guest 执行路径。当前目标是提供可嵌入 iOS 与 watchOS 应用的可移植核心，而不是替代完整的 iSH 应用层。
+本分支基于官方 iSH 历史继续开发，保留原有 i386 guest，并增加独立的 AArch64 Linux guest 执行路径。当前目标是逐步形成可嵌入 iOS 与 watchOS 应用的可移植核心，而不是替代完整的 iSH 应用层。现阶段生成的静态库和 XCFramework 是构建、ABI 与最终链接验证产物，并非已经发布的公共 SDK。
 
 该实现仍处于实验阶段。真实 Alpine AArch64 环境已经验证 shell、基础文件操作、进程创建与等待、信号投递以及本机 TCP 连接，但尚未覆盖完整的 AArch64 指令集与 Linux 系统调用集合。
 
@@ -13,7 +13,7 @@
 | guest 指令集 | i386、AArch64 | 两套 CPU 状态与执行路径相互隔离 |
 | guest Linux ABI | i386 32 位、AArch64 64 位 | 系统调用号、结构体与寄存器约定按 guest 架构编码 |
 | host 平台 | macOS 测试、iOS、watchOS | host 指针宽度不能泄漏进 guest ABI |
-| Apple 架构 | iOS `arm64`、watchOS `arm64_32`、watchOS `arm64` | `arm64_32` 是 watchOS host ABI，不是 32 位 AArch64 guest |
+| Apple 切片 | iOS device `arm64`；watchOS device `arm64_32`、`arm64`；watchOS Simulator `arm64`、`x86_64` | `arm64_32` 是 watchOS host ABI，不是 32 位 AArch64 guest；device `arm64` 的 minOS 为 26.0，其余 watchOS 切片为 10.0 |
 
 guest 地址、host 指针和 Linux wire 数据分别使用明确宽度的类型。AArch64 guest 使用稀疏 48 位地址空间，内存访问通过页表和用户内存复制边界完成；文件、任务和信号服务继续复用官方内核对象，但不直接暴露架构特定的数据布局。
 
@@ -23,7 +23,8 @@ guest 地址、host 指针和 Linux wire 数据分别使用明确宽度的类型
 - `guest/aarch64/`：AArch64 CPU 状态、指令解码、执行语义、ELF64 装载与 Linux ABI 编码。
 - `guest/linux/`：与 guest 架构无关的内存、文件和系统调用服务边界。
 - `kernel/aarch64*.c`：将 AArch64 进程生命周期接入官方任务、文件系统、信号与调度设施。
-- `tools/apple-core-gate.sh`：以严格警告配置构建并检查三个 Apple core slice。
+- `tools/apple-core-gate.sh`：构建一个 iOS device 切片和四个 watchOS 切片，检查严格 core、完整静态库消费者、宿主 ABI 与 Apple 二进制元数据，并生成 watchOS device/Simulator XCFramework。
+- `tools/apple-watch-package.sh`：供 Xcode 打包 Scheme 调用 Apple 门禁，并把当前 Xcode 平台的通用静态库放入构建产品目录。
 - `tests/aarch64/`：指令、ABI、运行时、并发和真实发行版冒烟测试。
 
 ## 构建与测试
@@ -37,13 +38,148 @@ meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
-Apple core 门禁需要 Xcode SDK。脚本分别构建 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64`，验证 Mach-O 平台，再合并并检查 watchOS 静态库架构：
+Apple 门禁需要 Xcode SDK、Meson 与 Ninja。它构建以下五个 Apple 切片：
+
+- iOS device `arm64`，minOS 15.0；
+- watchOS device `arm64_32`，minOS 10.0；
+- watchOS device `arm64`，minOS 26.0；
+- watchOS Simulator `arm64`，minOS 10.0；
+- watchOS Simulator `x86_64`，minOS 10.0。
+
+可以直接运行：
 
 ```sh
-MESON=meson tools/apple-core-gate.sh
+MESON="$(command -v meson)" \
+NINJA="$(command -v ninja)" \
+tools/apple-core-gate.sh
 ```
 
-这个门禁只交叉构建、链接并检查可复用 AArch64 core slice，不会构建或运行完整的 iOS 或 watchOS 应用。
+每个切片都会进行两层构建：严格警告配置的 AArch64 core，以及包含 kernel、fs、platform、指令模拟器与 fakefs 的完整静态库。完整库随后接受两种最终链接检查：普通消费者通过对真实入口 `become_first_process` 的强引用按需解析归档，但不会调用该入口；另一个消费者强制解析三份静态归档的全部成员。门禁还会检查：
+
+- host 指针、函数指针、`long`、`size_t` 和文件偏移等 ABI 宽度；
+- `arm64_32` gadget 表的 4 字节指针重定位，以及汇编对 C 指针字段的 ILP32/LP64 访问宽度；
+- Mach-O 的 device/Simulator 平台和各切片 minOS；
+- 静态归档的架构集合、必要成员和禁用符号；
+- 三份 XCFramework 是否同时包含 watchOS device 与 Simulator 变体。
+
+默认产物位于：
+
+```text
+build-apple-core/universal/watchos/libish_aarch64_core.a
+build-apple-core/universal/watchos/libish.a
+build-apple-core/universal/watchos/libish_emu.a
+build-apple-core/universal/watchos/libfakefs.a
+build-apple-core/universal/watchsimulator/libish_aarch64_core.a
+build-apple-core/universal/watchsimulator/libish.a
+build-apple-core/universal/watchsimulator/libish_emu.a
+build-apple-core/universal/watchsimulator/libfakefs.a
+build-apple-core/xcframeworks/libish.xcframework
+build-apple-core/xcframeworks/libish_emu.xcframework
+build-apple-core/xcframeworks/libfakefs.xcframework
+```
+
+为了兼容已有调用方，脚本还会在 `build-apple-core/` 根目录保留 `libish_aarch64_core-watchos.a`、`libish-watchos.a`、`libish_emu-watchos.a` 与 `libfakefs-watchos.a` 这四份 device 通用归档副本。
+
+device 通用归档包含 `arm64_32` 与 `arm64`，Simulator 通用归档包含 `arm64` 与 `x86_64`。三份 XCFramework 目前都没有公共头文件（Headers）、模块映射（module map）或稳定的公共 C API；它们只是门禁生成的二进制容器，不能称为公共 SDK，也不能声称可以不经接口设计和集成验证就直接接入 ETOS 或其他应用。
+
+这个门禁会交叉构建并链接最小 Mach-O 消费者，但不会启动这些消费者、watchOS Simulator 或 guest。它不验证应用生命周期、界面、签名、沙箱、entitlement、真机运行或 App Store 交付。
+
+### Xcode Scheme 验收
+
+工程提供两个共享 Scheme：
+
+- `iSHCore-watchOS` 是 aggregate 打包 Scheme。它调用 `tools/apple-watch-package.sh`，生成四个 watchOS 切片、通用静态库和三份 XCFramework；它本身没有 Xcode 可运行产品。
+- `iSHWatchLinkSmoke` 是最小 watchOS application 类型的链接夹具。它只有一个 C 入口，依赖 `iSHCore-watchOS`，并最终链接 `libish.a`、`libish_emu.a`、`libfakefs.a` 及系统 SQLite。它没有 SwiftUI、图标或用户界面，不会在构建时运行 guest，也不代表完整或可交付的 Watch App。
+
+先验证打包 Scheme：
+
+```sh
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHCore-watchOS \
+    -configuration Release \
+    -sdk watchos \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+```
+
+随后按切片验证最终 Xcode 链接。两个 watchOS device 切片具有不同的 minOS，因此必须分别执行：
+
+```sh
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatchLinkSmoke \
+    -configuration Release \
+    -sdk watchos \
+    ARCHS=arm64_32 \
+    WATCHOS_DEPLOYMENT_TARGET=10.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatchLinkSmoke \
+    -configuration Release \
+    -sdk watchos \
+    ARCHS=arm64 \
+    WATCHOS_DEPLOYMENT_TARGET=26.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+```
+
+Simulator 两个切片同为 minOS 10.0，也逐一执行以保留清晰的架构证据：
+
+```sh
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatchLinkSmoke \
+    -configuration Release \
+    -sdk watchsimulator \
+    ARCHS=arm64 \
+    WATCHOS_DEPLOYMENT_TARGET=10.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatchLinkSmoke \
+    -configuration Release \
+    -sdk watchsimulator \
+    ARCHS=x86_64 \
+    WATCHOS_DEPLOYMENT_TARGET=10.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+```
+
+这些命令只使用 SDK 进行编译和链接，不要求安装或启动 Simulator runtime。Xcode Scheme 的交叉构建中间产物位于 `ISH_WATCH_ARTIFACT_ROOT`，默认展开为 DerivedData 下的：
+
+```text
+Build/Intermediates.noindex/iSH.build/iSHWatchArtifacts/<配置><平台后缀>/
+```
+
+其中仍使用与命令行门禁相同的 `universal/watchos/`、`universal/watchsimulator/` 和 `xcframeworks/` 子目录。当前平台供 LinkSmoke 使用的三份通用归档会复制到：
+
+```text
+Build/Products/<配置><平台后缀>/iSHWatchLibraries/
+```
+
+LinkSmoke 的验证包位于 `Build/Products/<配置><平台后缀>/iSHWatchLinkSmoke.app/`；这个路径下出现 `.app` 只表示 Xcode 完成了 application 类型的最终链接，不表示该包拥有界面、可以启动 guest 或能够作为产品交付。
+
+可以用以下命令查看本机的完整展开路径，而不依赖 DerivedData 的随机目录名：
+
+```sh
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHCore-watchOS \
+    -configuration Release \
+    -sdk watchos \
+    -showBuildSettings \
+    | grep -E 'ISH_WATCH_(ARTIFACT_ROOT|LIBRARY_DIR) ='
+```
 
 ## Alpine AArch64 冒烟
 
@@ -65,8 +201,8 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 
 本次发布候选在开发使用的 macOS 与 Xcode 环境中完成了以下门禁：
 
-- 默认非交叉 `kernel=ish` 配置登记的 98 项 Meson 测试，在常规、ASan+UBSan 与 TSan 配置中均为 98/98 通过。
-- iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 的 core 编译、链接与架构检查通过。
+- 默认非交叉 `kernel=ish` 配置当前登记的 Meson 测试，在常规、ASan+UBSan 与 TSan 配置中均通过。
+- iOS device `arm64`，watchOS device `arm64_32`/`arm64` 与 Simulator `arm64`/`x86_64` 的 core、完整静态库、普通消费者、全归档消费者、ABI 和二进制元数据门禁通过，并成功生成包含 device/Simulator 变体的三份 XCFramework。
 - Alpine AArch64 的动态 `/bin/sh`、文件操作、子进程等待、信号终止和本机 HTTP 获取通过；冒烟结束后没有残留 `ish` 进程。
 
 ## 来源、许可与独立实现边界
@@ -89,5 +225,5 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 - 多线程进程跨架构替换映像尚未实现；不安全的该类 `exec` 会返回 `EBUSY`。
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
 - 网络验证目前只覆盖基础 TCP 客户端路径，不代表 UDP、IPv6 或全部 socket 选项均已实现。
-- Apple 门禁只验证 core 的 ABI、编译与链接；完整 iOS/watchOS 应用的生命周期、界面和沙箱能力由集成方负责。
+- Apple 门禁验证 core、完整静态库的普通与全归档链接闭包、宿主 ABI、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
 - Alpine 冒烟是目标工作负载验证，不等价于完整发行版兼容认证。

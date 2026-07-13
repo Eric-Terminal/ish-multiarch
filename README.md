@@ -1,6 +1,6 @@
 # [iSH](https://ish.app)
 
-> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。新增的可复用核心目前通过 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 编译门禁；真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建方法和已知限制见[多架构实现说明](docs/multiarch/README.md)。
+> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。Apple 门禁目前覆盖一个 iOS device 切片（`arm64`）和四个 watchOS 切片：device `arm64_32`、device `arm64`、Simulator `arm64`、Simulator `x86_64`。其中 watchOS device `arm64` 的最低系统版本为 26.0，其余三个 watchOS 切片为 10.0。门禁会检查普通静态库消费者、强制解析全部归档成员的消费者、宿主 ABI、重定位、Mach-O 平台与最低版本，并生成三份仅含二进制库切片的 XCFramework；这些产物没有公共头文件、模块映射或稳定 API 承诺，不是可直接接入其他应用的公共 SDK。真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建与 Xcode 验收命令、产物路径和已知限制见[多架构实现说明](docs/multiarch/README.md)。
 
 [![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
@@ -39,6 +39,10 @@ You'll need these things to build the project:
 ## Build for iOS
 
 Open the project in Xcode, open iSH.xcconfig, and change `ROOT_BUNDLE_IDENTIFIER` to something unique. You'll also need to update the development team ID in the project (not target!) build settings. Then click Run. There are scripts that should do everything else automatically. If you run into any problems, open an issue and I'll try to help.
+
+## 验证 watchOS 核心
+
+共享 Scheme `iSHCore-watchOS` 是跨架构静态库与 XCFramework 的打包门禁，本身没有 Xcode 可运行产品；`iSHWatchLinkSmoke` 是只有一个 C 入口的最终链接夹具，用来确认 Xcode 能为指定的 watchOS device 或 Simulator 切片链接三份静态库。LinkSmoke 没有界面，不启动 guest，也不代表已经具备可交付的 watchOS App。请使用[多架构实现说明](docs/multiarch/README.md#xcode-scheme-验收)中的逐切片命令，尤其不要把最低版本不同的两个 device 切片合并成一次含糊的验收。
 
 ## Build command line tool for testing
 
