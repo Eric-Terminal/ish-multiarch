@@ -77,7 +77,7 @@ librt = cc.find_library('rt', required: false)
 libm = cc.find_library('m', required: false)
 libdl = cc.find_library('dl', required: false)
 sqlite3 = cc.find_library('sqlite3')
-dependencies = [librt, libm, libdl, threads, sqlite3]
+dependencies = [librt, libm, libdl, threads]
 
 subdir('vdso') # ish depends on the vdso
 
@@ -217,6 +217,14 @@ if get_option('kernel') == 'ish'
         link_with: [libish, libish_emu, libfakefs],
         dependencies: dependencies,
         include_directories: includes)
+
+    if host_machine.system() == 'darwin'
+        apple_runtime_link_smoke = executable(
+            'apple_runtime_link_smoke',
+            'platform/apple-runtime-link-smoke.c',
+            dependencies: ish,
+            link_args: ['-Wl,-fatal_warnings'])
+    endif
 
     if not meson.is_cross_build()
         executable('ish', ['main.c'], dependencies: ish)
