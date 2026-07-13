@@ -80,7 +80,7 @@ build_slice() {
     echo "==> 严格构建 ${name} 的 AArch64 core（${target}）"
     write_cross_file "$core_cross_file" "$sdk" "$arch" "$target" strict
     if [[ -d "$core_build_dir/meson-private" ]]; then
-        "$MESON" setup --wipe "$core_build_dir" "$ROOT" \
+        "$MESON" setup --reconfigure "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true --buildtype=release
     else
         "$MESON" setup "$core_build_dir" "$ROOT" \
@@ -103,7 +103,7 @@ build_slice() {
     echo "==> 完整构建 ${name} 的 kernel/fs/platform"
     write_cross_file "$full_cross_file" "$sdk" "$arch" "$target" full
     if [[ -d "$full_build_dir/meson-private" ]]; then
-        "$MESON" setup --wipe "$full_build_dir" "$ROOT" \
+        "$MESON" setup --reconfigure "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos --buildtype=release
     else

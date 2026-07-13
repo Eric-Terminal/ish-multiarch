@@ -18,9 +18,21 @@
 			name = "iSH pre";
 			productName = "iSH pre";
 		};
+		A1C000000000000000000001 /* iSHCore-watchOS */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = A1C000000000000000000003 /* Build configuration list for PBXAggregateTarget "iSHCore-watchOS" */;
+			buildPhases = (
+				A1C000000000000000000002 /* 打包 watchOS 核心 */,
+			);
+			dependencies = (
+			);
+			name = "iSHCore-watchOS";
+			productName = "iSHCore-watchOS";
+		};
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		A1C00000000000000000000E /* apple-runtime-link-smoke.c in Sources */ = {isa = PBXBuildFile; fileRef = A1C00000000000000000000D /* apple-runtime-link-smoke.c */; };
 		0FC2383C2991FBA6004C09EC /* mmx.c in Sources */ = {isa = PBXBuildFile; fileRef = 0FC2383B2991FB82004C09EC /* mmx.c */; };
 		491B31E62883BF22008EEFB0 /* ThemeViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 491B31E52883BF22008EEFB0 /* ThemeViewController.m */; };
 		49302D8E277669D300C9885A /* ish.c in Sources */ = {isa = PBXBuildFile; fileRef = 49302D8D277669D300C9885A /* ish.c */; };
@@ -265,6 +277,13 @@
 /* End PBXBuildRule section */
 
 /* Begin PBXContainerItemProxy section */
+		A1C000000000000000000014 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1C000000000000000000001;
+			remoteInfo = "iSHCore-watchOS";
+		};
 		497F6D5A254E609000C82F46 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
@@ -428,6 +447,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1C00000000000000000000C /* iSHWatchLinkSmoke.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iSHWatchLinkSmoke.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1C00000000000000000000D /* apple-runtime-link-smoke.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "apple-runtime-link-smoke.c"; sourceTree = "<group>"; };
+		A1C000000000000000000016 /* WatchOS.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchOS.xcconfig; sourceTree = "<group>"; };
+		A1C000000000000000000017 /* WatchCore.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchCore.xcconfig; sourceTree = "<group>"; };
+		A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchLinkSmoke.xcconfig; sourceTree = "<group>"; };
+		A1C000000000000000000019 /* apple-watch-package.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; name = "apple-watch-package.sh"; path = "tools/apple-watch-package.sh"; sourceTree = "<group>"; };
 		0FC2383B2991FB82004C09EC /* mmx.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mmx.c; sourceTree = "<group>"; };
 		408A2639236440F8008A4E81 /* iOSFS.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = iOSFS.m; sourceTree = "<group>"; };
 		408A263B23644102008A4E81 /* iOSFS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = iOSFS.h; sourceTree = "<group>"; };
@@ -758,6 +783,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		A1C00000000000000000000A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		497F6D44254E605F00C82F46 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -885,6 +917,9 @@
 				BB0B859B2586F13200208600 /* XcodeDebug.xcconfig */,
 				BB0B848E2586A4CF00208600 /* XcodeDefault.xcconfig */,
 				BB0B859C2586F19000208600 /* XcodeRelease.xcconfig */,
+				A1C000000000000000000016 /* WatchOS.xcconfig */,
+				A1C000000000000000000017 /* WatchCore.xcconfig */,
+				A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */,
 			);
 			name = Configs;
 			sourceTree = "<group>";
@@ -919,6 +954,7 @@
 				BB13F7C8200ACC24003D1C4D /* xcode-meson.sh */,
 				494D03F72727DAC6004F0CCE /* xcode-ninja.sh */,
 				BB0C03002AEEC85500E5ECBB /* gen_apk_repositories.py */,
+				A1C000000000000000000019 /* apple-watch-package.sh */,
 			);
 			name = Scripts;
 			sourceTree = "<group>";
@@ -969,6 +1005,7 @@
 		BB2D71072354244700A10D1E /* platform */ = {
 			isa = PBXGroup;
 			children = (
+				A1C00000000000000000000D /* apple-runtime-link-smoke.c */,
 				497F6CC3254E5CB300C82F46 /* darwin.c */,
 				497F6CC4254E5CB300C82F46 /* linux.c */,
 				497F6CC2254E5CB300C82F46 /* platform.h */,
@@ -1032,6 +1069,7 @@
 		BB792B511F96D90D00FFB7A4 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				A1C00000000000000000000C /* iSHWatchLinkSmoke.app */,
 				BB792B501F96D90D00FFB7A4 /* iSH.app */,
 				BB88F4902154760800A341FD /* iSHFileProvider.appex */,
 				BB13F7DC200AD81D003D1C4D /* libish.a */,
@@ -1399,6 +1437,24 @@
 /* End PBXLegacyTarget section */
 
 /* Begin PBXNativeTarget section */
+		A1C000000000000000000008 /* iSHWatchLinkSmoke */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1C00000000000000000000F /* Build configuration list for PBXNativeTarget "iSHWatchLinkSmoke" */;
+			buildPhases = (
+				A1C000000000000000000009 /* Sources */,
+				A1C00000000000000000000A /* Frameworks */,
+				A1C00000000000000000000B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1C000000000000000000015 /* PBXTargetDependency */,
+			);
+			name = iSHWatchLinkSmoke;
+			productName = iSHWatchLinkSmoke;
+			productReference = A1C00000000000000000000C /* iSHWatchLinkSmoke.app */;
+			productType = "com.apple.product-type.application";
+		};
 		497F6CE3254E5E4C00C82F46 /* MakeXcodeAutoCompleteWork */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 497F6CEA254E5E4C00C82F46 /* Build configuration list for PBXNativeTarget "MakeXcodeAutoCompleteWork" */;
@@ -1638,6 +1694,13 @@
 				CLASSPREFIX = "";
 				LastUpgradeCheck = 1410;
 				TargetAttributes = {
+					A1C000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					A1C000000000000000000008 = {
+						CreatedOnToolsVersion = 26.6;
+						ProvisioningStyle = Manual;
+					};
 					497F6CE3254E5E4C00C82F46 = {
 						CreatedOnToolsVersion = 12.2;
 					};
@@ -1712,6 +1775,8 @@
 			);
 			projectRoot = "";
 			targets = (
+				A1C000000000000000000001 /* iSHCore-watchOS */,
+				A1C000000000000000000008 /* iSHWatchLinkSmoke */,
 				BB792B4F1F96D90D00FFB7A4 /* iSH */,
 				BBEF191D26806364001225BD /* libiSHApp */,
 				BBEF1964268066D1001225BD /* iSH+Linux */,
@@ -1743,6 +1808,13 @@
 /* End PBXReferenceProxy section */
 
 /* Begin PBXResourcesBuildPhase section */
+		A1C00000000000000000000B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BB41591A255EF9E300E0950C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1838,6 +1910,22 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		A1C000000000000000000002 /* 打包 watchOS 核心 */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "打包 watchOS 核心";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"$SRCROOT/tools/apple-watch-package.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
 		BB034E8C263643C10000A498 /* Generate APK Repositories File */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -2034,6 +2122,14 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		A1C000000000000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1C00000000000000000000E /* apple-runtime-link-smoke.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		497F6CE0254E5E4C00C82F46 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -2233,6 +2329,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		A1C000000000000000000015 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1C000000000000000000001 /* iSHCore-watchOS */;
+			targetProxy = A1C000000000000000000014 /* PBXContainerItemProxy */;
+		};
 		497F6D5B254E609000C82F46 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = BB13F7DB200AD81D003D1C4D /* libish */;
@@ -2348,6 +2449,62 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		A1C000000000000000000004 /* Debug-ApplePleaseFixFB19282108 */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000017 /* WatchCore.xcconfig */;
+			buildSettings = {
+			};
+			name = "Debug-ApplePleaseFixFB19282108";
+		};
+		A1C000000000000000000005 /* DebugLinux */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000017 /* WatchCore.xcconfig */;
+			buildSettings = {
+			};
+			name = DebugLinux;
+		};
+		A1C000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000017 /* WatchCore.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		A1C000000000000000000007 /* ReleaseLinux */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000017 /* WatchCore.xcconfig */;
+			buildSettings = {
+			};
+			name = ReleaseLinux;
+		};
+		A1C000000000000000000010 /* Debug-ApplePleaseFixFB19282108 */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */;
+			buildSettings = {
+			};
+			name = "Debug-ApplePleaseFixFB19282108";
+		};
+		A1C000000000000000000011 /* DebugLinux */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */;
+			buildSettings = {
+			};
+			name = DebugLinux;
+		};
+		A1C000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		A1C000000000000000000013 /* ReleaseLinux */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1C000000000000000000018 /* WatchLinkSmoke.xcconfig */;
+			buildSettings = {
+			};
+			name = ReleaseLinux;
+		};
 		497F6CE8254E5E4C00C82F46 /* Debug-ApplePleaseFixFB19282108 */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = BB0B86D52587009D00208600 /* iOS.xcconfig */;
@@ -2889,6 +3046,28 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		A1C000000000000000000003 /* Build configuration list for PBXAggregateTarget "iSHCore-watchOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1C000000000000000000004 /* Debug-ApplePleaseFixFB19282108 */,
+				A1C000000000000000000005 /* DebugLinux */,
+				A1C000000000000000000006 /* Release */,
+				A1C000000000000000000007 /* ReleaseLinux */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1C00000000000000000000F /* Build configuration list for PBXNativeTarget "iSHWatchLinkSmoke" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1C000000000000000000010 /* Debug-ApplePleaseFixFB19282108 */,
+				A1C000000000000000000011 /* DebugLinux */,
+				A1C000000000000000000012 /* Release */,
+				A1C000000000000000000013 /* ReleaseLinux */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		497F6CEA254E5E4C00C82F46 /* Build configuration list for PBXNativeTarget "MakeXcodeAutoCompleteWork" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
