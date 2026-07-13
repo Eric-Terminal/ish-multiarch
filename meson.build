@@ -224,6 +224,10 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        file_lock_test = executable(
+            'file_lock_test', 'fs/lock-test.c', dependencies: ish)
+        test('file_lock', file_lock_test)
+
         proc_pid_test = executable(
             'proc_pid_test', 'fs/proc-pid-test.c', dependencies: ish)
         test('proc_pid', proc_pid_test)

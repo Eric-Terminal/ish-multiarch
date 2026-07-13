@@ -122,7 +122,7 @@ static int file_lock_acquire(struct inode_data *inode, struct file_lock *request
             } else if (lock->end > request->end) {
                 // lock sticks out on the end, so move the start up
                 assert(lock->start <= request->end);
-                // add can't overflow since the comparison above would fail if request->start is OFF_T_MAX
+                // add can't overflow since the comparison above would fail if request->start is OFF_T_MAX_
                 lock->start = request->end + 1;
             }
         }
@@ -135,7 +135,7 @@ static int file_lock_acquire(struct inode_data *inode, struct file_lock *request
     return 0;
 }
 
-#define OFF_T_MAX ~(1l << (sizeof(off_t) * 8 - 1))
+#define OFF_T_MAX_ ((off_t_) INT64_MAX)
 
 static int file_lock_from_flock(struct fd *fd, struct flock_ *flock, struct file_lock *lock) {
     off_t_ offset;
@@ -151,7 +151,7 @@ static int file_lock_from_flock(struct fd *fd, struct flock_ *flock, struct file
                 offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
                 unlock(&fd->lock);
                 if (offset < 0)
-                    return offset;
+                    return (int) offset;
             }
             break;
         case LSEEK_END: {
@@ -159,21 +159,35 @@ static int file_lock_from_flock(struct fd *fd, struct flock_ *flock, struct file
             int err = fd->mount->fs->fstat(fd, &stat);
             if (err < 0)
                 return err;
-            offset = stat.size;
+            if (stat.size > INT64_MAX)
+                return _EOVERFLOW;
+            offset = (off_t_) stat.size;
             break;
         }
         default:
             return _EINVAL;
     }
 
-    lock->start = flock->start + offset;
+    if (__builtin_add_overflow(flock->start, offset, &lock->start))
+        return _EOVERFLOW;
+    if (lock->start < 0)
+        return _EINVAL;
     if (flock->len > 0) {
-        lock->end = lock->start + flock->len - 1;
+        off_t_ last_offset = flock->len - 1;
+        if (__builtin_add_overflow(
+                lock->start, last_offset, &lock->end))
+            return _EOVERFLOW;
     } else if (flock->len < 0) {
+        off_t_ reverse_start;
+        if (__builtin_add_overflow(
+                lock->start, flock->len, &reverse_start))
+            return _EOVERFLOW;
+        if (reverse_start < 0 || lock->start == 0)
+            return _EINVAL;
         lock->end = lock->start - 1;
-        lock->start = lock->end + flock->len + 1;
+        lock->start = reverse_start;
     } else {
-        lock->end = OFF_T_MAX;
+        lock->end = OFF_T_MAX_;
     }
     lock->type = flock->type;
     lock->owner = current->files;
@@ -185,7 +199,7 @@ static int flock_from_file_lock(struct file_lock *lock, struct flock_ *flock) {
     flock->type = lock->type;
     flock->whence = LSEEK_SET;
     flock->start = lock->start;
-    if (lock->end != OFF_T_MAX)
+    if (lock->end != OFF_T_MAX_)
         flock->len = lock->end - lock->start + 1;
     else
         flock->len = 0;
