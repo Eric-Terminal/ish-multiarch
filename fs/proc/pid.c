@@ -259,7 +259,7 @@ static struct proc_dir_entry proc_pid_fd;
 static bool proc_pid_fd_readdir(struct proc_entry *entry, unsigned long *index, struct proc_entry *next_entry) {
     struct task *task = proc_get_task(entry);
     if (task == NULL)
-        return _ESRCH;
+        return false;
     lock(&task->files->lock);
     while (*index < task->files->size && task->files->files[*index] == NULL)
         (*index)++;

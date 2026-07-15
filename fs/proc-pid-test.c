@@ -112,6 +112,19 @@ int main(void) {
             "已关闭的陈旧 fd 目录项返回 ENOENT");
     CHECK(mount.refcount == 0, "关闭陈旧目录项释放文件对象引用");
 
+    lock(&pids_lock);
+    task->exiting = true;
+    unlock(&pids_lock);
+    unsigned long stale_index = 0;
+    struct proc_entry stale_fd_link = {0};
+    bool stale_directory_finished =
+            !proc_dir_read(&fd_directory, &stale_index, &stale_fd_link);
+    lock(&pids_lock);
+    task->exiting = false;
+    unlock(&pids_lock);
+    CHECK(stale_directory_finished,
+            "任务消失后陈旧 fd 目录结束枚举");
+
     fdtable_release(task->files);
     cond_destroy(&task->pause);
     cond_destroy(&task->ptrace.cond);
