@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "guest/aarch64/runner.h"
+#include "aarch64-backend-config.h"
 
 #define CODE_PAGE UINT64_C(0x0000456789abc000)
 #define DATA_PAGE (CODE_PAGE + GUEST_MEMORY_PAGE_SIZE)
@@ -298,14 +299,19 @@ static dword_t encode_test_branch(bool nonzero, byte_t bit,
 #endif
 
 static void test_backend_selection(void) {
-    assert(aarch64_backend_default() == AARCH64_BACKEND_C);
+#if ISH_AARCH64_BACKEND_THREADED_DEFAULT
+    const enum aarch64_backend expected_default = AARCH64_BACKEND_THREADED;
+#else
+    const enum aarch64_backend expected_default = AARCH64_BACKEND_C;
+#endif
+    assert(aarch64_backend_default() == expected_default);
     assert(aarch64_backend_available(AARCH64_BACKEND_C));
 
     struct test_fixture fixture;
     init_fixture(&fixture);
     struct aarch64_runner runner;
     aarch64_runner_init(&runner, &fixture.tlb);
-    assert(aarch64_runner_backend(&runner) == AARCH64_BACKEND_C);
+    assert(aarch64_runner_backend(&runner) == expected_default);
     assert_stats(&runner, 0, 0, 0, 0);
 
 #if defined(__aarch64__)

@@ -1,7 +1,12 @@
 #include "guest/aarch64/backend.h"
+#include "aarch64-backend-config.h"
 
 enum aarch64_backend aarch64_backend_default(void) {
+#if ISH_AARCH64_BACKEND_THREADED_DEFAULT
+    return AARCH64_BACKEND_THREADED;
+#else
     return AARCH64_BACKEND_C;
+#endif
 }
 
 bool aarch64_backend_available(enum aarch64_backend backend) {

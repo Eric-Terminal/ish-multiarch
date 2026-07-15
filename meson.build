@@ -30,6 +30,19 @@ add_project_arguments('-Wno-switch', language: 'c')
 
 includes = [include_directories('.')]
 
+aarch64_backend_option = get_option('aarch64_backend')
+aarch64_host_supports_threaded = host_machine.cpu_family() == 'aarch64'
+if aarch64_backend_option == 'threaded' and not aarch64_host_supports_threaded
+    error('threaded AArch64 后端只能用于 aarch64 主机')
+endif
+aarch64_threaded_default = aarch64_backend_option == 'threaded' or \
+        (aarch64_backend_option == 'auto' and aarch64_host_supports_threaded)
+aarch64_backend_config = configuration_data()
+aarch64_backend_config.set10(
+        'ISH_AARCH64_BACKEND_THREADED_DEFAULT', aarch64_threaded_default)
+configure_file(output: 'aarch64-backend-config.h',
+    configuration: aarch64_backend_config)
+
 aarch64_backend_src = [
     'guest/aarch64/backend.c',
     'guest/aarch64/runner.c',
