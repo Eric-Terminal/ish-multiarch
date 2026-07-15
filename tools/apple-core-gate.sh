@@ -64,6 +64,67 @@ c_link_args = ['-target', '$target', '-isysroot', '$sysroot']
 EOF
 }
 
+verify_backend_config() {
+    local name=$1
+    local build_dir=$2
+    local expected_value=$3
+    local config_header="$build_dir/aarch64-backend-config.h"
+    local configured_backend
+
+    configured_backend=$("$MESON" configure "$build_dir" |
+        awk '$1 == "aarch64_backend" { print $2 }')
+    if [[ "$configured_backend" != auto ]]; then
+        echo "错误：${name} 的 Meson AArch64 后端选项不是 auto。" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$config_header" ]]; then
+        echo "错误：${name} 未生成 AArch64 后端配置头。" >&2
+        exit 1
+    fi
+    if ! grep -Fqx \
+            "#define ISH_AARCH64_BACKEND_THREADED_DEFAULT $expected_value" \
+            "$config_header"; then
+        echo "错误：${name} 的 AArch64 默认后端与 auto 选择不一致。" >&2
+        exit 1
+    fi
+}
+
+verify_backend_archive() {
+    local name=$1
+    local archive=$2
+    local archive_members
+    local archive_symbols
+    local required_member
+    local required_symbol
+
+    archive_members=$("$AR" -t "$archive")
+    for required_member in \
+            guest_aarch64_execute.c.o \
+            guest_aarch64_backend.c.o \
+            guest_aarch64_runner.c.o \
+            guest_aarch64_threaded.c.o; do
+        if ! grep -Fqx "$required_member" <<< "$archive_members"; then
+            echo "错误：${name} 缺少 AArch64 后端对象 ${required_member}。" >&2
+            exit 1
+        fi
+    done
+
+    archive_symbols=$(xcrun nm -g "$archive")
+    for required_symbol in \
+            aarch64_execute \
+            aarch64_backend_default \
+            aarch64_runner_init_backend \
+            aarch64_threaded_execute; do
+        if ! grep -Eq \
+                "[[:space:]]T[[:space:]]+_${required_symbol}$" \
+                <<< "$archive_symbols"; then
+            echo "错误：${name} 未导出 ${required_symbol}。" >&2
+            exit 1
+        fi
+    done
+}
+
 build_slice() {
     local name=$1
     local sdk=$2
@@ -72,22 +133,43 @@ build_slice() {
     local platform=$5
     local word_bytes=$6
     local expected_minos=$7
+    local expected_backend=$8
     local core_cross_file="$BUILD_ROOT/cross-core-$name.ini"
     local core_build_dir="$BUILD_ROOT/core/$name"
     local full_cross_file="$BUILD_ROOT/cross-full-$name.ini"
     local full_build_dir="$BUILD_ROOT/full/$name"
+    local expected_backend_value
+
+    case "$expected_backend" in
+        threaded)
+            expected_backend_value=1
+            ;;
+        c)
+            expected_backend_value=0
+            ;;
+        *)
+            echo "错误：${name} 声明了未知的 AArch64 后端 ${expected_backend}。" >&2
+            exit 1
+            ;;
+    esac
 
     echo "==> 严格构建 ${name} 的 AArch64 core（${target}）"
     write_cross_file "$core_cross_file" "$sdk" "$arch" "$target" strict
     if [[ -d "$core_build_dir/meson-private" ]]; then
         "$MESON" setup --reconfigure "$core_build_dir" "$ROOT" \
-            --cross-file "$core_cross_file" -Dcore_only=true --buildtype=release
+            --cross-file "$core_cross_file" -Dcore_only=true \
+            -Daarch64_backend=auto --buildtype=release
     else
         "$MESON" setup "$core_build_dir" "$ROOT" \
-            --cross-file "$core_cross_file" -Dcore_only=true --buildtype=release
+            --cross-file "$core_cross_file" -Dcore_only=true \
+            -Daarch64_backend=auto --buildtype=release
     fi
+    verify_backend_config "${name} core" "$core_build_dir" \
+        "$expected_backend_value"
     "$NINJA" -C "$core_build_dir" \
         libish_aarch64_core.a aarch64_core_link_smoke
+    verify_backend_archive "${name} core 归档" \
+        "$core_build_dir/libish_aarch64_core.a"
 
     local sysroot
     local float80_object="$core_build_dir/float80-compile.o"
@@ -105,22 +187,36 @@ build_slice() {
     if [[ -d "$full_build_dir/meson-private" ]]; then
         "$MESON" setup --reconfigure "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
-            -Dkernel=ish -Dengine=asbestos --buildtype=release
+            -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
+            --buildtype=release
     else
         "$MESON" setup "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
-            -Dkernel=ish -Dengine=asbestos --buildtype=release
+            -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
+            --buildtype=release
     fi
+    verify_backend_config "${name} 完整构建" "$full_build_dir" \
+        "$expected_backend_value"
     "$NINJA" -C "$full_build_dir" \
         libish.a libish_emu.a libfakefs.a \
         darwin_platform_link_smoke apple_runtime_link_smoke \
         apple_runtime_force_link_smoke
+    verify_backend_archive "${name} libish.a" "$full_build_dir/libish.a"
 
     local abi_probe="$full_build_dir/apple-abi-probe.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \
         -std=gnu11 -Wall -Wextra -Werror \
         -DEXPECTED_APPLE_WORD_BYTES="$word_bytes" \
         -c "$ROOT/tools/apple-abi-probe.c" -o "$abi_probe"
+
+    local backend_probe="$full_build_dir/apple-aarch64-backend-probe.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" \
+        -I"$full_build_dir" -I"$ROOT" -DISH_GUEST_AARCH64=1 \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -DEXPECTED_APPLE_WORD_BYTES="$word_bytes" \
+        -DEXPECTED_AARCH64_THREADED_DEFAULT="$expected_backend_value" \
+        -c "$ROOT/tools/apple-aarch64-backend-probe.c" -o "$backend_probe"
 
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
@@ -129,7 +225,8 @@ build_slice() {
     done
     file "$full_build_dir/darwin_platform_link_smoke" \
         "$full_build_dir/apple_runtime_link_smoke" \
-        "$full_build_dir/apple_runtime_force_link_smoke" "$abi_probe"
+        "$full_build_dir/apple_runtime_force_link_smoke" \
+        "$abi_probe" "$backend_probe"
 
     local archive_members
     archive_members=$("$AR" -t "$full_build_dir/libish.a")
@@ -229,20 +326,48 @@ build_slice() {
             exit 1
         fi
     fi
+
+    if [[ "$name" == iphoneos-arm64 ]]; then
+        local arm64e_object="$core_build_dir/aarch64-threaded-arm64e.o"
+        local arm64e_file
+        local arm64e_disassembly
+
+        echo "==> 编译 iOS arm64e 的 threaded 指针认证证据"
+        "$CLANG" -target arm64e-apple-ios15.0 -isysroot "$sysroot" \
+            -I"$ROOT" -DISH_GUEST_AARCH64=1 -std=gnu11 -O2 \
+            -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+            -Wshorten-64-to-32 -Wpointer-to-int-cast \
+            -Wint-to-pointer-cast -Wcast-align \
+            -c "$ROOT/guest/aarch64/threaded.c" -o "$arm64e_object"
+        arm64e_file=$(file "$arm64e_object")
+        if ! grep -Eq 'Mach-O 64-bit.*arm64e' <<< "$arm64e_file"; then
+            echo "错误：iOS threaded 严格编译产物不是 arm64e 对象。" >&2
+            exit 1
+        fi
+        arm64e_disassembly=$(xcrun otool -tvV "$arm64e_object")
+        if ! grep -Eq '[[:space:]]paciza[[:space:]]' \
+                <<< "$arm64e_disassembly" || \
+                ! grep -Eq '[[:space:]]blraaz[[:space:]]' \
+                <<< "$arm64e_disassembly"; then
+            echo "错误：iOS arm64e threaded 间接调用缺少预期的指针认证指令。" >&2
+            exit 1
+        fi
+        echo "$arm64e_file"
+    fi
 }
 
 if [[ "${APPLE_SKIP_IOS:-0}" != 1 ]]; then
     build_slice iphoneos-arm64 iphoneos arm64 \
-        arm64-apple-ios15.0 IOS 8 15.0
+        arm64-apple-ios15.0 IOS 8 15.0 threaded
 fi
 build_slice watchos-arm64_32 watchos arm64_32 \
-    arm64_32-apple-watchos10.0 WATCHOS 4 10.0
+    arm64_32-apple-watchos10.0 WATCHOS 4 10.0 threaded
 build_slice watchos-arm64 watchos arm64 \
-    arm64-apple-watchos26.0 WATCHOS 8 26.0
+    arm64-apple-watchos26.0 WATCHOS 8 26.0 threaded
 build_slice watchsimulator-arm64 watchsimulator arm64 \
-    arm64-apple-watchos10.0-simulator WATCHOSSIMULATOR 8 10.0
+    arm64-apple-watchos10.0-simulator WATCHOSSIMULATOR 8 10.0 threaded
 build_slice watchsimulator-x86_64 watchsimulator x86_64 \
-    x86_64-apple-watchos10.0-simulator WATCHOSSIMULATOR 8 10.0
+    x86_64-apple-watchos10.0-simulator WATCHOSSIMULATOR 8 10.0 c
 
 UNIVERSAL_ROOT="$BUILD_ROOT/universal"
 XCFRAMEWORK_ROOT="$BUILD_ROOT/xcframeworks"

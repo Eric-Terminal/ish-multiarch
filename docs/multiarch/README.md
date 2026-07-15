@@ -38,6 +38,12 @@ meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
+### AArch64 执行后端
+
+Meson 选项 `-Daarch64_backend=auto|c|threaded` 控制 AArch64 guest 的默认执行后端。`auto` 是默认值：AArch64 host（包括 watchOS `arm64_32`）选择 threaded-code，`x86_64` host 选择 C；`c` 可显式固定到正确性 oracle，`threaded` 可显式固定到快速后端，但非 AArch64 host 会在配置阶段拒绝该组合。
+
+两种选择都会编译并保留 C 执行器。threaded-code 只加速已经独立实现并经过差分测试的指令，未提速指令继续回落到 C oracle；因此选择快速后端不会从归档中移除 `aarch64_execute`，`x86_64` Simulator 也始终具有可用的 C 路径。
+
 Apple 门禁需要 Xcode SDK、Meson 与 Ninja。它构建以下五个 Apple 切片：
 
 - iOS device `arm64`，minOS 15.0；
@@ -45,6 +51,8 @@ Apple 门禁需要 Xcode SDK、Meson 与 Ninja。它构建以下五个 Apple 切
 - watchOS device `arm64`，minOS 26.0；
 - watchOS Simulator `arm64`，minOS 10.0；
 - watchOS Simulator `x86_64`，minOS 10.0。
+
+门禁显式使用 `aarch64_backend=auto`，并要求 iOS `arm64`、watchOS `arm64_32`/`arm64` 与 Simulator `arm64` 选择 threaded-code，Simulator `x86_64` 选择 C。它同时核对生成的配置宏、core 与完整归档中的 C/threaded 对象和公开符号，并对五个切片严格编译函数指针 ABI probe；iOS 还以 `arm64e -O2` 检查 threaded 间接调用的指针认证指令。
 
 可以直接运行：
 
@@ -57,6 +65,7 @@ tools/apple-core-gate.sh
 每个切片都会进行两层构建：严格警告配置的 AArch64 core，以及包含 kernel、fs、platform、指令模拟器与 fakefs 的完整静态库。完整库随后接受两种最终链接检查：普通消费者通过对真实入口 `become_first_process` 的强引用按需解析归档，但不会调用该入口；另一个消费者强制解析三份静态归档的全部成员。门禁还会检查：
 
 - host 指针、函数指针、`long`、`size_t` 和文件偏移等 ABI 宽度；
+- AArch64 auto 后端的五切片选择、C oracle 的永久归档保留，以及 threaded 缓存项的 ILP32/LP64 函数指针宽度；
 - `arm64_32` gadget 表的 4 字节指针重定位，以及汇编对 C 指针字段的 ILP32/LP64 访问宽度；
 - Mach-O 的 device/Simulator 平台和各切片 minOS；
 - 静态归档的架构集合、必要成员和禁用符号；
@@ -82,7 +91,7 @@ build-apple-core/xcframeworks/libfakefs.xcframework
 
 device 通用归档包含 `arm64_32` 与 `arm64`，Simulator 通用归档包含 `arm64` 与 `x86_64`。三份 XCFramework 目前都没有公共头文件（Headers）、模块映射（module map）或稳定的公共 C API；它们只是门禁生成的二进制容器，不能称为公共 SDK，也不能声称可以不经接口设计和集成验证就直接接入 ETOS 或其他应用。
 
-这个门禁会交叉构建并链接最小 Mach-O 消费者，但不会启动这些消费者、watchOS Simulator 或 guest。它不验证应用生命周期、界面、签名、沙箱、entitlement、真机运行或 App Store 交付。
+这个门禁会交叉构建并链接最小 Mach-O 消费者，并静态检查后端选择、归档符号与 `arm64e` 指针认证指令，但不会启动这些消费者、watchOS Simulator 或 guest。它不衡量 threaded-code 的运行性能，也不验证应用生命周期、界面、签名、沙箱、entitlement、真机运行或 App Store 交付。
 
 ### Xcode Scheme 验收
 
@@ -225,5 +234,5 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 - 多线程进程跨架构替换映像尚未实现；不安全的该类 `exec` 会返回 `EBUSY`。
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
 - 网络验证目前只覆盖基础 TCP 客户端路径，不代表 UDP、IPv6 或全部 socket 选项均已实现。
-- Apple 门禁验证 core、完整静态库的普通与全归档链接闭包、宿主 ABI、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
+- Apple 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core、完整静态库的普通与全归档链接闭包、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest、不衡量后端性能，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
 - Alpine 冒烟是目标工作负载验证，不等价于完整发行版兼容认证。

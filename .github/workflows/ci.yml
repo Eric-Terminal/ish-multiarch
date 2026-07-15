@@ -55,7 +55,7 @@ jobs:
       - name: Build
         if: matrix.kernel == 'ish'
         run: xcodebuild -project iSH.xcodeproj -scheme iSH -arch arm64 -sdk iphoneos CODE_SIGNING_ALLOWED=NO
-      - name: 验证 Apple 四切片与 XCFramework
+      - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
       - name: 验证 watchOS Xcode 最终链接
