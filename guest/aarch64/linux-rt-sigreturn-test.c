@@ -427,6 +427,7 @@ int main(void) {
                 sizeof(handler)) == 0);
     }
 
+    guest_linux_mm_destroy(&memory);
     guest_page_table_destroy(&table);
     return 0;
 }

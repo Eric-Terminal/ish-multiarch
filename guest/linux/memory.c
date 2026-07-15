@@ -72,47 +72,6 @@ static bool range_is_in_mmap_arena(const struct guest_linux_mm *memory,
     return count <= arena_pages - offset_pages;
 }
 
-static bool mmap_anonymous_page_index(
-        const struct guest_linux_mm *memory, qword_t page,
-        dword_t *index) {
-    if (page < memory->mmap_base || page >= memory->mmap_limit)
-        return false;
-    qword_t offset = (page - memory->mmap_base) >>
-            GUEST_MEMORY_PAGE_BITS;
-    assert(offset < GUEST_LINUX_MMAP_ANONYMOUS_BITMAP_SIZE * 8);
-    *index = (dword_t) offset;
-    return true;
-}
-
-static bool mmap_anonymous_page_is_tracked(
-        const struct guest_linux_mm *memory, qword_t page) {
-    dword_t index;
-    if (!mmap_anonymous_page_index(memory, page, &index))
-        return false;
-    byte_t mask = (byte_t) (1u << (index & 7u));
-    return (memory->mmap_anonymous_bitmap[index >> 3] & mask) != 0;
-}
-
-static void mmap_anonymous_range_set(struct guest_linux_mm *memory,
-        qword_t first, qword_t count, bool tracked) {
-    assert(valid_range(memory, first, count));
-    qword_t range_end = first +
-            (count << GUEST_MEMORY_PAGE_BITS);
-    qword_t page = first < memory->mmap_base ?
-            memory->mmap_base : first;
-    qword_t end = range_end > memory->mmap_limit ?
-            memory->mmap_limit : range_end;
-    for (; page < end; page += GUEST_MEMORY_PAGE_SIZE) {
-        dword_t index;
-        assert(mmap_anonymous_page_index(memory, page, &index));
-        byte_t mask = (byte_t) (1u << (index & 7u));
-        if (tracked)
-            memory->mmap_anonymous_bitmap[index >> 3] |= mask;
-        else
-            memory->mmap_anonymous_bitmap[index >> 3] &= (byte_t) ~mask;
-    }
-}
-
 static bool find_mmap_hole(struct guest_linux_mm *memory,
         qword_t count, qword_t *first) {
     qword_t arena_pages = (memory->mmap_limit - memory->mmap_base) >>
@@ -165,30 +124,45 @@ static bool page_end(const struct guest_linux_mm *memory,
     return true;
 }
 
-static bool range_is_in_allocated_brk(
-        const struct guest_linux_mm *memory, qword_t first,
-        qword_t count) {
-    qword_t end;
-    if (!page_end(memory, memory->brk, &end) ||
-            first < memory->start_brk || first >= end)
-        return false;
-    return count <= (end - first) >> GUEST_MEMORY_PAGE_BITS;
-}
-
 static bool range_is_discardable_anonymous(
         const struct guest_linux_mm *memory, qword_t first,
         qword_t count) {
-    if (range_is_in_allocated_brk(memory, first, count))
-        return true;
-    if (!range_is_in_mmap_arena(memory, first, count))
-        return false;
     for (qword_t index = 0; index < count; index++) {
         qword_t page = first +
                 (index << GUEST_MEMORY_PAGE_BITS);
-        if (!mmap_anonymous_page_is_tracked(memory, page))
+        const struct guest_linux_vma *mapping = guest_linux_vma_find(
+                &memory->vmas, (guest_addr_t) page);
+        if (mapping == NULL ||
+                (mapping->source != GUEST_LINUX_VMA_SOURCE_BRK &&
+                mapping->source !=
+                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE))
             return false;
     }
     return true;
+}
+
+static bool vma_range_intersects(const struct guest_linux_vma_set *set,
+        guest_addr_t first, guest_addr_t last) {
+    for (size_t index = 0; index < set->count; index++) {
+        const struct guest_linux_vma *mapping = &set->entries[index];
+        if (mapping->first >= last)
+            break;
+        if (mapping->last > first)
+            return true;
+    }
+    return false;
+}
+
+static bool vma_protection_changes(const struct guest_linux_vma_set *set,
+        guest_addr_t first, guest_addr_t last, qword_t protection) {
+    for (size_t index = 0; index < set->count; index++) {
+        const struct guest_linux_vma *mapping = &set->entries[index];
+        if (mapping->first >= last)
+            break;
+        if (mapping->last > first && mapping->protection != protection)
+            return true;
+    }
+    return false;
 }
 
 void guest_linux_mm_init(struct guest_linux_mm *memory,
@@ -214,6 +188,13 @@ void guest_linux_mm_init(struct guest_linux_mm *memory,
         .mmap_base = mmap_base,
         .mmap_limit = mmap_limit,
     };
+    guest_linux_vma_set_init(&memory->vmas);
+}
+
+void guest_linux_mm_destroy(struct guest_linux_mm *memory) {
+    assert(memory != NULL);
+    guest_linux_vma_set_destroy(&memory->vmas);
+    *memory = (struct guest_linux_mm) {0};
 }
 
 bool guest_linux_mm_clone(struct guest_linux_mm *destination,
@@ -221,15 +202,77 @@ bool guest_linux_mm_clone(struct guest_linux_mm *destination,
         const struct guest_linux_mm *source) {
     assert(destination != NULL && destination_page_table != NULL &&
             source != NULL && source->page_table != NULL);
+    if (destination == source)
+        return false;
+    *destination = (struct guest_linux_mm) {0};
+    if (destination_page_table == source->page_table)
+        return false;
+    *destination_page_table = (struct guest_page_table) {0};
     bool locked = guest_page_table_read_lock(source->page_table);
-    bool result = guest_page_table_clone_locked(
-            destination_page_table, source->page_table);
+    struct guest_linux_vma_set vmas;
+    bool result = guest_linux_vma_set_clone(&vmas, &source->vmas);
     if (result) {
-        *destination = *source;
-        destination->page_table = destination_page_table;
+        result = guest_page_table_clone_locked(
+                destination_page_table, source->page_table);
+    }
+    if (result) {
+        *destination = (struct guest_linux_mm) {
+            .page_table = destination_page_table,
+            .start_brk = source->start_brk,
+            .brk = source->brk,
+            .brk_limit = source->brk_limit,
+            .mmap_base = source->mmap_base,
+            .mmap_limit = source->mmap_limit,
+            .membarrier_registrations =
+                    source->membarrier_registrations,
+            .vmas = vmas,
+        };
+    } else {
+        guest_linux_vma_set_destroy(&vmas);
     }
     guest_page_table_read_unlock(source->page_table, locked);
     return result;
+}
+
+static void commit_vma_candidate(struct guest_linux_mm *memory,
+        struct guest_linux_vma_set *candidate) {
+    guest_linux_vma_set_destroy(&memory->vmas);
+    memory->vmas = *candidate;
+    *candidate = (struct guest_linux_vma_set) {0};
+}
+
+static bool prepare_vma_insert(const struct guest_linux_mm *memory,
+        struct guest_linux_vma mapping,
+        struct guest_linux_vma_set *candidate) {
+    if (!guest_linux_vma_set_clone(candidate, &memory->vmas))
+        return false;
+    if (guest_linux_vma_insert(candidate, mapping))
+        return true;
+    guest_linux_vma_set_destroy(candidate);
+    return false;
+}
+
+static bool prepare_vma_remove(const struct guest_linux_mm *memory,
+        guest_addr_t first, guest_addr_t last,
+        struct guest_linux_vma_set *candidate) {
+    if (!guest_linux_vma_set_clone(candidate, &memory->vmas))
+        return false;
+    if (guest_linux_vma_remove(candidate, first, last))
+        return true;
+    guest_linux_vma_set_destroy(candidate);
+    return false;
+}
+
+static bool prepare_vma_protect(const struct guest_linux_mm *memory,
+        guest_addr_t first, guest_addr_t last, qword_t protection,
+        struct guest_linux_vma_set *candidate) {
+    if (!guest_linux_vma_set_clone(candidate, &memory->vmas))
+        return false;
+    if (guest_linux_vma_protect_tracked(
+            candidate, first, last, protection))
+        return true;
+    guest_linux_vma_set_destroy(candidate);
+    return false;
 }
 
 qword_t guest_linux_membarrier(struct guest_linux_mm *memory,
@@ -281,18 +324,39 @@ static guest_addr_t guest_linux_brk_unlocked(struct guest_linux_mm *memory,
             !page_end(memory, requested, &new_end))
         return memory->brk;
 
+    struct guest_linux_vma_set candidate;
     if (new_end > old_end) {
+        struct guest_linux_vma mapping = {
+            .first = (guest_addr_t) old_end,
+            .last = (guest_addr_t) new_end,
+            .protection = GUEST_LINUX_PROT_READ |
+                    GUEST_LINUX_PROT_WRITE,
+            .source = GUEST_LINUX_VMA_SOURCE_BRK,
+        };
+        if (!prepare_vma_insert(memory, mapping, &candidate))
+            return memory->brk;
         struct guest_page_range range = make_range(old_end,
                 (new_end - old_end) >> GUEST_MEMORY_PAGE_BITS);
         if (guest_page_table_map_zero_range(memory->page_table, range,
                 GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) !=
-                GUEST_PAGE_TABLE_OK)
+                GUEST_PAGE_TABLE_OK) {
+            guest_linux_vma_set_destroy(&candidate);
             return memory->brk;
+        }
+        commit_vma_candidate(memory, &candidate);
     } else if (new_end < old_end) {
+        bool update_vmas = vma_range_intersects(&memory->vmas,
+                (guest_addr_t) new_end, (guest_addr_t) old_end);
+        if (update_vmas && !prepare_vma_remove(memory,
+                (guest_addr_t) new_end,
+                (guest_addr_t) old_end, &candidate))
+            return memory->brk;
         struct guest_page_range range = make_range(new_end,
                 (old_end - new_end) >> GUEST_MEMORY_PAGE_BITS);
         assert(guest_page_table_unmap_range(
                 memory->page_table, range, true) == GUEST_PAGE_TABLE_OK);
+        if (update_vmas)
+            commit_vma_candidate(memory, &candidate);
     }
 
     memory->brk = requested;
@@ -352,15 +416,27 @@ static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
         }
     }
 
+    if (no_replace && !range_is_hole(memory, first, count))
+        return linux_error(GUEST_LINUX_EEXIST);
+    struct guest_linux_vma mapping = {
+        .first = (guest_addr_t) first,
+        .last = (guest_addr_t) (first +
+                (count << GUEST_MEMORY_PAGE_BITS)),
+        .protection = protection,
+        .source = GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
+    };
+    struct guest_linux_vma_set candidate;
+    if (!prepare_vma_insert(memory, mapping, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
+
     enum guest_page_table_result result = guest_page_table_map_zero_range(
             memory->page_table, make_range(first, count), permissions,
             fixed && !no_replace);
     if (result == GUEST_PAGE_TABLE_OK) {
-        mmap_anonymous_range_set(memory, first, count, false);
-        if (range_is_in_mmap_arena(memory, first, count))
-            mmap_anonymous_range_set(memory, first, count, true);
+        commit_vma_candidate(memory, &candidate);
         return first;
     }
+    guest_linux_vma_set_destroy(&candidate);
     if (result == GUEST_PAGE_TABLE_ALREADY_MAPPED && no_replace)
         return linux_error(GUEST_LINUX_EEXIST);
     return linux_error(GUEST_LINUX_ENOMEM);
@@ -384,10 +460,19 @@ static qword_t guest_linux_munmap_unlocked(struct guest_linux_mm *memory,
     if (!page_count(length, &count) ||
             !valid_range(memory, address, count))
         return linux_error(GUEST_LINUX_EINVAL);
+    guest_addr_t last = address +
+            (count << GUEST_MEMORY_PAGE_BITS);
+    struct guest_linux_vma_set candidate;
+    bool update_vmas = vma_range_intersects(
+            &memory->vmas, address, last);
+    if (update_vmas &&
+            !prepare_vma_remove(memory, address, last, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
     enum guest_page_table_result result = guest_page_table_unmap_range(
             memory->page_table, make_range(address, count), true);
     assert(result == GUEST_PAGE_TABLE_OK);
-    mmap_anonymous_range_set(memory, address, count, false);
+    if (update_vmas)
+        commit_vma_candidate(memory, &candidate);
     return 0;
 }
 
@@ -412,11 +497,24 @@ static qword_t guest_linux_mprotect_unlocked(struct guest_linux_mm *memory,
     if (!page_count(length, &count) ||
             !valid_range(memory, address, count))
         return linux_error(GUEST_LINUX_ENOMEM);
+    guest_addr_t last = address +
+            (count << GUEST_MEMORY_PAGE_BITS);
+    struct guest_linux_vma_set candidate;
+    bool update_vmas = vma_protection_changes(
+            &memory->vmas, address, last, protection);
+    if (update_vmas && !prepare_vma_protect(
+            memory, address, last, protection, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
     enum guest_page_table_result result = guest_page_table_protect_range(
             memory->page_table, make_range(address, count), permissions);
-    if (result == GUEST_PAGE_TABLE_NOT_MAPPED)
+    if (result == GUEST_PAGE_TABLE_NOT_MAPPED) {
+        if (update_vmas)
+            guest_linux_vma_set_destroy(&candidate);
         return linux_error(GUEST_LINUX_ENOMEM);
+    }
     assert(result == GUEST_PAGE_TABLE_OK);
+    if (update_vmas)
+        commit_vma_candidate(memory, &candidate);
     return 0;
 }
 

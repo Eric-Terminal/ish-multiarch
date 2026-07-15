@@ -235,7 +235,7 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 - AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；当前已实现 32/64 位 `CASP`、`CASPA`、`CASPL` 与 `CASPAL`，但尚未覆盖完整 `FEAT_LSE`，guest 的 `AT_HWCAP` 暂不宣告 `HWCAP_ATOMICS`。
 - 未支持的 AArch64 指令会安全投递 `SIGILL`，未知 Linux 系统调用会返回 `ENOSYS`。
 - `futex` 当前只在同一地址空间模型内支持 `WAIT`、`WAKE` 与 `REQUEUE`，尚无跨进程共享后备对象身份、AArch64 robust list 或 `futex_waitv`；`clone3` 仅接受当前任务模型可安全表达的受限标志集。
-- `mmap` 当前只支持匿名私有映射；文件映射和共享映射尚未实现。`MADV_DONTNEED` 只接受受控 mmap 匿名域或已分配 brk 页，无法确认来源的映射会在写入前被拒绝。
+- `mmap` 当前只支持匿名私有映射；文件映射和共享映射尚未实现。`MADV_DONTNEED` 通过 VMA 来源只接受匿名私有映射或已分配 brk 页，无法确认来源的映射会在写入前被拒绝。
 - `pidfd` 类接口尚缺少稳定的任务代际、引用和权限模型；`openat2` 尚未表达 `RESOLVE_*` 路径约束；`futex_waitv` 尚未建立原子多队列等待与共享后备对象身份模型，因此不做会弱化语义的伪实现。
 - `pselect6`、`ppoll` 与 `epoll_create1/epoll_ctl/epoll_pwait` 已接入当前的文件事件和信号掩码模型，不代表所有 Linux I/O 复用语义均已实现。
 - `FPREM` 在单次模拟中完成完整余数，不暴露实现相关的 `C2=1` 中间化简步骤。

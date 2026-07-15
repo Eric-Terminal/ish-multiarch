@@ -81,6 +81,7 @@ static void process_memory_release(
     if (memory == NULL || atomic_fetch_sub_explicit(
             &memory->references, 1, memory_order_acq_rel) != 1)
         return;
+    guest_linux_mm_destroy(&memory->linux_mm);
     guest_page_table_destroy(&memory->page_table);
     free(memory);
 }

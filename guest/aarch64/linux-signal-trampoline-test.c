@@ -217,6 +217,7 @@ int main(void) {
             probe.delivery.blocked_mask);
     assert(memcmp(&cpu, &probe.expected_poll_cpu, sizeof(cpu)) == 0);
 
+    guest_linux_mm_destroy(&memory);
     guest_page_table_destroy(&table);
     return 0;
 }

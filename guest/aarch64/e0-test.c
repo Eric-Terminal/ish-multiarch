@@ -180,6 +180,7 @@ int main(void) {
     assert(sink.calls == 1);
     assert(cpu.cycle == 9);
     assert(cpu.pc == loaded.entry + 9 * 4);
+    guest_linux_mm_destroy(&memory);
     guest_page_table_destroy(&table);
     return 0;
 }

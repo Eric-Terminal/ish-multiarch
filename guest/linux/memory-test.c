@@ -7,6 +7,7 @@
 #include "guest/linux/errno.h"
 #include "guest/linux/memory.h"
 #include "guest/linux/mman.h"
+#include "guest/memory/page-backing.h"
 #include "guest/memory/tlb.h"
 
 #define BRK_BASE UINT64_C(0x0000600000000000)
@@ -36,6 +37,12 @@ static void assert_not_mapped(struct guest_page_table *table,
             &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
 }
 
+static void destroy_memory(struct guest_linux_mm *memory,
+        struct guest_page_table *table) {
+    guest_linux_mm_destroy(memory);
+    guest_page_table_destroy(table);
+}
+
 static void test_growth_and_shrink(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
@@ -57,6 +64,11 @@ static void test_growth_and_shrink(void) {
     assert(guest_page_table_lookup(&table, BRK_BASE,
             &first_page, &permissions) == GUEST_PAGE_TABLE_OK);
     assert(permissions == (GUEST_MEMORY_READ | GUEST_MEMORY_WRITE));
+    const struct guest_linux_vma *heap_vma =
+            guest_linux_vma_find(&memory.vmas, BRK_BASE);
+    assert(heap_vma != NULL &&
+            heap_vma->source == GUEST_LINUX_VMA_SOURCE_BRK &&
+            heap_vma->last == BRK_BASE + GUEST_MEMORY_PAGE_SIZE);
     for (size_t i = 0; i < GUEST_MEMORY_PAGE_SIZE; i++)
         assert(first_page[i] == 0);
 
@@ -94,7 +106,8 @@ static void test_growth_and_shrink(void) {
 
     assert(guest_linux_brk(&memory, BRK_BASE) == BRK_BASE);
     assert_not_mapped(&table, BRK_BASE);
-    guest_page_table_destroy(&table);
+    assert(memory.vmas.count == 0);
+    destroy_memory(&memory, &table);
 }
 
 static void test_conflict_rollback(void) {
@@ -121,7 +134,7 @@ static void test_conflict_rollback(void) {
     assert(same_page == occupied);
     assert(same_page[0] == 0xa5);
     assert(permissions == GUEST_MEMORY_READ);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_address_limit(void) {
@@ -141,7 +154,7 @@ static void test_address_limit(void) {
                     GUEST_LINUX_MAP_FIXED,
             UINT64_MAX, 0) == TOP_PAGE);
     lookup_page(&table, TOP_PAGE, GUEST_MEMORY_READ);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_busybox_mmap_paths(void) {
@@ -196,7 +209,7 @@ static void test_busybox_mmap_paths(void) {
     assert(guest_tlb_read(&tlb, (guest_addr_t) result,
             &output, 1, GUEST_MEMORY_READ, &fault));
     assert(output == value);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_hints_and_fixed_replacement(void) {
@@ -227,12 +240,15 @@ static void test_hints_and_fixed_replacement(void) {
     assert(obstacle[0] == 0x41 && hinted[0] == 0x52);
 
     qword_t generation = table.address_space.generation;
+    guest_linux_vma_test_fail_allocation_at(0);
     result = guest_linux_mmap(&memory, hint, GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_PROT_WRITE,
             GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS |
                     GUEST_LINUX_MAP_FIXED_NOREPLACE,
             UINT64_MAX, 0);
     assert(result == encoded_error(GUEST_LINUX_EEXIST));
+    assert(guest_linux_vma_test_allocation_count() == 0);
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
     assert(table.address_space.generation == generation);
     assert(lookup_page(&table, hint, GUEST_MEMORY_READ)[0] == 0x52);
 
@@ -254,7 +270,7 @@ static void test_hints_and_fixed_replacement(void) {
                     GUEST_LINUX_MAP_FIXED_NOREPLACE,
             UINT64_MAX, 0);
     assert(result == empty);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_mmap_validation(void) {
@@ -303,7 +319,7 @@ static void test_mmap_validation(void) {
             GUEST_MEMORY_PAGE_SIZE + 1, GUEST_LINUX_PROT_READ,
             private_anonymous | GUEST_LINUX_MAP_FIXED,
             UINT64_MAX, 0) == encoded_error(GUEST_LINUX_ENOMEM));
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_mprotect_and_munmap(void) {
@@ -326,6 +342,21 @@ static void test_mprotect_and_munmap(void) {
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
     first[0] = 0x63;
     last[0] = 0x74;
+
+    assert(guest_linux_mprotect(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_EXEC) == 0);
+    assert(memory.vmas.count == 3);
+    assert(guest_linux_vma_find(&memory.vmas, base)->protection ==
+            (GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE));
+    assert(guest_linux_vma_find(&memory.vmas,
+            base + GUEST_MEMORY_PAGE_SIZE)->protection ==
+            GUEST_LINUX_PROT_EXEC);
+    assert(guest_linux_mprotect(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE) == 0);
+    assert(memory.vmas.count == 1);
 
     struct guest_tlb tlb;
     guest_tlb_init(&tlb, &table.address_space);
@@ -351,6 +382,9 @@ static void test_mprotect_and_munmap(void) {
     assert(guest_linux_munmap(&memory,
             base + GUEST_MEMORY_PAGE_SIZE,
             GUEST_MEMORY_PAGE_SIZE) == 0);
+    assert(memory.vmas.count == 2);
+    assert(guest_linux_vma_find(&memory.vmas,
+            base + GUEST_MEMORY_PAGE_SIZE) == NULL);
     qword_t generation = table.address_space.generation;
     assert(guest_linux_mprotect(&memory, base,
             3 * GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ) ==
@@ -361,6 +395,11 @@ static void test_mprotect_and_munmap(void) {
     assert(lookup_page(&table,
             base + 2 * GUEST_MEMORY_PAGE_SIZE,
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE)[0] == 0x74);
+    assert(guest_linux_vma_find(&memory.vmas, base)->protection ==
+            GUEST_LINUX_PROT_WRITE);
+    assert(guest_linux_vma_find(&memory.vmas,
+            base + 2 * GUEST_MEMORY_PAGE_SIZE)->protection ==
+            GUEST_LINUX_PROT_WRITE);
 
     assert(guest_linux_munmap(&memory, base,
             3 * GUEST_MEMORY_PAGE_SIZE) == 0);
@@ -368,6 +407,7 @@ static void test_mprotect_and_munmap(void) {
     assert_not_mapped(&table, base);
     assert_not_mapped(&table, base + GUEST_MEMORY_PAGE_SIZE);
     assert_not_mapped(&table, base + 2 * GUEST_MEMORY_PAGE_SIZE);
+    assert(memory.vmas.count == 0);
     generation = table.address_space.generation;
     assert(guest_linux_munmap(&memory, base,
             3 * GUEST_MEMORY_PAGE_SIZE) == 0);
@@ -389,7 +429,7 @@ static void test_mprotect_and_munmap(void) {
     assert(guest_linux_munmap(&memory, TOP_PAGE,
             GUEST_MEMORY_PAGE_SIZE + 1) ==
             encoded_error(GUEST_LINUX_EINVAL));
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_brk_with_hole(void) {
@@ -405,7 +445,7 @@ static void test_brk_with_hole(void) {
     assert_not_mapped(&table, BRK_BASE);
     assert_not_mapped(&table, BRK_BASE + GUEST_MEMORY_PAGE_SIZE);
     assert_not_mapped(&table, BRK_BASE + 2 * GUEST_MEMORY_PAGE_SIZE);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 static void test_madvise(void) {
@@ -447,6 +487,8 @@ static void test_madvise(void) {
     struct guest_page_table clone_table;
     struct guest_linux_mm clone;
     assert(guest_linux_mm_clone(&clone, &clone_table, &memory));
+    assert(clone.vmas.count == memory.vmas.count);
+    assert(clone.vmas.entries != memory.vmas.entries);
     byte_t *cloned = lookup_page(&clone_table, code_page,
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
     assert(cloned[0] == 0x6d);
@@ -454,7 +496,7 @@ static void test_madvise(void) {
             GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_MADV_DONTNEED) == 0);
     assert(cloned[0] == 0 && replacement[0] == 0x6d);
-    guest_page_table_destroy(&clone_table);
+    destroy_memory(&clone, &clone_table);
 
     assert(guest_linux_munmap(&memory, code_page,
             GUEST_MEMORY_PAGE_SIZE) == 0);
@@ -557,10 +599,9 @@ static void test_madvise(void) {
     memset(outside_anonymous, 0xb7, GUEST_MEMORY_PAGE_SIZE);
     assert(guest_linux_madvise(&memory, fixed_outside,
             GUEST_MEMORY_PAGE_SIZE,
-            GUEST_LINUX_MADV_DONTNEED) ==
-            encoded_error(GUEST_LINUX_EINVAL));
-    assert(outside_anonymous[0] == 0xb7 &&
-            outside_anonymous[GUEST_MEMORY_PAGE_SIZE - 1] == 0xb7);
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert(outside_anonymous[0] == 0 &&
+            outside_anonymous[GUEST_MEMORY_PAGE_SIZE - 1] == 0);
 
     assert(guest_linux_madvise(&memory, base + 1, 0,
             GUEST_LINUX_MADV_NORMAL) ==
@@ -576,7 +617,137 @@ static void test_madvise(void) {
     assert(guest_linux_madvise(&memory, base, UINT64_MAX,
             GUEST_LINUX_MADV_NORMAL) ==
             encoded_error(GUEST_LINUX_EINVAL));
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
+}
+
+static void test_vma_transaction_failures(void) {
+    assert(guest_linux_vma_test_live_allocation_count() == 0);
+    assert(guest_page_backing_test_live_count() == 0);
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    struct guest_linux_mm memory;
+    guest_linux_mm_init(&memory, &table, BRK_BASE, BRK_LIMIT);
+
+    qword_t generation = table.address_space.generation;
+    guest_linux_vma_test_fail_allocation_at(0);
+    assert(guest_linux_brk(&memory, BRK_BASE + 1) == BRK_BASE);
+    assert(memory.brk == BRK_BASE && memory.vmas.count == 0);
+    assert(table.address_space.generation == generation);
+    assert_not_mapped(&table, BRK_BASE);
+
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
+    assert(guest_linux_brk(&memory, BRK_BASE + 1) == BRK_BASE + 1);
+    guest_addr_t base = (guest_addr_t) memory.mmap_base +
+            96 * GUEST_MEMORY_PAGE_SIZE;
+    qword_t flags = GUEST_LINUX_MAP_PRIVATE |
+            GUEST_LINUX_MAP_ANONYMOUS | GUEST_LINUX_MAP_FIXED;
+    assert(guest_linux_mmap(&memory, base,
+            3 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            flags, UINT64_MAX, 0) == base);
+    size_t live_vma_allocations =
+            guest_linux_vma_test_live_allocation_count();
+    assert(live_vma_allocations == 1);
+
+    guest_linux_vma_test_fail_allocation_at(0);
+    assert(guest_linux_mprotect(&memory, base,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE) == 0);
+    assert(guest_linux_vma_test_allocation_count() == 0);
+    guest_addr_t failed_page = base + 8 * GUEST_MEMORY_PAGE_SIZE;
+    guest_linux_vma_test_fail_allocation_at(0);
+    assert(guest_linux_munmap(&memory, failed_page,
+            GUEST_MEMORY_PAGE_SIZE) == 0);
+    assert(guest_linux_vma_test_allocation_count() == 0);
+    assert_not_mapped(&table, failed_page);
+
+    generation = table.address_space.generation;
+    guest_linux_vma_test_fail_allocation_at(1);
+    assert(guest_linux_mprotect(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_EXEC) ==
+            encoded_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_vma_test_allocation_count() == 2);
+    assert(guest_linux_vma_test_live_allocation_count() ==
+            live_vma_allocations);
+    assert(table.address_space.generation == generation);
+    lookup_page(&table, base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(guest_linux_vma_find(&memory.vmas,
+            base + GUEST_MEMORY_PAGE_SIZE)->protection ==
+            (GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE));
+
+    guest_linux_vma_test_fail_allocation_at(1);
+    assert(guest_linux_munmap(&memory,
+            base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE) ==
+            encoded_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_vma_test_allocation_count() == 2);
+    assert(guest_linux_vma_test_live_allocation_count() ==
+            live_vma_allocations);
+    assert(table.address_space.generation == generation);
+    lookup_page(&table, base + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+
+    guest_linux_vma_test_fail_allocation_at(1);
+    assert(guest_linux_mmap(&memory, failed_page,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ,
+            flags, UINT64_MAX, 0) == encoded_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_vma_test_allocation_count() == 2);
+    assert(table.address_space.generation == generation);
+    assert_not_mapped(&table, failed_page);
+
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
+    size_t live_backings = guest_page_backing_test_live_count();
+    guest_page_backing_test_fail_allocation_at(0);
+    assert(guest_linux_mmap(&memory, failed_page,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ,
+            flags, UINT64_MAX, 0) == encoded_error(GUEST_LINUX_ENOMEM));
+    assert(guest_page_backing_test_allocation_count() == 1);
+    assert(guest_page_backing_test_live_count() == live_backings);
+    assert(guest_linux_vma_test_live_allocation_count() ==
+            live_vma_allocations);
+    assert(table.address_space.generation == generation);
+    assert_not_mapped(&table, failed_page);
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_linux_mm failed_memory;
+    struct guest_page_table failed_table;
+    guest_linux_vma_test_fail_allocation_at(0);
+    assert(!guest_linux_mm_clone(
+            &failed_memory, &failed_table, &memory));
+    assert(failed_memory.page_table == NULL);
+    assert(failed_memory.vmas.entries == NULL &&
+            failed_memory.vmas.count == 0);
+    assert(failed_table.root == NULL);
+    assert(guest_linux_vma_test_live_allocation_count() ==
+            live_vma_allocations);
+    guest_linux_mm_destroy(&failed_memory);
+    guest_page_table_destroy(&failed_table);
+
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(0);
+    assert(!guest_linux_mm_clone(
+            &failed_memory, &failed_table, &memory));
+    assert(guest_page_backing_test_allocation_count() == 1);
+    assert(failed_memory.page_table == NULL &&
+            failed_memory.vmas.entries == NULL &&
+            failed_memory.vmas.count == 0);
+    assert(failed_table.root == NULL);
+    assert(guest_page_backing_test_live_count() == live_backings);
+    assert(guest_linux_vma_test_live_allocation_count() ==
+            live_vma_allocations);
+    guest_linux_mm_destroy(&failed_memory);
+    guest_page_table_destroy(&failed_table);
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    destroy_memory(&memory, &table);
+    guest_linux_mm_destroy(&memory);
+    assert(guest_linux_vma_test_live_allocation_count() == 0);
+    assert(guest_page_backing_test_live_count() == 0);
 }
 
 static void test_membarrier_commands_and_lifecycle(void) {
@@ -642,10 +813,10 @@ static void test_membarrier_commands_and_lifecycle(void) {
     assert(guest_linux_membarrier(&fresh,
             GUEST_LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS, 0) == 0);
 
-    guest_page_table_destroy(&fresh_table);
-    guest_page_table_destroy(&registered_copy_table);
-    guest_page_table_destroy(&early_copy_table);
-    guest_page_table_destroy(&source_table);
+    destroy_memory(&fresh, &fresh_table);
+    destroy_memory(&registered_copy, &registered_copy_table);
+    destroy_memory(&early_copy, &early_copy_table);
+    destroy_memory(&source, &source_table);
 }
 
 struct membarrier_drain_context {
@@ -720,7 +891,7 @@ static void test_membarrier_drains_concurrent_access(void) {
     assert(pthread_join(barrier, NULL) == 0);
     assert(atomic_load_explicit(
             &context.barrier_returned, memory_order_acquire));
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 struct concurrency_context {
@@ -778,7 +949,7 @@ static void test_concurrent_access_and_protection(void) {
                 GUEST_MEMORY_PAGE_SIZE, protection) == 0);
     assert(pthread_join(reader, NULL) == 0);
     assert(pthread_join(writer, NULL) == 0);
-    guest_page_table_destroy(&table);
+    destroy_memory(&memory, &table);
 }
 
 int main(void) {
@@ -791,6 +962,7 @@ int main(void) {
     test_mprotect_and_munmap();
     test_brk_with_hole();
     test_madvise();
+    test_vma_transaction_failures();
     test_membarrier_commands_and_lifecycle();
     test_membarrier_drains_concurrent_access();
     test_concurrent_access_and_protection();

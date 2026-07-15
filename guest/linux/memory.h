@@ -2,12 +2,11 @@
 #define GUEST_LINUX_MEMORY_H
 
 #include "guest/linux/membarrier.h"
+#include "guest/linux/vma.h"
 #include "guest/memory/page-table.h"
 
-// 固定 arena 限制搜索成本，并让每个匿名页可由 4 KiB 位图追踪。
+// 固定 arena 只限制非 fixed 映射的搜索成本，不限制 VMA 表达范围。
 #define GUEST_LINUX_MMAP_ARENA_SIZE (UINT64_C(128) * 1024 * 1024)
-#define GUEST_LINUX_MMAP_ANONYMOUS_BITMAP_SIZE \
-    ((GUEST_LINUX_MMAP_ARENA_SIZE >> GUEST_MEMORY_PAGE_BITS) / 8)
 
 struct guest_linux_mm {
     struct guest_page_table *page_table;
@@ -17,14 +16,15 @@ struct guest_linux_mm {
     qword_t mmap_base;
     qword_t mmap_limit;
     dword_t membarrier_registrations;
-    // 每一位记录 arena 对应页是否由匿名 mmap 成功创建。
-    byte_t mmap_anonymous_bitmap[
-            GUEST_LINUX_MMAP_ANONYMOUS_BITMAP_SIZE];
+    struct guest_linux_vma_set vmas;
 };
 
 void guest_linux_mm_init(struct guest_linux_mm *memory,
         struct guest_page_table *page_table, guest_addr_t start_brk,
         guest_addr_t brk_limit);
+// 接受全零状态且可重复调用；page_table 的所有权仍属于调用方。
+void guest_linux_mm_destroy(struct guest_linux_mm *memory);
+// 两个 destination 均须未初始化，并且不得与 source 的所有权别名。
 bool guest_linux_mm_clone(struct guest_linux_mm *destination,
         struct guest_page_table *destination_page_table,
         const struct guest_linux_mm *source);

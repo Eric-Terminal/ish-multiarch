@@ -64,6 +64,7 @@ aarch64_core_src = [
     'guest/aarch64/linux-signal-frame.c',
     'guest/aarch64/linux-signal-trampoline.c',
     'guest/aarch64/linux-process.c',
+    'guest/linux/vma.c',
     'guest/linux/memory.c',
     'guest/aarch64/linux-runtime.c',
     'guest/aarch64/elf64.c',
@@ -686,10 +687,22 @@ if not meson.is_cross_build()
             'guest/memory/tlb.c',
             'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
+            'guest/linux/vma.c',
             'guest/linux/memory.c',
             'guest/linux/memory-test.c',
-        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1'])
     test('guest_linux_memory', guest_linux_memory_test)
+
+    guest_linux_vma_test = executable('guest_linux_vma_test', [
+            'guest/linux/vma.c',
+            'guest/linux/vma-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1'])
+    test('guest_linux_vma', guest_linux_vma_test)
 
     aarch64_elf64_test = executable('aarch64_elf64_test', [
             'guest/aarch64/elf64.c',
