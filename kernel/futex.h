@@ -17,5 +17,7 @@ void futex_cleanup_robust_list_aarch64(
         struct task *task, struct aarch64_linux_process *process);
 // 常驻故障注入入口仅供测试；SIZE_MAX 表示恢复正常分配。
 void futex_test_fail_allocation_at(size_t index);
+// 常驻生命周期计数仅供测试在所有等待者退出后的静止点读取。
+unsigned futex_test_live_count(void);
 
 #endif

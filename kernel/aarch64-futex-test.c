@@ -863,6 +863,12 @@ static bool run_isolated(const char *name, scenario_function scenario) {
         signal(SIGUSR1, SIG_IGN);
         alarm(20);
         bool passed = scenario();
+        unsigned live_futexes = futex_test_live_count();
+        if (live_futexes != 0) {
+            fprintf(stderr, "%s 遗留 %u 个 futex 对象\n",
+                    name, live_futexes);
+            passed = false;
+        }
         alarm(0);
         exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
     }

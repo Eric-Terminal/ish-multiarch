@@ -365,6 +365,14 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_robust_futex', aarch64_robust_futex_test)
 
+        aarch64_futex_lifecycle_test = executable(
+            'aarch64_futex_lifecycle_test',
+            'kernel/aarch64-futex-lifecycle-test.c',
+            dependencies: ish)
+        test('aarch64_futex_lifecycle',
+            aarch64_futex_lifecycle_test,
+            timeout: 60)
+
         aarch64_clone3_syscall_test = executable(
             'aarch64_clone3_syscall_test',
             'kernel/aarch64-clone3-syscall-test.c',

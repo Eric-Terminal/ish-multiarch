@@ -33,6 +33,7 @@ struct guest_page_backing {
 
 static pthread_mutex_t identity_lock = PTHREAD_MUTEX_INITIALIZER;
 static qword_t last_identity;
+static atomic_uint live_count;
 
 static void check_pthread(int result) {
     if (result != 0)
@@ -163,7 +164,6 @@ static qword_t allocate_identity(void) {
 #if defined(GUEST_PAGE_BACKING_TESTING)
 static size_t allocation_fail_at = SIZE_MAX;
 static size_t allocation_count;
-static atomic_uint live_count;
 
 void guest_page_backing_test_fail_allocation_at(size_t index) {
     allocation_fail_at = index;
@@ -172,10 +172,6 @@ void guest_page_backing_test_fail_allocation_at(size_t index) {
 
 size_t guest_page_backing_test_allocation_count(void) {
     return allocation_count;
-}
-
-unsigned guest_page_backing_test_live_count(void) {
-    return atomic_load_explicit(&live_count, memory_order_relaxed);
 }
 
 unsigned guest_page_backing_test_reference_count(
@@ -188,6 +184,10 @@ static bool allocation_fails(void) {
     return allocation_count++ == allocation_fail_at;
 }
 #endif
+
+unsigned guest_page_backing_test_live_count(void) {
+    return atomic_load_explicit(&live_count, memory_order_relaxed);
+}
 
 static struct guest_page_backing *allocate_backing(void) {
 #if defined(GUEST_PAGE_BACKING_TESTING)
@@ -207,11 +207,9 @@ static struct guest_page_backing *allocate_backing(void) {
         .opaque = backing,
         .identity = allocate_identity(),
     };
-#if defined(GUEST_PAGE_BACKING_TESTING)
     unsigned previous = atomic_fetch_add_explicit(
             &live_count, 1, memory_order_relaxed);
     assert(previous != UINT_MAX);
-#endif
     return backing;
 }
 
@@ -245,11 +243,9 @@ void guest_page_backing_release(struct guest_page_backing *backing) {
     assert(previous != 0);
     if (previous != 1)
         return;
-#if defined(GUEST_PAGE_BACKING_TESTING)
     unsigned live_previous = atomic_fetch_sub_explicit(
             &live_count, 1, memory_order_relaxed);
     assert(live_previous != 0);
-#endif
     check_pthread(pthread_rwlock_destroy(&backing->lock));
     free(backing);
 }

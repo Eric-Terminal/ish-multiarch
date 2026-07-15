@@ -22,11 +22,12 @@ byte_t *guest_page_backing_bytes(struct guest_page_backing *backing);
 // track_exclusive、exclusive_matches 与 written 回调只能在持有写锁时调用。
 const struct guest_page_sync *guest_page_backing_sync(
         const struct guest_page_backing *backing);
+// 常驻生命周期计数仅供集成测试在静止点检查资源回收。
+unsigned guest_page_backing_test_live_count(void);
 
 #if defined(GUEST_PAGE_BACKING_TESTING)
 void guest_page_backing_test_fail_allocation_at(size_t index);
 size_t guest_page_backing_test_allocation_count(void);
-unsigned guest_page_backing_test_live_count(void);
 unsigned guest_page_backing_test_reference_count(
         const struct guest_page_backing *backing);
 #endif

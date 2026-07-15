@@ -63,6 +63,7 @@ static lock_t futex_lock = LOCK_INITIALIZER;
 static struct list futex_hash[FUTEX_HASH_SIZE];
 static atomic_size_t futex_allocation_index = ATOMIC_VAR_INIT(0);
 static atomic_size_t futex_failed_allocation = ATOMIC_VAR_INIT(SIZE_MAX);
+static atomic_uint futex_live_count = ATOMIC_VAR_INIT(0);
 
 static void __attribute__((constructor)) init_futex_hash(void) {
     for (int i = 0; i < FUTEX_HASH_SIZE; i++)
@@ -74,6 +75,11 @@ void futex_test_fail_allocation_at(size_t index) {
             &futex_allocation_index, 0, memory_order_relaxed);
     atomic_store_explicit(
             &futex_failed_allocation, index, memory_order_relaxed);
+}
+
+unsigned futex_test_live_count(void) {
+    return atomic_load_explicit(
+            &futex_live_count, memory_order_relaxed);
 }
 
 static void *futex_malloc(size_t size) {
@@ -223,6 +229,9 @@ static struct futex *futex_get_or_create_unlocked(
     };
     list_init(&futex->queue);
     list_add(&futex_hash[futex_hash_index(key)], &futex->chain);
+    unsigned previous = atomic_fetch_add_explicit(
+            &futex_live_count, 1, memory_order_relaxed);
+    assert(previous != UINT_MAX);
     return futex;
 }
 
@@ -231,6 +240,9 @@ static void futex_put_unlocked(struct futex *futex) {
     if (--futex->refcount == 0) {
         assert(list_empty(&futex->queue));
         list_remove(&futex->chain);
+        unsigned previous = atomic_fetch_sub_explicit(
+                &futex_live_count, 1, memory_order_relaxed);
+        assert(previous != 0);
         free(futex);
     }
 }
