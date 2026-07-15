@@ -368,10 +368,11 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
     return GUEST_TLB_EXCLUSIVE_STORED;
 }
 
-enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
+static enum guest_tlb_compare_exchange_result compare_exchange(
         struct guest_tlb *tlb, guest_addr_t address,
         const void *expected, const void *replacement, void *observed,
-        size_t size, struct guest_memory_fault *fault) {
+        size_t size, struct guest_tlb_mapping_snapshot *snapshot,
+        struct guest_memory_fault *fault) {
     assert((size == 4 || size == 8 || size == 16) &&
             size <= GUEST_TLB_MAX_ACCESS_SIZE);
     byte_t expected_bytes[GUEST_TLB_MAX_ACCESS_SIZE];
@@ -391,12 +392,24 @@ enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
     collect_syncs(chunks, chunk_count, &syncs);
     lock_syncs(&syncs, true);
 
+    struct guest_tlb_mapping_snapshot resolved_snapshot;
+    if (snapshot != NULL) {
+        assert(chunk_count == 1);
+        resolved_snapshot = (struct guest_tlb_mapping_snapshot) {
+            .shared_identity = chunks[0].sync == NULL ? 0 :
+                    guest_page_sync_identity(chunks[0].sync),
+            .page_offset = chunks[0].page_offset,
+        };
+    }
+
     byte_t *observed_bytes = observed;
     for (unsigned i = 0; i < chunk_count; i++) {
         memcpy(observed_bytes, chunks[i].host, chunks[i].size);
         observed_bytes += chunks[i].size;
     }
     if (memcmp(observed, expected_bytes, size) != 0) {
+        if (snapshot != NULL)
+            *snapshot = resolved_snapshot;
         unlock_syncs(&syncs, true);
         guest_address_space_write_unlock(tlb->address_space, locked);
         return GUEST_TLB_COMPARE_EXCHANGE_MISMATCH;
@@ -409,7 +422,29 @@ enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
     }
     record_sync_writes(chunks, chunk_count);
     guest_address_space_written(tlb->address_space, address, size);
+    if (snapshot != NULL)
+        *snapshot = resolved_snapshot;
     unlock_syncs(&syncs, true);
     guest_address_space_write_unlock(tlb->address_space, locked);
     return GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED;
+}
+
+enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
+        struct guest_tlb *tlb, guest_addr_t address,
+        const void *expected, const void *replacement, void *observed,
+        size_t size, struct guest_memory_fault *fault) {
+    return compare_exchange(tlb, address, expected, replacement,
+            observed, size, NULL, fault);
+}
+
+enum guest_tlb_compare_exchange_result
+        guest_tlb_compare_exchange_u32_resolved(
+        struct guest_tlb *tlb, guest_addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_tlb_mapping_snapshot *snapshot,
+        struct guest_memory_fault *fault) {
+    assert((address & (sizeof(dword_t) - 1)) == 0 &&
+            observed != NULL && snapshot != NULL);
+    return compare_exchange(tlb, address, &expected, &replacement,
+            observed, sizeof(expected), snapshot, fault);
 }

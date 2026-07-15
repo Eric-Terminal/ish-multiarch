@@ -768,6 +768,34 @@ bool aarch64_linux_process_write_u32(
 }
 
 enum aarch64_linux_process_compare_exchange_result
+        aarch64_linux_process_compare_exchange_futex_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct aarch64_linux_futex_word_snapshot *snapshot,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && observed != NULL && snapshot != NULL);
+    struct guest_memory_fault memory_fault;
+    struct guest_tlb_mapping_snapshot resolved;
+    enum guest_tlb_compare_exchange_result result =
+            guest_tlb_compare_exchange_u32_resolved(&process->tlb,
+                    (guest_addr_t) address, expected, replacement,
+                    observed, &resolved, &memory_fault);
+    if (result != GUEST_TLB_COMPARE_EXCHANGE_FAULT) {
+        *snapshot = (struct aarch64_linux_futex_word_snapshot) {
+            .shared_identity = resolved.shared_identity,
+            .page_offset = resolved.page_offset,
+        };
+    }
+    if (result == GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED)
+        return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED;
+    if (result == GUEST_TLB_COMPARE_EXCHANGE_MISMATCH)
+        return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH;
+    if (fault != NULL)
+        export_fault(fault, &memory_fault);
+    return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT;
+}
+
+enum aarch64_linux_process_compare_exchange_result
         aarch64_linux_process_compare_exchange_u32(
         struct aarch64_linux_process *process, qword_t address,
         dword_t expected, dword_t replacement, dword_t *observed,

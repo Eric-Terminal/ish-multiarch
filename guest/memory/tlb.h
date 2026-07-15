@@ -40,6 +40,12 @@ enum guest_tlb_compare_exchange_result {
     GUEST_TLB_COMPARE_EXCHANGE_FAULT,
 };
 
+struct guest_tlb_mapping_snapshot {
+    // 0 表示地址空间私有页；非零值标识共享物理页同步域。
+    qword_t shared_identity;
+    qword_t page_offset;
+};
+
 _Static_assert(sizeof(guest_addr_t) == 8,
         "独立 guest TLB 要求 64 位地址类型");
 _Static_assert((GUEST_TLB_SIZE & (GUEST_TLB_SIZE - 1)) == 0,
@@ -72,5 +78,12 @@ enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
         struct guest_tlb *tlb, guest_addr_t address,
         const void *expected, const void *replacement, void *observed,
         size_t size, struct guest_memory_fault *fault);
+// 32 位地址必须自然对齐；snapshot 与 observed 来自同一次原子事务。
+enum guest_tlb_compare_exchange_result
+        guest_tlb_compare_exchange_u32_resolved(
+        struct guest_tlb *tlb, guest_addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_tlb_mapping_snapshot *snapshot,
+        struct guest_memory_fault *fault);
 
 #endif

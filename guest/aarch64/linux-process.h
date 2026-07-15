@@ -220,6 +220,13 @@ enum aarch64_linux_process_compare_exchange_result
         struct aarch64_linux_process *process, qword_t address,
         dword_t expected, dword_t replacement, dword_t *observed,
         struct guest_linux_user_fault *fault);
+// snapshot 与 observed 均来自同一事务，可在映射随后改变后继续作为键使用。
+enum aarch64_linux_process_compare_exchange_result
+        aarch64_linux_process_compare_exchange_futex_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct aarch64_linux_futex_word_snapshot *snapshot,
+        struct guest_linux_user_fault *fault);
 // 核对 create 时复制的 tid、服务闭包与 task opaque；不比较描述符地址。
 bool aarch64_linux_process_uses_services(
         const struct aarch64_linux_process *process,
