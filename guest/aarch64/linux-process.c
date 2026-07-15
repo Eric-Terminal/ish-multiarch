@@ -767,6 +767,26 @@ bool aarch64_linux_process_write_u32(
     return false;
 }
 
+enum aarch64_linux_process_compare_exchange_result
+        aarch64_linux_process_compare_exchange_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && observed != NULL);
+    struct guest_memory_fault memory_fault;
+    enum guest_tlb_compare_exchange_result result =
+            guest_tlb_compare_exchange(&process->tlb,
+                    (guest_addr_t) address, &expected, &replacement,
+                    observed, sizeof(expected), &memory_fault);
+    if (result == GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED)
+        return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED;
+    if (result == GUEST_TLB_COMPARE_EXCHANGE_MISMATCH)
+        return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH;
+    if (fault != NULL)
+        export_fault(fault, &memory_fault);
+    return AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT;
+}
+
 static void apply_signal_result(
         struct aarch64_linux_process_result *result,
         struct guest_linux_signal_poll_result signal) {

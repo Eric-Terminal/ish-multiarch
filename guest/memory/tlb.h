@@ -66,7 +66,8 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
         const void *expected, const void *replacement, size_t size,
         struct guest_tlb_exclusive_token token,
         struct guest_memory_fault *fault);
-// observed 仅在完整预检成功后更新，返回值区分交换、比较失败与访存故障。
+// 支持 32、64 与 128 位事务；observed 仅在完整预检成功后更新，
+// 返回值区分交换、比较失败与访存故障。
 enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
         struct guest_tlb *tlb, guest_addr_t address,
         const void *expected, const void *replacement, void *observed,

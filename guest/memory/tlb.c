@@ -372,7 +372,7 @@ enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
         struct guest_tlb *tlb, guest_addr_t address,
         const void *expected, const void *replacement, void *observed,
         size_t size, struct guest_memory_fault *fault) {
-    assert((size == 8 || size == 16) &&
+    assert((size == 4 || size == 8 || size == 16) &&
             size <= GUEST_TLB_MAX_ACCESS_SIZE);
     byte_t expected_bytes[GUEST_TLB_MAX_ACCESS_SIZE];
     byte_t replacement_bytes[GUEST_TLB_MAX_ACCESS_SIZE];

@@ -265,6 +265,29 @@ static qword_t dispatch_fork_fixture(
                 child_snapshots[1].page_offset == sizeof(dword_t));
         assert(parent_value == UINT32_C(0x41) &&
                 child_value == parent_value);
+
+        dword_t observed = UINT32_MAX;
+        assert(aarch64_linux_process_compare_exchange_u32(
+                fixture->parent, FIRST_MMAP, UINT32_C(0x41),
+                UINT32_C(0x42), &observed, &snapshot_fault) ==
+                AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED);
+        assert(observed == UINT32_C(0x41));
+        assert(aarch64_linux_process_read_u32(
+                fixture->child, FIRST_MMAP, &child_value,
+                &snapshot_fault));
+        assert(child_value == UINT32_C(0x42));
+
+        observed = UINT32_MAX;
+        assert(aarch64_linux_process_compare_exchange_u32(
+                fixture->child, FIRST_MMAP, UINT32_C(0x41),
+                UINT32_C(0x43), &observed, &snapshot_fault) ==
+                AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH);
+        assert(observed == UINT32_C(0x42));
+        assert(aarch64_linux_process_compare_exchange_u32(
+                fixture->parent, FIRST_MMAP, UINT32_C(0x42),
+                UINT32_C(0x41), &observed, &snapshot_fault) ==
+                AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED);
+        assert(observed == UINT32_C(0x42));
         fixture->fork_calls++;
         return CHILD_TID;
     }
@@ -720,6 +743,21 @@ static qword_t dispatch_snapshot_fault_fixture(
             first_value == UINT32_C(0xaabbccdd));
     assert(snapshot_fault.address == DATA_ADDRESS &&
             snapshot_fault.access == GUEST_MEMORY_READ &&
+            snapshot_fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+
+    dword_t observed = UINT32_C(0x55667788);
+    snapshot_fault = (struct guest_linux_user_fault) {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
+    };
+    assert(aarch64_linux_process_compare_exchange_u32(
+            fixture->process, DATA_ADDRESS, UINT32_C(0x11),
+            UINT32_C(0x22), &observed, &snapshot_fault) ==
+            AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT);
+    assert(observed == UINT32_C(0x55667788));
+    assert(snapshot_fault.address == DATA_ADDRESS &&
+            snapshot_fault.access == GUEST_MEMORY_WRITE &&
             snapshot_fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
 
     const qword_t partially_valid_addresses[2] = {

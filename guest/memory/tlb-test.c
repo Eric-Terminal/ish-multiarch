@@ -158,6 +158,30 @@ static void test_exclusive_token_address_space_identity(void) {
 static void test_compare_exchange_transaction(struct test_memory *memory,
         struct guest_address_space *space, struct guest_tlb *tlb) {
     byte_t *first = memory->pages[0].host_page;
+    const guest_addr_t word_address = PAGE_A + 96;
+    const dword_t word_initial = UINT32_C(0x12345678);
+    const dword_t word_replacement = UINT32_C(0x89abcdef);
+    memcpy(first + 96, &word_initial, sizeof(word_initial));
+    struct guest_memory_fault fault;
+    dword_t observed_word = UINT32_MAX;
+    assert(guest_tlb_compare_exchange(tlb, word_address,
+            &word_initial, &word_replacement, &observed_word,
+            sizeof(word_initial), &fault) ==
+            GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED);
+    assert(observed_word == word_initial);
+    dword_t stored_word;
+    memcpy(&stored_word, first + 96, sizeof(stored_word));
+    assert(stored_word == word_replacement);
+
+    observed_word = UINT32_MAX;
+    assert(guest_tlb_compare_exchange(tlb, word_address,
+            &word_initial, &word_initial, &observed_word,
+            sizeof(word_initial), &fault) ==
+            GUEST_TLB_COMPARE_EXCHANGE_MISMATCH);
+    assert(observed_word == word_replacement);
+    memcpy(&stored_word, first + 96, sizeof(stored_word));
+    assert(stored_word == word_replacement);
+
     const guest_addr_t address = PAGE_A + 128;
     const byte_t initial[8] = {
         0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
@@ -167,7 +191,6 @@ static void test_compare_exchange_transaction(struct test_memory *memory,
     };
     memcpy(first + 128, initial, sizeof(initial));
 
-    struct guest_memory_fault fault;
     struct guest_tlb_exclusive_token token;
     byte_t expected[sizeof(initial)];
     assert(guest_tlb_load_exclusive(tlb, address, expected,

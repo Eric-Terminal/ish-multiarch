@@ -134,6 +134,12 @@ struct aarch64_linux_futex_word_snapshot {
     qword_t page_offset;
 };
 
+enum aarch64_linux_process_compare_exchange_result {
+    AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED,
+    AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH,
+    AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT,
+};
+
 /*
  * create 会复制 ELF、初始栈数据和服务描述符；服务 opaque 指向的后端状态
  * 仍由调用方持有，并须覆盖 process 的完整生命周期。
@@ -208,6 +214,12 @@ bool aarch64_linux_process_read_u32(
 bool aarch64_linux_process_write_u32(
         struct aarch64_linux_process *process, qword_t address,
         dword_t value, struct guest_linux_user_fault *fault);
+// observed 在交换或比较失败时返回旧值，访存故障时保持不变。
+enum aarch64_linux_process_compare_exchange_result
+        aarch64_linux_process_compare_exchange_u32(
+        struct aarch64_linux_process *process, qword_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_linux_user_fault *fault);
 // 核对 create 时复制的 tid、服务闭包与 task opaque；不比较描述符地址。
 bool aarch64_linux_process_uses_services(
         const struct aarch64_linux_process *process,
@@ -236,6 +248,7 @@ struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
 
 _Static_assert(sizeof(enum aarch64_linux_process_error_stage) == 4 &&
         sizeof(enum aarch64_linux_process_status) == 4 &&
+        sizeof(enum aarch64_linux_process_compare_exchange_result) == 4 &&
         sizeof(enum aarch64_linux_interpreter_config_error) == 4 &&
         sizeof(enum aarch64_linux_interpreter_path_status) == 4 &&
         sizeof(enum aarch64_linux_executable_status) == 4,
