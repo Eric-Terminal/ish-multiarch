@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 
 #include <stdio.h>
@@ -15,12 +16,17 @@
 #include "kernel/futex.h"
 #include "kernel/random.h"
 #include "kernel/errno.h"
+#include "kernel/time.h"
 #include "fs/fd.h"
 #include "kernel/elf.h"
 #include "kernel/vdso.h"
 #include "tools/ptraceomatic-config.h"
 
 #define ARGV_MAX 32 * PAGE_SIZE
+#define EXEC_COMMITTED_FATAL INT_MIN
+
+// 只沿当前 host 调用栈传播，绝不能作为 errno 返回 guest。
+static __thread int exec_committed_fatal_signal;
 
 struct exec_args {
     // number of arguments
@@ -48,10 +54,13 @@ static struct ish_aarch64_exec_identity exec_identity(
 }
 
 static inline dword_t align_stack(dword_t sp);
-static inline ssize_t user_strlen(dword_t p);
-static inline int user_memset(addr_t start, byte_t val, dword_t len);
-static inline dword_t copy_string(dword_t sp, const char *string);
-static inline dword_t args_copy(dword_t sp, struct exec_args args);
+static inline ssize_t user_strlen(struct mem *mem, dword_t p);
+static inline int user_memset(
+        struct mem *mem, addr_t start, byte_t val, dword_t len);
+static inline dword_t copy_string(
+        struct mem *mem, dword_t sp, const char *string);
+static inline dword_t args_copy(
+        struct mem *mem, dword_t sp, struct exec_args args);
 static size_t args_size(struct exec_args args);
 
 static int read_header(struct fd *fd, struct elf_header *header) {
@@ -94,8 +103,10 @@ static int read_prg_headers(struct fd *fd, struct elf_header header, struct prg_
     return 0;
 }
 
-static int load_entry(struct prg_header ph, addr_t bias, struct fd *fd) {
+static int load_entry(struct mm *mm, struct prg_header ph,
+        addr_t bias, struct fd *fd) {
     int err;
+    struct mem *mem = &mm->mem;
 
     addr_t addr = ph.vaddr + bias;
     addr_t offset = ph.offset;
@@ -105,14 +116,14 @@ static int load_entry(struct prg_header ph, addr_t bias, struct fd *fd) {
     int flags = P_READ;
     if (ph.flags & PH_W) flags |= P_WRITE;
 
-    if ((err = fd->ops->mmap(fd, current->mem, PAGE(addr),
+    if ((err = fd->ops->mmap(fd, mem, PAGE(addr),
                     PAGE_ROUND_UP(filesize + PGOFFSET(addr)),
                     offset - PGOFFSET(addr), flags, MMAP_PRIVATE)) < 0)
         return err;
     // TODO find a better place for these to avoid code duplication
-    mem_pt(current->mem, PAGE(addr))->data->fd = fd_retain(fd);
-    mem_pt(current->mem, PAGE(addr))->data->file_offset = offset - PGOFFSET(addr);
-    mem_pt(current->mem, PAGE(addr))->data->file_backing_offset =
+    mem_pt(mem, PAGE(addr))->data->fd = fd_retain(fd);
+    mem_pt(mem, PAGE(addr))->data->file_offset = offset - PGOFFSET(addr);
+    mem_pt(mem, PAGE(addr))->data->file_backing_offset =
             (offset - PGOFFSET(addr)) / (qword_t) real_page_size *
             (qword_t) real_page_size;
 
@@ -131,23 +142,24 @@ static int load_entry(struct prg_header ph, addr_t bias, struct fd *fd) {
         if (tail_size != 0) {
             // Unlock and lock the mem because the user functions must be
             // called without locking mem.
-            write_wrunlock(&current->mem->lock);
-            user_memset(file_end, 0, tail_size);
-            write_wrlock(&current->mem->lock);
+            write_wrunlock(&mem->lock);
+            user_memset(mem, file_end, 0, tail_size);
+            write_wrlock(&mem->lock);
         }
         if (tail_size > bss_size)
             tail_size = bss_size;
 
         // then map the pages from after the file mapping up to and including the end of bss
         if (bss_size - tail_size != 0)
-            if ((err = pt_map_nothing(current->mem, PAGE_ROUND_UP(addr + filesize),
+            if ((err = pt_map_nothing(mem, PAGE_ROUND_UP(addr + filesize),
                     PAGE_ROUND_UP(bss_size - tail_size), flags)) < 0)
                 return err;
     }
     return 0;
 }
 
-static addr_t find_hole_for_elf(struct elf_header *header, struct prg_header *ph) {
+static addr_t find_hole_for_elf(struct mem *mem,
+        struct elf_header *header, struct prg_header *ph) {
     struct prg_header *first = NULL, *last = NULL;
     for (int i = 0; i < header->phent_count; i++) {
         if (ph[i].type == PT_LOAD) {
@@ -162,7 +174,7 @@ static addr_t find_hole_for_elf(struct elf_header *header, struct prg_header *ph
         pages_t b = PAGE(first->vaddr);
         size = a - b;
     }
-    return pt_find_hole(current->mem, size) << PAGE_BITS;
+    return pt_find_hole(mem, size) << PAGE_BITS;
 }
 
 static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, struct exec_args envp) {
@@ -181,6 +193,10 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     struct fd *interp_fd = NULL;
     struct elf_header interp_header;
     struct prg_header *interp_ph = NULL;
+    struct mm *new_mm = NULL;
+    struct fdtable *private_files = NULL;
+    struct sighand *private_sighand = NULL;
+    int fatal_signal = SIGSEGV_;
     for (unsigned i = 0; i < header.phent_count; i++) {
         if (ph[i].type != PT_INTERP)
             continue;
@@ -218,24 +234,60 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
         }
     }
 
-    // free the process's memory.
-    // from this point on, if any error occurs the process will have to be
-    // killed before it even starts. please don't be too sad about it, it's
-    // just a process.
-    //
-    // robust 与 clear-child-tid 必须在旧 i386 地址空间仍可访问时退休。
+    // 新 mm 必须在不可回退阶段之前分配，ENOMEM 仍可返回旧映像。
+    err = _ENOMEM;
+    new_mm = mm_new();
+    if (new_mm == NULL)
+        goto out_free_interp;
+
+    // 从这里开始不能返回旧映像：先收敛线程，再取得最终 files 快照。
+    err = task_exec_dethread_i386(current);
+    if (err < 0) {
+        if (err == _EINTR) {
+            int external_fatal = task_group_fatal_signal(current);
+            fatal_signal = external_fatal != 0 ?
+                    external_fatal : SIGKILL_;
+        }
+        goto fatal_exec;
+    }
+
+    if (atomic_load_explicit(
+                &current->files->refcount, memory_order_acquire) > 1) {
+        private_files = fdtable_copy(current->files);
+        if (IS_ERR(private_files)) {
+            err = (int) PTR_ERR(private_files);
+            private_files = NULL;
+            goto fatal_exec;
+        }
+    }
+    lock(&pids_lock);
+    int external_fatal = task_group_fatal_signal(current);
+    if (task_sigkill_pending(current) || external_fatal != 0) {
+        unlock(&pids_lock);
+        if (private_files != NULL)
+            fdtable_release(private_files);
+        private_files = NULL;
+        fatal_signal = external_fatal != 0 ?
+                external_fatal : SIGKILL_;
+        goto fatal_exec;
+    }
+    struct fdtable *old_files = NULL;
+    if (private_files != NULL) {
+        old_files = current->files;
+        current->files = private_files;
+        private_files = NULL;
+    }
+    unlock(&pids_lock);
+    if (old_files != NULL)
+        fdtable_release(old_files);
+
+    // 非 leader 已完成 PID 换位，robust owner 比较使用新的 leader TID。
     futex_cleanup_task_i386(current);
 
-    // general_lock protects current->mm. otherwise procfs might read the
-    // pointer before it's released and then try to lock it after it's
-    // released.
-    lock(&current->general_lock);
-    mm_release(current->mm);
-    task_set_mm(current, mm_new());
-    unlock(&current->general_lock);
-    write_wrlock(&current->mem->lock);
-
-    current->mm->exefile = fd_retain(fd);
+    // 新映像始终在私有 mm 中完成，procfs 不会观察到半成品元数据或页表。
+    struct mem *new_mem = &new_mm->mem;
+    write_wrlock(&new_mem->lock);
+    new_mm->exefile = fd_retain(fd);
 
     addr_t load_addr = 0; // used for AX_PHDR
     bool load_addr_set = false;
@@ -251,11 +303,11 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
             if (interp_name)
                 bias = 0x56555000; // I have no idea how this number was arrived at
             else
-                bias = find_hole_for_elf(&header, ph);
+                bias = find_hole_for_elf(new_mem, &header, ph);
         }
 
-        if ((err = load_entry(ph[i], bias, fd)) < 0)
-            goto beyond_hope;
+        if ((err = load_entry(new_mm, ph[i], bias, fd)) < 0)
+            goto fatal_exec_locked;
 
         // load_addr is used to get a value for AX_PHDR et al
         if (!load_addr_set) {
@@ -265,8 +317,8 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
 
         // we have to know where the brk starts
         addr_t brk = bias + ph[i].vaddr + ph[i].memsize;
-        if (brk > current->mm->start_brk)
-            current->mm->start_brk = current->mm->brk = BYTES_ROUND_UP(brk);
+        if (brk > new_mm->start_brk)
+            new_mm->start_brk = new_mm->brk = BYTES_ROUND_UP(brk);
     }
 
     addr_t entry = bias + header.entry_point;
@@ -274,12 +326,14 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
 
     if (interp_name) {
         // map dat shit! interpreter edition
-        interp_base = find_hole_for_elf(&interp_header, interp_ph);
+        interp_base = find_hole_for_elf(
+                new_mem, &interp_header, interp_ph);
         for (int i = interp_header.phent_count - 1; i >= 0; i--) {
             if (interp_ph[i].type != PT_LOAD)
                 continue;
-            if ((err = load_entry(interp_ph[i], interp_base, interp_fd)) < 0)
-                goto beyond_hope;
+            if ((err = load_entry(
+                        new_mm, interp_ph[i], interp_base, interp_fd)) < 0)
+                goto fatal_exec_locked;
         }
         entry = interp_base + interp_header.entry_point;
     }
@@ -290,31 +344,34 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     // FIXME disgusting hack: musl's dynamic linker has a one-page hole, and
     // I'd rather not put the vdso in that hole. so find a two-page hole and
     // add one.
-    page_t vdso_page = pt_find_hole(current->mem, vdso_pages + 1);
+    page_t vdso_page = pt_find_hole(new_mem, vdso_pages + 1);
     if (vdso_page == BAD_PAGE)
-        goto beyond_hope;
+        goto fatal_exec_locked;
     vdso_page += 1;
-    if ((err = pt_map(current->mem, vdso_page, vdso_pages, (void *) vdso_data, 0, 0)) < 0)
-        goto beyond_hope;
-    mem_pt(current->mem, vdso_page)->data->name = "[vdso]";
-    current->mm->vdso = vdso_page << PAGE_BITS;
-    addr_t vdso_entry = current->mm->vdso + ((struct elf_header *) vdso_data)->entry_point;
+    if ((err = pt_map(new_mem, vdso_page, vdso_pages,
+                    (void *) vdso_data, 0, 0)) < 0)
+        goto fatal_exec_locked;
+    mem_pt(new_mem, vdso_page)->data->name = "[vdso]";
+    new_mm->vdso = vdso_page << PAGE_BITS;
+    addr_t vdso_entry = new_mm->vdso +
+            ((struct elf_header *) vdso_data)->entry_point;
 
     // map 3 empty "vvar" pages to satisfy ptraceomatic
-    page_t vvar_page = pt_find_hole(current->mem, VVAR_PAGES);
+    page_t vvar_page = pt_find_hole(new_mem, VVAR_PAGES);
     if (vvar_page == BAD_PAGE)
-        goto beyond_hope;
-    if ((err = pt_map_nothing(current->mem, vvar_page, VVAR_PAGES, 0)) < 0)
-        goto beyond_hope;
-    mem_pt(current->mem, vvar_page)->data->name = "[vvar]";
+        goto fatal_exec_locked;
+    if ((err = pt_map_nothing(new_mem, vvar_page, VVAR_PAGES, 0)) < 0)
+        goto fatal_exec_locked;
+    mem_pt(new_mem, vvar_page)->data->name = "[vvar]";
 
     // STACK TIME!
 
     // allocate 1 page of stack at 0xffffd, and let it grow down
-    if ((err = pt_map_nothing(current->mem, 0xffffd, 1, P_WRITE | P_GROWSDOWN)) < 0)
-        goto beyond_hope;
+    if ((err = pt_map_nothing(
+                new_mem, 0xffffd, 1, P_WRITE | P_GROWSDOWN)) < 0)
+        goto fatal_exec_locked;
     // that was the last memory mapping
-    write_wrunlock(&current->mem->lock);
+    write_wrunlock(&new_mem->lock);
     dword_t sp = 0xffffe000;
     // on 32-bit linux, there's 4 empty bytes at the very bottom of the stack.
     // on 64-bit linux, there's 8. make ptraceomatic happy. (a major theme in this file)
@@ -323,28 +380,28 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     err = _EFAULT;
     // first, copy stuff pointed to by argv/envp/auxv
     // filename, argc, argv
-    addr_t file_addr = sp = copy_string(sp, file);
+    addr_t file_addr = sp = copy_string(new_mem, sp, file);
     if (sp == 0)
-        goto beyond_hope;
-    addr_t envp_addr = sp = args_copy(sp, envp);
+        goto fatal_exec;
+    addr_t envp_addr = sp = args_copy(new_mem, sp, envp);
     if (sp == 0)
-        goto beyond_hope;
-    current->mm->argv_end = sp;
-    addr_t argv_addr = sp = args_copy(sp, argv);
+        goto fatal_exec;
+    new_mm->argv_end = sp;
+    addr_t argv_addr = sp = args_copy(new_mem, sp, argv);
     if (sp == 0)
-        goto beyond_hope;
-    current->mm->argv_start = sp;
+        goto fatal_exec;
+    new_mm->argv_start = sp;
     sp = align_stack(sp);
 
-    addr_t platform_addr = sp = copy_string(sp, "i686");
+    addr_t platform_addr = sp = copy_string(new_mem, sp, "i686");
     if (sp == 0)
-        goto beyond_hope;
+        goto fatal_exec;
     // 16 random bytes so no system call is needed to seed a userspace RNG
     char random[16] = {};
     get_random(random, sizeof(random)); // if this fails, eh, no one's really using it
     addr_t random_addr = sp -= sizeof(random);
-    if (user_put(sp, random))
-        goto beyond_hope;
+    if (user_write_mem(new_mem, sp, random, sizeof(random)))
+        goto fatal_exec;
 
     // the way linux aligns the stack at this point is kinda funky
     // calculate how much space is needed for argv, envp, and auxv, subtract
@@ -353,7 +410,7 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     // declare elf aux now so we can know how big it is
     struct aux_ent aux[] = {
         {AX_SYSINFO, vdso_entry},
-        {AX_SYSINFO_EHDR, current->mm->vdso},
+        {AX_SYSINFO_EHDR, new_mm->vdso},
         {AX_HWCAP, 0x00000000}, // suck that
         {AX_PAGESZ, PAGE_SIZE},
         {AX_CLKTCK, 0x64},
@@ -382,16 +439,17 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     addr_t p = sp;
 
     // argc
-    if (user_put(p, argv.count))
-        return _EFAULT;
+    dword_t guest_argc = (dword_t) argv.count;
+    if (user_write_mem(new_mem, p, &guest_argc, sizeof(guest_argc)))
+        goto fatal_exec;
     p += sizeof(dword_t);
 
     // argv
     size_t argc = argv.count;
     while (argc-- > 0) {
-        if (user_put(p, argv_addr))
-            return _EFAULT;
-        argv_addr += user_strlen(argv_addr) + 1;
+        if (user_write_mem(new_mem, p, &argv_addr, sizeof(argv_addr)))
+            goto fatal_exec;
+        argv_addr += user_strlen(new_mem, argv_addr) + 1;
         p += sizeof(dword_t); // null terminator
     }
     p += sizeof(dword_t); // null terminator
@@ -399,29 +457,70 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     // envp
     size_t envc = envp.count;
     while (envc-- > 0) {
-        if (user_put(p, envp_addr))
-            return _EFAULT;
-        envp_addr += user_strlen(envp_addr) + 1;
+        if (user_write_mem(new_mem, p, &envp_addr, sizeof(envp_addr)))
+            goto fatal_exec;
+        envp_addr += user_strlen(new_mem, envp_addr) + 1;
         p += sizeof(dword_t);
     }
     p += sizeof(dword_t); // null terminator
 
     // copy auxv
-    current->mm->auxv_start = p;
-    if (user_put(p, aux))
-        goto beyond_hope;
+    new_mm->auxv_start = p;
+    if (user_write_mem(new_mem, p, aux, sizeof(aux)))
+        goto fatal_exec;
     p += sizeof(aux);
-    current->mm->auxv_end = p;
+    new_mm->auxv_end = p;
 
-    current->mm->stack_start = sp;
+    new_mm->stack_start = sp;
+
+    external_fatal = task_group_fatal_signal(current);
+    if (task_sigkill_pending(current) || external_fatal != 0) {
+        fatal_signal = external_fatal != 0 ?
+                external_fatal : SIGKILL_;
+        goto fatal_exec;
+    }
+
+    // 新 mm 构建完成后再退休 exec 会删除的 timer 状态。
+    tgroup_exec_posix_timers_destroy(current->group);
+    signal_flush_exec_timer_pending(current);
+
+    // 在安全点取得最终信号动作快照，不能让 CLONE_SIGHAND 进程被重置。
+    if (atomic_load_explicit(
+                &current->sighand->refcount, memory_order_acquire) > 1) {
+        private_sighand = sighand_new();
+        if (private_sighand == NULL)
+            goto fatal_exec;
+        lock(&pids_lock);
+        struct sighand *old_sighand = current->sighand;
+        lock(&old_sighand->lock);
+        memcpy(private_sighand->action, old_sighand->action,
+                sizeof(private_sighand->action));
+        current->sighand = private_sighand;
+        private_sighand = NULL;
+        unlock(&old_sighand->lock);
+        unlock(&pids_lock);
+        sighand_release(old_sighand);
+    }
+
+    // pids_lock 先排空所有 procfs task 借用，再一次发布完整 mm 与 CPU 入口。
+    lock(&pids_lock);
+    external_fatal = task_group_fatal_signal(current);
+    if (task_sigkill_pending(current) || external_fatal != 0) {
+        unlock(&pids_lock);
+        fatal_signal = external_fatal != 0 ?
+                external_fatal : SIGKILL_;
+        goto fatal_exec;
+    }
+    lock(&current->general_lock);
+    struct mm *old_mm = current->mm;
+    task_set_mm(current, new_mm);
+    new_mm = NULL;
+
     current->cpu.esp = sp;
     current->cpu.eip = entry;
     current->cpu.fcw = 0x37f;
 
-    // This code was written when I discovered that the glibc entry point
-    // interprets edx as the address of a function to call on exit, as
-    // specified in the ABI. This register is normally set by the dynamic
-    // linker, so everything works fine until you run a static executable.
+    // 静态程序入口把 edx 解释为退出回调，exec 后必须清空通用寄存器。
     current->cpu.eax = 0;
     current->cpu.ebx = 0;
     current->cpu.ecx = 0;
@@ -431,6 +530,9 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     current->cpu.ebp = 0;
     collapse_flags(&current->cpu);
     current->cpu.eflags = 0;
+    unlock(&current->general_lock);
+    unlock(&pids_lock);
+    mm_release(old_mm);
 
     err = 0;
 out_free_interp:
@@ -444,10 +546,18 @@ out_free_ph:
     free(ph);
     return err;
 
-beyond_hope:
-    // TODO force sigsegv
-    write_wrunlock(&current->mem->lock);
-    goto out_free_interp;
+fatal_exec_locked:
+    write_wrunlock(&new_mem->lock);
+fatal_exec:
+    if (new_mm != NULL)
+        mm_release(new_mm);
+    free(interp_name);
+    if (interp_fd != NULL && !IS_ERR(interp_fd))
+        fd_close(interp_fd);
+    free(interp_ph);
+    free(ph);
+    exec_committed_fatal_signal = fatal_signal;
+    return EXEC_COMMITTED_FATAL;
 }
 
 static size_t args_size(struct exec_args args) {
@@ -465,35 +575,39 @@ static inline dword_t align_stack(addr_t sp) {
     return sp &~ 0xf;
 }
 
-static inline dword_t copy_string(addr_t sp, const char *string) {
-    sp -= strlen(string) + 1;
-    if (user_write_string(sp, string))
+static inline dword_t copy_string(
+        struct mem *mem, addr_t sp, const char *string) {
+    size_t size = strlen(string) + 1;
+    sp -= size;
+    if (user_write_mem(mem, sp, string, size))
         return 0;
     return sp;
 }
 
-static inline dword_t args_copy(addr_t sp, struct exec_args args) {
+static inline dword_t args_copy(
+        struct mem *mem, addr_t sp, struct exec_args args) {
     size_t size = args_size(args);
     sp -= size;
-    if (user_write(sp, args.args, size))
+    if (user_write_mem(mem, sp, args.args, size))
         return 0;
     return sp;
 }
 
-static inline ssize_t user_strlen(addr_t p) {
+static inline ssize_t user_strlen(struct mem *mem, addr_t p) {
     size_t i = 0;
     char c;
     do {
-        if (user_get(p + i, c))
+        if (user_read_mem(mem, p + (addr_t) i, &c, sizeof(c)))
             return -1;
         i++;
     } while (c != '\0');
     return i - 1;
 }
 
-static inline int user_memset(addr_t start, byte_t val, dword_t len) {
+static inline int user_memset(
+        struct mem *mem, addr_t start, byte_t val, dword_t len) {
     while (len--)
-        if (user_put(start++, val))
+        if (user_write_mem(mem, start++, &val, sizeof(val)))
             return 1;
     return 0;
 }
@@ -660,7 +774,7 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
 
     if (current->ptrace.traced) {
         lock(&pids_lock);
-        send_signal(current, SIGTRAP_, (struct siginfo_) {
+        send_signal_locked(current, SIGTRAP_, (struct siginfo_) {
             .code = SI_USER_,
             .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
             .kill.pid = current->pid,
@@ -684,7 +798,10 @@ int do_execve(const char *file, size_t argc, const char *argv_p, const char *env
         envp_p += strlen(envp_p) + 1;
         envp.count++;
     }
-    return __do_execve(file, argv, envp);
+    int err = __do_execve(file, argv, envp);
+    if (err == EXEC_COMMITTED_FATAL)
+        do_exit_group(exec_committed_fatal_signal);
+    return err;
 }
 
 static ssize_t user_read_string_array(addr_t addr, char *buf, size_t max) {
@@ -721,6 +838,7 @@ dword_t sys_execve(addr_t filename_addr, addr_t argv_addr, addr_t envp_addr) {
         return _EFAULT;
 
     int err = _ENOMEM;
+    bool committed_fatal = false;
     char *argv = malloc(ARGV_MAX);
     if (argv == NULL)
         goto err_free_argv;
@@ -757,11 +875,29 @@ dword_t sys_execve(addr_t filename_addr, addr_t argv_addr, addr_t envp_addr) {
     }
     STRACE("})");
 
-    err = do_execve(filename, argc, argv, envp);
+    const char empty_argument[] = "\0";
+    struct exec_args exec_argv = {
+        .count = (size_t) argc,
+        .args = argv,
+    };
+    if (exec_argv.count == 0) {
+        exec_argv.count = 1;
+        exec_argv.args = empty_argument;
+    }
+    struct exec_args exec_envp = {.args = envp};
+    const char *env_cursor = envp;
+    while (*env_cursor != '\0') {
+        env_cursor += strlen(env_cursor) + 1;
+        exec_envp.count++;
+    }
+    err = __do_execve(filename, exec_argv, exec_envp);
+    committed_fatal = err == EXEC_COMMITTED_FATAL;
 
 err_free_envp:
     free(envp);
 err_free_argv:
     free(argv);
+    if (committed_fatal)
+        do_exit_group(exec_committed_fatal_signal);
     return err;
 }

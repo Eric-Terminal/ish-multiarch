@@ -140,11 +140,12 @@ static bool child_is_fully_reaped(
 static bool queued_signal_matches(
         struct task *task, int signal, pid_t_ child_pid, int status) {
     lock(&task->sighand->lock);
-    bool matches = task->pending == sig_mask(signal) &&
-            list_size(&task->queue) == 1;
+    bool matches = task->pending == 0 && list_empty(&task->queue) &&
+            task->group->shared_pending == sig_mask(signal) &&
+            list_size(&task->group->shared_queue) == 1;
     if (matches) {
         struct sigqueue *queued = list_first_entry(
-                &task->queue, struct sigqueue, queue);
+                &task->group->shared_queue, struct sigqueue, queue);
         matches = queued->info.sig == signal &&
                 queued->info.payload_kind ==
                         SIGNAL_INFO_PAYLOAD_CHILD &&
@@ -157,13 +158,17 @@ static bool queued_signal_matches(
 
 static bool no_pending_signals(struct task *task) {
     lock(&task->sighand->lock);
-    bool empty = task->pending == 0 && list_empty(&task->queue);
+    bool empty = task->pending == 0 && list_empty(&task->queue) &&
+            task->group->shared_pending == 0 &&
+            list_empty(&task->group->shared_queue);
     unlock(&task->sighand->lock);
     return empty;
 }
 
 static void destroy_parent(
         struct task *parent, struct tgroup *group) {
+    signal_flush_pending(parent);
+    signal_flush_group_pending(group);
     mm_release(parent->mm);
     fdtable_release(parent->files);
     fs_info_release(parent->fs);

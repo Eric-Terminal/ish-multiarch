@@ -3,6 +3,7 @@
 
 #include "fs/fd.h"
 #include "fs/proc.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/resource.h"
@@ -50,6 +51,19 @@ static bool find_child(struct proc_entry *directory,
             *child = candidate;
             return true;
         }
+    }
+    return false;
+}
+
+static bool root_contains_process(pid_t_ pid) {
+    struct proc_entry root = {
+        .meta = &proc_root,
+    };
+    unsigned long index = 0;
+    struct proc_entry candidate = {0};
+    while (proc_dir_read(&root, &index, &candidate)) {
+        if (candidate.meta == &proc_pid && candidate.pid == pid)
+            return true;
     }
     return false;
 }
@@ -125,17 +139,91 @@ int main(void) {
     CHECK(stale_directory_finished,
             "任务消失后陈旧 fd 目录结束枚举");
 
+    struct task *execer = task_create_(NULL);
+    CHECK(execer != NULL, "创建 exec 换位窗口任务");
+    execer->group = &group;
+    execer->tgid = task->pid;
+    execer->uid = 123;
+    execer->gid = 456;
+    strcpy(execer->comm, "exec-window");
+    execer->sighand = sighand_new();
+    CHECK(execer->sighand != NULL, "创建 execer 信号表");
+    task_publish(execer);
+
+    // 旧 TGID 槽仍指向退出中的 leader，进程访问应跟随 execer。
+    lock(&pids_lock);
+    lock(&group.lock);
+    group.exec_task = task;
+    bool live_tid_stable =
+            pid_get_process_task(execer->pid) == execer;
+    group.exec_task = execer;
+    task->exiting = true;
+    unlock(&group.lock);
+    unlock(&pids_lock);
+    CHECK(live_tid_stable,
+            "exec 窗口不把存活 peer TID 别名为执行者");
+    current = execer;
+
+    struct statbuf process_stat = {0};
+    CHECK(proc_entry_stat(&process_directory, &process_stat) == 0 &&
+            process_stat.uid == execer->uid &&
+            process_stat.gid == execer->gid,
+            "TGID 目录属性跟随换位中的进程代表");
+    CHECK(root_contains_process(task->pid),
+            "proc 根目录保留换位中的 TGID");
+    CHECK(sys_getpgid(task->pid) == group.pgid,
+            "getpgid 通过 TGID 找到换位中的进程");
+
+    struct proc_entry stat_entry = {0};
+    CHECK(find_child(&process_directory, "stat", &stat_entry),
+            "找到换位中进程的 stat 文件");
+    char stat_text[4096];
+    struct proc_data stat_data = {
+        .data = stat_text,
+        .capacity = sizeof(stat_text),
+    };
+    CHECK(stat_entry.meta->show(&stat_entry, &stat_data) == 0 &&
+            stat_data.size < sizeof(stat_text),
+            "读取换位中进程的 stat");
+    stat_text[stat_data.size] = '\0';
+    char expected_prefix[32];
+    snprintf(expected_prefix, sizeof(expected_prefix), "%d ", task->pid);
+    CHECK(strncmp(stat_text, expected_prefix,
+                    strlen(expected_prefix)) == 0 &&
+            strstr(stat_text, "(exec-window)") != NULL,
+            "stat 使用请求 TGID 并读取 execer 状态");
+
+    lock(&pids_lock);
+    task->exiting = false;
+    execer->exiting = true;
+    group.exec_task = task;
+    bool exiting_tid_hidden =
+            pid_get_process_task(execer->pid) == NULL;
+    execer->exiting = false;
+    task->exiting = true;
+    group.exec_task = execer;
+    unlock(&pids_lock);
+    CHECK(exiting_tid_hidden,
+            "退出中的非 leader TID 不别名为其他组成员");
+
     fdtable_release(task->files);
+    sighand_release(execer->sighand);
+    cond_destroy(&execer->pause);
+    cond_destroy(&execer->ptrace.cond);
     cond_destroy(&task->pause);
     cond_destroy(&task->ptrace.cond);
     lock(&pids_lock);
     lock(&group.lock);
+    group.exec_task = NULL;
+    list_remove(&execer->group_links);
     list_remove(&task->group_links);
     list_remove(&group.session);
     list_remove(&group.pgroup);
+    task_destroy(execer);
     task_destroy(task);
     unlock(&group.lock);
     unlock(&pids_lock);
+    current = NULL;
     cond_destroy(&group.child_exit);
     cond_destroy(&group.stopped_cond);
     return 0;

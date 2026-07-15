@@ -522,6 +522,55 @@ static void group_cleanup_callback(void *opaque) {
     atomic_fetch_add(&state->callback_count, 1);
 }
 
+static bool group_posix_timers_empty(const struct tgroup *group) {
+    for (unsigned i = 0; i < TIMERS_MAX; i++)
+        if (group->posix_timers[i].timer != NULL ||
+                group->posix_timers[i].deleting)
+            return false;
+    return true;
+}
+
+static int test_exec_cleanup_retires_only_posix_timers(void) {
+    struct tgroup group = {0};
+    lock_init(&group.lock);
+    struct group_cleanup_state state = {0};
+    atomic_init(&state.callback_count, 0);
+
+    group.itimer = timer_new(
+            CLOCK_MONOTONIC, group_cleanup_callback, &state);
+    group.posix_timers[0].timer = timer_new(
+            CLOCK_MONOTONIC, group_cleanup_callback, &state);
+    group.posix_timers[TIMERS_MAX - 1].timer = timer_new(
+            CLOCK_MONOTONIC, group_cleanup_callback, &state);
+    CHECK(group.itimer != NULL &&
+            group.posix_timers[0].timer != NULL &&
+            group.posix_timers[TIMERS_MAX - 1].timer != NULL,
+            "创建 exec 清理用定时器");
+
+    const struct timer_spec delayed = {
+        .value = {.sec = 2},
+    };
+    CHECK(timer_set(group.itimer, delayed, NULL) == 0 &&
+            timer_set(group.posix_timers[0].timer, delayed, NULL) == 0 &&
+            timer_set(group.posix_timers[TIMERS_MAX - 1].timer,
+                    delayed, NULL) == 0,
+            "启动 exec 清理用定时器");
+
+    struct timer *preserved_itimer = group.itimer;
+    tgroup_exec_posix_timers_destroy(&group);
+    CHECK(group.itimer == preserved_itimer &&
+            group_posix_timers_empty(&group) &&
+            timer_set(group.itimer, (struct timer_spec) {}, NULL) == 0 &&
+            atomic_load(&state.callback_count) == 0,
+            "exec 清理仅同步退休 POSIX timers 并保留 ITIMER_REAL");
+
+    tgroup_exec_posix_timers_destroy(&group);
+    CHECK(group.itimer == preserved_itimer,
+            "重复 exec 清理不影响保留的 ITIMER_REAL");
+    tgroup_timers_destroy(&group);
+    return 0;
+}
+
 static int test_group_cleanup_retires_all_timers(void) {
     struct tgroup group = {0};
     lock_init(&group.lock);
@@ -624,6 +673,9 @@ int main(void) {
     failures += !run_isolated(
             "宽期限等待分片",
             test_deadline_slice_preserves_wide_absolute_time);
+    failures += !run_isolated(
+            "exec 定时器清理",
+            test_exec_cleanup_retires_only_posix_timers);
     failures += !run_isolated(
             "线程组定时器清理", test_group_cleanup_retires_all_timers);
     return failures == 0 ? 0 : 1;

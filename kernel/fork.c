@@ -49,6 +49,12 @@ static void tgroup_init_copy(
     group->itimer = NULL;
     memset(group->posix_timers, 0, sizeof(group->posix_timers));
     group->doing_group_exit = false;
+    group->exec_task = NULL;
+    atomic_init(&group->external_fatal_signal, 0);
+    group->shared_pending = 0;
+    group->shared_bit_only = 0;
+    group->shared_timer_bit_only = 0;
+    list_init(&group->shared_queue);
     group->stop_code = 0;
     group->continued = false;
     group->continue_notification_pending = false;
@@ -124,6 +130,22 @@ static int copy_task(struct task *task, dword_t flags, qword_t stack,
             goto fail_free_sighand;
     }
 
+    if ((flags & CLONE_CHILD_CLEARTID_) && !is_aarch64)
+        task->clear_tid = (addr_t) ctid_addr;
+    task->exit_signal = flags & CSIGNAL_;
+
+    lock(&pids_lock);
+    lock(&old_group->lock);
+    bool group_action = old_group->doing_group_exit ||
+            old_group->exec_task != NULL;
+    unlock(&old_group->lock);
+    bool killed = task_sigkill_pending(current) ||
+            task_group_fatal_signal(current) != 0;
+    if (group_action || killed) {
+        unlock(&pids_lock);
+        err = killed ? _EINTR : _EAGAIN;
+        goto fail_free_sighand;
+    }
     err = _EFAULT;
     if (flags & CLONE_CHILD_SETTID_) {
         bool failed = is_aarch64 ?
@@ -131,8 +153,10 @@ static int copy_task(struct task *task, dword_t flags, qword_t stack,
                         task->aarch64_process, ctid_addr,
                         (dword_t) task->pid, fault) :
                 user_put_task(task, (addr_t) ctid_addr, task->pid);
-        if (failed)
+        if (failed) {
+            unlock(&pids_lock);
             goto fail_free_sighand;
+        }
     }
     if (flags & CLONE_PARENT_SETTID_) {
         bool failed = is_aarch64 ?
@@ -140,24 +164,28 @@ static int copy_task(struct task *task, dword_t flags, qword_t stack,
                         current->aarch64_process, ptid_addr,
                         (dword_t) task->pid, fault) :
                 user_put((addr_t) ptid_addr, task->pid);
-        if (failed)
+        if (failed) {
+            unlock(&pids_lock);
             goto fail_free_sighand;
+        }
     }
-    if ((flags & CLONE_CHILD_CLEARTID_) && !is_aarch64)
-        task->clear_tid = (addr_t) ctid_addr;
-    task->exit_signal = flags & CSIGNAL_;
-
-    task_start_suspended(task);
-    lock(&pids_lock);
-    lock(&old_group->lock);
     if (new_group != NULL) {
+        // 整体快照包含由旧组 sighand 保护的共享 pending 字段。
+        lock(&current->sighand->lock);
+        lock(&old_group->lock);
         tgroup_init_copy(new_group, old_group);
+        unlock(&old_group->lock);
+        unlock(&current->sighand->lock);
         task->group = new_group;
         task->group->leader = task;
         task->tgid = task->pid;
-        unlock(&old_group->lock);
-        lock(&new_group->lock);
+    } else {
+        // 同组线程与 leader 具有同一外部父任务，避免 leader 退出时自环。
+        task->parent = old_group->leader->parent;
     }
+    // 检查、启动与发布共用 pids_lock，组动作不会漏掉新子任务。
+    task_start_suspended(task);
+    lock(&task->group->lock);
     task_publish_locked(task);
     unlock(&task->group->lock);
     unlock(&pids_lock);

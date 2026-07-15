@@ -32,7 +32,8 @@ struct task {
 
     struct tgroup *group; // immutable
     struct list group_links;
-    pid_t_ pid, tgid; // immutable
+    // pid/tgid 通常不可变；非 leader exec 在 pids_lock 下接管 leader PID。
+    pid_t_ pid, tgid;
     uid_t_ uid, gid;
     uid_t_ euid, egid;
     uid_t_ suid, sgid;
@@ -49,6 +50,9 @@ struct task {
     struct sighand *sighand;
     sigset_t_ blocked;
     sigset_t_ pending;
+    // 无队列节点的 pending 仍需记录来源，供 exec 只清理 POSIX timer。
+    sigset_t_ pending_bit_only;
+    sigset_t_ pending_timer_bit_only;
     sigset_t_ waiting; // if nonzero, an ongoing call to sigtimedwait is waiting on these
     struct list queue;
     cond_t pause; // please don't signal this
@@ -152,6 +156,8 @@ void task_publish(struct task *task);
 void task_abort_create(struct task *task);
 // Removes the process from the process table and frees it. Must be called with pids_lock.
 void task_destroy(struct task *task);
+// 收敛 i386 exec 线程组；EINTR 表示执行者同时收到 SIGKILL。
+int task_exec_dethread_i386(struct task *task);
 
 // misc
 pid_t_ task_getpid(const struct task *task);
@@ -174,7 +180,17 @@ struct posix_timer {
 // struct thread_group is way too long to type comfortably
 struct tgroup {
     struct list threads; // locked by pids_lock, by majority vote
-    struct task *leader; // immutable
+    // 非 leader exec 只可在 pids_lock 下接管 leader 身份。
+    struct task *leader;
+    // 非空时禁止发布新线程，并让被清理线程只退出自身。
+    struct task *exec_task; // locked by pids_lock
+    // 已生成的未阻塞默认致死信号；内部 exec zap 不写入。
+    atomic_int external_fatal_signal;
+    // 进程定向 pending 属于线程组，不随单个 peer 退出丢失。
+    sigset_t_ shared_pending; // locked by the shared sighand
+    struct list shared_queue; // locked by the shared sighand
+    sigset_t_ shared_bit_only; // locked by the shared sighand
+    sigset_t_ shared_timer_bit_only; // locked by the shared sighand
     struct rusage_ rusage;
 
     // locked by pids_lock
@@ -221,6 +237,8 @@ static inline bool task_is_leader(struct task *task) {
     return task->group->leader == task;
 }
 
+int task_group_fatal_signal(const struct task *task);
+
 struct pid {
     dword_t id;
     bool reserved;
@@ -235,6 +253,8 @@ extern lock_t pids_lock;
 struct pid *pid_get(dword_t pid);
 struct task *pid_get_task(dword_t pid);
 struct task *pid_get_task_zombie(dword_t id); // don't return null if the task exists as a zombie
+struct task *task_process_representative_locked(struct task *task);
+struct task *pid_get_process_task(dword_t id);
 
 #define MAX_PID (1 << 15) // oughta be enough
 

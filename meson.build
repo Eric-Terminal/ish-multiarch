@@ -389,6 +389,22 @@ if get_option('kernel') == 'ish'
             i386_futex_shared_test,
             timeout: 60)
 
+        i386_exec_thread_group_test = executable(
+            'i386_exec_thread_group_test',
+            'kernel/i386-exec-thread-group-test.c',
+            dependencies: ish)
+        test('i386_exec_thread_group',
+            i386_exec_thread_group_test,
+            timeout: 60)
+
+        i386_exec_proc_publication_test = executable(
+            'i386_exec_proc_publication_test',
+            'kernel/i386-exec-proc-publication-test.c',
+            dependencies: ish)
+        test('i386_exec_proc_publication',
+            i386_exec_proc_publication_test,
+            timeout: 60)
+
         aarch64_cross_abi_exec_lifecycle_test = executable(
             'aarch64_cross_abi_exec_lifecycle_test',
             'kernel/aarch64-cross-abi-exec-lifecycle-test.c',

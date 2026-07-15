@@ -15,7 +15,7 @@ static void proc_pid_getname(struct proc_entry *entry, char *buf) {
 
 static struct task *proc_get_task(struct proc_entry *entry) {
     lock(&pids_lock);
-    struct task *task = pid_get_task(entry->pid);
+    struct task *task = pid_get_process_task(entry->pid);
     if (task == NULL)
         unlock(&pids_lock);
     return task;
@@ -32,7 +32,7 @@ static int proc_pid_stat_show(struct proc_entry *entry, struct proc_data *buf) {
     lock(&task->sighand->lock);
     lock(&task->group->lock);
 
-    proc_printf(buf, "%d ", task->pid);
+    proc_printf(buf, "%d ", entry->pid);
     proc_printf(buf, "(%.16s) ", task->comm);
     proc_printf(buf, "%c ",
             task->zombie ? 'Z' :
@@ -76,7 +76,8 @@ static int proc_pid_stat_show(struct proc_entry *entry, struct proc_data *buf) {
     proc_printf(buf, "%lu ", 0l); // kstkesp
     proc_printf(buf, "%lu ", 0l); // kstkeip
 
-    proc_printf(buf, "%lu ", (unsigned long) task->pending & 0xffffffff);
+    proc_printf(buf, "%lu ",
+            (unsigned long) signal_pending_mask_locked(task) & 0xffffffff);
     proc_printf(buf, "%lu ", (unsigned long) task->blocked & 0xffffffff);
     uint32_t ignored = 0;
     uint32_t caught = 0;

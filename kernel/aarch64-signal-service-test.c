@@ -662,26 +662,27 @@ static int test_default_stop_and_terminate(void) {
     queue_signal(&fixture.task, SIGTERM_);
 
     init_probe(&probe, &fixture.task);
+    struct guest_linux_signal_poll_result terminate =
+            poll_signal(&fixture, &probe);
+    CHECK(terminate.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE &&
+            terminate.signal == SIGTERM_ && probe.calls == 0 &&
+            !fixture.group.stopped &&
+            fixture.task.pending == sig_mask(SIGTSTP_) &&
+            list_size(&fixture.task.queue) == 1 &&
+            sighand_is_unlocked(&fixture.sighand),
+            "私有 pending 先按信号号选择默认致命 SIGTERM");
+
+    init_probe(&probe, &fixture.task);
     struct guest_linux_signal_poll_result stop =
             poll_signal(&fixture, &probe);
     CHECK(stop.status == GUEST_LINUX_SIGNAL_POLL_STOP &&
             stop.signal == SIGTSTP_ && probe.calls == 0 &&
             fixture.group.stopped &&
             fixture.group.stop_code == (SIGTSTP_ << 8 | 0x7f) &&
-            fixture.task.pending == sig_mask(SIGTERM_) &&
-            list_size(&fixture.task.queue) == 1 &&
-            sighand_is_unlocked(&fixture.sighand),
-            "默认停止动作返回 STOP 且单轮不消费后继信号");
-
-    init_probe(&probe, &fixture.task);
-    struct guest_linux_signal_poll_result terminate =
-            poll_signal(&fixture, &probe);
-    CHECK(terminate.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE &&
-            terminate.signal == SIGTERM_ && probe.calls == 0 &&
             fixture.task.pending == 0 &&
             list_empty(&fixture.task.queue) &&
             sighand_is_unlocked(&fixture.sighand),
-            "默认致命动作返回 TERMINATE 且不构造 handler DTO");
+            "消费较低编号信号后返回默认 STOP 且不构造 handler DTO");
 
     destroy_fixture(&fixture);
 
@@ -698,6 +699,30 @@ static int test_default_stop_and_terminate(void) {
             list_size(&fixture.task.queue) == 1,
             "pending SIGKILL 抢占普通 handler 并直接返回 TERMINATE");
 
+    destroy_fixture(&fixture);
+    return 0;
+}
+
+static int test_exec_peer_exit_preempts_sync_handler(void) {
+    struct signal_fixture fixture;
+    struct installer_probe probe;
+    struct task execer = {0};
+    init_fixture(&fixture);
+    fixture.group.exec_task = &execer;
+    fixture.sighand.action[SIGSEGV_].handler = HANDLER_ONE;
+    queue_signal(&fixture.task, SIGSEGV_);
+    queue_signal(&fixture.task, SIGKILL_);
+
+    init_probe(&probe, &fixture.task);
+    struct guest_linux_signal_poll_result result =
+            poll_signal(&fixture, &probe);
+    CHECK(result.status == GUEST_LINUX_SIGNAL_POLL_TERMINATE &&
+            result.signal == SIGKILL_ && probe.calls == 0 &&
+            fixture.task.pending == sig_mask(SIGSEGV_) &&
+            list_size(&fixture.task.queue) == 1,
+            "exec 清理标记在取同步 handler 前强制 peer 退场");
+
+    fixture.group.exec_task = NULL;
     destroy_fixture(&fixture);
     return 0;
 }
@@ -1065,6 +1090,8 @@ int main(void) {
     if (test_second_frame_fault_terminates() != 0)
         return 1;
     if (test_default_stop_and_terminate() != 0)
+        return 1;
+    if (test_exec_peer_exit_preempts_sync_handler() != 0)
         return 1;
     if (test_ptrace_stop_restarts_selection() != 0)
         return 1;

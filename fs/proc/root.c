@@ -138,7 +138,7 @@ static bool proc_root_readdir(struct proc_entry *UNUSED(entry), unsigned long *i
         lock(&pids_lock);
         do {
             pid++;
-        } while (pid <= MAX_PID && pid_get_task(pid) == NULL);
+        } while (pid <= MAX_PID && pid_get_process_task(pid) == NULL);
         unlock(&pids_lock);
         if (pid > MAX_PID)
             return false;

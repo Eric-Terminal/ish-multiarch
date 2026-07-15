@@ -68,6 +68,7 @@ static struct task *construct_task(struct task *parent) {
     }
     *group = (struct tgroup) {};
     list_init(&group->threads);
+    signal_group_pending_init(group);
     list_init(&group->session);
     list_init(&group->pgroup);
     lock_init(&group->lock);

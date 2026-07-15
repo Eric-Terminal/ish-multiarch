@@ -16,6 +16,9 @@
 #define TEST_CLONE_SETTLS UINT32_C(0x00080000)
 #define TEST_CLONE_PARENT_SETTID UINT32_C(0x00100000)
 #define TEST_CLONE_CHILD_SETTID UINT32_C(0x01000000)
+#define TID_PAGE UINT32_C(0x00100000)
+#define PARENT_TID_ADDRESS (TID_PAGE + 16)
+#define CHILD_TID_ADDRESS (TID_PAGE + 32)
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -54,6 +57,11 @@ int main(void) {
     parent.sighand = &sighand;
     task_set_mm(&parent, mm_new());
     CHECK(parent.mm != NULL, "创建父任务地址空间");
+    write_wrlock(&parent.mem->lock);
+    int map_error = pt_map_nothing(
+            parent.mem, PAGE(TID_PAGE), 1, P_RWX);
+    write_wrunlock(&parent.mem->lock);
+    CHECK(map_error == 0, "映射 clone TID 发布验证页");
     current = &parent;
 
     const dword_t shared_flags = TEST_CLONE_VM | TEST_CLONE_FS |
@@ -102,6 +110,62 @@ int main(void) {
                 fs.refcount == 1 && sighand.refcount == 1,
                 "失败路径恢复共享资源引用计数");
     }
+
+    const dword_t parent_sentinel = UINT32_C(0x11223344);
+    const dword_t child_sentinel = UINT32_C(0x55667788);
+    const dword_t publication_flags = shared_flags |
+            TEST_CLONE_PARENT_SETTID | TEST_CLONE_CHILD_SETTID;
+    CHECK(user_put(PARENT_TID_ADDRESS, parent_sentinel) == 0 &&
+            user_put(CHILD_TID_ADDRESS, child_sentinel) == 0,
+            "写入 clone 发布门哨兵值");
+
+    group.exec_task = &parent;
+    CHECK(sys_clone(publication_flags, 0,
+                    PARENT_TID_ADDRESS, 0, CHILD_TID_ADDRESS) ==
+                    (dword_t) _EAGAIN,
+            "exec 收敛期间拒绝发布新线程");
+    group.exec_task = NULL;
+    dword_t parent_tid_value;
+    dword_t child_tid_value;
+    CHECK(user_get(PARENT_TID_ADDRESS, parent_tid_value) == 0 &&
+            user_get(CHILD_TID_ADDRESS, child_tid_value) == 0 &&
+            parent_tid_value == parent_sentinel &&
+            child_tid_value == child_sentinel,
+            "exec 发布门拒绝后不污染 parent/child TID 地址");
+
+    group.doing_group_exit = true;
+    CHECK(sys_clone(publication_flags, 0,
+                    PARENT_TID_ADDRESS, 0, CHILD_TID_ADDRESS) ==
+                    (dword_t) _EAGAIN,
+            "线程组退出期间拒绝发布新线程");
+    group.doing_group_exit = false;
+    CHECK(user_get(PARENT_TID_ADDRESS, parent_tid_value) == 0 &&
+            user_get(CHILD_TID_ADDRESS, child_tid_value) == 0 &&
+            parent_tid_value == parent_sentinel &&
+            child_tid_value == child_sentinel,
+            "组退出发布门拒绝后不污染 TID 地址");
+
+    lock(&sighand.lock);
+    sigset_add(&parent.pending, SIGKILL_);
+    unlock(&sighand.lock);
+    CHECK(sys_clone(publication_flags, 0,
+                    PARENT_TID_ADDRESS, 0, CHILD_TID_ADDRESS) ==
+                    (dword_t) _EINTR,
+            "当前线程已有致命信号时 clone 返回 EINTR");
+    lock(&sighand.lock);
+    signal_discard_pending_locked(&parent, SIGKILL_);
+    unlock(&sighand.lock);
+    CHECK(user_get(PARENT_TID_ADDRESS, parent_tid_value) == 0 &&
+            user_get(CHILD_TID_ADDRESS, child_tid_value) == 0 &&
+            parent_tid_value == parent_sentinel &&
+            child_tid_value == child_sentinel,
+            "致命信号发布门拒绝后不污染 TID 地址");
+
+    CHECK(list_size(&group.threads) == 1 &&
+            list_empty(&parent.children) && parent.mm->refcount == 1 &&
+            files.refcount == 1 && fs.refcount == 1 &&
+            sighand.refcount == 1,
+            "所有发布门失败路径均恢复任务与共享资源");
 
     current = NULL;
     mm_release(parent.mm);

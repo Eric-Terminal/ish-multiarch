@@ -7,6 +7,7 @@
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
 #include "kernel/calls.h"
+#include "kernel/errno.h"
 #include "kernel/futex.h"
 #include "kernel/task.h"
 #include "kernel/memory.h"
@@ -85,6 +86,12 @@ void task_commit_aarch64_exec(struct task *task) {
     aarch64_linux_process_destroy(retired);
     if (retired_mm != NULL)
         mm_release(retired_mm);
+
+    // AArch64 候选在安全点提交后同样退休旧映像的 POSIX timer 状态。
+    if (task->group != NULL)
+        tgroup_exec_posix_timers_destroy(task->group);
+    if (task->sighand != NULL)
+        signal_flush_exec_timer_pending(task);
     // vfork 父任务只能在共享旧 mm 完全退休后恢复。
     vfork_notify(task);
 }
@@ -144,6 +151,43 @@ struct task *pid_get_task(dword_t id) {
     return task;
 }
 
+struct task *task_process_representative_locked(struct task *task) {
+    if (task == NULL)
+        return NULL;
+    struct tgroup *group = task->group;
+    struct task *preferred[] = {
+        task,
+        group->exec_task,
+        group->leader,
+    };
+    for (size_t index = 0; index < array_size(preferred); index++) {
+        struct task *candidate = preferred[index];
+        if (candidate != NULL &&
+                !candidate->zombie && !candidate->exiting)
+            return candidate;
+    }
+    struct task *member;
+    list_for_each_entry(&group->threads, member, group_links) {
+        if (!member->zombie && !member->exiting)
+            return member;
+    }
+    return NULL;
+}
+
+struct task *pid_get_process_task(dword_t id) {
+    struct task *task = pid_get_task_zombie(id);
+    if (task == NULL)
+        return NULL;
+    if (!task->zombie && !task->exiting)
+        return task;
+    if (task == task->group->leader) {
+        struct task *execer = task->group->exec_task;
+        if (execer != NULL && !execer->zombie && !execer->exiting)
+            return execer;
+    }
+    return NULL;
+}
+
 struct task *task_create_(struct task *parent) {
     struct task *task = malloc(sizeof(struct task));
     if (task == NULL)
@@ -169,6 +213,8 @@ struct task *task_create_(struct task *parent) {
     list_init(&task->siblings);
     task->parent = parent;
     task->pending = 0;
+    task->pending_bit_only = 0;
+    task->pending_timer_bit_only = 0;
     task->waiting = 0;
     list_init(&task->queue);
     task->saved_mask = 0;
@@ -265,6 +311,115 @@ void task_destroy(struct task *task) {
     assert(pid != NULL && !pid->reserved && pid->task == task);
     pid->task = NULL;
     free(task);
+}
+
+static bool task_group_has_other_threads(
+        const struct tgroup *group, const struct task *task) {
+    struct task *member;
+    list_for_each_entry(&group->threads, member, group_links) {
+        if (member != task)
+            return true;
+    }
+    return false;
+}
+
+int task_group_fatal_signal(const struct task *task) {
+    return atomic_load_explicit(
+            &task->group->external_fatal_signal, memory_order_acquire);
+}
+
+// 调用方持有 pids_lock；marker 的发布与清除都串在共享 sighand 内。
+static void task_exec_clear_marker_locked(struct task *task) {
+    lock(&task->sighand->lock);
+    lock(&task->group->lock);
+    assert(task->group->exec_task == task);
+    task->group->exec_task = NULL;
+    unlock(&task->group->lock);
+    unlock(&task->sighand->lock);
+}
+
+// 成功后线程组只保留 task；等待期间不会吞掉外部 SIGKILL。
+int task_exec_dethread_i386(struct task *task) {
+    assert(task != NULL);
+    struct tgroup *group = task->group;
+
+    lock(&pids_lock);
+    lock(&task->sighand->lock);
+    lock(&group->lock);
+    int external_fatal = task_group_fatal_signal(task);
+    if (group->doing_group_exit || group->exec_task != NULL ||
+            external_fatal != 0) {
+        bool killed = external_fatal != 0 ||
+                sigset_has(task->pending, SIGKILL_);
+        unlock(&group->lock);
+        unlock(&task->sighand->lock);
+        unlock(&pids_lock);
+        return killed ? _EINTR : _EAGAIN;
+    }
+    group->exec_task = task;
+    group->stopped = false;
+    group->stop_code = 0;
+    group->continued = false;
+    group->continue_notification_pending = false;
+    notify(&group->stopped_cond);
+    unlock(&group->lock);
+    unlock(&task->sighand->lock);
+
+    // 强制信号只负责唤醒 peer；do_exit_group 会识别 exec 协调态。
+    struct task *peer;
+    list_for_each_entry(&group->threads, peer, group_links) {
+        if (peer != task && !peer->exiting) {
+            deliver_signal_locked(peer, SIGKILL_, SIGINFO_NIL);
+        }
+    }
+    while (task_group_has_other_threads(group, task)) {
+        if (task_sigkill_pending(task) ||
+                task_group_fatal_signal(task) != 0) {
+            task_exec_clear_marker_locked(task);
+            unlock(&pids_lock);
+            return _EINTR;
+        }
+        wait_for_ignore_signals(&group->child_exit, &pids_lock, NULL);
+        if (task_sigkill_pending(task) ||
+                task_group_fatal_signal(task) != 0) {
+            task_exec_clear_marker_locked(task);
+            unlock(&pids_lock);
+            return _EINTR;
+        }
+    }
+
+    struct task *old_leader = group->leader;
+    if (old_leader != task) {
+        assert(old_leader->exiting &&
+                list_null(&old_leader->group_links));
+        struct pid *leader_pid = pid_slot(old_leader->pid);
+        struct pid *thread_pid = pid_slot(task->pid);
+        assert(leader_pid != NULL && thread_pid != NULL &&
+                leader_pid->task == old_leader &&
+                thread_pid->task == task);
+
+        // 当前线程取代旧 leader 在父进程子链中的位置。
+        list_remove_safe(&task->siblings);
+        task->parent = old_leader->parent;
+        if (task->parent != NULL)
+            list_add_before(&old_leader->siblings, &task->siblings);
+        else
+            list_init(&task->siblings);
+
+        pid_t_ thread_id = task->pid;
+        task->pid = old_leader->pid;
+        old_leader->pid = thread_id;
+        leader_pid->task = task;
+        thread_pid->task = old_leader;
+        task->tgid = task->pid;
+        group->leader = task;
+        old_leader->exit_signal = 0;
+        task_destroy(old_leader);
+    }
+    task->exit_signal = SIGCHLD_;
+    task_exec_clear_marker_locked(task);
+    unlock(&pids_lock);
+    return 0;
 }
 
 static void task_run_i386_current(void) {

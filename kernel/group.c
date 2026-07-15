@@ -64,7 +64,7 @@ pid_t_ sys_getpgid(pid_t_ pid) {
     lock(&pids_lock);
     struct task *task = current;
     if (pid != 0)
-        task = pid_get_task(pid);
+        task = pid_get_process_task(pid);
     if (!task) {
         unlock(&pids_lock);
         return _ESRCH;
@@ -128,4 +128,3 @@ dword_t sys_getsid(void) {
     unlock(&pids_lock);
     return sid;
 }
-

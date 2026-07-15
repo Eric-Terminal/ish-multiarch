@@ -459,9 +459,12 @@ static int test_nocldstop_does_not_affect_other_exit_signal(void) {
     deliver_signal(&fixture.child, SIGTSTP_, SIGINFO_NIL);
     receive_signals();
     CHECK(fixture.child_group.stopped &&
-            sigset_has(fixture.parent.pending, SIGUSR1_) &&
-            list_size(&fixture.parent.queue) == 1,
+            sigset_has(fixture.parent_group.shared_pending, SIGUSR1_) &&
+            list_size(&fixture.parent_group.shared_queue) == 1 &&
+            fixture.parent.pending == 0 &&
+            list_empty(&fixture.parent.queue),
             "SA_NOCLDSTOP 不影响非 SIGCHLD 的停止通知信号");
+    signal_flush_group_pending(&fixture.parent_group);
     return 0;
 }
 

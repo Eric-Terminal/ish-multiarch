@@ -364,7 +364,7 @@ static int poll_wait_deadline(struct poll *poll_,
         assert(task != NULL && task->sighand != NULL);
         lock(&task->sighand->lock);
         pending_at_registration =
-                !!(task->pending & ~task->blocked);
+                !!(signal_pending_mask_locked(task) & ~task->blocked);
         lock(&task->waiting_cond_lock);
         if (task->waiting_poll_active) {
             unlock(&task->waiting_cond_lock);
@@ -419,7 +419,8 @@ static int poll_wait_deadline(struct poll *poll_,
 
         lock(&current->sighand->lock);
         bool signal_pending = pending_at_registration ||
-                !!(current->pending & ~current->blocked);
+                !!(signal_pending_mask_locked(current) &
+                        ~current->blocked);
         pending_at_registration = false;
         unlock(&current->sighand->lock);
         if (signal_pending) {

@@ -71,8 +71,13 @@ static void *send_signal_when_waiting(void *opaque) {
 int main(void) {
     struct task task = {0};
     struct sighand sighand = {0};
+    struct tgroup signal_group = {0};
     lock_init(&sighand.lock);
+    lock_init(&signal_group.lock);
+    cond_init(&signal_group.stopped_cond);
+    signal_group.leader = &task;
     task.sighand = &sighand;
+    task.group = &signal_group;
     list_init(&task.queue);
     cond_init(&task.pause);
     lock_init(&task.waiting_cond_lock);
@@ -177,9 +182,12 @@ int main(void) {
                     (sig_mask(SIGUSR1_) | sig_mask(NUM_SIGS)),
             "rt_sigpending 在 sighand 锁内取得阻塞 pending 快照");
     struct sighand other_sighand = {0};
+    struct tgroup other_group = {0};
     lock_init(&other_sighand.lock);
+    signal_group_pending_init(&other_group);
     struct task other_task = {
         .sighand = &other_sighand,
+        .group = &other_group,
         .blocked = sig_mask(SIGUSR2_),
         .pending = sig_mask(SIGUSR1_) | sig_mask(SIGUSR2_),
     };
@@ -764,11 +772,6 @@ int main(void) {
     CHECK(altstack_map_error == 0 && normal_stack_map_error == 0,
             "映射普通栈与替代信号栈测试页");
 
-    struct tgroup signal_group = {0};
-    lock_init(&signal_group.lock);
-    cond_init(&signal_group.stopped_cond);
-    signal_group.leader = &task;
-    task.group = &signal_group;
     CHECK(user_put(altstack_input_address, configured_stack) == 0 &&
             sys_sigaltstack(altstack_input_address, 0) == 0,
             "为信号帧派送配置线程替代栈");
@@ -1001,6 +1004,7 @@ int main(void) {
     clear_pending_signals(&task);
     task.cpu.esp = normal_stack_top;
     cond_destroy(&signal_group.stopped_cond);
+    pthread_mutex_destroy(&signal_group.lock.m);
 
     CHECK(sigaction(SIGUSR1, &old_host_action, NULL) == 0,
             "恢复 host 唤醒信号动作");

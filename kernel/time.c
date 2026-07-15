@@ -140,10 +140,6 @@ dword_t sys_clock_settime(dword_t UNUSED(clock), addr_t UNUSED(tp)) {
 }
 
 static void itimer_notify(struct tgroup *group) {
-    struct siginfo_ info = {
-        .code = SI_TIMER_,
-        .payload_kind = SIGNAL_INFO_PAYLOAD_TIMER,
-    };
     lock(&pids_lock);
     lock(&group->lock);
     struct timer *timer = group->itimer;
@@ -154,13 +150,8 @@ static void itimer_notify(struct tgroup *group) {
         unlock(&pids_lock);
         return;
     }
-    struct task *task;
-    list_for_each_entry(&group->threads, task, group_links) {
-        if (!task->exiting) {
-            send_signal(task, SIGALRM_, info);
-            break;
-        }
-    }
+    // ITIMER_REAL 与 Linux 一样生成 SI_KERNEL，不属于 exec 清理的 POSIX timer 节点。
+    send_process_signal(group->leader, SIGALRM_, SIGINFO_NIL);
     unlock(&pids_lock);
 }
 
@@ -332,23 +323,17 @@ static void posix_timer_callback(struct posix_timer *timer) {
         return;
     }
     struct task *thread = NULL;
+    bool process_directed = timer->thread_pid == 0;
     if (timer->thread_pid != 0) {
         thread = pid_get_task(timer->thread_pid);
         if (thread != NULL && thread->group != timer->tgroup)
             thread = NULL;
-    } else {
-        struct task *candidate;
-        list_for_each_entry(
-                &timer->tgroup->threads, candidate, group_links) {
-            if (!candidate->exiting) {
-                thread = candidate;
-                break;
-            }
-        }
     }
     // TODO: solve pid reuse. currently we have two ways of referring to a task: pid_t_ and struct task *. pids get reused. task struct pointers get freed on exit or reap. need a third option for cases like this, like a refcount layer.
-    if (thread != NULL)
-        send_signal(thread, timer->signal, info);
+    if (process_directed)
+        send_process_signal(timer->tgroup->leader, timer->signal, info);
+    else if (thread != NULL)
+        send_signal_locked(thread, timer->signal, info);
     unlock(&pids_lock);
 }
 
@@ -491,13 +476,9 @@ int_t sys_timer_delete(dword_t timer_id) {
     return 0;
 }
 
-void tgroup_timers_destroy(struct tgroup *group) {
-    struct timer *itimer;
-    struct timer *posix_timers[TIMERS_MAX] = {0};
-
-    lock(&group->lock);
-    itimer = group->itimer;
-    group->itimer = NULL;
+static void posix_timers_begin_destroy_locked(
+        struct tgroup *group,
+        struct timer *posix_timers[TIMERS_MAX]) {
     for (unsigned i = 0; i < TIMERS_MAX; i++) {
         struct posix_timer *timer = &group->posix_timers[i];
         if (timer->timer != NULL) {
@@ -506,19 +487,47 @@ void tgroup_timers_destroy(struct tgroup *group) {
             posix_timers[i] = timer->timer;
         }
     }
-    unlock(&group->lock);
+}
 
-    if (itimer != NULL)
-        timer_free(itimer);
+static void posix_timers_finish_destroy(
+        struct tgroup *group,
+        struct timer *posix_timers[TIMERS_MAX]) {
     for (unsigned i = 0; i < TIMERS_MAX; i++)
         if (posix_timers[i] != NULL)
             timer_free(posix_timers[i]);
 
     lock(&group->lock);
-    for (unsigned i = 0; i < TIMERS_MAX; i++)
-        if (posix_timers[i] != NULL)
+    for (unsigned i = 0; i < TIMERS_MAX; i++) {
+        if (posix_timers[i] != NULL) {
+            assert(group->posix_timers[i].deleting &&
+                    group->posix_timers[i].timer == posix_timers[i]);
             group->posix_timers[i] = (struct posix_timer) {0};
+        }
+    }
     unlock(&group->lock);
+}
+
+void tgroup_exec_posix_timers_destroy(struct tgroup *group) {
+    struct timer *posix_timers[TIMERS_MAX] = {0};
+
+    lock(&group->lock);
+    posix_timers_begin_destroy_locked(group, posix_timers);
+    unlock(&group->lock);
+    posix_timers_finish_destroy(group, posix_timers);
+}
+
+void tgroup_timers_destroy(struct tgroup *group) {
+    struct timer *posix_timers[TIMERS_MAX] = {0};
+
+    lock(&group->lock);
+    struct timer *itimer = group->itimer;
+    group->itimer = NULL;
+    posix_timers_begin_destroy_locked(group, posix_timers);
+    unlock(&group->lock);
+
+    if (itimer != NULL)
+        timer_free(itimer);
+    posix_timers_finish_destroy(group, posix_timers);
 }
 
 static struct fd_ops timerfd_ops;

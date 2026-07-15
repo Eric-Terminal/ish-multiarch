@@ -14,6 +14,8 @@ static void halt_system(void);
 static bool exit_tgroup(struct task *task) {
     struct tgroup *group = task->group;
     list_remove(&task->group_links);
+    // de-thread 与 wait 共用该条件，谓词均在 pids_lock 下复查。
+    notify(&group->child_exit);
     bool group_dead = list_empty(&group->threads);
     if (group_dead) {
         // don't need to lock the group since the only pointers to it come from:
@@ -60,7 +62,10 @@ noreturn void do_exit(int status) {
 
     // 最后一个进入退出流程的线程负责在资源仍完整时退休组定时器。
     lock(&pids_lock);
+    lock(&current->sighand->lock);
     current->exiting = true;
+    signal_retarget_shared_pending_locked(
+            current, ~current->blocked);
     bool all_exiting = true;
     struct task *group_task;
     list_for_each_entry(
@@ -70,6 +75,7 @@ noreturn void do_exit(int status) {
             break;
         }
     }
+    unlock(&current->sighand->lock);
     unlock(&pids_lock);
     if (all_exiting)
         tgroup_timers_destroy(current->group);
@@ -112,6 +118,8 @@ noreturn void do_exit(int status) {
     }
 
     bool group_dead = exit_tgroup(current);
+    if (group_dead)
+        signal_flush_group_pending(current->group);
     bool auto_reap = false;
     if (group_dead) {
         // notify parent that we died
@@ -138,7 +146,7 @@ noreturn void do_exit(int status) {
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };
             if (send_exit_signal)
-                send_signal(parent, leader->exit_signal, info);
+                send_process_signal(parent, leader->exit_signal, info);
         }
 
         if (exit_hook != NULL)
@@ -158,7 +166,20 @@ noreturn void do_exit(int status) {
 noreturn void do_exit_group(int status) {
     struct tgroup *group = current->group;
     lock(&pids_lock);
+    struct sighand *sighand = current->sighand;
+    lock(&sighand->lock);
     lock(&group->lock);
+    int external_fatal = task_group_fatal_signal(current);
+    if (group->exec_task != NULL && group->exec_task != current &&
+            !group->doing_group_exit && external_fatal == 0) {
+        unlock(&group->lock);
+        unlock(&sighand->lock);
+        unlock(&pids_lock);
+        // exec 发出的致命信号只清理当前 peer，不能反杀执行线程。
+        do_exit(0);
+    }
+    if (external_fatal != 0)
+        status = external_fatal;
     if (!group->doing_group_exit) {
         group->doing_group_exit = true;
         group->group_exit_code = status;
@@ -166,11 +187,12 @@ noreturn void do_exit_group(int status) {
         status = group->group_exit_code;
     }
     unlock(&group->lock);
+    unlock(&sighand->lock);
 
     // kill everyone else in the group
     struct task *task;
     list_for_each_entry(&group->threads, task, group_links) {
-        deliver_signal(task, SIGKILL_, SIGINFO_NIL);
+        deliver_signal_locked(task, SIGKILL_, SIGINFO_NIL);
     }
 
     lock(&group->lock);
@@ -194,10 +216,10 @@ static void halt_system(void) {
                     continue;
                 switch (state) {
                 case 0:
-                    deliver_signal(task, SIGTERM_, SIGINFO_NIL);
+                    deliver_signal_locked(task, SIGTERM_, SIGINFO_NIL);
                     break;
                 case 1:
-                    deliver_signal(task, SIGKILL_, SIGINFO_NIL);
+                    send_signal_locked(task, SIGKILL_, SIGINFO_NIL);
                     break;
                 case 2:
                     pthread_kill(task_thread_load(task), SIGTERM);

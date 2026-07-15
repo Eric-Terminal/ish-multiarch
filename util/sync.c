@@ -23,7 +23,8 @@ static bool is_signal_pending(lock_t *lock) {
         return false;
     if (lock != &current->sighand->lock)
         lock(&current->sighand->lock);
-    bool pending = !!(current->pending & ~current->blocked);
+    bool pending = !!(signal_pending_mask_locked(current) &
+            ~current->blocked);
     if (lock != &current->sighand->lock)
         unlock(&current->sighand->lock);
     return pending;

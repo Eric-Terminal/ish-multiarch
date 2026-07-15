@@ -69,42 +69,72 @@ static struct signal_pending_account *charge_pending(
     return account;
 }
 
-static int enqueue_without_node(
-        struct task *task, int signal, enum signal_queue_policy policy) {
+void signal_group_pending_init(struct tgroup *group) {
+    assert(group != NULL);
+    if (list_null(&group->shared_queue))
+        list_init(&group->shared_queue);
+}
+
+static int enqueue_without_node(sigset_t_ *pending,
+        sigset_t_ *bit_only, sigset_t_ *timer_bit_only,
+        int signal, const struct siginfo_ *info,
+        enum signal_queue_policy policy) {
     if (policy == SIGNAL_QUEUE_EXPLICIT)
         return _EAGAIN;
-    sigset_add(&task->pending, signal);
+    sigset_add(pending, signal);
+    if (info->code == SI_TIMER_)
+        sigset_add(timer_bit_only, signal);
+    else
+        sigset_add(bit_only, signal);
     return SIGNAL_ENQUEUE_BIT_ONLY;
 }
 
-static bool has_queued_signal(const struct task *task, int signal) {
+static bool has_queued_signal(struct list *queue, int signal) {
     struct sigqueue *queued;
-    list_for_each_entry(&task->queue, queued, queue) {
+    list_for_each_entry(queue, queued, queue) {
         if (queued->info.sig == signal)
             return true;
     }
     return false;
 }
 
-int signal_enqueue_locked(struct task *task, int signal,
+static int enqueue_signal_locked(struct task *task,
+        sigset_t_ *pending, struct list *queue,
+        sigset_t_ *bit_only, sigset_t_ *timer_bit_only, int signal,
         struct siginfo_ info, enum signal_queue_policy policy,
         uid_t_ uid, qword_t limit) {
     assert(task != NULL && signal >= 1 && signal <= NUM_SIGS);
     // Linux 对 SIGKILL 只保留 pending 位，不分配无从观察的 siginfo。
     if (signal == SIGKILL_) {
-        bool already_pending = sigset_has(task->pending, signal);
-        sigset_add(&task->pending, signal);
+        bool already_pending = sigset_has(*pending, signal);
+        sigset_add(pending, signal);
+        if (!already_pending) {
+            if (info.code == SI_TIMER_)
+                sigset_add(timer_bit_only, signal);
+            else
+                sigset_add(bit_only, signal);
+        }
         return already_pending ?
                 SIGNAL_ENQUEUE_COALESCED : SIGNAL_ENQUEUE_BIT_ONLY;
     }
-    if (signal < SIGRTMIN_ && sigset_has(task->pending, signal) &&
-            (policy != SIGNAL_QUEUE_FORCE ||
-                    has_queued_signal(task, signal)))
-        return SIGNAL_ENQUEUE_COALESCED;
+    bool replace_bit_only = false;
+    if (signal < SIGRTMIN_ && sigset_has(*pending, signal)) {
+        bool has_node = has_queued_signal(queue, signal);
+        if (policy != SIGNAL_QUEUE_FORCE || has_node)
+            return SIGNAL_ENQUEUE_COALESCED;
+        // FORCE 为已有普通信号补精确信息，替换而不是追加旧 fallback。
+        replace_bit_only = true;
+    }
 
     struct sigqueue *queued = signal_queue_malloc(sizeof(*queued));
-    if (queued == NULL)
-        return enqueue_without_node(task, signal, policy);
+    if (queued == NULL) {
+        if (replace_bit_only) {
+            sigset_del(bit_only, signal);
+            sigset_del(timer_bit_only, signal);
+        }
+        return enqueue_without_node(pending, bit_only,
+                timer_bit_only, signal, &info, policy);
+    }
 
     bool ignore_limit = policy == SIGNAL_QUEUE_FORCE ||
             (policy == SIGNAL_QUEUE_LEGACY && signal < SIGRTMIN_);
@@ -112,7 +142,17 @@ int signal_enqueue_locked(struct task *task, int signal,
             charge_pending(uid, limit, ignore_limit);
     if (account == NULL) {
         free(queued);
-        return enqueue_without_node(task, signal, policy);
+        if (replace_bit_only) {
+            sigset_del(bit_only, signal);
+            sigset_del(timer_bit_only, signal);
+        }
+        return enqueue_without_node(pending, bit_only,
+                timer_bit_only, signal, &info, policy);
+    }
+
+    if (replace_bit_only) {
+        sigset_del(bit_only, signal);
+        sigset_del(timer_bit_only, signal);
     }
 
     *queued = (struct sigqueue) {
@@ -120,9 +160,37 @@ int signal_enqueue_locked(struct task *task, int signal,
         .account = account,
     };
     queued->info.sig = signal;
-    list_add_tail(&task->queue, &queued->queue);
-    sigset_add(&task->pending, signal);
+    list_add_tail(queue, &queued->queue);
+    sigset_add(pending, signal);
     return SIGNAL_ENQUEUE_QUEUED;
+}
+
+int signal_enqueue_locked(struct task *task, int signal,
+        struct siginfo_ info, enum signal_queue_policy policy,
+        uid_t_ uid, qword_t limit) {
+    return enqueue_signal_locked(task,
+            &task->pending, &task->queue,
+            &task->pending_bit_only, &task->pending_timer_bit_only,
+            signal, info, policy, uid, limit);
+}
+
+int signal_enqueue_process_locked(struct task *representative, int signal,
+        struct siginfo_ info, enum signal_queue_policy policy,
+        uid_t_ uid, qword_t limit) {
+    struct tgroup *group = representative->group;
+    signal_group_pending_init(group);
+    return enqueue_signal_locked(representative,
+            &group->shared_pending, &group->shared_queue,
+            &group->shared_bit_only, &group->shared_timer_bit_only,
+            signal, info, policy, uid, limit);
+}
+
+sigset_t_ signal_pending_mask_locked(struct task *task) {
+    assert(task != NULL);
+    if (task->group == NULL)
+        return task->pending;
+    signal_group_pending_init(task->group);
+    return task->pending | task->group->shared_pending;
 }
 
 void signal_queue_release(struct sigqueue *queued) {
@@ -141,10 +209,15 @@ void signal_queue_release(struct sigqueue *queued) {
     free(queued);
 }
 
-void signal_discard_pending_locked(struct task *task, int signal) {
-    sigset_del(&task->pending, signal);
+static void discard_pending_locked(
+        sigset_t_ *pending, struct list *queue,
+        sigset_t_ *bit_only, sigset_t_ *timer_bit_only,
+        int signal) {
+    sigset_del(pending, signal);
+    sigset_del(bit_only, signal);
+    sigset_del(timer_bit_only, signal);
     struct sigqueue *queued, *temporary;
-    list_for_each_entry_safe(&task->queue, queued, temporary, queue) {
+    list_for_each_entry_safe(queue, queued, temporary, queue) {
         if (queued->info.sig == signal) {
             list_remove(&queued->queue);
             signal_queue_release(queued);
@@ -152,11 +225,76 @@ void signal_discard_pending_locked(struct task *task, int signal) {
     }
 }
 
+void signal_discard_pending_locked(struct task *task, int signal) {
+    discard_pending_locked(&task->pending, &task->queue,
+            &task->pending_bit_only, &task->pending_timer_bit_only,
+            signal);
+}
+
+void signal_discard_group_pending_locked(
+        struct tgroup *group, int signal) {
+    signal_group_pending_init(group);
+    discard_pending_locked(
+            &group->shared_pending, &group->shared_queue,
+            &group->shared_bit_only, &group->shared_timer_bit_only,
+            signal);
+}
+
 void signal_flush_pending(struct task *task) {
     task->pending = 0;
+    task->pending_bit_only = 0;
+    task->pending_timer_bit_only = 0;
     struct sigqueue *queued, *temporary;
     list_for_each_entry_safe(&task->queue, queued, temporary, queue) {
         list_remove(&queued->queue);
         signal_queue_release(queued);
     }
+}
+
+void signal_flush_group_pending(struct tgroup *group) {
+    signal_group_pending_init(group);
+    group->shared_pending = 0;
+    group->shared_bit_only = 0;
+    group->shared_timer_bit_only = 0;
+    struct sigqueue *queued, *temporary;
+    list_for_each_entry_safe(
+            &group->shared_queue, queued, temporary, queue) {
+        list_remove(&queued->queue);
+        signal_queue_release(queued);
+    }
+}
+
+static void flush_timer_queue_locked(
+        sigset_t_ *pending, struct list *queue,
+        sigset_t_ *bit_only, sigset_t_ *timer_bit_only) {
+    sigset_t_ removed_signals = *timer_bit_only;
+    sigset_t_ remaining_signals = 0;
+    *timer_bit_only = 0;
+    struct sigqueue *queued, *temporary;
+    list_for_each_entry_safe(queue, queued, temporary, queue) {
+        if (queued->info.code != SI_TIMER_) {
+            sigset_add(&remaining_signals, queued->info.sig);
+            continue;
+        }
+        sigset_add(&removed_signals, queued->info.sig);
+        list_remove(&queued->queue);
+        signal_queue_release(queued);
+    }
+    // 同号的非 timer 节点或 bit-only 来源仍需保留 pending。
+    *pending &= ~(removed_signals & ~(remaining_signals | *bit_only));
+}
+
+void signal_flush_exec_timer_pending(struct task *task) {
+    assert(task != NULL && task->sighand != NULL);
+    lock(&task->sighand->lock);
+    flush_timer_queue_locked(&task->pending, &task->queue,
+            &task->pending_bit_only, &task->pending_timer_bit_only);
+    if (task->group != NULL) {
+        signal_group_pending_init(task->group);
+        flush_timer_queue_locked(&task->group->shared_pending,
+                &task->group->shared_queue,
+                &task->group->shared_bit_only,
+                &task->group->shared_timer_bit_only);
+    }
+    unlock(&task->sighand->lock);
 }

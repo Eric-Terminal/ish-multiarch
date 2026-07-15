@@ -1,8 +1,10 @@
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "kernel/errno.h"
 #include "kernel/signal-delivery.h"
@@ -16,6 +18,10 @@
         return 1; \
     } \
 } while (0)
+
+#define TEST_JOB_CONTROL_STOP_MASK \
+        (sig_mask(SIGSTOP_) | sig_mask(SIGTSTP_) | \
+         sig_mask(SIGTTIN_) | sig_mask(SIGTTOU_))
 
 struct local_target {
     struct task task;
@@ -179,7 +185,7 @@ static int test_allocation_failure_and_bit_only(void) {
     struct siginfo_ fallback;
     lock(&target.sighand.lock);
     bool taken = signal_take_unblocked_locked(
-            &target.task, 0, false, &fallback);
+            &target.task, 0, &fallback);
     unlock(&target.sighand.lock);
     CHECK(taken && fallback.sig == SIGRTMIN_ &&
             fallback.code == SI_USER_ && fallback.kill.pid == 0 &&
@@ -211,7 +217,7 @@ static int test_allocation_failure_and_bit_only(void) {
             &target.sighand, SIGSEGV_, &recovered_fault);
     struct siginfo_ recovered;
     taken = signal_take_unblocked_locked(
-            &target.task, 0, false, &recovered);
+            &target.task, 0, &recovered);
     unlock(&target.sighand.lock);
     current = NULL;
     CHECK(taken &&
@@ -233,14 +239,14 @@ static int test_fifo_and_standard_coalescing(void) {
     struct siginfo_ info;
     lock(&target.sighand.lock);
     bool first = signal_take_unblocked_locked(
-            &target.task, 0, false, &info);
+            &target.task, 0, &info);
     int first_signal = info.sig;
     bool second = signal_take_unblocked_locked(
-            &target.task, 0, false, &info);
+            &target.task, 0, &info);
     unlock(&target.sighand.lock);
-    CHECK(first && second && first_signal == SIGTSTP_ &&
-            info.sig == SIGTERM_,
-            "普通异步队列继续保持原有 FIFO 顺序");
+    CHECK(first && second && first_signal == SIGTERM_ &&
+            info.sig == SIGTSTP_,
+            "不同普通信号按 Linux 信号号顺序消费");
 
     CHECK(enqueue_local(&target, SIGUSR1_, 3,
                     SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_QUEUED &&
@@ -256,12 +262,138 @@ static int test_fifo_and_standard_coalescing(void) {
                     SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_QUEUED,
             "同号实时信号全部入队");
     lock(&target.sighand.lock);
-    first = signal_take_unblocked_locked(&target.task, 0, false, &info);
+    first = signal_take_unblocked_locked(&target.task, 0, &info);
     qword_t first_value = info.queue.value;
-    second = signal_take_unblocked_locked(&target.task, 0, false, &info);
+    second = signal_take_unblocked_locked(&target.task, 0, &info);
     unlock(&target.sighand.lock);
     CHECK(first && second && first_value == 5 && info.queue.value == 6,
             "同号实时信号按入队 FIFO 保留 sigval");
+    return 0;
+}
+
+static int test_linux_signal_selection_order(void) {
+    struct local_target target;
+    init_local_target(&target, 3002, 8);
+    struct siginfo_ info;
+
+    CHECK(enqueue_local(&target, SIGKILL_, 1,
+                    SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_BIT_ONLY &&
+            enqueue_local(&target, SIGSEGV_, 2,
+                    SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_QUEUED,
+            "排队同步故障与 SIGKILL");
+    lock(&target.sighand.lock);
+    bool first = signal_take_unblocked_locked(
+            &target.task, 0, &info);
+    int first_signal = info.sig;
+    bool second = signal_take_unblocked_locked(
+            &target.task, 0, &info);
+    unlock(&target.sighand.lock);
+    CHECK(first && second && first_signal == SIGSEGV_ &&
+                    info.sig == SIGKILL_,
+            "同步故障集合先于 SIGKILL 消费");
+
+    CHECK(enqueue_local(&target, SIGKILL_, 3,
+                    SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_BIT_ONLY &&
+            enqueue_local(&target, SIGINT_, 4,
+                    SIGNAL_QUEUE_EXPLICIT) == SIGNAL_ENQUEUE_QUEUED,
+            "排队低号普通信号与 SIGKILL");
+    lock(&target.sighand.lock);
+    first = signal_take_unblocked_locked(&target.task, 0, &info);
+    first_signal = info.sig;
+    second = signal_take_unblocked_locked(&target.task, 0, &info);
+    unlock(&target.sighand.lock);
+    CHECK(first && second && first_signal == SIGINT_ &&
+                    info.sig == SIGKILL_,
+            "非同步信号按信号号而非强制 SIGKILL 优先");
+
+    lock(&target.sighand.lock);
+    CHECK(signal_enqueue_locked(&target.task, SIGUSR1_, queue_info(5),
+                    SIGNAL_QUEUE_EXPLICIT, target.task.uid, 8) ==
+                    SIGNAL_ENQUEUE_QUEUED &&
+            signal_enqueue_process_locked(&target.task, SIGSEGV_,
+                    queue_info(6), SIGNAL_QUEUE_EXPLICIT,
+                    target.task.uid, 8) == SIGNAL_ENQUEUE_QUEUED,
+            "分别排队线程私有普通信号与共享同步信号");
+    first = signal_take_unblocked_locked(&target.task, 0, &info);
+    first_signal = info.sig;
+    second = signal_take_unblocked_locked(&target.task, 0, &info);
+    unlock(&target.sighand.lock);
+    CHECK(first && second && first_signal == SIGUSR1_ &&
+                    info.sig == SIGSEGV_,
+            "Linux 先完整消费私有 pending，再选择共享 pending");
+    return 0;
+}
+
+static int test_exec_timer_pending_cleanup(void) {
+    struct local_target target;
+    init_local_target(&target, 3003, 16);
+    struct siginfo_ timer_info = {
+        .code = SI_TIMER_,
+        .payload_kind = SIGNAL_INFO_PAYLOAD_TIMER,
+        .timer.timer = 7,
+    };
+
+    lock(&target.sighand.lock);
+    CHECK(signal_enqueue_locked(&target.task, SIGRTMIN_, timer_info,
+                    SIGNAL_QUEUE_EXPLICIT, target.task.uid, 16) ==
+                    SIGNAL_ENQUEUE_QUEUED &&
+            signal_enqueue_locked(&target.task, SIGRTMIN_ + 1,
+                    timer_info, SIGNAL_QUEUE_EXPLICIT,
+                    target.task.uid, 16) == SIGNAL_ENQUEUE_QUEUED &&
+            signal_enqueue_locked(&target.task, SIGRTMIN_ + 1,
+                    queue_info(8), SIGNAL_QUEUE_EXPLICIT,
+                    target.task.uid, 16) == SIGNAL_ENQUEUE_QUEUED &&
+            signal_enqueue_process_locked(&target.task,
+                    SIGRTMIN_ + 2, timer_info,
+                    SIGNAL_QUEUE_EXPLICIT, target.task.uid, 16) ==
+                    SIGNAL_ENQUEUE_QUEUED,
+            "建立 exec 清理用私有与共享 POSIX timer 队列");
+    sigset_add(&target.task.pending, SIGUSR2_);
+
+    signal_queue_test_fail_allocation_at(0);
+    CHECK(signal_enqueue_locked(&target.task, SIGRTMIN_ + 3,
+                    timer_info, SIGNAL_QUEUE_LEGACY,
+                    target.task.uid, 16) == SIGNAL_ENQUEUE_BIT_ONLY,
+            "POSIX timer 节点分配失败时记录 bit-only 来源");
+    signal_queue_test_fail_allocation_at(0);
+    CHECK(signal_enqueue_locked(&target.task, SIGRTMIN_ + 3,
+                    queue_info(9), SIGNAL_QUEUE_LEGACY,
+                    target.task.uid, 16) == SIGNAL_ENQUEUE_BIT_ONLY,
+            "同号普通 bit-only 来源与 timer 来源并存");
+    signal_queue_test_fail_allocation_at(0);
+    CHECK(signal_enqueue_process_locked(&target.task, SIGRTMIN_ + 4,
+                    timer_info, SIGNAL_QUEUE_LEGACY,
+                    target.task.uid, 16) == SIGNAL_ENQUEUE_BIT_ONLY,
+            "共享 POSIX timer 节点分配失败时记录来源");
+    signal_queue_test_fail_allocation_at(SIZE_MAX);
+    unlock(&target.sighand.lock);
+
+    signal_flush_exec_timer_pending(&target.task);
+
+    lock(&target.sighand.lock);
+    bool cleaned = !sigset_has(target.task.pending, SIGRTMIN_) &&
+            sigset_has(target.task.pending, SIGRTMIN_ + 1) &&
+            sigset_has(target.task.pending, SIGUSR2_) &&
+            sigset_has(target.task.pending, SIGRTMIN_ + 3) &&
+            sigset_has(target.task.pending_bit_only, SIGRTMIN_ + 3) &&
+            !sigset_has(target.task.pending_timer_bit_only,
+                    SIGRTMIN_ + 3) &&
+            list_size(&target.task.queue) == 1 &&
+            !sigset_has(target.group.shared_pending, SIGRTMIN_ + 2) &&
+            !sigset_has(target.group.shared_pending, SIGRTMIN_ + 4) &&
+            target.group.shared_timer_bit_only == 0 &&
+            list_empty(&target.group.shared_queue);
+    if (cleaned) {
+        struct sigqueue *remaining = list_first_entry(
+                &target.task.queue, struct sigqueue, queue);
+        cleaned = remaining->info.code == SI_QUEUE_ &&
+                remaining->info.sig == SIGRTMIN_ + 1;
+    }
+    signal_flush_pending(&target.task);
+    signal_flush_group_pending(&target.group);
+    unlock(&target.sighand.lock);
+    CHECK(cleaned,
+            "exec 删除 timer 节点与 bit-only 来源并保留同号普通来源");
     return 0;
 }
 
@@ -381,6 +513,7 @@ static bool init_published_group(struct published_group *published,
 static void destroy_published_group(struct published_group *published) {
     signal_flush_pending(published->leader);
     signal_flush_pending(published->sibling);
+    signal_flush_group_pending(&published->group);
     cond_destroy(&published->sibling->pause);
     cond_destroy(&published->sibling->ptrace.cond);
     cond_destroy(&published->leader->pause);
@@ -419,10 +552,21 @@ static int test_process_and_thread_targeting(void) {
 
     CHECK(task_rt_sigqueueinfo(target.leader->pid,
                     SIGRTMIN_, &info) == 0 &&
-            list_size(&target.leader->queue) == 1 &&
+            target.group.shared_pending == sig_mask(SIGRTMIN_) &&
+            list_size(&target.group.shared_queue) == 1 &&
+            list_empty(&target.leader->queue) &&
             list_empty(&target.sibling->queue),
-            "process-directed 信号优先投递到存活 leader");
-    signal_flush_pending(target.leader);
+            "process-directed 信号进入线程组共享队列");
+    signal_flush_group_pending(&target.group);
+
+    CHECK(task_rt_sigqueueinfo(target.sibling->pid,
+                    SIGRTMIN_, &info) == 0 &&
+            target.group.shared_pending == sig_mask(SIGRTMIN_) &&
+            list_size(&target.group.shared_queue) == 1 &&
+            list_empty(&target.leader->queue) &&
+            list_empty(&target.sibling->queue),
+            "非 leader TID 也按 Linux 语义定位线程组共享队列");
+    signal_flush_group_pending(&target.group);
 
     target.leader->blocked |= sig_mask(SIGCONT_);
     target.group.limits[RLIMIT_SIGPENDING_].cur = 0;
@@ -437,8 +581,8 @@ static int test_process_and_thread_targeting(void) {
             target.group.stop_code == 0;
     unlock(&target.group.lock);
     CHECK(resume_error == _EAGAIN && group_resumed &&
-            !sigset_has(target.leader->pending, SIGCONT_) &&
-            list_empty(&target.leader->queue),
+            !sigset_has(target.group.shared_pending, SIGCONT_) &&
+            list_empty(&target.group.shared_queue),
             "显式 SIGCONT 排队失败仍先恢复已停止线程组");
     target.leader->blocked &= ~sig_mask(SIGCONT_);
     target.group.limits[RLIMIT_SIGPENDING_].cur = 8;
@@ -447,18 +591,20 @@ static int test_process_and_thread_targeting(void) {
     CHECK(task_rt_sigqueueinfo(target.leader->pid,
                     SIGRTMIN_, &info) == 0 &&
             list_empty(&target.leader->queue) &&
-            list_size(&target.sibling->queue) == 1,
-            "leader 先退出时 process-directed 信号选择存活 sibling");
-    signal_flush_pending(target.sibling);
+            list_empty(&target.sibling->queue) &&
+            list_size(&target.group.shared_queue) == 1,
+            "leader 先退出时 process-directed 信号仍留在共享队列");
+    signal_flush_group_pending(&target.group);
     CHECK(task_rt_sigqueueinfo(target.leader->pid, 0, &info) == 0 &&
-            list_empty(&target.sibling->queue),
+            list_empty(&target.group.shared_queue),
             "signal 0 对仍存在的退出 leader 只做权限与存在性检查");
 
     target.sibling->exiting = true;
     CHECK(task_rt_sigqueueinfo(target.leader->pid,
                     SIGRTMIN_, &info) == 0 &&
             list_empty(&target.leader->queue) &&
-            list_empty(&target.sibling->queue),
+            list_empty(&target.sibling->queue) &&
+            list_empty(&target.group.shared_queue),
             "完全退出但未 reap 的线程组与 Linux 一样静默接受信号");
     CHECK(task_rt_tgsigqueueinfo(target.leader->pid,
                     target.sibling->pid, SIGRTMIN_, &info) == _ESRCH,
@@ -499,6 +645,199 @@ static int test_process_and_thread_targeting(void) {
     return 0;
 }
 
+static int test_shared_pending_retarget(void) {
+    struct published_group target;
+    CHECK(init_published_group(&target, 5003, 8),
+            "创建共享 pending 重定向目标组");
+    struct task sender = {
+        .uid = 5003,
+        .euid = 5003,
+    };
+    current = &sender;
+
+    int notification[2];
+    CHECK(pipe(notification) == 0 &&
+            fcntl(notification[0], F_SETFL, O_NONBLOCK) == 0 &&
+            fcntl(notification[1], F_SETFL, O_NONBLOCK) == 0,
+            "创建共享 pending 唤醒通知管道");
+    task_thread_store(target.sibling, pthread_self());
+    lock(&target.sibling->waiting_cond_lock);
+    target.sibling->waiting_poll_active = true;
+    target.sibling->waiting_poll_notify_fd = notification[1];
+    unlock(&target.sibling->waiting_cond_lock);
+
+    lock(&pids_lock);
+    lock(&target.sighand.lock);
+    sigset_add(&target.group.shared_pending, SIGUSR1_);
+    target.leader->exiting = true;
+    signal_retarget_shared_pending_locked(
+            target.leader, sig_mask(SIGUSR1_));
+    target.leader->exiting = false;
+    unlock(&target.sighand.lock);
+    unlock(&pids_lock);
+    char byte;
+    CHECK(read(notification[0], &byte, 1) == 1,
+            "原接收线程退出时唤醒可接收的 sibling");
+
+    lock(&target.sighand.lock);
+    target.group.shared_pending = sig_mask(SIGUSR2_);
+    target.leader->blocked |= sig_mask(SIGUSR2_);
+    unlock(&target.sighand.lock);
+    signal_retarget_shared_pending(
+            target.leader, sig_mask(SIGUSR2_));
+    CHECK(read(notification[0], &byte, 1) == 1,
+            "原接收线程新阻塞共享信号时重新唤醒 sibling");
+
+    lock(&target.sibling->waiting_cond_lock);
+    target.sibling->waiting_poll_active = false;
+    target.sibling->waiting_poll_notify_fd = -1;
+    unlock(&target.sibling->waiting_cond_lock);
+    close(notification[0]);
+    close(notification[1]);
+    target.leader->blocked &= ~sig_mask(SIGUSR2_);
+    signal_flush_group_pending(&target.group);
+    destroy_published_group(&target);
+    current = NULL;
+    return 0;
+}
+
+static int test_job_control_queue_cancellation(void) {
+    struct published_group target;
+    CHECK(init_published_group(&target, 5004, 16),
+            "创建作业控制队列目标组");
+    struct task sender = {
+        .uid = 5004,
+        .euid = 5004,
+    };
+    current = &sender;
+    struct siginfo_ info = queue_info(17);
+
+    lock(&target.sighand.lock);
+    CHECK(signal_enqueue_locked(target.leader, SIGCONT_, info,
+                    SIGNAL_QUEUE_FORCE, target.leader->uid, 16) >= 0 &&
+            signal_enqueue_locked(target.sibling, SIGCONT_, info,
+                    SIGNAL_QUEUE_FORCE, target.sibling->uid, 16) >= 0 &&
+            signal_enqueue_process_locked(target.leader, SIGCONT_, info,
+                    SIGNAL_QUEUE_FORCE, target.leader->uid, 16) >= 0,
+            "在私有与共享层建立待清理 SIGCONT");
+    unlock(&target.sighand.lock);
+
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGTSTP_, &info) == 0 &&
+            !sigset_has(target.leader->pending, SIGCONT_) &&
+            !sigset_has(target.sibling->pending, SIGCONT_) &&
+            !sigset_has(target.group.shared_pending, SIGCONT_) &&
+            sigset_has(target.group.shared_pending, SIGTSTP_),
+            "生成 stop 信号时清除两级 SIGCONT 队列");
+
+    lock(&target.sighand.lock);
+    CHECK(signal_enqueue_locked(target.leader, SIGSTOP_, info,
+                    SIGNAL_QUEUE_FORCE, target.leader->uid, 16) >= 0 &&
+            signal_enqueue_locked(target.sibling, SIGTTIN_, info,
+                    SIGNAL_QUEUE_FORCE, target.sibling->uid, 16) >= 0 &&
+            signal_enqueue_process_locked(target.leader, SIGTTOU_, info,
+                    SIGNAL_QUEUE_FORCE, target.leader->uid, 16) >= 0,
+            "在私有与共享层建立全部 stop 类队列");
+    unlock(&target.sighand.lock);
+    lock(&target.group.lock);
+    target.group.stopped = true;
+    target.group.stop_code = SIGSTOP_;
+    unlock(&target.group.lock);
+
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGCONT_, &info) == 0 &&
+            (target.leader->pending & TEST_JOB_CONTROL_STOP_MASK) == 0 &&
+            (target.sibling->pending & TEST_JOB_CONTROL_STOP_MASK) == 0 &&
+            (target.group.shared_pending &
+                    TEST_JOB_CONTROL_STOP_MASK) == 0,
+            "生成 SIGCONT 时清除私有与共享 stop 队列");
+    lock(&target.group.lock);
+    bool resumed = !target.group.stopped &&
+            target.group.stop_code == 0 && target.group.continued &&
+            target.group.continue_notification_pending;
+    unlock(&target.group.lock);
+    CHECK(resumed, "SIGCONT 在排队判定前恢复线程组状态");
+
+    destroy_published_group(&target);
+    current = NULL;
+    return 0;
+}
+
+static int test_exec_window_process_signal_routing(void) {
+    struct published_group target;
+    CHECK(init_published_group(&target, 5002, 8),
+            "创建 exec 窗口信号目标组");
+    struct task sender = {
+        .uid = 5002,
+        .euid = 5002,
+        .pid = 7002,
+    };
+    current = &sender;
+    struct siginfo_ info = queue_info(UINT64_C(0x8877665544332211));
+
+    target.group.exec_task = target.sibling;
+    target.sibling->blocked = sig_mask(SIGTERM_);
+    target.leader->blocked = 0;
+    sigset_add(&target.leader->pending, SIGKILL_);
+    CHECK(task_rt_tgsigqueueinfo(target.leader->pid,
+                    target.leader->pid, SIGTERM_, &info) == 0 &&
+            sigset_has(target.leader->pending, SIGKILL_) &&
+            sigset_has(target.leader->pending, SIGTERM_) &&
+            task_group_fatal_signal(target.sibling) == 0 &&
+            !target.group.doing_group_exit,
+            "已待清理 peer 的线程定向 SIGTERM 不反杀 execer");
+    signal_flush_pending(target.leader);
+
+    sigset_add(&target.leader->pending, SIGKILL_);
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGTERM_, &info) == 0 &&
+            target.leader->pending == sig_mask(SIGKILL_) &&
+            sigset_has(target.group.shared_pending, SIGTERM_) &&
+            !sigset_has(target.sibling->pending, SIGTERM_) &&
+            task_group_fatal_signal(target.sibling) == 0 &&
+            !target.group.doing_group_exit,
+            "进程定向 pending 在 exec 窗口保留在线程组队列");
+    signal_flush_pending(target.leader);
+    signal_flush_pending(target.sibling);
+    signal_flush_group_pending(&target.group);
+
+    target.sighand.action[SIGUSR1_] = (struct signal_action) {
+        .handler = UINT64_C(0x12345678),
+    };
+    target.leader->exiting = true;
+    target.leader->sighand = NULL;
+    target.sibling->blocked = 0;
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGUSR1_, &info) == 0 &&
+            sigset_has(target.group.shared_pending, SIGUSR1_) &&
+            list_size(&target.group.shared_queue) == 1,
+            "旧 leader 已释放 sighand 时继续向共享队列排队");
+    signal_flush_group_pending(&target.group);
+
+    target.group.exec_task = NULL;
+    target.sibling->exiting = true;
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGUSR1_, &info) == 0,
+            "完全 zombie 进程成功丢弃进程定向信号");
+
+    target.leader->sighand = &target.sighand;
+    target.leader->exiting = false;
+    target.sibling->exiting = false;
+    target.group.exec_task = target.sibling;
+    CHECK(task_rt_sigqueueinfo(target.leader->pid,
+                    SIGKILL_, &info) == 0 &&
+            task_group_fatal_signal(target.sibling) == SIGKILL_ &&
+            target.group.doing_group_exit &&
+            target.group.group_exit_code == SIGKILL_ &&
+            sigset_has(target.group.shared_pending, SIGKILL_),
+            "外部 SIGKILL 在 exec 窗口提交组退出并命中 execer");
+
+    target.group.exec_task = NULL;
+    destroy_published_group(&target);
+    current = NULL;
+    return 0;
+}
+
 int main(void) {
     struct sigaction ignored = {.sa_handler = SIG_IGN};
     sigemptyset(&ignored.sa_mask);
@@ -508,8 +847,13 @@ int main(void) {
     if (test_shared_uid_limit_and_cleanup() != 0 ||
             test_allocation_failure_and_bit_only() != 0 ||
             test_fifo_and_standard_coalescing() != 0 ||
+            test_linux_signal_selection_order() != 0 ||
+            test_exec_timer_pending_cleanup() != 0 ||
             test_concurrent_shared_limit() != 0 ||
-            test_process_and_thread_targeting() != 0)
+            test_process_and_thread_targeting() != 0 ||
+            test_shared_pending_retarget() != 0 ||
+            test_job_control_queue_cancellation() != 0 ||
+            test_exec_window_process_signal_routing() != 0)
         return 1;
     return 0;
 }

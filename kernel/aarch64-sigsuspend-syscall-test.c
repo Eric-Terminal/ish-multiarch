@@ -321,6 +321,9 @@ static int test_signal_after_wait_registration(
     fixture->sighand.action[SIGUSR2_] = (struct signal_action) {
         .handler = UINT64_C(0x0000400087654321),
     };
+    fixture->sighand.action[SIGUSR1_] = (struct signal_action) {
+        .handler = UINT64_C(0x0000400012345678),
+    };
     queue_signal(&fixture->task, SIGUSR1_);
 
     struct signal_sender sender = {.task = &fixture->task};

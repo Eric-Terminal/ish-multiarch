@@ -76,6 +76,9 @@ uint_t sys_alarm(uint_t seconds);
 int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr);
 int_t sys_timer_settime(dword_t timer, int_t flags, addr_t new_value_addr, addr_t old_value_addr);
 int_t sys_timer_delete(dword_t timer_id);
+// exec 成功越过 PONR 且线程组收敛后，在无外部锁状态同步删除
+// POSIX timers，但保留 ITIMER_REAL。
+void tgroup_exec_posix_timers_destroy(struct tgroup *group);
 // 全组线程均进入退出流程后，在无外部锁状态同步终止全部定时器。
 void tgroup_timers_destroy(struct tgroup *group);
 fd_t sys_timerfd_create(int_t clockid, int_t flags);

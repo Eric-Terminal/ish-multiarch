@@ -6,6 +6,7 @@
 #include "util/list.h"
 #include "util/sync.h"
 struct task;
+struct tgroup;
 
 typedef qword_t sigset_t_;
 
@@ -125,26 +126,33 @@ enum signal_enqueue_result {
 int signal_enqueue_locked(struct task *task, int signal,
         struct siginfo_ info, enum signal_queue_policy policy,
         uid_t_ uid, qword_t limit);
+int signal_enqueue_process_locked(struct task *representative, int signal,
+        struct siginfo_ info, enum signal_queue_policy policy,
+        uid_t_ uid, qword_t limit);
+// 调用方持有任务共享的 sighand 锁；返回线程与进程两级 pending 并集。
+sigset_t_ signal_pending_mask_locked(struct task *task);
 // 释放节点时同步归还其 real UID pending 配额。
 void signal_queue_release(struct sigqueue *queued);
 // 调用方保证队列不被并发修改；所有节点经统一扣账路径释放。
 void signal_flush_pending(struct task *task);
+void signal_flush_group_pending(struct tgroup *group);
+// POSIX timer 已同步退休后，清除其私有与进程级 SI_TIMER 排队节点。
+void signal_flush_exec_timer_pending(struct task *task);
 // 调用方持有 sighand 锁；清空一个信号的节点与 bit-only pending 位。
 void signal_discard_pending_locked(struct task *task, int signal);
+void signal_discard_group_pending_locked(
+        struct tgroup *group, int signal);
+void signal_group_pending_init(struct tgroup *group);
 
 // 仅供故障注入测试；SIZE_MAX 表示恢复正常分配。
 void signal_queue_test_fail_allocation_at(size_t index);
 
-// 调用方持有 sighand->lock；普通信号优先，
-// 实时信号按编号与入队顺序选择。
-struct sigqueue *signal_select_unblocked_locked(
-        struct task *task, sigset_t_ blocked);
 // 删除一个队列节点，并仅在同号节点全部消费后清除 pending 位。
 void signal_dequeue_locked(
         struct task *task, struct sigqueue *queued);
 // 选择并消费一个信号；没有队列节点的 pending 位会生成 Linux 兼容信息。
 bool signal_take_unblocked_locked(struct task *task, sigset_t_ blocked,
-        bool prioritize_sigkill, struct siginfo_ *info);
+        struct siginfo_ *info);
 
 struct sigevent_ {
     union sigval_ value;
@@ -156,6 +164,21 @@ struct sigevent_ {
 // send a signal
 // you better make sure the task isn't gonna get freed under me (pids_lock or current)
 void send_signal(struct task *task, int sig, struct siginfo_ info);
+// 调用方持有 pids_lock；用于已经固定目标生命周期的内部路径。
+void send_signal_locked(struct task *task, int sig, struct siginfo_ info);
+// 调用方持有 pids_lock；在 exec 换位窗口内保留进程定向 pending。
+void send_process_signal(
+        struct task *suggested, int sig, struct siginfo_ info);
+// 已持有 pids_lock 与共享 sighand 锁时，把当前任务不再接收的共享信号重定向。
+void signal_retarget_shared_pending_locked(
+        struct task *task, sigset_t_ which);
+// 无锁入口；用于任务修改自身阻塞掩码后的重新唤醒。
+void signal_retarget_shared_pending(
+        struct task *task, sigset_t_ which);
+// 读取不可阻塞的 SIGKILL pending 状态；内部负责 sighand 锁。
+bool task_sigkill_pending(struct task *task);
+// 调用方持有目标 sighand 锁；返回必须抢占普通派送的退出信号。
+int signal_forced_exit_locked(struct task *task);
 // 子进程从作业控制停止恢复后，在无 pids_lock 的运行安全点通知父组。
 void signal_notify_group_continue(struct task *task);
 // 子进程停止或继续后唤醒父组；调用方不得持有 pids、group 或 sighand 锁。
@@ -165,6 +188,9 @@ bool signal_parent_child_exit_policy_locked(
         struct task *parent, int exit_signal, bool *send_exit_signal);
 // send a signal without regard for whether the signal is blocked or ignored
 void deliver_signal(struct task *task, int sig, struct siginfo_ info);
+// 调用方持有 pids_lock；强制排队但仍执行 stop/continue 的进程级副作用。
+void deliver_signal_locked(
+        struct task *task, int sig, struct siginfo_ info);
 // send a signal to current if it's not blocked or ignored, return whether that worked
 // exists specifically for sending SIGTTIN/SIGTTOU
 bool try_self_signal(int sig);

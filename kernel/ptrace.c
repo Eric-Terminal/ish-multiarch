@@ -168,7 +168,7 @@ dword_t sys_ptrace(dword_t request, dword_t pid, addr_t addr, dword_t data) {
             if (!child) return _EPERM;
 
             unlock(&child->ptrace.lock);
-            send_signal(child, SIGKILL_, SIGINFO_NIL);
+            send_signal_locked(child, SIGKILL_, SIGINFO_NIL);
             lock(&child->ptrace.lock);
             child->ptrace.stopped = false;
             notify(&child->ptrace.cond);
