@@ -278,6 +278,8 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
         struct guest_linux_user_fault *fault);
 int_t sys_set_robust_list(addr_t robust_list, dword_t len);
 int_t sys_get_robust_list(pid_t_ pid, addr_t robust_list_ptr, addr_t len_ptr);
+int_t sys_set_robust_list_aarch64(qword_t robust_list, qword_t len);
+int_t sys_get_robust_list_aarch64(pid_t_ pid, qword_t *robust_list);
 
 // misc
 dword_t sys_getrandom(addr_t buf_addr, dword_t len, dword_t flags);

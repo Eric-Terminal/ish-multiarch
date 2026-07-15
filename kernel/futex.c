@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "kernel/calls.h"
+#include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
@@ -410,6 +411,17 @@ static bool snapshot_aarch64_futex_keys_locked(
     return true;
 }
 
+static struct futex_key aarch64_futex_key_from_snapshot(
+        struct aarch64_linux_process *process, qword_t address,
+        const struct aarch64_linux_futex_word_snapshot *snapshot) {
+    if (snapshot->shared_identity != 0) {
+        return aarch64_physical_futex_key(
+                snapshot->shared_identity, snapshot->page_offset);
+    }
+    return aarch64_virtual_futex_key(
+            aarch64_linux_process_memory_identity(process), address);
+}
+
 static bool aarch64_futex_address_is_in_range(
         struct aarch64_linux_process *process, qword_t address,
         struct guest_linux_user_fault *fault) {
@@ -626,6 +638,166 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
                     (dword_t) timeout_or_val2, fault);
     }
     return _ENOSYS;
+}
+
+int_t sys_set_robust_list_aarch64(qword_t robust_list, qword_t len) {
+    assert(current != NULL);
+    if (len != sizeof(struct aarch64_linux_robust_list_head))
+        return _EINVAL;
+    lock(&pids_lock);
+    current->aarch64_robust_list = robust_list;
+    unlock(&pids_lock);
+    return 0;
+}
+
+int_t sys_get_robust_list_aarch64(
+        pid_t_ pid, qword_t *robust_list) {
+    assert(current != NULL && robust_list != NULL);
+    lock(&pids_lock);
+    struct task *task = pid == 0 || pid == current->pid ?
+            current : pid_get_task((dword_t) pid);
+    int_t result = 0;
+    if (task == NULL) {
+        result = _ESRCH;
+    } else if (task != current) {
+        // AArch64 ptrace 尚未提供 READ_REALCREDS 等价检查，保守拒绝跨任务读取。
+        result = _EPERM;
+    } else {
+        *robust_list = task->aarch64_robust_list;
+    }
+    unlock(&pids_lock);
+    return result;
+}
+
+static qword_t take_aarch64_robust_list(struct task *task) {
+    lock(&pids_lock);
+    qword_t robust_list = task->aarch64_robust_list;
+    task->aarch64_robust_list = 0;
+    unlock(&pids_lock);
+    return robust_list;
+}
+
+static bool add_robust_futex_offset(
+        qword_t entry, sqword_t offset, qword_t *address) {
+    if (offset >= 0) {
+        qword_t positive = (qword_t) offset;
+        if (entry > UINT64_MAX - positive)
+            return false;
+        *address = entry + positive;
+        return true;
+    }
+    qword_t magnitude = (qword_t) (-(offset + 1)) + 1;
+    if (entry < magnitude)
+        return false;
+    *address = entry - magnitude;
+    return true;
+}
+
+static bool cleanup_robust_futex_aarch64(
+        struct aarch64_linux_process *process, qword_t entry,
+        sqword_t offset, pid_t_ tid, bool pi, bool pending) {
+    qword_t address;
+    if (!add_robust_futex_offset(entry, offset, &address) ||
+            (address & (sizeof(dword_t) - 1)) != 0 ||
+            !aarch64_linux_process_contains_user_range(
+                    process, address, sizeof(dword_t)))
+        return false;
+
+    lock(&futex_lock);
+    const qword_t addresses[] = {address};
+    struct aarch64_linux_futex_word_snapshot snapshot;
+    dword_t observed;
+    if (!aarch64_linux_process_snapshot_futex_words(
+            process, addresses, 1, &snapshot, &observed, NULL)) {
+        unlock(&futex_lock);
+        return false;
+    }
+
+    for (;;) {
+        struct futex_key key = aarch64_futex_key_from_snapshot(
+                process, address, &snapshot);
+        dword_t owner = observed & AARCH64_LINUX_FUTEX_TID_MASK;
+        if (pending && !pi && owner == 0) {
+            (void) wake_futex_locked(&key, 1);
+            unlock(&futex_lock);
+            return true;
+        }
+        if (owner != (dword_t) tid) {
+            unlock(&futex_lock);
+            return true;
+        }
+
+        dword_t replacement =
+                (observed & AARCH64_LINUX_FUTEX_WAITERS) |
+                AARCH64_LINUX_FUTEX_OWNER_DIED;
+        enum aarch64_linux_process_compare_exchange_result result =
+                aarch64_linux_process_compare_exchange_futex_u32(
+                        process, address, observed, replacement,
+                        &observed, &snapshot, NULL);
+        if (result == AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT) {
+            unlock(&futex_lock);
+            return false;
+        }
+        if (result == AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH)
+            continue;
+
+        if (!pi && (observed & AARCH64_LINUX_FUTEX_WAITERS) != 0) {
+            key = aarch64_futex_key_from_snapshot(
+                    process, address, &snapshot);
+            (void) wake_futex_locked(&key, 1);
+        }
+        unlock(&futex_lock);
+        return true;
+    }
+}
+
+static qword_t robust_entry_address(qword_t pointer) {
+    return pointer & AARCH64_LINUX_ROBUST_LIST_ADDRESS_MASK;
+}
+
+static bool robust_entry_is_pi(qword_t pointer) {
+    return (pointer & AARCH64_LINUX_ROBUST_LIST_PI) != 0;
+}
+
+void futex_cleanup_robust_list_aarch64(
+        struct task *task, struct aarch64_linux_process *process) {
+    assert(task != NULL);
+    qword_t head_address = take_aarch64_robust_list(task);
+    if (head_address == 0 || process == NULL)
+        return;
+
+    struct aarch64_linux_robust_list_head head;
+    if (!aarch64_linux_process_read_memory(process,
+            head_address, &head, sizeof(head), NULL))
+        return;
+
+    qword_t entry = robust_entry_address(head.next);
+    bool entry_pi = robust_entry_is_pi(head.next);
+    qword_t pending = robust_entry_address(head.list_op_pending);
+    bool pending_pi = robust_entry_is_pi(head.list_op_pending);
+    for (dword_t count = 0;
+            entry != head_address &&
+            count < AARCH64_LINUX_ROBUST_LIST_LIMIT;
+            count++) {
+        qword_t next_pointer;
+        bool next_loaded = aarch64_linux_process_read_memory(process,
+                entry, &next_pointer, sizeof(next_pointer), NULL);
+        if (entry != pending && !cleanup_robust_futex_aarch64(
+                process, entry, head.futex_offset,
+                task->pid, entry_pi, false))
+            return;
+        // Linux 会先修复当前节点，再以预先读取的 next 故障终止遍历。
+        if (!next_loaded)
+            return;
+        entry = robust_entry_address(next_pointer);
+        entry_pi = robust_entry_is_pi(next_pointer);
+    }
+
+    if (pending != 0) {
+        (void) cleanup_robust_futex_aarch64(
+                process, pending, head.futex_offset,
+                task->pid, pending_pi, true);
+    }
 }
 
 struct robust_list_head_ {

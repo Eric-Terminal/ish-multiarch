@@ -2,10 +2,12 @@
 #include <string.h>
 
 #include "guest/aarch64/elf64.h"
+#include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
+#include "kernel/calls.h"
 #include "kernel/task.h"
 
 #define CHECK(condition, message) do { \
@@ -23,6 +25,9 @@
 #define LOAD_BIAS UINT64_C(0x0000400000000000)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define ROBUST_HEAD (STACK_TOP - 2 * GUEST_MEMORY_PAGE_SIZE + UINT64_C(0x100))
+#define ROBUST_ENTRY (ROBUST_HEAD + UINT64_C(0x40))
+#define ROBUST_FUTEX (ROBUST_ENTRY + UINT64_C(0x8))
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -122,9 +127,29 @@ static bool stage_process(struct task *task,
     return false;
 }
 
+static bool write_guest_u64(struct aarch64_linux_process *process,
+        qword_t address, qword_t value) {
+    return aarch64_linux_process_write_u32(
+                    process, address, (dword_t) value, NULL) &&
+            aarch64_linux_process_write_u32(
+                    process, address + 4,
+                    (dword_t) (value >> 32), NULL);
+}
+
+static bool write_robust_state(
+        struct aarch64_linux_process *process, pid_t_ owner) {
+    return write_guest_u64(process, ROBUST_HEAD, ROBUST_ENTRY) &&
+            write_guest_u64(process, ROBUST_HEAD + 8, 8) &&
+            write_guest_u64(process, ROBUST_HEAD + 16, 0) &&
+            write_guest_u64(process, ROBUST_ENTRY, ROBUST_HEAD) &&
+            aarch64_linux_process_write_u32(
+                    process, ROBUST_FUTEX, (dword_t) owner, NULL);
+}
+
 int main(void) {
     struct task parent = {.pid = 1000};
     lock_init(&parent.general_lock);
+    current = &parent;
     struct aarch64_linux_process *first =
             make_process(&parent, parent.pid, true);
     CHECK(first != NULL, "创建首个 opaque process");
@@ -141,6 +166,19 @@ int main(void) {
     CHECK(task_attach_aarch64_process(&parent, taken),
             "take 后可重新交还同一 process");
 
+    const struct aarch64_linux_process_thread_config observer_config = {
+        .tid = parent.pid + 1,
+        .task_opaque = &parent,
+    };
+    struct aarch64_linux_process *old_image_observer =
+            aarch64_linux_process_clone_thread(
+                    first, &observer_config, NULL);
+    CHECK(old_image_observer != NULL &&
+            write_robust_state(first, parent.pid) &&
+            sys_set_robust_list_aarch64(ROBUST_HEAD,
+                    sizeof(struct aarch64_linux_robust_list_head)) == 0,
+            "在旧 exec 映像登记可观察的 robust 节点");
+
     struct aarch64_linux_process *replacement =
             make_process(&parent, parent.pid, true);
     CHECK(replacement != NULL &&
@@ -156,19 +194,41 @@ int main(void) {
             "stage 拒绝覆盖尚未提交的 exec 候选");
     aarch64_linux_process_destroy(duplicate_candidate);
     task_commit_aarch64_exec(&parent);
+    dword_t old_word;
+    qword_t registration = UINT64_MAX;
     CHECK(parent.aarch64_process == replacement &&
-            !task_has_aarch64_exec_candidate(&parent),
-            "安全点提交候选并退休旧 process");
+            !task_has_aarch64_exec_candidate(&parent) &&
+            aarch64_linux_process_read_u32(
+                    old_image_observer, ROBUST_FUTEX,
+                    &old_word, NULL) &&
+            old_word == AARCH64_LINUX_FUTEX_OWNER_DIED &&
+            sys_get_robust_list_aarch64(0, &registration) == 0 &&
+            registration == 0,
+            "安全点在销毁旧映像前完成 robust 修复并清除注册");
+    aarch64_linux_process_destroy(old_image_observer);
 
     struct aarch64_linux_process *discarded =
             make_process(&parent, parent.pid, true);
-    CHECK(discarded != NULL &&
+    CHECK(discarded != NULL && write_robust_state(
+                    replacement, parent.pid) &&
+            sys_set_robust_list_aarch64(ROBUST_HEAD,
+                    sizeof(struct aarch64_linux_robust_list_head)) == 0 &&
             stage_process(&parent, discarded),
             "建立可回滚的 exec 候选");
     task_discard_aarch64_exec(&parent);
+    dword_t preserved_word;
     CHECK(parent.aarch64_process == replacement &&
-            !task_has_aarch64_exec_candidate(&parent),
-            "回滚候选不影响活动 process");
+            !task_has_aarch64_exec_candidate(&parent) &&
+            sys_get_robust_list_aarch64(0, &registration) == 0 &&
+            registration == ROBUST_HEAD &&
+            aarch64_linux_process_read_u32(
+                    replacement, ROBUST_FUTEX,
+                    &preserved_word, NULL) &&
+            preserved_word == (dword_t) parent.pid,
+            "回滚候选保留活动映像的 robust 注册与 owner");
+    CHECK(sys_set_robust_list_aarch64(0,
+            sizeof(struct aarch64_linux_robust_list_head)) == 0,
+            "释放活动映像前清除测试注册");
     task_release_aarch64_process(&parent);
     CHECK(!task_has_aarch64_process(&parent),
             "release 销毁并清空 opaque process");
@@ -184,13 +244,23 @@ int main(void) {
     CHECK(inherited_candidate != NULL &&
             stage_process(&parent, inherited_candidate),
             "为浅拷贝验证建立 exec 候选");
+    const qword_t inherited_registration =
+            UINT64_C(0x00007fff12345678);
+    CHECK(sys_set_robust_list_aarch64(inherited_registration,
+            sizeof(struct aarch64_linux_robust_list_head)) == 0,
+            "登记待验证的父任务 robust 指针");
     struct task *child = task_create_(&parent);
     CHECK(child != NULL && !task_has_aarch64_process(child) &&
             !task_has_aarch64_exec_candidate(child) &&
+            child->aarch64_robust_list == 0 &&
+            parent.aarch64_robust_list == inherited_registration &&
             parent.aarch64_process == inherited &&
             parent.aarch64_exec_candidate == inherited_candidate,
-            "task_create_ 不复制父任务活动或候选 opaque 所有权");
+            "task_create_ 不复制父任务 opaque 所有权或 robust 注册");
     task_abort_create(child);
+    CHECK(sys_set_robust_list_aarch64(0,
+            sizeof(struct aarch64_linux_robust_list_head)) == 0,
+            "浅拷贝验证后清除父任务注册");
     task_discard_aarch64_exec(&parent);
     task_release_aarch64_process(&parent);
 
@@ -228,5 +298,6 @@ int main(void) {
     mm_release(parent.mm);
     parent.mm = NULL;
     parent.mem = NULL;
+    current = NULL;
     return 0;
 }

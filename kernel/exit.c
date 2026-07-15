@@ -53,6 +53,7 @@ noreturn void do_exit(int status) {
     if (task_has_aarch64_process(current)) {
         struct aarch64_linux_process *process =
                 current->aarch64_process;
+        futex_cleanup_robust_list_aarch64(current, process);
         qword_t clear_tid =
                 aarch64_linux_process_take_clear_child_tid(process);
         if (clear_tid != 0 && aarch64_linux_process_write_u32(

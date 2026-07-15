@@ -6,6 +6,7 @@
 #include "fs/fd.h"
 #include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
+#include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-signal-info.h"
@@ -85,6 +86,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_NEWFSTATAT = 79,
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_FUTEX = 98,
+    AARCH64_LINUX_SYS_SET_ROBUST_LIST = 99,
+    AARCH64_LINUX_SYS_GET_ROBUST_LIST = 100,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
     AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
     AARCH64_LINUX_SYS_KILL = 129,
@@ -2092,6 +2095,38 @@ static qword_t dispatch_syscall(
                     (dword_t) syscall->arguments[2],
                     syscall->arguments[3], syscall->arguments[4],
                     (dword_t) syscall->arguments[5], fault));
+        case AARCH64_LINUX_SYS_SET_ROBUST_LIST:
+            return syscall_result(sys_set_robust_list_aarch64(
+                    syscall->arguments[0], syscall->arguments[1]));
+        case AARCH64_LINUX_SYS_GET_ROBUST_LIST: {
+            qword_t robust_list;
+            int_t error = sys_get_robust_list_aarch64(
+                    syscall_pid(syscall->arguments[0]), &robust_list);
+            if (error < 0)
+                return syscall_result(error);
+            const qword_t length =
+                    sizeof(struct aarch64_linux_robust_list_head);
+            qword_t length_address = syscall->arguments[2];
+            if (!aarch64_user_range_fits(
+                    length_address, sizeof(length)))
+                return user_range_error(
+                        fault, length_address, GUEST_MEMORY_WRITE);
+            assert(context->user.write != NULL);
+            if (!context->user.write(context->user.opaque,
+                    length_address, &length, sizeof(length), fault))
+                return syscall_result(_EFAULT);
+
+            qword_t head_address = syscall->arguments[1];
+            if (!aarch64_user_range_fits(
+                    head_address, sizeof(robust_list)))
+                return user_range_error(
+                        fault, head_address, GUEST_MEMORY_WRITE);
+            if (!context->user.write(context->user.opaque,
+                    head_address, &robust_list,
+                    sizeof(robust_list), fault))
+                return syscall_result(_EFAULT);
+            return 0;
+        }
         case AARCH64_LINUX_SYS_NANOSLEEP:
             return aarch64_linux_dispatch_nanosleep(
                     context, syscall, task, fault);

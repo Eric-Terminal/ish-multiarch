@@ -7,6 +7,7 @@
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
 #include "kernel/calls.h"
+#include "kernel/futex.h"
 #include "kernel/task.h"
 #include "kernel/memory.h"
 #include "emu/tlb.h"
@@ -62,6 +63,9 @@ void task_commit_aarch64_exec(struct task *task) {
     assert(task != NULL && task_has_aarch64_exec_candidate(task) &&
             task->aarch64_exec_mm != NULL);
     struct aarch64_linux_process *retired = task->aarch64_process;
+
+    // exec 只在成功提交时清理旧映像；候选失败或丢弃仍保留原注册。
+    futex_cleanup_robust_list_aarch64(task, retired);
 
     // procfs 与 ptrace 先以 pids_lock 固定 task，再读取地址空间元数据。
     lock(&pids_lock);
@@ -167,6 +171,7 @@ struct task *task_create_(struct task *parent) {
     task->has_saved_mask = false;
     task->clear_tid = 0;
     task->robust_list = 0;
+    task->aarch64_robust_list = 0;
     task->did_exec = false;
     task->exit_code = 0;
     task->zombie = false;

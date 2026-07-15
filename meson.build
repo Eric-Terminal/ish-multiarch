@@ -359,6 +359,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_futex', aarch64_futex_test)
 
+        aarch64_robust_futex_test = executable(
+            'aarch64_robust_futex_test',
+            'kernel/aarch64-robust-futex-test.c',
+            dependencies: ish)
+        test('aarch64_robust_futex', aarch64_robust_futex_test)
+
         aarch64_clone3_syscall_test = executable(
             'aarch64_clone3_syscall_test',
             'kernel/aarch64-clone3-syscall-test.c',
@@ -593,6 +599,12 @@ if not meson.is_cross_build()
         'guest/aarch64/linux-file-abi-test.c',
         include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_linux_file_abi', aarch64_linux_file_abi_test)
+
+    aarch64_linux_futex_abi_test = executable(
+        'aarch64_linux_futex_abi_test',
+        'guest/aarch64/linux-futex-abi-test.c',
+        include_directories: includes)
+    test('aarch64_linux_futex_abi', aarch64_linux_futex_abi_test)
 
     aarch64_linux_signal_abi_test = executable(
         'aarch64_linux_signal_abi_test',
