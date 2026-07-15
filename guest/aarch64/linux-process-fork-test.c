@@ -151,6 +151,7 @@ struct fork_fixture {
     int parent_task;
     int child_task;
     guest_addr_t fork_stack_pointer;
+    qword_t shared_identity;
     unsigned fork_calls;
     unsigned memory_reports[2];
     unsigned state_reports[2];
@@ -228,6 +229,42 @@ static qword_t dispatch_fork_fixture(
         assert(aarch64_linux_process_test_has_owned_state(
                 fixture->child, CHILD_TID, &fixture->child_task,
                 0, SIGNAL_TRAMPOLINE, true));
+        qword_t parent_identity =
+                aarch64_linux_process_memory_identity(fixture->parent);
+        qword_t child_identity =
+                aarch64_linux_process_memory_identity(fixture->child);
+        assert(parent_identity != 0 && child_identity != 0 &&
+                parent_identity != child_identity);
+
+        const qword_t addresses[2] = {
+            FIRST_MMAP,
+            FIRST_MMAP + sizeof(dword_t),
+        };
+        struct aarch64_linux_futex_word_snapshot parent_snapshots[2];
+        struct aarch64_linux_futex_word_snapshot child_snapshots[2];
+        dword_t parent_value;
+        dword_t child_value;
+        struct guest_linux_user_fault snapshot_fault;
+        assert(aarch64_linux_process_snapshot_futex_words(
+                fixture->parent, addresses, 2, parent_snapshots,
+                &parent_value, &snapshot_fault));
+        assert(aarch64_linux_process_snapshot_futex_words(
+                fixture->child, addresses, 2, child_snapshots,
+                &child_value, &snapshot_fault));
+        fixture->shared_identity = parent_snapshots[0].shared_identity;
+        assert(fixture->shared_identity != 0 &&
+                parent_snapshots[1].shared_identity ==
+                        fixture->shared_identity &&
+                child_snapshots[0].shared_identity ==
+                        fixture->shared_identity &&
+                child_snapshots[1].shared_identity ==
+                        fixture->shared_identity);
+        assert(parent_snapshots[0].page_offset == 0 &&
+                parent_snapshots[1].page_offset == sizeof(dword_t) &&
+                child_snapshots[0].page_offset == 0 &&
+                child_snapshots[1].page_offset == sizeof(dword_t));
+        assert(parent_value == UINT32_C(0x41) &&
+                child_value == parent_value);
         fixture->fork_calls++;
         return CHILD_TID;
     }
@@ -246,6 +283,20 @@ static qword_t dispatch_fork_fixture(
         assert(context->user.read(context->user.opaque,
                 FIRST_MMAP, &marker, sizeof(marker), fault));
         assert(marker == (task_index == 0 ? 'P' : 'C'));
+        struct aarch64_linux_process *process = task_index == 0 ?
+                fixture->parent : fixture->child;
+        const qword_t addresses[2] = {FIRST_MMAP, SECOND_MMAP};
+        struct aarch64_linux_futex_word_snapshot snapshots[2];
+        dword_t first_value;
+        assert(aarch64_linux_process_snapshot_futex_words(
+                process, addresses, 2, snapshots, &first_value, fault));
+        assert(snapshots[0].shared_identity ==
+                fixture->shared_identity &&
+                snapshots[0].page_offset == 0 &&
+                snapshots[1].shared_identity == 0 &&
+                snapshots[1].page_offset == 0);
+        assert(first_value == (dword_t)
+                (task_index == 0 ? 'P' : 'C'));
         fixture->memory_reports[task_index]++;
         return 0;
     }
@@ -573,6 +624,9 @@ static void test_thread_shared_memory(void) {
     struct aarch64_linux_process *parent =
             aarch64_linux_process_create(&config, NULL);
     assert(parent != NULL);
+    qword_t memory_identity =
+            aarch64_linux_process_memory_identity(parent);
+    assert(memory_identity != 0);
 
     const guest_addr_t child_stack = STACK_TOP - UINT64_C(0x8000);
     const qword_t child_tls = UINT64_C(0x123456789abcdef0);
@@ -606,6 +660,8 @@ static void test_thread_shared_memory(void) {
     assert(child != NULL &&
             error.stage == AARCH64_LINUX_PROCESS_ERROR_NONE &&
             error.detail == 0);
+    assert(aarch64_linux_process_memory_identity(child) ==
+            memory_identity);
     assert(aarch64_linux_process_test_has_owned_state(
             child, CHILD_TID, &fixture.child_task,
             clear_child_tid, SIGNAL_TRAMPOLINE, true));
@@ -615,6 +671,8 @@ static void test_thread_shared_memory(void) {
     run_to_exit(parent, 0);
     assert(fixture.parent_calls == 1);
     aarch64_linux_process_destroy(parent);
+    assert(aarch64_linux_process_memory_identity(child) ==
+            memory_identity);
     run_to_exit(child, 0);
     assert(fixture.child_calls == 1);
     aarch64_linux_process_destroy(child);
@@ -625,9 +683,110 @@ static void test_thread_shared_memory(void) {
     assert(aarch64_linux_process_clone_thread(NULL, NULL, NULL) == NULL);
 }
 
+struct snapshot_fault_fixture {
+    struct aarch64_linux_process *process;
+    unsigned calls;
+};
+
+static qword_t dispatch_snapshot_fault_fixture(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    (void) fault;
+    struct snapshot_fault_fixture *fixture = context->runtime_opaque;
+    assert(syscall->number == 700 && fixture->process != NULL);
+
+    const struct aarch64_linux_futex_word_snapshot untouched = {
+        .shared_identity = UINT64_C(0x1122334455667788),
+        .page_offset = UINT64_C(0x8877665544332211),
+    };
+    struct aarch64_linux_futex_word_snapshot snapshots[2] = {
+        untouched, untouched,
+    };
+    dword_t first_value = UINT32_C(0xaabbccdd);
+    struct guest_linux_user_fault snapshot_fault = {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
+    };
+    const qword_t protected_address = DATA_ADDRESS;
+    assert(!aarch64_linux_process_snapshot_futex_words(
+            fixture->process,
+            &protected_address, 1, snapshots,
+            &first_value, &snapshot_fault));
+    assert(snapshots[0].shared_identity ==
+            untouched.shared_identity &&
+            snapshots[0].page_offset == untouched.page_offset &&
+            first_value == UINT32_C(0xaabbccdd));
+    assert(snapshot_fault.address == DATA_ADDRESS &&
+            snapshot_fault.access == GUEST_MEMORY_READ &&
+            snapshot_fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+
+    const qword_t partially_valid_addresses[2] = {
+        TEXT_BASE,
+        BRK_LIMIT,
+    };
+    snapshot_fault = (struct guest_linux_user_fault) {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
+    };
+    assert(!aarch64_linux_process_snapshot_futex_words(
+            fixture->process, partially_valid_addresses, 2,
+            snapshots, &first_value, &snapshot_fault));
+    for (size_t index = 0; index < 2; index++) {
+        assert(snapshots[index].shared_identity ==
+                untouched.shared_identity);
+        assert(snapshots[index].page_offset == untouched.page_offset);
+    }
+    assert(first_value == UINT32_C(0xaabbccdd));
+    assert(snapshot_fault.address == BRK_LIMIT &&
+            snapshot_fault.access == GUEST_MEMORY_READ &&
+            snapshot_fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    fixture->calls++;
+    return 0;
+}
+
+static void test_snapshot_faults(void) {
+    // 将数据页改为 PROT_NONE，再在自定义系统调用安全点核对快照故障。
+    static const dword_t program[] = {
+        UINT32_C(0xd2800000), UINT32_C(0xf2a00a00),
+        UINT32_C(0xd2820001), UINT32_C(0xd2800002),
+        UINT32_C(0xd2801c48), UINT32_C(0xd4000001),
+        UINT32_C(0xd2805788), UINT32_C(0xd4000001),
+        UINT32_C(0xd2800000), UINT32_C(0xd2800ba8),
+        UINT32_C(0xd4000001),
+    };
+    byte_t file[TEST_FILE_SIZE];
+    make_test_elf(file, program, sizeof(program) / sizeof(program[0]));
+    struct snapshot_fault_fixture fixture = {0};
+    const struct guest_linux_syscall_service syscalls = {
+        .runtime_opaque = &fixture,
+        .dispatch = dispatch_snapshot_fault_fixture,
+    };
+    struct aarch64_linux_process_config config = make_config(
+            file, PARENT_TID, &fixture, &syscalls, NULL);
+    fixture.process = aarch64_linux_process_create(&config, NULL);
+    assert(fixture.process != NULL);
+    run_to_exit(fixture.process, 0);
+    assert(fixture.calls == 1);
+    qword_t released_identity =
+            aarch64_linux_process_memory_identity(fixture.process);
+    aarch64_linux_process_destroy(fixture.process);
+
+    fixture.process = aarch64_linux_process_create(&config, NULL);
+    assert(fixture.process != NULL);
+    qword_t replacement_identity =
+            aarch64_linux_process_memory_identity(fixture.process);
+    assert(replacement_identity != 0 &&
+            replacement_identity != released_identity);
+    aarch64_linux_process_destroy(fixture.process);
+}
+
 int main(void) {
     test_post_svc_fork();
     test_exclusive_monitor_reset();
     test_thread_shared_memory();
+    test_snapshot_faults();
     return 0;
 }

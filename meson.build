@@ -353,6 +353,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_clone', aarch64_clone_test)
 
+        aarch64_futex_test = executable(
+            'aarch64_futex_test',
+            'kernel/aarch64-futex-test.c',
+            dependencies: ish)
+        test('aarch64_futex', aarch64_futex_test)
+
         aarch64_clone3_syscall_test = executable(
             'aarch64_clone3_syscall_test',
             'kernel/aarch64-clone3-syscall-test.c',

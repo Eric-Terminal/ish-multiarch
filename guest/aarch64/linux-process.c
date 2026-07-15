@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,7 @@ _Static_assert(AARCH64_LINUX_PROCESS_RANDOM_SIZE ==
 
 struct aarch64_linux_process_memory {
     atomic_uint references;
+    qword_t identity;
     struct guest_page_table page_table;
     struct guest_linux_mm linux_mm;
 };
@@ -38,6 +40,23 @@ struct aarch64_linux_process {
     struct aarch64_linux_task task;
 };
 
+static pthread_mutex_t memory_identity_lock = PTHREAD_MUTEX_INITIALIZER;
+static qword_t last_memory_identity;
+
+static void process_check_pthread(int result) {
+    if (result != 0)
+        abort();
+}
+
+static qword_t allocate_memory_identity(void) {
+    process_check_pthread(pthread_mutex_lock(&memory_identity_lock));
+    if (last_memory_identity == UINT64_MAX)
+        abort();
+    qword_t identity = ++last_memory_identity;
+    process_check_pthread(pthread_mutex_unlock(&memory_identity_lock));
+    return identity;
+}
+
 static struct aarch64_linux_process_memory *process_memory_create(void) {
     struct aarch64_linux_process_memory *memory =
             calloc(1, sizeof(*memory));
@@ -49,6 +68,7 @@ static struct aarch64_linux_process_memory *process_memory_create(void) {
         return NULL;
     }
     atomic_init(&memory->references, 1);
+    memory->identity = allocate_memory_identity();
     return memory;
 }
 
@@ -64,6 +84,7 @@ static struct aarch64_linux_process_memory *process_memory_clone(
         return NULL;
     }
     atomic_init(&copy->references, 1);
+    copy->identity = allocate_memory_identity();
     return copy;
 }
 
@@ -522,10 +543,20 @@ void aarch64_linux_process_destroy(
     free(process);
 }
 
-const void *aarch64_linux_process_memory_identity(
+qword_t aarch64_linux_process_memory_identity(
         const struct aarch64_linux_process *process) {
     assert(process != NULL);
-    return process->memory;
+    assert(process->memory->identity != 0);
+    return process->memory->identity;
+}
+
+bool aarch64_linux_process_contains_user_range(
+        const struct aarch64_linux_process *process,
+        qword_t address, size_t size) {
+    assert(process != NULL);
+    return guest_address_space_contains(
+            &process->memory->page_table.address_space,
+            (guest_addr_t) address, size);
 }
 
 qword_t aarch64_linux_process_take_clear_child_tid(
@@ -626,6 +657,79 @@ static void export_fault(struct guest_linux_user_fault *destination,
         .access = (dword_t) source->access,
         .kind = (dword_t) source->kind,
     };
+}
+
+bool aarch64_linux_process_snapshot_futex_words(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, size_t count,
+        struct aarch64_linux_futex_word_snapshot *snapshots,
+        dword_t *first_value,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && addresses != NULL && snapshots != NULL);
+    assert(count == 1 || count == 2);
+    for (size_t index = 0; index < count; index++)
+        assert((addresses[index] & (sizeof(dword_t) - 1)) == 0);
+
+    struct guest_address_space *space =
+            &process->memory->page_table.address_space;
+    struct guest_page_view views[2];
+    struct aarch64_linux_futex_word_snapshot resolved[2];
+    enum guest_memory_fault_kind fault_kind = GUEST_MEMORY_FAULT_NONE;
+    guest_addr_t fault_address = 0;
+    bool locked = guest_address_space_read_lock(space);
+    for (size_t index = 0; index < count; index++) {
+        qword_t address = addresses[index];
+        if (!guest_address_space_contains(
+                space, (guest_addr_t) address, sizeof(dword_t))) {
+            qword_t limit = UINT64_C(1) << space->address_bits;
+            fault_address = (guest_addr_t) (address < limit ?
+                    limit : address);
+            fault_kind = GUEST_MEMORY_FAULT_ADDRESS_SIZE;
+            break;
+        }
+        guest_addr_t page_base = (guest_addr_t)
+                (address & ~GUEST_MEMORY_PAGE_MASK);
+        fault_kind = guest_address_space_resolve_page(
+                space, page_base, GUEST_MEMORY_READ, &views[index]);
+        if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+            fault_address = (guest_addr_t) address;
+            break;
+        }
+        resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
+            .shared_identity = views[index].sync == NULL ? 0 :
+                    guest_page_sync_identity(views[index].sync),
+            .page_offset = address & GUEST_MEMORY_PAGE_MASK,
+        };
+    }
+
+    dword_t resolved_first_value = 0;
+    if (fault_kind == GUEST_MEMORY_FAULT_NONE && first_value != NULL) {
+        const struct guest_page_view *first = &views[0];
+        if (first->sync != NULL)
+            guest_page_sync_read_lock(first->sync);
+        memcpy(&resolved_first_value,
+                first->host_page + (size_t) resolved[0].page_offset,
+                sizeof(resolved_first_value));
+        if (first->sync != NULL)
+            guest_page_sync_read_unlock(first->sync);
+    }
+    guest_address_space_read_unlock(space, locked);
+
+    if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+        if (fault != NULL) {
+            const struct guest_memory_fault memory_fault = {
+                .address = fault_address,
+                .access = GUEST_MEMORY_READ,
+                .kind = fault_kind,
+            };
+            export_fault(fault, &memory_fault);
+        }
+        return false;
+    }
+    memcpy(snapshots, resolved, count * sizeof(*snapshots));
+    if (first_value != NULL)
+        *first_value = resolved_first_value;
+    return true;
 }
 
 bool aarch64_linux_process_read_memory(

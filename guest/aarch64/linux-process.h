@@ -128,6 +128,12 @@ struct aarch64_linux_process_result {
     struct guest_linux_user_fault fault;
 };
 
+struct aarch64_linux_futex_word_snapshot {
+    // 0 表示私有映射；非零值标识共享页的同步域。
+    qword_t shared_identity;
+    qword_t page_offset;
+};
+
 /*
  * create 会复制 ELF、初始栈数据和服务描述符；服务 opaque 指向的后端状态
  * 仍由调用方持有，并须覆盖 process 的完整生命周期。
@@ -172,8 +178,23 @@ struct aarch64_linux_executable_info
         const void *elf_data, size_t elf_size);
 void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process);
-const void *aarch64_linux_process_memory_identity(
+// 地址空间的非零稳定身份；线程共享，fork 得到新身份，释放后不复用。
+qword_t aarch64_linux_process_memory_identity(
         const struct aarch64_linux_process *process);
+// 仅检查用户地址范围，不要求对应页面已经映射。
+bool aarch64_linux_process_contains_user_range(
+        const struct aarch64_linux_process *process,
+        qword_t address, size_t size);
+/*
+ * addresses 仅接受一到两个对齐的 32 位 futex 字。全部地址会在同一
+ * 地址空间读事务内解析，失败时 snapshots 与 first_value 保持不变。
+ */
+bool aarch64_linux_process_snapshot_futex_words(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, size_t count,
+        struct aarch64_linux_futex_word_snapshot *snapshots,
+        dword_t *first_value,
+        struct guest_linux_user_fault *fault);
 qword_t aarch64_linux_process_take_clear_child_tid(
         struct aarch64_linux_process *process);
 // 单次读取不得超过 GUEST_TLB_MAX_ACCESS_SIZE。

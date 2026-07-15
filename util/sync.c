@@ -12,6 +12,7 @@ void cond_init(cond_t *cond) {
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
 #endif
     pthread_cond_init(&cond->cond, &attr);
+    pthread_condattr_destroy(&attr);
 }
 void cond_destroy(cond_t *cond) {
     pthread_cond_destroy(&cond->cond);
@@ -28,22 +29,23 @@ static bool is_signal_pending(lock_t *lock) {
     return pending;
 }
 
-int wait_for(cond_t *cond, lock_t *lock, struct timespec *timeout) {
-    if (is_signal_pending(lock))
-        return _EINTR;
-    int err = wait_for_ignore_signals(cond, lock, timeout);
-    if (err < 0)
-        return _ETIMEDOUT;
-    if (is_signal_pending(lock))
-        return _EINTR;
-    return 0;
-}
-
-int wait_for_ignore_signals(cond_t *cond, lock_t *lock, struct timespec *timeout) {
+static int wait_for_common(cond_t *cond, lock_t *lock,
+        struct timespec *timeout, bool interruptible) {
     if (current) {
         lock(&current->waiting_cond_lock);
         current->waiting_cond = cond;
         current->waiting_lock = lock;
+        /*
+         * 发布后仍持有登记锁复查 pending。信号发送方要么先完成入队并
+         * 被这里观察到，要么随后看到已发布的 condition，并在取得
+         * wait lock 后通知；两种顺序都不会丢失唤醒。
+         */
+        if (interruptible && is_signal_pending(lock)) {
+            current->waiting_cond = NULL;
+            current->waiting_lock = NULL;
+            unlock(&current->waiting_cond_lock);
+            return _EINTR;
+        }
         unlock(&current->waiting_cond_lock);
     }
     int rc = 0;
@@ -82,7 +84,18 @@ int wait_for_ignore_signals(cond_t *cond, lock_t *lock, struct timespec *timeout
     }
     if (rc == ETIMEDOUT)
         return _ETIMEDOUT;
+    if (interruptible && is_signal_pending(lock))
+        return _EINTR;
     return 0;
+}
+
+int wait_for(cond_t *cond, lock_t *lock, struct timespec *timeout) {
+    return wait_for_common(cond, lock, timeout, true);
+}
+
+int wait_for_ignore_signals(
+        cond_t *cond, lock_t *lock, struct timespec *timeout) {
+    return wait_for_common(cond, lock, timeout, false);
 }
 
 void notify(cond_t *cond) {
