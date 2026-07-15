@@ -10,6 +10,7 @@
 struct guest_page_mapping {
     struct guest_page_backing *backing;
     unsigned permissions;
+    bool shared;
 };
 
 struct guest_page_table_leaf {
@@ -60,6 +61,8 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
     *view = (struct guest_page_view) {
         .host_page = guest_page_backing_bytes(mapping->backing),
         .permissions = mapping->permissions,
+        .sync = mapping->shared ?
+                guest_page_backing_sync(mapping->backing) : NULL,
     };
     return GUEST_MEMORY_FAULT_NONE;
 }
@@ -209,19 +212,25 @@ static struct guest_page_table_leaf *clone_leaf(
         if (source_mapping->backing == NULL)
             continue;
         struct guest_page_mapping *copy_mapping = &copy->entries[i];
+        if (source_mapping->shared) {
+            guest_page_backing_retain(source_mapping->backing);
+            copy_mapping->backing = source_mapping->backing;
+        } else {
 #if defined(GUEST_PAGE_TABLE_TESTING)
-        if (clone_allocation_fails()) {
-            destroy_leaf(copy);
-            return NULL;
-        }
+            if (clone_allocation_fails()) {
+                destroy_leaf(copy);
+                return NULL;
+            }
 #endif
-        copy_mapping->backing = guest_page_backing_clone(
-                source_mapping->backing);
-        if (copy_mapping->backing == NULL) {
-            destroy_leaf(copy);
-            return NULL;
+            copy_mapping->backing = guest_page_backing_clone(
+                    source_mapping->backing);
+            if (copy_mapping->backing == NULL) {
+                destroy_leaf(copy);
+                return NULL;
+            }
         }
         copy_mapping->permissions = source_mapping->permissions;
+        copy_mapping->shared = source_mapping->shared;
     }
     return copy;
 }
@@ -372,6 +381,7 @@ enum guest_page_table_result guest_page_table_map(
     if (mapping->backing == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     mapping->permissions = permissions;
+    mapping->shared = false;
     *host_page = guest_page_backing_bytes(mapping->backing);
     guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
@@ -386,9 +396,9 @@ static void discard_prepared_pages(struct prepared_page_mapping *prepared,
     free(prepared);
 }
 
-enum guest_page_table_result guest_page_table_map_zero_range(
+static enum guest_page_table_result map_zero_range(
         struct guest_page_table *table, struct guest_page_range range,
-        unsigned permissions, bool replace) {
+        unsigned permissions, bool replace, bool shared) {
     assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
     if (!valid_range(table, range))
         return GUEST_PAGE_TABLE_INVALID_ADDRESS;
@@ -439,6 +449,7 @@ enum guest_page_table_result guest_page_table_map_zero_range(
         prepared[i].old_backing = prepared[i].mapping->backing;
         prepared[i].mapping->backing = prepared[i].new_backing;
         prepared[i].mapping->permissions = permissions;
+        prepared[i].mapping->shared = shared;
         prepared[i].new_backing = NULL;
     }
     guest_address_space_changed(&table->address_space);
@@ -448,6 +459,18 @@ enum guest_page_table_result guest_page_table_map_zero_range(
     }
     free(prepared);
     return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_map_zero_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions, bool replace) {
+    return map_zero_range(table, range, permissions, replace, false);
+}
+
+enum guest_page_table_result guest_page_table_map_zero_shared_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions, bool replace) {
+    return map_zero_range(table, range, permissions, replace, true);
 }
 
 enum guest_page_table_result guest_page_table_lookup(

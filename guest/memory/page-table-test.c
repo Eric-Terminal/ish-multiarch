@@ -10,6 +10,7 @@
 #define SIBLING_LEAF_PAGE (HIGH_PAGE + (UINT64_C(1) << 21))
 #define SIBLING_LEVEL2_PAGE (HIGH_PAGE + (UINT64_C(1) << 30))
 #define RANGE_BASE UINT64_C(0x0000200000000000)
+#define SHARED_BASE UINT64_C(0x0000000000400000)
 
 static byte_t *lookup_page(struct guest_page_table *table,
         guest_addr_t page, unsigned expected_permissions) {
@@ -27,6 +28,28 @@ static void assert_not_mapped(struct guest_page_table *table,
     unsigned permissions;
     assert(guest_page_table_lookup(table, page,
             &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
+}
+
+static struct guest_page_view resolve_view(struct guest_page_table *table,
+        guest_addr_t page) {
+    struct guest_page_view view;
+    assert(guest_address_space_resolve_page(&table->address_space, page,
+            GUEST_MEMORY_READ, &view) == GUEST_MEMORY_FAULT_NONE);
+    return view;
+}
+
+static byte_t tlb_read_byte(struct guest_tlb *tlb, guest_addr_t address) {
+    struct guest_memory_fault fault;
+    byte_t value;
+    assert(guest_tlb_read(tlb, address, &value, sizeof(value),
+            GUEST_MEMORY_READ, &fault));
+    return value;
+}
+
+static void tlb_write_byte(struct guest_tlb *tlb, guest_addr_t address,
+        byte_t value) {
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(tlb, address, &value, sizeof(value), &fault));
 }
 
 static void test_single_page_operations(void) {
@@ -188,6 +211,118 @@ static void test_backing_allocation_failures(void) {
             assert(replacement_page[offset] == 0);
     }
     guest_page_table_destroy(&table);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void test_shared_map_rollback(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    const struct guest_page_range range = {
+        .first = SHARED_BASE,
+        .page_count = 3,
+    };
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    assert(guest_page_table_map_zero_shared_range(&table, range,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *pages[3];
+    const struct guest_page_sync *syncs[3];
+    for (qword_t index = 0; index < range.page_count; index++) {
+        guest_addr_t address = range.first +
+                index * GUEST_MEMORY_PAGE_SIZE;
+        pages[index] = lookup_page(&table, address,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+        pages[index][0] = (byte_t) (0x51 + index);
+        syncs[index] = resolve_view(&table, address).sync;
+        assert(syncs[index] != NULL);
+    }
+    assert(guest_page_backing_test_live_count() == range.page_count);
+    qword_t generation = table.address_space.generation;
+
+    guest_page_backing_test_fail_allocation_at(0);
+    assert(guest_page_table_map_zero_shared_range(&table, range,
+            GUEST_MEMORY_READ, false) ==
+            GUEST_PAGE_TABLE_ALREADY_MAPPED);
+    assert(guest_page_backing_test_allocation_count() == 0);
+
+    for (size_t fail_at = 0; fail_at < 3; fail_at++) {
+        guest_page_backing_test_fail_allocation_at(fail_at);
+        assert(guest_page_table_map_zero_shared_range(&table, range,
+                GUEST_MEMORY_EXECUTE, true) ==
+                GUEST_PAGE_TABLE_OUT_OF_MEMORY);
+        assert(guest_page_backing_test_allocation_count() == fail_at + 1);
+        assert(table.address_space.generation == generation);
+        assert(guest_page_backing_test_live_count() == range.page_count);
+        for (qword_t index = 0; index < range.page_count; index++) {
+            guest_addr_t address = range.first +
+                    index * GUEST_MEMORY_PAGE_SIZE;
+            assert(lookup_page(&table, address,
+                    GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
+                    pages[index]);
+            assert(pages[index][0] == (byte_t) (0x51 + index));
+            assert(resolve_view(&table, address).sync == syncs[index]);
+        }
+    }
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    guest_page_table_destroy(&table);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void test_mapping_kind_replacement(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_table source;
+    assert(guest_page_table_init(&source, 48));
+    const struct guest_page_range one_page = {
+        .first = SHARED_BASE,
+        .page_count = 1,
+    };
+
+    assert(guest_page_table_map_zero_range(&source, one_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *private_page = lookup_page(&source, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(resolve_view(&source, SHARED_BASE).sync == NULL);
+
+    assert(guest_page_table_map_zero_shared_range(&source, one_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, true) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *shared_page = lookup_page(&source, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(shared_page != private_page);
+    assert(resolve_view(&source, SHARED_BASE).sync != NULL);
+    shared_page[0] = 0x6a;
+
+    struct guest_page_table shared_copy;
+    assert(guest_page_table_clone(&shared_copy, &source));
+    assert(lookup_page(&shared_copy, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_page);
+
+    assert(guest_page_table_map_zero_range(&source, one_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, true) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *new_private_page = lookup_page(&source, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(new_private_page != shared_page && new_private_page[0] == 0);
+    assert(resolve_view(&source, SHARED_BASE).sync == NULL);
+    assert(lookup_page(&shared_copy, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_page);
+    assert(shared_page[0] == 0x6a);
+
+    struct guest_page_table private_copy;
+    assert(guest_page_table_clone(&private_copy, &source));
+    assert(lookup_page(&private_copy, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) != new_private_page);
+    assert(resolve_view(&private_copy, SHARED_BASE).sync == NULL);
+
+    guest_page_table_destroy(&private_copy);
+    guest_page_table_destroy(&source);
+    assert(shared_page[0] == 0x6a);
+    guest_page_table_destroy(&shared_copy);
     assert(guest_page_backing_test_live_count() == 0);
 }
 
@@ -414,6 +549,254 @@ static void test_tree_and_address_boundaries(void) {
     guest_page_table_destroy(&table);
 }
 
+static void test_shared_clone_lifecycle(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table source;
+    assert(guest_page_table_init(&source, 48));
+
+    byte_t *private_page;
+    assert(guest_page_table_map(&source, HIGH_PAGE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &private_page) ==
+            GUEST_PAGE_TABLE_OK);
+    private_page[0] = 0x31;
+    const struct guest_page_range shared_range = {
+        .first = SHARED_BASE,
+        .page_count = 3,
+    };
+    assert(guest_page_table_map_zero_shared_range(&source, shared_range,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *shared_pages[3];
+    for (qword_t index = 0; index < shared_range.page_count; index++) {
+        shared_pages[index] = lookup_page(&source,
+                shared_range.first + index * GUEST_MEMORY_PAGE_SIZE,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+        shared_pages[index][0] = (byte_t) (0x41 + index);
+    }
+    assert(resolve_view(&source, HIGH_PAGE).sync == NULL);
+    assert(resolve_view(&source, SHARED_BASE).sync != NULL);
+
+    guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_table first_copy;
+    assert(guest_page_table_clone(&first_copy, &source));
+    assert(guest_page_backing_test_allocation_count() == 1);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_table second_copy;
+    assert(guest_page_table_clone(&second_copy, &source));
+    assert(guest_page_backing_test_allocation_count() == 1);
+
+    byte_t *first_private = lookup_page(&first_copy, HIGH_PAGE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    byte_t *second_private = lookup_page(&second_copy, HIGH_PAGE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(first_private != private_page && second_private != private_page &&
+            first_private != second_private);
+    assert(first_private[0] == private_page[0] &&
+            second_private[0] == private_page[0]);
+    assert(resolve_view(&first_copy, HIGH_PAGE).sync == NULL);
+    assert(resolve_view(&second_copy, HIGH_PAGE).sync == NULL);
+    for (qword_t index = 0; index < shared_range.page_count; index++) {
+        guest_addr_t page = shared_range.first +
+                index * GUEST_MEMORY_PAGE_SIZE;
+        assert(lookup_page(&first_copy, page,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
+                shared_pages[index]);
+        assert(lookup_page(&second_copy, page,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
+                shared_pages[index]);
+    }
+    assert(resolve_view(&source, SHARED_BASE).sync ==
+            resolve_view(&first_copy, SHARED_BASE).sync);
+    assert(resolve_view(&source, SHARED_BASE).sync ==
+            resolve_view(&second_copy, SHARED_BASE).sync);
+
+    struct guest_tlb source_tlb;
+    struct guest_tlb first_tlb;
+    struct guest_tlb second_tlb;
+    guest_tlb_init(&source_tlb, &source.address_space);
+    guest_tlb_init(&first_tlb, &first_copy.address_space);
+    guest_tlb_init(&second_tlb, &second_copy.address_space);
+    tlb_write_byte(&source_tlb, SHARED_BASE, 0x51);
+    assert(tlb_read_byte(&first_tlb, SHARED_BASE) == 0x51);
+    tlb_write_byte(&first_tlb, SHARED_BASE + 1, 0x61);
+    assert(tlb_read_byte(&source_tlb, SHARED_BASE + 1) == 0x61);
+    assert(tlb_read_byte(&second_tlb, SHARED_BASE + 1) == 0x61);
+
+    assert(guest_page_table_protect(&first_copy,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE, GUEST_MEMORY_READ) ==
+            GUEST_PAGE_TABLE_OK);
+    lookup_page(&source, SHARED_BASE + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    lookup_page(&second_copy, SHARED_BASE + GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    struct guest_memory_fault fault;
+    byte_t rejected = 0x70;
+    assert(!guest_tlb_write(&first_tlb,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE,
+            &rejected, sizeof(rejected), &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    tlb_write_byte(&source_tlb,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE, 0x71);
+    assert(tlb_read_byte(&first_tlb,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE) == 0x71);
+
+    assert(guest_page_table_unmap(&first_copy,
+            SHARED_BASE + 2 * GUEST_MEMORY_PAGE_SIZE) ==
+            GUEST_PAGE_TABLE_OK);
+    assert_not_mapped(&first_copy,
+            SHARED_BASE + 2 * GUEST_MEMORY_PAGE_SIZE);
+    assert(lookup_page(&source,
+            SHARED_BASE + 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_pages[2]);
+    assert(lookup_page(&second_copy,
+            SHARED_BASE + 2 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_pages[2]);
+
+    byte_t *old_shared = shared_pages[0];
+    const struct guest_page_range one_shared_page = {
+        .first = SHARED_BASE,
+        .page_count = 1,
+    };
+    assert(guest_page_table_map_zero_shared_range(&source, one_shared_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, true) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *replacement = lookup_page(&source, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    assert(replacement != old_shared && replacement[0] == 0);
+    assert(lookup_page(&first_copy, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == old_shared);
+    assert(lookup_page(&second_copy, SHARED_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == old_shared);
+    tlb_write_byte(&source_tlb, SHARED_BASE, 0xa1);
+    assert(tlb_read_byte(&second_tlb, SHARED_BASE) == 0x51);
+    tlb_write_byte(&second_tlb, SHARED_BASE, 0xb1);
+    assert(tlb_read_byte(&source_tlb, SHARED_BASE) == 0xa1);
+
+    guest_page_table_destroy(&first_copy);
+    tlb_write_byte(&source_tlb,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE, 0xc1);
+    assert(tlb_read_byte(&second_tlb,
+            SHARED_BASE + GUEST_MEMORY_PAGE_SIZE) == 0xc1);
+    guest_page_table_destroy(&source);
+    tlb_write_byte(&second_tlb, SHARED_BASE, 0xd1);
+    assert(tlb_read_byte(&second_tlb, SHARED_BASE) == 0xd1);
+    assert(tlb_read_byte(&second_tlb,
+            SHARED_BASE + 2 * GUEST_MEMORY_PAGE_SIZE) == 0x43);
+    guest_page_table_destroy(&second_copy);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void test_mixed_clone_failures(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table source;
+    assert(guest_page_table_init(&source, 48));
+    const struct guest_page_range shared_range = {
+        .first = GUEST_MEMORY_PAGE_SIZE,
+        .page_count = 1,
+    };
+    assert(guest_page_table_map_zero_shared_range(&source, shared_range,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    byte_t *shared_page = lookup_page(&source, shared_range.first,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+    shared_page[0] = 0x7a;
+
+    static const guest_addr_t private_addresses[] = {
+        HIGH_PAGE,
+        NEXT_PAGE,
+        SIBLING_LEVEL2_PAGE,
+    };
+    byte_t *private_pages[array_size(private_addresses)];
+    for (size_t index = 0; index < array_size(private_addresses); index++) {
+        assert(guest_page_table_map(&source, private_addresses[index],
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE,
+                &private_pages[index]) == GUEST_PAGE_TABLE_OK);
+        private_pages[index][0] = (byte_t) (0x80 + index);
+    }
+
+    guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_table probe;
+    assert(guest_page_table_clone(&probe, &source));
+    size_t clone_allocations =
+            guest_page_table_test_clone_allocation_count();
+    size_t private_clone_allocations =
+            guest_page_backing_test_allocation_count();
+    assert(clone_allocations > 4);
+    assert(private_clone_allocations == array_size(private_addresses));
+    assert(lookup_page(&probe, shared_range.first,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_page);
+    guest_page_table_destroy(&probe);
+
+    for (size_t fail_at = 0; fail_at < clone_allocations; fail_at++) {
+        unsigned live_before = guest_page_backing_test_live_count();
+        qword_t generation = source.address_space.generation;
+        guest_page_table_test_fail_clone_allocation_at(fail_at);
+        guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+        struct guest_page_table failed;
+        assert(!guest_page_table_clone(&failed, &source));
+        assert(failed.root == NULL);
+        assert(source.address_space.generation == generation);
+        assert(guest_page_backing_test_live_count() == live_before);
+        assert(lookup_page(&source, shared_range.first,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_page);
+        for (size_t index = 0;
+                index < array_size(private_addresses); index++) {
+            assert(lookup_page(&source, private_addresses[index],
+                    GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
+                    private_pages[index]);
+            assert(private_pages[index][0] == (byte_t) (0x80 + index));
+        }
+        guest_page_table_destroy(&failed);
+
+        // 解除源映射后对象必须消失，否则失败路径遗留了一份共享引用。
+        assert(guest_page_table_unmap(&source, shared_range.first) ==
+                GUEST_PAGE_TABLE_OK);
+        assert(guest_page_backing_test_live_count() == live_before - 1);
+        guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+        assert(guest_page_table_map_zero_shared_range(&source, shared_range,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+                GUEST_PAGE_TABLE_OK);
+        shared_page = lookup_page(&source, shared_range.first,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+        shared_page[0] = 0x7a;
+        assert(guest_page_backing_test_live_count() == live_before);
+    }
+
+    guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+    for (size_t fail_at = 0;
+            fail_at < private_clone_allocations; fail_at++) {
+        unsigned live_before = guest_page_backing_test_live_count();
+        qword_t generation = source.address_space.generation;
+        guest_page_backing_test_fail_allocation_at(fail_at);
+        struct guest_page_table failed;
+        assert(!guest_page_table_clone(&failed, &source));
+        assert(failed.root == NULL);
+        assert(source.address_space.generation == generation);
+        assert(guest_page_backing_test_allocation_count() == fail_at + 1);
+        assert(guest_page_backing_test_live_count() == live_before);
+        guest_page_table_destroy(&failed);
+
+        assert(guest_page_table_unmap(&source, shared_range.first) ==
+                GUEST_PAGE_TABLE_OK);
+        assert(guest_page_backing_test_live_count() == live_before - 1);
+        guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+        assert(guest_page_table_map_zero_shared_range(&source, shared_range,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+                GUEST_PAGE_TABLE_OK);
+        shared_page = lookup_page(&source, shared_range.first,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
+        shared_page[0] = 0x7a;
+        assert(guest_page_backing_test_live_count() == live_before);
+    }
+
+    guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    guest_page_table_destroy(&source);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
 static void test_independent_clone(void) {
     struct guest_page_table source;
     assert(guest_page_table_init(&source, 48));
@@ -585,9 +968,13 @@ int main(void) {
     test_single_page_operations();
     test_supported_address_widths();
     test_backing_allocation_failures();
+    test_shared_map_rollback();
+    test_mapping_kind_replacement();
     test_atomic_map_and_replace();
     test_conflicts_and_holes();
     test_tree_and_address_boundaries();
+    test_shared_clone_lifecycle();
+    test_mixed_clone_failures();
     test_independent_clone();
     assert(guest_page_backing_test_live_count() == 0);
     return 0;
