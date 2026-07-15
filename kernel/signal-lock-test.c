@@ -119,6 +119,171 @@ static bool start_child_event_waiter(
     return true;
 }
 
+struct condition_notifier {
+    cond_t *cond;
+    lock_t *lock;
+    bool notified;
+};
+
+static void *notify_condition(void *opaque) {
+    struct condition_notifier *notifier = opaque;
+    current = NULL;
+    lock(notifier->lock);
+    notifier->notified = true;
+    notify(notifier->cond);
+    unlock(notifier->lock);
+    return NULL;
+}
+
+static void register_wait_target(
+        struct task *task, cond_t *cond, lock_t *lock) {
+    lock(&task->waiting_cond_lock);
+    task->waiting_cond = cond;
+    task->waiting_lock = lock;
+    unlock(&task->waiting_cond_lock);
+}
+
+static void unregister_wait_target(struct task *task) {
+    lock(&task->waiting_cond_lock);
+    task->waiting_cond = NULL;
+    task->waiting_lock = NULL;
+    unlock(&task->waiting_cond_lock);
+}
+
+static int test_wait_lock_owner_handoff(void) {
+    struct signal_fixture fixture;
+    init_fixture(&fixture, false, 0);
+    CHECK(signal(SIGUSR1, SIG_IGN) != SIG_ERR,
+            "忽略测试使用的 host 唤醒信号");
+    task_thread_store(&fixture.child, pthread_self());
+    fixture.child_sighand.action[SIGUSR1_] =
+            (struct signal_action) {.handler = UINT64_C(0x1000)};
+    current = NULL;
+
+    lock_t wait_lock = {0};
+    cond_t wake_cond;
+    cond_t handoff_cond;
+    lock_init(&wait_lock);
+    cond_init(&wake_cond);
+    cond_init(&handoff_cond);
+
+    CHECK(trylock(&wait_lock) == 0 &&
+                    lock_owned_by_current(&wait_lock),
+            "trylock 成功后登记当前 owner");
+    register_wait_target(&fixture.child, &wake_cond, &wait_lock);
+    deliver_signal(&fixture.child, SIGUSR1_, SIGINFO_NIL);
+    unregister_wait_target(&fixture.child);
+    CHECK(lock_owned_by_current(&wait_lock),
+            "发送者自持等待锁时完成通知且保留所有权");
+    unlock(&wait_lock);
+    signal_flush_pending(&fixture.child);
+
+    struct condition_notifier notifier = {
+        .cond = &handoff_cond,
+        .lock = &wait_lock,
+    };
+    lock(&wait_lock);
+    pthread_t notifier_thread;
+    CHECK(pthread_create(&notifier_thread, NULL,
+                    notify_condition, &notifier) == 0,
+            "创建 condition 交接通知线程");
+    while (!notifier.notified)
+        CHECK(wait_for_ignore_signals(
+                        &handoff_cond, &wait_lock, NULL) == 0,
+                "等待 condition 交接通知");
+    CHECK(pthread_join(notifier_thread, NULL) == 0,
+            "回收 condition 交接通知线程");
+    CHECK(lock_owned_by_current(&wait_lock),
+            "condition wait 重取 mutex 后恢复当前 owner");
+
+    register_wait_target(&fixture.child, &wake_cond, &wait_lock);
+    deliver_signal(&fixture.child, SIGUSR1_, SIGINFO_NIL);
+    unregister_wait_target(&fixture.child);
+    CHECK(lock_owned_by_current(&wait_lock),
+            "condition 交接后仍可走自持等待锁通知路径");
+    unlock(&wait_lock);
+
+    signal_flush_pending(&fixture.child);
+    cond_destroy(&handoff_cond);
+    cond_destroy(&wake_cond);
+    pthread_mutex_destroy(&wait_lock.m);
+    current = NULL;
+    return 0;
+}
+
+#define OWNER_CONTENTION_ROUNDS 4096
+
+struct owner_contention {
+    lock_t lock;
+    atomic_bool first_held;
+    atomic_bool release_first;
+    atomic_bool done;
+};
+
+static void *contend_lock_owner(void *opaque) {
+    struct owner_contention *contention = opaque;
+    current = NULL;
+    lock(&contention->lock);
+    atomic_store_explicit(
+            &contention->first_held, true, memory_order_release);
+    while (!atomic_load_explicit(
+            &contention->release_first, memory_order_acquire))
+        sched_yield();
+    unlock(&contention->lock);
+
+    for (unsigned round = 0;
+            round < OWNER_CONTENTION_ROUNDS; round++) {
+        lock(&contention->lock);
+        sched_yield();
+        unlock(&contention->lock);
+    }
+    atomic_store_explicit(&contention->done, true, memory_order_release);
+    return NULL;
+}
+
+static int test_lock_owner_contention(void) {
+    struct owner_contention contention = {0};
+    lock_init(&contention.lock);
+    atomic_init(&contention.first_held, false);
+    atomic_init(&contention.release_first, false);
+    atomic_init(&contention.done, false);
+
+    pthread_t holder;
+    CHECK(pthread_create(&holder, NULL,
+                    contend_lock_owner, &contention) == 0,
+            "创建 owner 竞争线程");
+    while (!atomic_load_explicit(
+            &contention.first_held, memory_order_acquire))
+        sched_yield();
+
+    int first_result = trylock(&contention.lock);
+    bool valid = first_result == EBUSY &&
+            !lock_owned_by_current(&contention.lock);
+    if (first_result == 0)
+        unlock(&contention.lock);
+    atomic_store_explicit(
+            &contention.release_first, true, memory_order_release);
+
+    unsigned busy_observations = first_result == EBUSY ? 1 : 0;
+    while (!atomic_load_explicit(&contention.done, memory_order_acquire)) {
+        int result = trylock(&contention.lock);
+        if (result == 0) {
+            unlock(&contention.lock);
+        } else if (result == EBUSY) {
+            busy_observations++;
+            valid = valid && !lock_owned_by_current(&contention.lock);
+        } else {
+            valid = false;
+        }
+    }
+    CHECK(pthread_join(holder, NULL) == 0,
+            "回收 owner 竞争线程");
+    CHECK(valid && busy_observations != 0,
+            "竞争读取只观察原子 owner 且不误认其他线程");
+    pthread_mutex_destroy(&contention.lock.m);
+    return 0;
+}
+
 static void *continue_traced_task(void *opaque) {
     struct stop_controller *controller = opaque;
     while (true) {
@@ -424,6 +589,8 @@ static bool run_isolated(const char *name, isolated_test_fn test) {
 
 int main(void) {
     unsigned failures = 0;
+    failures += !run_isolated("等待锁 owner 交接",
+            test_wait_lock_owner_handoff);
     failures += !run_isolated("共享 sighand 父通知",
             test_shared_sighand_parent_notification);
     failures += !run_isolated("并发 SIG_IGN 删除后继节点",
@@ -437,5 +604,6 @@ int main(void) {
             test_sigkill_releases_ptrace_stop);
     failures += !run_isolated("并发实时信号排队",
             test_concurrent_realtime_queue);
+    failures += test_lock_owner_contention() != 0;
     return failures == 0 ? 0 : 1;
 }

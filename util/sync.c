@@ -53,6 +53,8 @@ static int wait_for_common(cond_t *cond, lock_t *lock,
     struct lock_debug lock_tmp = lock->debug;
     lock->debug = (struct lock_debug) { .initialized = lock->debug.initialized };
 #endif
+    // pthread_cond_wait 直接交接底层 mutex，所有权记录也必须同步交接。
+    lock_owner_released(lock);
     if (!timeout) {
         pthread_cond_wait(&cond->cond, &lock->m);
     } else {
@@ -72,6 +74,7 @@ static int wait_for_common(cond_t *cond, lock_t *lock,
 #error Unimplemented pthread_cond_wait relative timeout.
 #endif
     }
+    lock_owner_acquired(lock);
 #if LOCK_DEBUG
     lock->debug = lock_tmp;
 #endif

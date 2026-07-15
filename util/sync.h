@@ -15,7 +15,7 @@
 
 typedef struct {
     pthread_mutex_t m;
-    pthread_t owner;
+    _Atomic(pthread_t) owner;
 #if LOCK_DEBUG
     struct lock_debug {
         const char *file; // doubles as locked
@@ -28,6 +28,7 @@ typedef struct {
 
 static inline void lock_init(lock_t *lock) {
     pthread_mutex_init(&lock->m, NULL);
+    atomic_init(&lock->owner, zero_init(pthread_t));
 #if LOCK_DEBUG
     lock->debug = (struct lock_debug) {
         .initialized = true,
@@ -40,9 +41,22 @@ static inline void lock_init(lock_t *lock) {
 #else
 #define LOCK_INITIALIZER {PTHREAD_MUTEX_INITIALIZER, 0}
 #endif
+static inline void lock_owner_acquired(lock_t *lock) {
+    atomic_store_explicit(
+            &lock->owner, pthread_self(), memory_order_relaxed);
+}
+static inline void lock_owner_released(lock_t *lock) {
+    atomic_store_explicit(&lock->owner,
+            zero_init(pthread_t), memory_order_relaxed);
+}
+static inline bool lock_owned_by_current(const lock_t *lock) {
+    pthread_t owner = atomic_load_explicit(
+            &lock->owner, memory_order_relaxed);
+    return pthread_equal(owner, pthread_self());
+}
 static inline void __lock(lock_t *lock, __attribute__((unused)) const char *file, __attribute__((unused)) int line) {
     pthread_mutex_lock(&lock->m);
-    lock->owner = pthread_self();
+    lock_owner_acquired(lock);
 #if LOCK_DEBUG
     assert(lock->debug.initialized);
     assert(!lock->debug.file && "Attempting to recursively lock");
@@ -59,12 +73,14 @@ static inline void unlock(lock_t *lock) {
     assert(lock->debug.file && "Attempting to unlock an unlocked lock");
     lock->debug = (struct lock_debug) { .initialized = true };
 #endif
-    lock->owner = zero_init(pthread_t);
+    lock_owner_released(lock);
     pthread_mutex_unlock(&lock->m);
 }
 
 static inline int trylock(lock_t *lock, __attribute__((unused)) const char *file, __attribute__((unused)) int line) {
     int status = pthread_mutex_trylock(&lock->m);
+    if (!status)
+        lock_owner_acquired(lock);
 #if LOCK_DEBUG
     if (!status) {
         lock->debug.file = file;
