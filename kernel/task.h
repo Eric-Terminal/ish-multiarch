@@ -15,6 +15,16 @@
 
 struct aarch64_linux_process;
 
+// exec 候选映像在 guest 执行栈返回安全点后统一提交。
+struct task_exec_transition {
+    struct aarch64_linux_process *process;
+    struct mm *mm;
+    struct sighand *sighand;
+    uid_t_ euid, egid;
+    char comm[16] __strncpy_safe;
+    bool begun;
+};
+
 // everything here is private to the thread executing this task and needs no
 // locking, unless otherwise specified
 struct task {
@@ -22,8 +32,7 @@ struct task {
     // 非空时由 task 独占；AArch64 CPU 与页表封装在 opaque process 中。
     struct aarch64_linux_process *aarch64_process;
     // exec 候选在当前 guest 执行栈返回安全点前不得替换或销毁活动映像。
-    struct aarch64_linux_process *aarch64_exec_candidate;
-    struct mm *aarch64_exec_mm;
+    struct task_exec_transition exec_transition;
     struct mm *mm; // locked by general_lock
     struct mem *mem; // pointer to mm.mem, for convenience
     pthread_t thread; // 并发访问必须使用 task_thread_load/store。

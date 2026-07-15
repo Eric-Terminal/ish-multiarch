@@ -221,7 +221,7 @@ int main(void) {
             make_process(&parent, parent.pid, true);
     CHECK(duplicate_candidate != NULL &&
             !stage_process(&parent, duplicate_candidate) &&
-            parent.aarch64_exec_candidate == replacement,
+            parent.exec_transition.process == replacement,
             "stage 拒绝覆盖尚未提交的 exec 候选");
     aarch64_linux_process_destroy(duplicate_candidate);
     task_commit_aarch64_exec(&parent);
@@ -319,7 +319,7 @@ int main(void) {
             child->aarch64_robust_list == 0 &&
             parent.aarch64_robust_list == inherited_registration &&
             parent.aarch64_process == inherited &&
-            parent.aarch64_exec_candidate == inherited_candidate,
+            parent.exec_transition.process == inherited_candidate,
             "task_create_ 不复制父任务 opaque 所有权或 robust 注册");
     task_abort_create(child);
     CHECK(sys_set_robust_list_aarch64(0,

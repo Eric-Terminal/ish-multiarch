@@ -738,7 +738,7 @@ int main(void) {
             2, arguments, 1, environment, &identity) == 0 &&
             task_has_aarch64_exec_candidate(&fixture.task),
             "动态主映像经 guest PT_INTERP 完整建立候选");
-    CHECK(runs_to_exit(fixture.task.aarch64_exec_candidate, 42),
+    CHECK(runs_to_exit(fixture.task.exec_transition.process, 42),
             "动态解释器从真实入口运行到唯一退出码");
     task_discard_aarch64_exec(&fixture.task);
     CHECK(fixture.task.mm == original_mm &&
@@ -824,8 +824,8 @@ int main(void) {
             fixture.task.vfork == &vfork && !vfork.done,
             "i386 execve 成功后不向旧 CPU 写回并返回架构安全点");
     struct aarch64_linux_process *first_process =
-            fixture.task.aarch64_exec_candidate;
-    struct mm *first_mm = fixture.task.aarch64_exec_mm;
+            fixture.task.exec_transition.process;
+    struct mm *first_mm = fixture.task.exec_transition.mm;
     task_commit_aarch64_exec(&fixture.task);
     CHECK(fixture.task.aarch64_process == first_process &&
             !task_has_aarch64_exec_candidate(&fixture.task) &&
@@ -854,8 +854,8 @@ int main(void) {
             "建立 AArch64 execve 失败路径调用映像");
     fd_close(main_fd);
     struct aarch64_linux_process *failed_caller =
-            fixture.task.aarch64_exec_candidate;
-    struct mm *failed_caller_mm = fixture.task.aarch64_exec_mm;
+            fixture.task.exec_transition.process;
+    struct mm *failed_caller_mm = fixture.task.exec_transition.mm;
     task_commit_aarch64_exec(&fixture.task);
     CHECK(fixture.task.aarch64_process == failed_caller &&
             fixture.task.mm == failed_caller_mm,
@@ -928,8 +928,8 @@ int main(void) {
             "建立 AArch64 execve 成功路径调用映像");
     fd_close(main_fd);
     struct aarch64_linux_process *successful_caller =
-            fixture.task.aarch64_exec_candidate;
-    struct mm *successful_caller_mm = fixture.task.aarch64_exec_mm;
+            fixture.task.exec_transition.process;
+    struct mm *successful_caller_mm = fixture.task.exec_transition.mm;
     task_commit_aarch64_exec(&fixture.task);
     CHECK(fixture.task.aarch64_process == successful_caller &&
             fixture.task.mm == successful_caller_mm,
@@ -987,7 +987,7 @@ int main(void) {
             fixture.task.suid == 3000 && fixture.task.sgid == 300,
             "空 argv 的 shebang 使用解释器而非脚本的 set-id 身份");
     struct aarch64_linux_process *script_process =
-            fixture.task.aarch64_exec_candidate;
+            fixture.task.exec_transition.process;
     task_commit_aarch64_exec(&fixture.task);
     CHECK(fixture.task.aarch64_process == script_process,
             "shebang 候选在安全点提交");

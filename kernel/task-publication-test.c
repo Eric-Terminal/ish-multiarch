@@ -48,9 +48,9 @@ int main(void) {
     parent.cpu.poked_ptr = &parent.cpu._poked;
     parent.aarch64_process =
             (struct aarch64_linux_process *) (uintptr_t) 0x1234;
-    parent.aarch64_exec_candidate =
+    parent.exec_transition.process =
             (struct aarch64_linux_process *) (uintptr_t) 0x2345;
-    parent.aarch64_exec_mm = (struct mm *) (uintptr_t) 0x3456;
+    parent.exec_transition.mm = (struct mm *) (uintptr_t) 0x3456;
     parent.exiting = true;
     parent.zombie = true;
     parent.exit_code = UINT32_MAX;
@@ -93,8 +93,8 @@ int main(void) {
             child->altstack.size == parent.altstack.size &&
             child->altstack.flags == parent.altstack.flags &&
             child->aarch64_process == NULL &&
-            child->aarch64_exec_candidate == NULL &&
-            child->aarch64_exec_mm == NULL &&
+            child->exec_transition.process == NULL &&
+            child->exec_transition.mm == NULL &&
             child->cpu.poked_ptr == NULL &&
             !child->cpu._poked && !child->ptrace.traced &&
             !child->exiting && !child->zombie && child->exit_code == 0,
@@ -257,7 +257,7 @@ int main(void) {
     cond_destroy(&parent.ptrace.cond);
     cond_destroy(&group.stopped_cond);
     parent.aarch64_process = NULL;
-    parent.aarch64_exec_candidate = NULL;
-    parent.aarch64_exec_mm = NULL;
+    parent.exec_transition.process = NULL;
+    parent.exec_transition.mm = NULL;
     return 0;
 }

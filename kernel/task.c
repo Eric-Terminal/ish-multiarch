@@ -36,7 +36,7 @@ bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process) {
     if (!task_accepts_aarch64_process(task, process) ||
             task->aarch64_process != NULL ||
-            task->aarch64_exec_candidate != NULL)
+            task->exec_transition.process != NULL)
         return false;
     task->aarch64_process = process;
     return true;
@@ -47,22 +47,22 @@ bool task_stage_aarch64_exec(struct task *task,
     if (!task_accepts_aarch64_process(task, process) ||
             mm == NULL ||
             mm == task->mm ||
-            task->aarch64_exec_candidate != NULL ||
-            task->aarch64_exec_mm != NULL ||
+            task->exec_transition.process != NULL ||
+            task->exec_transition.mm != NULL ||
             task->aarch64_process == process)
         return false;
-    task->aarch64_exec_candidate = process;
-    task->aarch64_exec_mm = mm;
+    task->exec_transition.process = process;
+    task->exec_transition.mm = mm;
     return true;
 }
 
 bool task_has_aarch64_exec_candidate(const struct task *task) {
-    return task->aarch64_exec_candidate != NULL;
+    return task->exec_transition.process != NULL;
 }
 
 void task_commit_aarch64_exec(struct task *task) {
     assert(task != NULL && task_has_aarch64_exec_candidate(task) &&
-            task->aarch64_exec_mm != NULL);
+            task->exec_transition.mm != NULL);
     struct aarch64_linux_process *retired = task->aarch64_process;
 
     // 只在成功提交时清理旧映像；候选失败仍保留原架构注册。
@@ -76,10 +76,10 @@ void task_commit_aarch64_exec(struct task *task) {
     lock(&task->general_lock);
     struct mm *retired_mm = task->mm;
     __atomic_store_n(&task->aarch64_process,
-            task->aarch64_exec_candidate, __ATOMIC_RELEASE);
-    task->aarch64_exec_candidate = NULL;
-    task_set_mm(task, task->aarch64_exec_mm);
-    task->aarch64_exec_mm = NULL;
+            task->exec_transition.process, __ATOMIC_RELEASE);
+    task->exec_transition.process = NULL;
+    task_set_mm(task, task->exec_transition.mm);
+    task->exec_transition.mm = NULL;
     unlock(&task->general_lock);
     unlock(&pids_lock);
 
@@ -98,11 +98,10 @@ void task_commit_aarch64_exec(struct task *task) {
 
 void task_discard_aarch64_exec(struct task *task) {
     assert(task != NULL);
-    aarch64_linux_process_destroy(task->aarch64_exec_candidate);
-    if (task->aarch64_exec_mm != NULL)
-        mm_release(task->aarch64_exec_mm);
-    task->aarch64_exec_candidate = NULL;
-    task->aarch64_exec_mm = NULL;
+    aarch64_linux_process_destroy(task->exec_transition.process);
+    if (task->exec_transition.mm != NULL)
+        mm_release(task->exec_transition.mm);
+    task->exec_transition = (struct task_exec_transition) {};
 }
 
 struct aarch64_linux_process *task_take_aarch64_process(
@@ -200,8 +199,7 @@ struct task *task_create_(struct task *parent) {
     }
     // opaque process 不可通过 task 的结构体浅拷贝共享。
     task->aarch64_process = NULL;
-    task->aarch64_exec_candidate = NULL;
-    task->aarch64_exec_mm = NULL;
+    task->exec_transition = (struct task_exec_transition) {};
 
     task_thread_store(task, zero_init(pthread_t));
     atomic_init(&task->start_ready, false);
@@ -304,8 +302,8 @@ void task_abort_create(struct task *task) {
 
 void task_destroy(struct task *task) {
     assert(task->aarch64_process == NULL &&
-            task->aarch64_exec_candidate == NULL &&
-            task->aarch64_exec_mm == NULL);
+            task->exec_transition.process == NULL &&
+            task->exec_transition.mm == NULL);
     list_remove(&task->siblings);
     struct pid *pid = pid_slot(task->pid);
     assert(pid != NULL && !pid->reserved && pid->task == task);

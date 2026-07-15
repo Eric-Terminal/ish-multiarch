@@ -459,7 +459,7 @@ static bool test_candidate_discard_has_no_side_effect(void) {
             stage_candidate(&fixture.task),
             "登记旧 i386 状态并建立待回滚候选");
     TEST_CHECK(aarch64_linux_process_take_clear_child_tid(
-                    fixture.task.aarch64_exec_candidate) == 0,
+                    fixture.task.exec_transition.process) == 0,
             "新 AArch64 候选从空 clear-child-tid 注册开始");
 
     task_discard_aarch64_exec(&fixture.task);
