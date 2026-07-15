@@ -1,5 +1,8 @@
 #include <assert.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -531,6 +534,27 @@ static int copy_string_array_from_user(
     return 0;
 }
 
+struct execve_host_buffers {
+    char *arguments;
+    char *environment;
+};
+
+static atomic_size_t execve_live_host_buffer_sets = ATOMIC_VAR_INIT(0);
+
+size_t ish_aarch64_execve_test_live_host_buffer_sets(void) {
+    return atomic_load_explicit(
+            &execve_live_host_buffer_sets, memory_order_acquire);
+}
+
+static void release_execve_host_buffers(void *opaque) {
+    struct execve_host_buffers *buffers = opaque;
+    free(buffers->environment);
+    free(buffers->arguments);
+    size_t previous = atomic_fetch_sub_explicit(
+            &execve_live_host_buffer_sets, 1, memory_order_acq_rel);
+    assert(previous != 0);
+}
+
 static qword_t dispatch_execve(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -551,30 +575,39 @@ static qword_t dispatch_execve(
         free(arguments);
         return syscall_result(_ENOMEM);
     }
+    struct execve_host_buffers host_buffers = {
+        .arguments = arguments,
+        .environment = environment,
+    };
+    atomic_fetch_add_explicit(
+            &execve_live_host_buffer_sets, 1, memory_order_release);
     size_t argument_count;
     size_t argument_budget = ISH_AARCH64_EXEC_ARG_MAX;
-    int error = copy_string_array_from_user(context,
-            syscall->arguments[1], arguments,
-            ISH_AARCH64_EXEC_ARG_MAX, &argument_count,
-            &argument_budget, true, fault);
-    size_t environment_count = 0;
-    if (error == 0) {
+    int error;
+    pthread_cleanup_push(release_execve_host_buffers, &host_buffers);
+    {
         error = copy_string_array_from_user(context,
-                syscall->arguments[2], environment,
-                ISH_AARCH64_EXEC_ARG_MAX, &environment_count,
-                &argument_budget, false, fault);
-    }
-    if (error == 0) {
-        error = do_execve(filename, argument_count,
-                arguments, environment);
+                syscall->arguments[1], arguments,
+                ISH_AARCH64_EXEC_ARG_MAX, &argument_count,
+                &argument_budget, true, fault);
+        size_t environment_count = 0;
         if (error == 0) {
-            assert(task_has_aarch64_exec_candidate(task));
-            context->completion->disposition =
-                    GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+            error = copy_string_array_from_user(context,
+                    syscall->arguments[2], environment,
+                    ISH_AARCH64_EXEC_ARG_MAX, &environment_count,
+                    &argument_budget, false, fault);
+        }
+        if (error == 0) {
+            error = do_execve(filename, argument_count,
+                    arguments, environment);
+            if (error == 0) {
+                assert(task_has_aarch64_exec_candidate(task));
+                context->completion->disposition =
+                        GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+            }
         }
     }
-    free(environment);
-    free(arguments);
+    pthread_cleanup_pop(1);
     return syscall_result(error);
 }
 

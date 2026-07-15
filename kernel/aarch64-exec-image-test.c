@@ -11,6 +11,8 @@
 #include "guest/aarch64/linux-process.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-exec-image.h"
+#include "kernel/aarch64-signal-service.h"
+#include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
@@ -721,18 +723,63 @@ int main(void) {
     main_state.data = dynamic_main;
     CHECK(main_fd != NULL && ish_aarch64_exec_stage(
             &fixture.task, main_fd, "/bin/dynamic-stage",
-            2, arguments, 1, environment, &identity) == _EBUSY &&
-            !task_has_aarch64_exec_candidate(&fixture.task),
-            "多线程任务在 de-thread 实现前拒绝切换执行架构");
+            2, arguments, 1, environment, &identity) == 0 &&
+            task_has_aarch64_exec_candidate(&fixture.task),
+            "多线程任务可在 PONR 前建立完整 AArch64 候选");
+    task_discard_aarch64_exec(&fixture.task);
     lock(&pids_lock);
     list_remove(&sibling.group_links);
     unlock(&pids_lock);
     fixture.group.leader = &sibling;
     CHECK(ish_aarch64_exec_stage(&fixture.task, main_fd,
             "/bin/dynamic-stage", 2, arguments, 1, environment,
-            &identity) == _EBUSY,
-            "最后存活的非 leader 仍需完成 de-thread 后才能切换架构");
+            &identity) == 0 &&
+            aarch64_linux_process_uses_services(
+                    fixture.task.exec_transition.process,
+                    fixture.task.tgid, &fixture.task,
+                    &ish_aarch64_linux_syscall_service,
+                    &ish_aarch64_linux_signal_service),
+            "非 leader 候选预先使用 de-thread 后的最终 TGID");
+    task_discard_aarch64_exec(&fixture.task);
     fixture.group.leader = &fixture.task;
+    struct mm *ponr_old_mm = fixture.task.mm;
+    struct fdtable *ponr_old_files = fixture.task.files;
+    uid_t_ ponr_old_euid = fixture.task.euid;
+    uid_t_ ponr_old_egid = fixture.task.egid;
+    bool ponr_old_did_exec = fixture.task.did_exec;
+    char ponr_old_comm[sizeof(fixture.task.comm)];
+    memcpy(ponr_old_comm, fixture.task.comm, sizeof(ponr_old_comm));
+    CHECK(ish_aarch64_exec_stage(&fixture.task, main_fd,
+                    "/bin/dynamic-stage", 2, arguments, 1, environment,
+                    &identity) == 0,
+            "为 PONR 后分配失败建立完整候选");
+    struct mm *ponr_candidate_mm = fixture.task.exec_transition.mm;
+    mm_retain(ponr_candidate_mm);
+    atomic_fetch_add_explicit(&fixture.sighand.refcount,
+            1, memory_order_relaxed);
+    task_exec_test_fail_sighand_reservation_once();
+    CHECK(task_begin_aarch64_exec(&fixture.task) == _ENOMEM &&
+            fixture.task.exec_transition.begun &&
+            !fixture.task.exec_transition.ready &&
+            fixture.task.mm == ponr_old_mm &&
+            fixture.task.files == ponr_old_files &&
+            !task_has_aarch64_process(&fixture.task) &&
+            fixture.task.euid == ponr_old_euid &&
+            fixture.task.egid == ponr_old_egid &&
+            fixture.task.did_exec == ponr_old_did_exec &&
+            memcmp(fixture.task.comm, ponr_old_comm,
+                    sizeof(ponr_old_comm)) == 0 &&
+            fixture.group.exec_task == NULL,
+            "PONR 后 ENOMEM 不提交候选映像或公共 exec 副作用");
+    fixture.task.exiting = true;
+    task_discard_aarch64_exec(&fixture.task);
+    fixture.task.exiting = false;
+    CHECK(atomic_load_explicit(&ponr_candidate_mm->refcount,
+                    memory_order_acquire) == 1,
+            "PONR 失败退出释放候选 metadata mm 的任务引用");
+    mm_release(ponr_candidate_mm);
+    atomic_fetch_sub_explicit(&fixture.sighand.refcount,
+            1, memory_order_relaxed);
     CHECK(main_fd != NULL && ish_aarch64_exec_stage(
             &fixture.task, main_fd, "/bin/dynamic-stage",
             2, arguments, 1, environment, &identity) == 0 &&
@@ -852,6 +899,8 @@ int main(void) {
             &fixture.task, main_fd, "/bin/exec-caller",
             2, arguments, 1, environment, &caller_identity) == 0,
             "建立 AArch64 execve 失败路径调用映像");
+    CHECK(task_begin_aarch64_exec(&fixture.task) == 0,
+            "失败路径调用映像进入不可回退阶段");
     fd_close(main_fd);
     struct aarch64_linux_process *failed_caller =
             fixture.task.exec_transition.process;
@@ -926,6 +975,8 @@ int main(void) {
             &fixture.task, main_fd, "/bin/exec-caller",
             2, arguments, 1, environment, &caller_identity) == 0,
             "建立 AArch64 execve 成功路径调用映像");
+    CHECK(task_begin_aarch64_exec(&fixture.task) == 0,
+            "成功路径调用映像进入不可回退阶段");
     fd_close(main_fd);
     struct aarch64_linux_process *successful_caller =
             fixture.task.exec_transition.process;
@@ -979,18 +1030,22 @@ int main(void) {
             "shebang 新增字符串与指针仍受最终 AArch64 ARG_MAX 约束");
     free(large_arguments);
     static const char empty_arguments[] = "\0";
+    uid_t_ previous_euid = fixture.task.euid;
+    uid_t_ previous_egid = fixture.task.egid;
     int script_error = do_execve(
             "/bin/test", 0, empty_arguments, environment);
     CHECK(script_error == 0, "空 argv 的 shebang 建立候选");
     CHECK(task_has_aarch64_exec_candidate(&fixture.task) &&
-            fixture.task.euid == 3000 && fixture.task.egid == 300 &&
-            fixture.task.suid == 3000 && fixture.task.sgid == 300,
-            "空 argv 的 shebang 使用解释器而非脚本的 set-id 身份");
+            fixture.task.euid == previous_euid &&
+            fixture.task.egid == previous_egid,
+            "安全点前不提前发布解释器的 set-id 身份");
     struct aarch64_linux_process *script_process =
             fixture.task.exec_transition.process;
     task_commit_aarch64_exec(&fixture.task);
-    CHECK(fixture.task.aarch64_process == script_process,
-            "shebang 候选在安全点提交");
+    CHECK(fixture.task.aarch64_process == script_process &&
+            fixture.task.euid == 3000 && fixture.task.egid == 300 &&
+            fixture.task.suid == 3000 && fixture.task.sgid == 300,
+            "shebang 候选与解释器 set-id 身份在安全点一并提交");
     CHECK(runs_to_exit(script_process, 42),
             "shebang 解释器从真实入口运行到唯一退出码");
 

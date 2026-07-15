@@ -413,6 +413,14 @@ if get_option('kernel') == 'ish'
             aarch64_cross_abi_exec_lifecycle_test,
             timeout: 60)
 
+        aarch64_exec_transaction_test = executable(
+            'aarch64_exec_transaction_test',
+            'kernel/aarch64-exec-transaction-test.c',
+            dependencies: ish)
+        test('aarch64_exec_transaction',
+            aarch64_exec_transaction_test,
+            timeout: 60)
+
         aarch64_clone3_syscall_test = executable(
             'aarch64_clone3_syscall_test',
             'kernel/aarch64-clone3-syscall-test.c',

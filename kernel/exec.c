@@ -28,6 +28,14 @@
 // 只沿当前 host 调用栈传播，绝不能作为 errno 返回 guest。
 static __thread int exec_committed_fatal_signal;
 
+static int exec_committed_failure(void) {
+    int external_fatal = task_group_fatal_signal(current);
+    exec_committed_fatal_signal = external_fatal != 0 ?
+            external_fatal :
+            (task_sigkill_pending(current) ? SIGKILL_ : SIGSEGV_);
+    return EXEC_COMMITTED_FATAL;
+}
+
 struct exec_args {
     // number of arguments
     size_t count;
@@ -177,7 +185,10 @@ static addr_t find_hole_for_elf(struct mem *mem,
     return pt_find_hole(mem, size) << PAGE_BITS;
 }
 
-static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, struct exec_args envp) {
+static int elf_exec(struct fd *fd, const char *file,
+        struct exec_args argv, struct exec_args envp,
+        struct mm **retired_mm_out) {
+    assert(retired_mm_out != NULL && *retired_mm_out == NULL);
     int err = 0;
 
     // read the headers
@@ -194,7 +205,6 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     struct elf_header interp_header;
     struct prg_header *interp_ph = NULL;
     struct mm *new_mm = NULL;
-    struct fdtable *private_files = NULL;
     struct sighand *private_sighand = NULL;
     int fatal_signal = SIGSEGV_;
     for (unsigned i = 0; i < header.phent_count; i++) {
@@ -241,7 +251,7 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
         goto out_free_interp;
 
     // 从这里开始不能返回旧映像：先收敛线程，再取得最终 files 快照。
-    err = task_exec_dethread_i386(current);
+    err = task_exec_dethread(current);
     if (err < 0) {
         if (err == _EINTR) {
             int external_fatal = task_group_fatal_signal(current);
@@ -251,35 +261,15 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
         goto fatal_exec;
     }
 
-    if (atomic_load_explicit(
-                &current->files->refcount, memory_order_acquire) > 1) {
-        private_files = fdtable_copy(current->files);
-        if (IS_ERR(private_files)) {
-            err = (int) PTR_ERR(private_files);
-            private_files = NULL;
-            goto fatal_exec;
+    err = task_exec_unshare_files(current);
+    if (err < 0) {
+        if (err == _EINTR) {
+            int external_fatal = task_group_fatal_signal(current);
+            fatal_signal = external_fatal != 0 ?
+                    external_fatal : SIGKILL_;
         }
-    }
-    lock(&pids_lock);
-    int external_fatal = task_group_fatal_signal(current);
-    if (task_sigkill_pending(current) || external_fatal != 0) {
-        unlock(&pids_lock);
-        if (private_files != NULL)
-            fdtable_release(private_files);
-        private_files = NULL;
-        fatal_signal = external_fatal != 0 ?
-                external_fatal : SIGKILL_;
         goto fatal_exec;
     }
-    struct fdtable *old_files = NULL;
-    if (private_files != NULL) {
-        old_files = current->files;
-        current->files = private_files;
-        private_files = NULL;
-    }
-    unlock(&pids_lock);
-    if (old_files != NULL)
-        fdtable_release(old_files);
 
     // 非 leader 已完成 PID 换位，robust owner 比较使用新的 leader TID。
     futex_cleanup_task_i386(current);
@@ -473,34 +463,23 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
 
     new_mm->stack_start = sp;
 
-    external_fatal = task_group_fatal_signal(current);
+    int external_fatal = task_group_fatal_signal(current);
     if (task_sigkill_pending(current) || external_fatal != 0) {
         fatal_signal = external_fatal != 0 ?
                 external_fatal : SIGKILL_;
         goto fatal_exec;
     }
 
-    // 新 mm 构建完成后再退休 exec 会删除的 timer 状态。
-    tgroup_exec_posix_timers_destroy(current->group);
-    signal_flush_exec_timer_pending(current);
-
-    // 在安全点取得最终信号动作快照，不能让 CLONE_SIGHAND 进程被重置。
+    // 先预留私有 sighand；最终动作快照必须等到新 mm 发布以后。
     if (atomic_load_explicit(
                 &current->sighand->refcount, memory_order_acquire) > 1) {
         private_sighand = sighand_new();
         if (private_sighand == NULL)
             goto fatal_exec;
-        lock(&pids_lock);
-        struct sighand *old_sighand = current->sighand;
-        lock(&old_sighand->lock);
-        memcpy(private_sighand->action, old_sighand->action,
-                sizeof(private_sighand->action));
-        current->sighand = private_sighand;
-        private_sighand = NULL;
-        unlock(&old_sighand->lock);
-        unlock(&pids_lock);
-        sighand_release(old_sighand);
     }
+
+    // Linux 在替换 mm 前完成 vfork 通知；后续失败已不能返回旧映像。
+    vfork_notify(current);
 
     // pids_lock 先排空所有 procfs task 借用，再一次发布完整 mm 与 CPU 入口。
     lock(&pids_lock);
@@ -532,7 +511,24 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     current->cpu.eflags = 0;
     unlock(&current->general_lock);
     unlock(&pids_lock);
-    mm_release(old_mm);
+
+    // 新 mm 可见后，按 Linux 顺序退休 timer 并取得最终信号动作快照。
+    tgroup_exec_posix_timers_destroy(current->group);
+    signal_flush_exec_timer_pending(current);
+    if (private_sighand != NULL) {
+        lock(&pids_lock);
+        struct sighand *old_sighand = current->sighand;
+        lock(&old_sighand->lock);
+        memcpy(private_sighand->action, old_sighand->action,
+                sizeof(private_sighand->action));
+        current->sighand = private_sighand;
+        private_sighand = NULL;
+        unlock(&old_sighand->lock);
+        unlock(&pids_lock);
+        sighand_release(old_sighand);
+    }
+    // 旧 mm 保活到公共 exec 状态和凭据提交之后。
+    *retired_mm_out = old_mm;
 
     err = 0;
 out_free_interp:
@@ -549,6 +545,8 @@ out_free_ph:
 fatal_exec_locked:
     write_wrunlock(&new_mem->lock);
 fatal_exec:
+    if (private_sighand != NULL)
+        sighand_release(private_sighand);
     if (new_mm != NULL)
         mm_release(new_mm);
     free(interp_name);
@@ -614,21 +612,32 @@ static inline int user_memset(
 
 static int format_exec(struct fd *fd, const char *file,
         struct exec_args argv, struct exec_args envp,
-        const struct ish_aarch64_exec_identity *identity) {
+        const struct ish_aarch64_exec_identity *identity,
+        struct mm **retired_mm_out) {
+    assert(retired_mm_out != NULL && *retired_mm_out == NULL);
+    int err;
     if (task_has_aarch64_process(current)) {
-        return ish_aarch64_exec_stage(current, fd, file,
+        err = ish_aarch64_exec_stage(current, fd, file,
                 argv.count, argv.args, envp.count, envp.args, identity);
+    } else {
+        err = elf_exec(fd, file, argv, envp, retired_mm_out);
+        if (err != _ENOEXEC)
+            return err;
+        err = ish_aarch64_exec_stage(current, fd, file,
+                argv.count, argv.args,
+                envp.count, envp.args, identity);
     }
-    int err = elf_exec(fd, file, argv, envp);
-    if (err != _ENOEXEC)
+    if (err < 0)
         return err;
-    return ish_aarch64_exec_stage(current, fd, file,
-            argv.count, argv.args, envp.count, envp.args, identity);
+
+    err = task_begin_aarch64_exec(current);
+    return err < 0 ? exec_committed_failure() : 0;
 }
 
 static int shebang_exec(struct fd *fd, const char *file,
         struct exec_args argv, struct exec_args envp,
-        struct ish_aarch64_exec_identity *identity) {
+        struct ish_aarch64_exec_identity *identity,
+        struct mm **retired_mm_out) {
     // read the first 128 bytes to get the shebang line out of
     if (fd->ops->lseek(fd, 0, SEEK_SET))
         return _EIO;
@@ -717,7 +726,8 @@ static int shebang_exec(struct fd *fd, const char *file,
         *identity = exec_identity(&interpreter_stat);
         // 映像来自解释器，AT_EXECFN 仍保留最初请求的脚本路径。
         err = format_exec(
-                interpreter_fd, file, new_argv, envp, identity);
+                interpreter_fd, file, new_argv, envp,
+                identity, retired_mm_out);
     }
     fd_close(interpreter_fd);
     return err;
@@ -736,52 +746,26 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
     }
 
     struct ish_aarch64_exec_identity identity = exec_identity(&stat);
-    err = format_exec(fd, file, argv, envp, &identity);
+    struct mm *retired_mm = NULL;
+    err = format_exec(fd, file, argv, envp, &identity, &retired_mm);
     if (err == _ENOEXEC)
-        err = shebang_exec(fd, file, argv, envp, &identity);
+        err = shebang_exec(
+                fd, file, argv, envp, &identity, &retired_mm);
     fd_close(fd);
-    if (err < 0)
+    if (err < 0) {
+        assert(retired_mm == NULL);
         return err;
-
-    // identity 与候选初始栈来自同一次最终映像权限判定。
-    current->euid = identity.euid;
-    current->egid = identity.egid;
-    // Linux 在文件身份变换后把有效 ID 保存为 saved-set ID。
-    current->suid = current->euid;
-    current->sgid = current->egid;
-
-    // save current->comm
-    lock(&current->general_lock);
-    const char *basename = strrchr(file, '/');
-    if (basename == NULL)
-        basename = file;
-    else
-        basename++;
-    strncpy(current->comm, basename, sizeof(current->comm));
-    unlock(&current->general_lock);
-
-    update_thread_name();
-
-    // cloexec
-    // consider putting this in fd.c?
-    fdtable_do_cloexec(current->files);
-
-    task_signal_exec_reset(current);
-
-    current->did_exec = true;
-    if (!task_has_aarch64_exec_candidate(current))
-        vfork_notify(current);
-
-    if (current->ptrace.traced) {
-        lock(&pids_lock);
-        send_signal_locked(current, SIGTRAP_, (struct siginfo_) {
-            .code = SI_USER_,
-            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
-            .kill.pid = current->pid,
-            .kill.uid = current->uid,
-        });
-        unlock(&pids_lock);
     }
+
+    // AArch64 只能由 runner 安全点发布；公共副作用随事务一起延后。
+    if (task_has_aarch64_exec_candidate(current)) {
+        assert(retired_mm == NULL);
+        return 0;
+    }
+
+    assert(retired_mm != NULL);
+    task_finish_exec(current, identity.euid, identity.egid,
+            file, retired_mm);
 
     return 0;
 }

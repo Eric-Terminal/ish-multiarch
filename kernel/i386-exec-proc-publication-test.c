@@ -31,6 +31,11 @@
 #define OLD_DATA_ADDRESS UINT32_C(0x08048000)
 #define NEW_ENTRY_ADDRESS UINT32_C(0x09000000)
 #define SHOW_CAPACITY 16384
+#define OLD_EUID 1001
+#define OLD_EGID 1002
+#define NEW_EUID 2001
+#define NEW_EGID 2002
+#define OLD_ALTSTACK UINT32_C(0x0804a000)
 
 static const char old_arguments[] = "old\0state\0";
 static const char new_arguments[] = "/new\0arg\0";
@@ -54,6 +59,11 @@ struct mmap_gate {
 struct publication_probe {
     byte_t executable[PAGE_SIZE];
     struct mmap_gate gate;
+    struct task *task;
+    bool cloexec_close_called;
+    bool cloexec_close_state_valid;
+    bool old_exec_close_called;
+    bool old_exec_close_state_valid;
 };
 
 enum probe_file_kind {
@@ -140,7 +150,51 @@ static int probe_mmap(struct fd *fd, struct mem *mem,
 }
 
 static int probe_close(struct fd *fd) {
-    free(fd->data);
+    struct probe_file *file = fd->data;
+    if (file->kind == PROBE_OLD_EXECUTABLE) {
+        struct publication_probe *probe = file->probe;
+        struct task *task = probe->task;
+        const struct signal_action *trap =
+                &task->sighand->action[SIGTRAP_];
+        probe->old_exec_close_called = true;
+        probe->old_exec_close_state_valid = task == current &&
+                probe->cloexec_close_called &&
+                task->mem == probe->gate.staged_mem &&
+                task->did_exec && strcmp(task->comm, "new") == 0 &&
+                task->altstack.stack == 0 &&
+                task->altstack.size == 0 &&
+                task->altstack.flags == SS_DISABLE_ &&
+                task->euid == NEW_EUID && task->suid == NEW_EUID &&
+                task->egid == NEW_EGID && task->sgid == NEW_EGID &&
+                trap->handler == SIG_IGN_ && trap->flags == 0 &&
+                trap->restorer == 0 && trap->mask == 0 &&
+                !sigset_has(task->pending, SIGTRAP_) &&
+                !sigset_has(task->group->shared_pending, SIGTRAP_);
+    }
+    free(file);
+    return 0;
+}
+
+static int retire_order_marker_close(struct fd *fd) {
+    struct publication_probe *probe = fd->data;
+    struct task *task = probe->task;
+    const struct signal_action *trap =
+            &task->sighand->action[SIGTRAP_];
+    probe->cloexec_close_called = true;
+    probe->cloexec_close_state_valid = task == current &&
+            !probe->old_exec_close_called &&
+            task->mem == probe->gate.staged_mem &&
+            !task->did_exec && strcmp(task->comm, "old-exec") == 0 &&
+            task->altstack.stack == OLD_ALTSTACK &&
+            task->altstack.size == PAGE_SIZE &&
+            task->altstack.flags == 0 &&
+            task->euid == OLD_EUID && task->suid == OLD_EUID &&
+            task->egid == OLD_EGID && task->sgid == OLD_EGID &&
+            trap->handler == SIG_IGN_ && trap->flags == SA_NODEFER_ &&
+            trap->restorer == UINT32_C(0x08049000) &&
+            trap->mask == sig_mask(SIGCHLD_) &&
+            !sigset_has(task->pending, SIGTRAP_) &&
+            !sigset_has(task->group->shared_pending, SIGTRAP_);
     return 0;
 }
 
@@ -149,6 +203,10 @@ static const struct fd_ops probe_fd_ops = {
     .lseek = probe_lseek,
     .mmap = probe_mmap,
     .close = probe_close,
+};
+
+static const struct fd_ops retire_order_marker_fd_ops = {
+    .close = retire_order_marker_close,
 };
 
 static struct fd *probe_open(struct mount *mount,
@@ -192,7 +250,10 @@ static int probe_stat(struct mount *UNUSED(mount),
         return _ENOENT;
     *stat = (struct statbuf) {
         .inode = root ? 1 : (strcmp(path, "/old") == 0 ? 2 : 3),
-        .mode = root ? S_IFDIR | 0755 : S_IFREG | 0755,
+        .mode = root ? S_IFDIR | 0755 : S_IFREG | 0755 |
+                (strcmp(path, "/new") == 0 ? S_ISUID | S_ISGID : 0),
+        .uid = strcmp(path, "/new") == 0 ? NEW_EUID : OLD_EUID,
+        .gid = strcmp(path, "/new") == 0 ? NEW_EGID : OLD_EGID,
         .size = root ? 0 : PAGE_SIZE,
     };
     return 0;
@@ -204,7 +265,13 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     *stat = (struct statbuf) {
         .inode = root ? 1 :
                 (file->kind == PROBE_OLD_EXECUTABLE ? 2 : 3),
-        .mode = root ? S_IFDIR | 0755 : S_IFREG | 0755,
+        .mode = root ? S_IFDIR | 0755 : S_IFREG | 0755 |
+                (file->kind == PROBE_NEW_EXECUTABLE ?
+                        S_ISUID | S_ISGID : 0),
+        .uid = file->kind == PROBE_NEW_EXECUTABLE ?
+                NEW_EUID : OLD_EUID,
+        .gid = file->kind == PROBE_NEW_EXECUTABLE ?
+                NEW_EGID : OLD_EGID,
         .size = root ? 0 : PAGE_SIZE,
     };
     return 0;
@@ -281,6 +348,7 @@ static struct task *make_task(struct publication_probe *probe,
     struct task *task = task_create_(NULL);
     if (task == NULL)
         return NULL;
+    probe->task = task;
     init_group(group, task);
     task->group = group;
     task->tgid = task->pid;
@@ -293,6 +361,14 @@ static struct task *make_task(struct publication_probe *probe,
             task->sighand == NULL || old_mm == NULL)
         return NULL;
     task_set_mm(task, old_mm);
+    task->uid = task->gid = 1000;
+    task->euid = task->suid = OLD_EUID;
+    task->egid = task->sgid = OLD_EGID;
+    strcpy(task->comm, "old-exec");
+    task->altstack = (struct signal_altstack) {
+        .stack = OLD_ALTSTACK,
+        .size = PAGE_SIZE,
+    };
 
     current = task;
     struct fd *root = generic_open("/", O_RDONLY_, 0);
@@ -480,9 +556,26 @@ static int run_publication_scenario(void) {
     struct mm *old_mm = NULL;
     struct task *task = make_task(&probe, &group, &old_mm);
     CHECK(task != NULL && old_mm != NULL, "创建带旧映像的任务夹具");
+    const struct signal_action ignored_trap = {
+        .handler = SIG_IGN_,
+        .flags = SA_NODEFER_,
+        .restorer = UINT32_C(0x08049000),
+        .mask = sig_mask(SIGCHLD_),
+    };
+    CHECK(task_sigaction(task, SIGTRAP_, &ignored_trap, NULL) == 0,
+            "为经典 ptrace exec trap 安装忽略动作");
+    lock(&task->ptrace.lock);
+    task->ptrace.traced = true;
+    unlock(&task->ptrace.lock);
 
-    // 测试引用让旧实现即使过早退休 mm，也能被确定性检查而不是随机 UAF。
-    mm_retain(old_mm);
+    struct fd *retire_order_marker =
+            fd_create(&retire_order_marker_fd_ops);
+    CHECK(retire_order_marker != NULL, "创建旧 mm 退休顺序探针");
+    retire_order_marker->data = &probe;
+    fd_t retire_order_number = f_install_task(
+            task, retire_order_marker, O_CLOEXEC_);
+    CHECK(retire_order_number >= 0,
+            "把退休顺序探针安装为 CLOEXEC 描述符");
     struct exec_request request = {
         .task = task,
         .result = _EINTR,
@@ -513,7 +606,11 @@ static int run_publication_scenario(void) {
             staged_mem != &old_mm->mem && loader_lock_ok &&
             staged_start == PAGE(NEW_ENTRY_ADDRESS) && staged_pages == 1 &&
             atomic_load_explicit(
-                    &old_mm->refcount, memory_order_acquire) == 2;
+                    &old_mm->refcount, memory_order_acquire) == 1;
+    lock(&task->sighand->lock);
+    bool trap_delayed = !sigset_has(task->pending, SIGTRAP_) &&
+            !sigset_has(group.shared_pending, SIGTRAP_);
+    unlock(&task->sighand->lock);
     bool old_view_complete = private_stage && old_proc_view_is_complete(task);
 
     lock(&probe.gate.lock);
@@ -522,22 +619,48 @@ static int run_publication_scenario(void) {
     unlock(&probe.gate.lock);
     CHECK(pthread_join(worker, NULL) == 0, "等待 exec worker 完成");
 
-    CHECK(private_stage,
+    CHECK(private_stage && trap_delayed,
             "loader 在未发布的独立 mm 中构建新映像并保留旧 mm");
     CHECK(old_view_complete,
             "构建期间 /proc 只能读取完整旧 exe、maps、mem、cmdline 与 auxv");
     CHECK(request.result == 0, "释放 mmap 屏障后 exec 成功");
-    CHECK(task->mm != old_mm && task->mem == staged_mem &&
+    CHECK(task->mem == staged_mem &&
             task->cpu.mmu == &task->mm->mem.mmu &&
             task->cpu.eip == NEW_ENTRY_ADDRESS &&
             task->cpu.esp == task->mm->stack_start && task->did_exec,
             "成功路径一次性发布完整新 mm 与 CPU 入口状态");
-    CHECK(atomic_load_explicit(
-                &old_mm->refcount, memory_order_acquire) == 1,
-            "发布后旧 mm 只剩测试持有的稳定引用");
+    CHECK(probe.cloexec_close_called &&
+            probe.cloexec_close_state_valid &&
+            probe.old_exec_close_called &&
+            probe.old_exec_close_state_valid,
+            "旧 mm 在公共状态提交后、ptrace 通知前退休");
+    struct siginfo_ exec_trap_info;
+    lock(&task->sighand->lock);
+    bool task_trap_pending = sigset_has(task->pending, SIGTRAP_);
+    bool group_trap_pending = sigset_has(group.shared_pending, SIGTRAP_);
+    bool took_exec_trap = signal_take_unblocked_locked(
+            task, 0, &exec_trap_info);
+    unlock(&task->sighand->lock);
+    struct signal_action final_trap_action;
+    lock(&task->ptrace.lock);
+    bool still_traced = task->ptrace.traced;
+    task->ptrace.traced = false;
+    unlock(&task->ptrace.lock);
+    CHECK(task_trap_pending && !group_trap_pending && took_exec_trap &&
+            exec_trap_info.sig == SIGTRAP_ &&
+            exec_trap_info.code == SI_USER_ &&
+            exec_trap_info.payload_kind == SIGNAL_INFO_PAYLOAD_KILL &&
+            exec_trap_info.kill.pid == task->pid &&
+            exec_trap_info.kill.uid == task->uid && still_traced &&
+            task_sigaction(task, SIGTRAP_, NULL,
+                    &final_trap_action) == 0 &&
+            final_trap_action.handler == SIG_IGN_ &&
+            final_trap_action.flags == 0 &&
+            final_trap_action.restorer == 0 &&
+            final_trap_action.mask == 0,
+            "i386 exec 成功后精确排队 classic ptrace SIGTRAP");
     CHECK(new_proc_view_is_complete(task),
             "发布后 /proc 一次性切换到完整新 exe、maps、mem、cmdline 与 auxv");
-    mm_release(old_mm);
     return 0;
 }
 

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "guest/aarch64/linux-process.h"
@@ -17,6 +18,13 @@ __thread struct task *current;
 
 static struct pid pids[MAX_PID + 1] = {};
 lock_t pids_lock = LOCK_INITIALIZER;
+static atomic_bool task_exec_fail_sighand_reservation =
+        ATOMIC_VAR_INIT(false);
+
+void task_exec_test_fail_sighand_reservation_once(void) {
+    atomic_store_explicit(&task_exec_fail_sighand_reservation,
+            true, memory_order_release);
+}
 
 bool task_has_aarch64_process(const struct task *task) {
     return __atomic_load_n(
@@ -24,17 +32,21 @@ bool task_has_aarch64_process(const struct task *task) {
 }
 
 static bool task_accepts_aarch64_process(struct task *task,
-        struct aarch64_linux_process *process) {
+        struct aarch64_linux_process *process, pid_t_ tid) {
     return task != NULL && process != NULL &&
             aarch64_linux_process_uses_services(process,
-                    task->pid, task,
+                    tid, task,
                     &ish_aarch64_linux_syscall_service,
                     &ish_aarch64_linux_signal_service);
 }
 
+static void task_exec_name_from_path(
+        char name[16], const char *executable);
+
 bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process) {
-    if (!task_accepts_aarch64_process(task, process) ||
+    if (task == NULL ||
+            !task_accepts_aarch64_process(task, process, task->pid) ||
             task->aarch64_process != NULL ||
             task->exec_transition.process != NULL)
         return false;
@@ -43,16 +55,24 @@ bool task_attach_aarch64_process(struct task *task,
 }
 
 bool task_stage_aarch64_exec(struct task *task,
-        struct aarch64_linux_process *process, struct mm *mm) {
-    if (!task_accepts_aarch64_process(task, process) ||
+        struct aarch64_linux_process *process, struct mm *mm,
+        uid_t_ euid, uid_t_ egid, const char *executable) {
+    if (task == NULL || executable == NULL ||
+            !task_accepts_aarch64_process(task, process, task->tgid) ||
             mm == NULL ||
             mm == task->mm ||
             task->exec_transition.process != NULL ||
             task->exec_transition.mm != NULL ||
+            task->exec_transition.sighand != NULL ||
+            task->exec_transition.begun ||
+            task->exec_transition.ready ||
             task->aarch64_process == process)
         return false;
     task->exec_transition.process = process;
     task->exec_transition.mm = mm;
+    task->exec_transition.euid = euid;
+    task->exec_transition.egid = egid;
+    task_exec_name_from_path(task->exec_transition.comm, executable);
     return true;
 }
 
@@ -60,10 +80,148 @@ bool task_has_aarch64_exec_candidate(const struct task *task) {
     return task->exec_transition.process != NULL;
 }
 
+static void task_exec_name_from_path(
+        char name[16], const char *executable) {
+    const char *basename = strrchr(executable, '/');
+    basename = basename == NULL ? executable : basename + 1;
+    memset(name, 0, 16);
+    snprintf(name, 16, "%s", basename);
+}
+
+static bool task_exec_is_killed(struct task *task) {
+    return task_group_fatal_signal(task) != 0 ||
+            task_sigkill_pending(task);
+}
+
+static int task_exec_reserve_sighand(struct task *task) {
+    struct sighand *old_sighand = task->sighand;
+    if (atomic_load_explicit(
+                &old_sighand->refcount, memory_order_acquire) == 1)
+        return 0;
+
+    bool fail_reservation = atomic_exchange_explicit(
+            &task_exec_fail_sighand_reservation,
+            false, memory_order_acq_rel);
+    struct sighand *private_sighand =
+            fail_reservation ? NULL : sighand_new();
+    lock(&pids_lock);
+    old_sighand = task->sighand;
+    bool shared = atomic_load_explicit(
+            &old_sighand->refcount, memory_order_acquire) > 1;
+    if (private_sighand != NULL && shared) {
+        assert(task->exec_transition.sighand == NULL);
+        task->exec_transition.sighand = private_sighand;
+        private_sighand = NULL;
+    }
+    unlock(&pids_lock);
+
+    if (private_sighand != NULL)
+        sighand_release(private_sighand);
+    return shared && task->exec_transition.sighand == NULL ?
+            _ENOMEM : 0;
+}
+
+int task_begin_aarch64_exec(struct task *task) {
+    assert(task != NULL && task == current &&
+            task_has_aarch64_exec_candidate(task) &&
+            task->exec_transition.mm != NULL &&
+            task->exec_transition.sighand == NULL &&
+            !task->exec_transition.begun);
+
+    // PONR 必须早于 de-thread；从这里起任何失败都只能终止映像。
+    task->exec_transition.begun = true;
+
+    int error = task_exec_dethread(task);
+    if (error < 0)
+        return error;
+    error = task_exec_unshare_files(task);
+    if (error < 0)
+        return error;
+    error = task_exec_reserve_sighand(task);
+    if (error < 0)
+        return error;
+
+    lock(&pids_lock);
+    bool killed = task_exec_is_killed(task);
+    unlock(&pids_lock);
+    if (killed)
+        return _EINTR;
+    task->exec_transition.ready = true;
+    return 0;
+}
+
+static void task_set_exec_name(struct task *task, const char comm[16]) {
+    lock(&task->general_lock);
+    memcpy(task->comm, comm, sizeof(task->comm));
+    unlock(&task->general_lock);
+    task->did_exec = true;
+}
+
+static void task_commit_exec_credentials(
+        struct task *task, uid_t_ euid, uid_t_ egid) {
+    // 信号权限检查在 pids_lock 下读取四个字段，必须整体发布。
+    lock(&pids_lock);
+    task->euid = euid;
+    task->egid = egid;
+    task->suid = euid;
+    task->sgid = egid;
+    unlock(&pids_lock);
+}
+
+static void task_notify_exec(struct task *task) {
+    update_thread_name();
+    lock(&task->ptrace.lock);
+    bool traced = task->ptrace.traced;
+    unlock(&task->ptrace.lock);
+    if (traced) {
+        lock(&pids_lock);
+        // 经典 ptrace exec trap 即使 disposition 为 SIG_IGN 也必须排队。
+        deliver_signal_locked(task, SIGTRAP_, (struct siginfo_) {
+            .code = SI_USER_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_KILL,
+            .kill.pid = task->pid,
+            .kill.uid = task->uid,
+        });
+        unlock(&pids_lock);
+    }
+}
+
+static void task_finish_exec_state(struct task *task,
+        uid_t_ euid, uid_t_ egid, const char comm[16]) {
+    // Linux 先关闭敏感 fd，再清替代栈、更新 comm、重置 handler，最后提交凭据。
+    fdtable_do_cloexec(task->files);
+    task_altstack_reset(task);
+    task_set_exec_name(task, comm);
+    task_signal_exec_reset_actions(task);
+    task_commit_exec_credentials(task, euid, egid);
+}
+
+void task_finish_exec(struct task *task, uid_t_ euid, uid_t_ egid,
+        const char *executable, struct mm *retired_mm) {
+    assert(task != NULL && task == current && retired_mm != NULL &&
+            retired_mm != task->mm);
+    char comm[16];
+    task_exec_name_from_path(comm, executable);
+
+    task_finish_exec_state(task, euid, egid, comm);
+    mm_release(retired_mm);
+    task_notify_exec(task);
+}
+
 void task_commit_aarch64_exec(struct task *task) {
-    assert(task != NULL && task_has_aarch64_exec_candidate(task) &&
-            task->exec_transition.mm != NULL);
+    assert(task != NULL && task == current &&
+            task_has_aarch64_exec_candidate(task) &&
+            task->exec_transition.mm != NULL &&
+            task->exec_transition.begun &&
+            task->exec_transition.ready &&
+            task_accepts_aarch64_process(task,
+                    task->exec_transition.process, task->pid));
+    struct task_exec_transition *transition = &task->exec_transition;
     struct aarch64_linux_process *retired = task->aarch64_process;
+    uid_t_ euid = transition->euid;
+    uid_t_ egid = transition->egid;
+    char comm[16];
+    memcpy(comm, transition->comm, sizeof(comm));
 
     // 只在成功提交时清理旧映像；候选失败仍保留原架构注册。
     if (retired != NULL)
@@ -71,36 +229,69 @@ void task_commit_aarch64_exec(struct task *task) {
     else
         futex_cleanup_task_i386(task);
 
-    // procfs 与 ptrace 先以 pids_lock 固定 task，再读取地址空间元数据。
+    // Linux 在替换 mm 前完成 clear_child_tid/robust 清理并唤醒 vfork 父任务。
+    vfork_notify(task);
+
+    // procfs 以 pids_lock 固定 task，再由 general_lock 取得配对的 process/mm。
     lock(&pids_lock);
     lock(&task->general_lock);
     struct mm *retired_mm = task->mm;
+    task_set_mm(task, transition->mm);
+    transition->mm = NULL;
+    // mm 先写，process 的 release-store 是无锁观察者的发布标志。
     __atomic_store_n(&task->aarch64_process,
-            task->exec_transition.process, __ATOMIC_RELEASE);
-    task->exec_transition.process = NULL;
-    task_set_mm(task, task->exec_transition.mm);
-    task->exec_transition.mm = NULL;
+            transition->process, __ATOMIC_RELEASE);
+    transition->process = NULL;
     unlock(&task->general_lock);
     unlock(&pids_lock);
 
+    // timer pending 仍由旧 sighand 保护，必须在最终动作快照前清理。
+    if (task->group != NULL)
+        tgroup_exec_posix_timers_destroy(task->group);
+    signal_flush_exec_timer_pending(task);
+
+    struct sighand *retired_sighand = NULL;
+    // 对应 Linux unshare_sighand：在旧动作锁下取得安全点的最终快照。
+    lock(&pids_lock);
+    if (transition->sighand != NULL) {
+        retired_sighand = task->sighand;
+        lock(&retired_sighand->lock);
+        memcpy(transition->sighand->action,
+                retired_sighand->action,
+                sizeof(transition->sighand->action));
+        task->sighand = transition->sighand;
+        transition->sighand = NULL;
+        unlock(&retired_sighand->lock);
+    } else {
+        assert(atomic_load_explicit(
+                    &task->sighand->refcount,
+                    memory_order_acquire) == 1);
+    }
+    unlock(&pids_lock);
+
+    if (retired_sighand != NULL)
+        sighand_release(retired_sighand);
+
+    assert(atomic_load_explicit(
+                &task->files->refcount, memory_order_acquire) == 1);
+    task_finish_exec_state(task, euid, egid, comm);
+
+    *transition = (struct task_exec_transition) {};
     aarch64_linux_process_destroy(retired);
     if (retired_mm != NULL)
         mm_release(retired_mm);
 
-    // AArch64 候选在安全点提交后同样退休旧映像的 POSIX timer 状态。
-    if (task->group != NULL)
-        tgroup_exec_posix_timers_destroy(task->group);
-    if (task->sighand != NULL)
-        signal_flush_exec_timer_pending(task);
-    // vfork 父任务只能在共享旧 mm 完全退休后恢复。
-    vfork_notify(task);
+    task_notify_exec(task);
 }
 
 void task_discard_aarch64_exec(struct task *task) {
     assert(task != NULL);
+    assert(!task->exec_transition.begun || task->exiting);
     aarch64_linux_process_destroy(task->exec_transition.process);
     if (task->exec_transition.mm != NULL)
         mm_release(task->exec_transition.mm);
+    if (task->exec_transition.sighand != NULL)
+        sighand_release(task->exec_transition.sighand);
     task->exec_transition = (struct task_exec_transition) {};
 }
 
@@ -303,7 +494,10 @@ void task_abort_create(struct task *task) {
 void task_destroy(struct task *task) {
     assert(task->aarch64_process == NULL &&
             task->exec_transition.process == NULL &&
-            task->exec_transition.mm == NULL);
+            task->exec_transition.mm == NULL &&
+            task->exec_transition.sighand == NULL &&
+            !task->exec_transition.begun &&
+            !task->exec_transition.ready);
     list_remove(&task->siblings);
     struct pid *pid = pid_slot(task->pid);
     assert(pid != NULL && !pid->reserved && pid->task == task);
@@ -336,8 +530,35 @@ static void task_exec_clear_marker_locked(struct task *task) {
     unlock(&task->sighand->lock);
 }
 
+int task_exec_unshare_files(struct task *task) {
+    assert(task != NULL && task->files != NULL);
+    struct fdtable *shared_files = task->files;
+    struct fdtable *private_files = NULL;
+    if (atomic_load_explicit(
+                &shared_files->refcount, memory_order_acquire) > 1) {
+        private_files = fdtable_copy(shared_files);
+        if (IS_ERR(private_files))
+            return (int) PTR_ERR(private_files);
+    }
+
+    lock(&pids_lock);
+    bool killed = task_exec_is_killed(task);
+    if (!killed && private_files != NULL) {
+        assert(task->files == shared_files);
+        task->files = private_files;
+        private_files = NULL;
+    }
+    unlock(&pids_lock);
+
+    if (private_files != NULL)
+        fdtable_release(private_files);
+    if (task->files != shared_files)
+        fdtable_release(shared_files);
+    return killed ? _EINTR : 0;
+}
+
 // 成功后线程组只保留 task；等待期间不会吞掉外部 SIGKILL。
-int task_exec_dethread_i386(struct task *task) {
+int task_exec_dethread(struct task *task) {
     assert(task != NULL);
     struct tgroup *group = task->group;
 

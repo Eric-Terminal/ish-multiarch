@@ -69,6 +69,7 @@ _Static_assert(sizeof(struct i386_robust_list_head_wire) == 12 &&
 struct exec_fixture {
     struct task task;
     struct task observer;
+    struct tgroup group;
 };
 
 struct i386_waiter {
@@ -173,7 +174,8 @@ static bool stage_candidate(struct task *task) {
             mm_release(metadata);
         return false;
     }
-    if (task_stage_aarch64_exec(task, candidate, metadata))
+    if (task_stage_aarch64_exec(task, candidate, metadata,
+                task->euid, task->egid, "/bin/cross-abi-exec"))
         return true;
     aarch64_linux_process_destroy(candidate);
     mm_release(metadata);
@@ -183,10 +185,29 @@ static bool stage_candidate(struct task *task) {
 static bool init_fixture(struct exec_fixture *fixture) {
     memset(fixture, 0, sizeof(*fixture));
     fixture->task.pid = fixture->task.tgid = TEST_PID;
+    fixture->task.group = &fixture->group;
+    list_init(&fixture->group.threads);
+    list_init(&fixture->group.shared_queue);
+    list_init(&fixture->group.session);
+    list_init(&fixture->group.pgroup);
+    lock_init(&fixture->group.lock);
+    cond_init(&fixture->group.child_exit);
+    cond_init(&fixture->group.stopped_cond);
+    fixture->group.leader = &fixture->task;
+    list_init(&fixture->task.group_links);
+    list_init(&fixture->task.queue);
+    list_init(&fixture->task.children);
+    list_init(&fixture->task.siblings);
+    list_add(&fixture->group.threads,
+            &fixture->task.group_links);
     lock_init(&fixture->task.general_lock);
+    fixture->task.files = fdtable_new(1);
+    fixture->task.sighand = sighand_new();
     struct mm *mm = mm_new();
     struct fd *metadata = fd_create(&metadata_fd_ops);
-    if (mm == NULL || metadata == NULL) {
+    if (IS_ERR(fixture->task.files) ||
+            fixture->task.sighand == NULL ||
+            mm == NULL || metadata == NULL) {
         if (mm != NULL)
             mm_release(mm);
         if (metadata != NULL)
@@ -229,8 +250,17 @@ static void destroy_fixture(struct exec_fixture *fixture) {
     fixture->task.mem = NULL;
     fixture->observer.mm = NULL;
     fixture->observer.mem = NULL;
+    fdtable_release(fixture->task.files);
+    sighand_release(fixture->task.sighand);
+    list_remove(&fixture->task.group_links);
+    cond_destroy(&fixture->group.child_exit);
+    cond_destroy(&fixture->group.stopped_cond);
     pthread_mutex_destroy(&fixture->task.general_lock.m);
     current = NULL;
+}
+
+static bool begin_candidate(struct task *task) {
+    return task_begin_aarch64_exec(task) == 0;
 }
 
 static bool write_u32(struct task *task,
@@ -349,6 +379,8 @@ static bool test_single_mm_user(void) {
             "独立观察 mm 共享 backing 但不冒充旧 mm 用户");
     TEST_CHECK(stage_candidate(&fixture.task),
             "建立最小 AArch64 exec 候选");
+    TEST_CHECK(begin_candidate(&fixture.task),
+            "进入单用户 exec 不可回退阶段");
 
     task_commit_aarch64_exec(&fixture.task);
 
@@ -390,6 +422,8 @@ static bool test_robust_before_clear_tid(void) {
             "确认两个等待者都已进入生产 futex 队列");
     TEST_CHECK(stage_candidate(&fixture.task),
             "建立顺序场景的 AArch64 候选");
+    TEST_CHECK(begin_candidate(&fixture.task),
+            "进入顺序场景 exec 不可回退阶段");
 
     task_commit_aarch64_exec(&fixture.task);
 
@@ -437,6 +471,8 @@ static bool test_clear_tid_write_fault_still_wakes(void) {
     TEST_CHECK(protection_error == 0 &&
             stage_candidate(&fixture.task),
             "把旧映像 clear-child-tid 页降为只读并建立候选");
+    TEST_CHECK(begin_candidate(&fixture.task),
+            "进入只读 clear-child-tid exec 不可回退阶段");
 
     task_commit_aarch64_exec(&fixture.task);
 

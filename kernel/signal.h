@@ -221,6 +221,8 @@ void sighand_release(struct sighand *sighand);
 int task_sigaction(struct task *task, int signal,
         const struct signal_action *action,
         struct signal_action *oldaction);
+// exec 在 comm 更新后重置 disposition；替代栈由调用方按 Linux 顺序单独清理。
+void task_signal_exec_reset_actions(struct task *task);
 void task_signal_exec_reset(struct task *task);
 
 dword_t sys_rt_sigaction(dword_t signum, addr_t action_addr, addr_t oldaction_addr, dword_t sigset_size);

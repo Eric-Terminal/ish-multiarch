@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "fs/fd.h"
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
@@ -139,7 +140,8 @@ static bool stage_process(struct task *task,
     struct mm *mm = mm_new();
     if (mm == NULL)
         return false;
-    if (task_stage_aarch64_exec(task, process, mm))
+    if (task_stage_aarch64_exec(task, process, mm,
+                task->euid, task->egid, "/bin/task-lifecycle"))
         return true;
     mm_release(mm);
     return false;
@@ -165,8 +167,31 @@ static bool write_robust_state(
 }
 
 int main(void) {
-    struct task parent = {.pid = 1000};
+    struct tgroup group = {0};
+    list_init(&group.threads);
+    list_init(&group.shared_queue);
+    list_init(&group.session);
+    list_init(&group.pgroup);
+    lock_init(&group.lock);
+    cond_init(&group.child_exit);
+    cond_init(&group.stopped_cond);
+
+    struct task parent = {
+        .pid = 1000,
+        .tgid = 1000,
+        .group = &group,
+    };
+    group.leader = &parent;
+    list_init(&parent.group_links);
+    list_init(&parent.queue);
+    list_init(&parent.children);
+    list_init(&parent.siblings);
+    list_add(&group.threads, &parent.group_links);
     lock_init(&parent.general_lock);
+    parent.files = fdtable_new(1);
+    parent.sighand = sighand_new();
+    CHECK(!IS_ERR(parent.files) && parent.sighand != NULL,
+            "创建 exec 公共文件表与信号动作表");
     struct mm *initial_mm = mm_new();
     CHECK(initial_mm != NULL, "创建首个 metadata mm");
     task_set_mm(&parent, initial_mm);
@@ -211,9 +236,10 @@ int main(void) {
             make_process_with_clear_tid(
                     &parent, parent.pid, CLEAR_CHILD_TID);
     CHECK(replacement != NULL && aarch64_linux_process_write_u32(
-                    replacement, CLEAR_CHILD_TID,
+            replacement, CLEAR_CHILD_TID,
                     (dword_t) parent.pid, NULL) &&
             stage_process(&parent, replacement) &&
+            task_begin_aarch64_exec(&parent) == 0 &&
             task_has_aarch64_exec_candidate(&parent) &&
             parent.aarch64_process == first,
             "exec 候选在安全点前不替换活动 process");
@@ -330,6 +356,7 @@ int main(void) {
 
     struct task *aborted = task_create_(&parent);
     CHECK(aborted != NULL, "创建待中止任务");
+    aborted->tgid = aborted->pid;
     struct aarch64_linux_process *aborted_process =
             make_process(aborted, aborted->pid, true);
     CHECK(aborted_process != NULL, "为待中止任务创建 process");
@@ -362,6 +389,11 @@ int main(void) {
     mm_release(parent.mm);
     parent.mm = NULL;
     parent.mem = NULL;
+    fdtable_release(parent.files);
+    sighand_release(parent.sighand);
+    list_remove(&parent.group_links);
+    cond_destroy(&group.child_exit);
+    cond_destroy(&group.stopped_cond);
     current = NULL;
     return 0;
 }

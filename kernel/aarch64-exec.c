@@ -125,16 +125,6 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
         error = _E2BIG;
         goto out_images;
     }
-    lock(&pids_lock);
-    bool single_threaded = task_is_leader(task) &&
-            list_size(&task->group->threads) == 1;
-    unlock(&pids_lock);
-    // 跨架构 de-thread 尚未实现，不能发布混合 i386/AArch64 线程组。
-    if (!single_threaded) {
-        error = _EBUSY;
-        goto out_images;
-    }
-
     const char **argument_vector =
             unpack_strings(arguments, argument_count);
     const char **environment_vector =
@@ -170,7 +160,8 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
         .gid = identity->gid,
         .egid = identity->egid,
         .secure = identity->secure,
-        .tid = task->pid,
+        // 非 leader 在 PONR 后接管 TGID，候选必须提前使用最终 TID。
+        .tid = task->tgid,
         .task_opaque = task,
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
@@ -198,7 +189,8 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
         goto out_vectors;
     }
     metadata->exefile = fd_retain(main_fd);
-    if (!task_stage_aarch64_exec(task, process, metadata)) {
+    if (!task_stage_aarch64_exec(task, process, metadata,
+                identity->euid, identity->egid, executable)) {
         mm_release(metadata);
         aarch64_linux_process_destroy(process);
         error = _EBUSY;

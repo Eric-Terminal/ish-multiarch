@@ -209,7 +209,7 @@ static int run_leader_exec(void) {
 
     current = leader;
     task_thread_store(leader, pthread_self());
-    CHECK(task_exec_dethread_i386(leader) == 0,
+    CHECK(task_exec_dethread(leader) == 0,
             "leader 等待并收敛同组线程");
     CHECK(join_exec_peer(host_thread),
             "同组线程经 exec 专用退出路径结束");
@@ -274,7 +274,7 @@ static int run_nonleader_exec(void) {
 
     current = execer;
     task_thread_store(execer, pthread_self());
-    CHECK(task_exec_dethread_i386(execer) == 0,
+    CHECK(task_exec_dethread(execer) == 0,
             "非 leader 等待 peer 并接管旧 TGID");
     CHECK(join_exec_peer(leader_host_thread) &&
                     join_exec_peer(ordinary_host_thread),

@@ -23,6 +23,7 @@ struct task_exec_transition {
     uid_t_ euid, egid;
     char comm[16] __strncpy_safe;
     bool begun;
+    bool ready;
 };
 
 // everything here is private to the thread executing this task and needs no
@@ -147,7 +148,10 @@ bool task_has_aarch64_process(const struct task *task);
 bool task_attach_aarch64_process(struct task *task,
         struct aarch64_linux_process *process);
 bool task_stage_aarch64_exec(struct task *task,
-        struct aarch64_linux_process *process, struct mm *mm);
+        struct aarch64_linux_process *process, struct mm *mm,
+        uid_t_ euid, uid_t_ egid, const char *executable);
+// stage 仍可回滚；begin 置位 PONR，之后的错误只能终止当前映像。
+int task_begin_aarch64_exec(struct task *task);
 bool task_has_aarch64_exec_candidate(const struct task *task);
 void task_commit_aarch64_exec(struct task *task);
 void task_discard_aarch64_exec(struct task *task);
@@ -165,8 +169,16 @@ void task_publish(struct task *task);
 void task_abort_create(struct task *task);
 // Removes the process from the process table and frees it. Must be called with pids_lock.
 void task_destroy(struct task *task);
-// 收敛 i386 exec 线程组；EINTR 表示执行者同时收到 SIGKILL。
-int task_exec_dethread_i386(struct task *task);
+// 收敛 exec 线程组；EINTR 表示执行者同时收到 SIGKILL。
+int task_exec_dethread(struct task *task);
+// 仅在 PONR 后调用；返回失败时旧映像不得继续运行。
+int task_exec_unshare_files(struct task *task);
+// 常驻的一次性故障注入仅用于验证 PONR 后的 sighand 分配失败路径。
+void task_exec_test_fail_sighand_reservation_once(void);
+// 完成两种 guest 共用的 exec 身份、文件、信号与通知副作用。
+// 接管 retired_mm，并在公共状态提交后、ptrace 通知前退休旧映像。
+void task_finish_exec(struct task *task, uid_t_ euid, uid_t_ egid,
+        const char *executable, struct mm *retired_mm);
 
 // misc
 pid_t_ task_getpid(const struct task *task);

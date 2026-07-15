@@ -976,7 +976,7 @@ int task_sigaction(struct task *task, int sig,
     return 0;
 }
 
-void task_signal_exec_reset(struct task *task) {
+void task_signal_exec_reset_actions(struct task *task) {
     struct sighand *sighand = task->sighand;
     lock(&sighand->lock);
     for (int sig = 1; sig <= NUM_SIGS; sig++) {
@@ -986,7 +986,11 @@ void task_signal_exec_reset(struct task *task) {
         };
     }
     unlock(&sighand->lock);
+}
+
+void task_signal_exec_reset(struct task *task) {
     task_altstack_reset(task);
+    task_signal_exec_reset_actions(task);
 }
 
 static struct signal_action unpack_i386_sigaction(
