@@ -1123,6 +1123,56 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    dword_t exclusive_pair_load = word & UINT32_C(0xbfff8000);
+    if (exclusive_pair_load == UINT32_C(0x887f0000) ||
+            exclusive_pair_load == UINT32_C(0x887f8000)) {
+        byte_t rt = word & 0x1f;
+        byte_t rt2 = (word >> 10) & 0x1f;
+        // 架构把两个目标寄存器重叠定义为受约束的不可预测行为；
+        // 解释器固定选择 UNDEFINED，避免产生依赖实现的部分写回。
+        if (rt == rt2)
+            return false;
+        byte_t width = (word >> 30) & 1 ? 64 : 32;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = exclusive_pair_load == UINT32_C(0x887f8000) ?
+                    AARCH64_OP_LDAXP : AARCH64_OP_LDXP,
+            .width = width,
+            .operands.exclusive = {
+                .rs = 31,
+                .rt = rt,
+                .rt2 = rt2,
+                .rn = (word >> 5) & 0x1f,
+                .size = width / 8,
+            },
+        };
+        return true;
+    }
+
+    dword_t exclusive_pair_store = word & UINT32_C(0xbfe08000);
+    if (exclusive_pair_store == UINT32_C(0x88200000) ||
+            exclusive_pair_store == UINT32_C(0x88208000)) {
+        byte_t rs = (word >> 16) & 0x1f;
+        byte_t rt = word & 0x1f;
+        byte_t rt2 = (word >> 10) & 0x1f;
+        byte_t rn = (word >> 5) & 0x1f;
+        if (rs == rt || rs == rt2 || (rn != 31 && rs == rn))
+            return false;
+        byte_t width = (word >> 30) & 1 ? 64 : 32;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = exclusive_pair_store == UINT32_C(0x88208000) ?
+                    AARCH64_OP_STLXP : AARCH64_OP_STXP,
+            .width = width,
+            .operands.exclusive = {
+                .rs = rs,
+                .rt = rt,
+                .rt2 = rt2,
+                .rn = rn,
+                .size = width / 8,
+            },
+        };
+        return true;
+    }
+
     dword_t exclusive_load = word & UINT32_C(0x3ffffc00);
     if (exclusive_load == UINT32_C(0x085f7c00) ||
             exclusive_load == UINT32_C(0x085ffc00)) {
@@ -1134,6 +1184,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .operands.exclusive = {
                 .rs = 31,
                 .rt = word & 0x1f,
+                .rt2 = 31,
                 .rn = (word >> 5) & 0x1f,
                 .size = (byte_t) (1U << size_shift),
             },
@@ -1157,6 +1208,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .operands.exclusive = {
                 .rs = rs,
                 .rt = rt,
+                .rt2 = 31,
                 .rn = rn,
                 .size = (byte_t) (1U << size_shift),
             },

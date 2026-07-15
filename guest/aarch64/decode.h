@@ -66,6 +66,10 @@ enum aarch64_opcode {
     AARCH64_OP_LDAXR,
     AARCH64_OP_STXR,
     AARCH64_OP_STLXR,
+    AARCH64_OP_LDXP,
+    AARCH64_OP_LDAXP,
+    AARCH64_OP_STXP,
+    AARCH64_OP_STLXP,
     AARCH64_OP_CLREX,
     AARCH64_OP_DMB,
     AARCH64_OP_DSB,
@@ -354,6 +358,7 @@ struct aarch64_decoded {
         struct {
             byte_t rs;
             byte_t rt;
+            byte_t rt2;
             byte_t rn;
             byte_t size;
         } exclusive;

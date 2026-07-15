@@ -69,7 +69,7 @@ static void test_execution(void) {
             cpu.x[0] = UINT64_C(0x0123456789abcdef);
             cpu.v[0].d[0] = UINT64_C(0x13579bdf2468ace0);
             cpu.v[0].d[1] = UINT64_C(0x02468ace13579bdf);
-            aarch64_set_exclusive(&cpu, UINT64_C(0x2000), 8,
+            aarch64_set_exclusive(&cpu, UINT64_C(0x2000), 8, false,
                     UINT64_C(0xaabbccddeeff0011), 0, NULL, 7, 11);
             struct cpu_state before = cpu;
             struct aarch64_decoded instruction = decode(
@@ -87,7 +87,7 @@ static void test_execution(void) {
 
 static void test_monitor_clearing(void) {
     struct cpu_state cpu = {.pc = UINT64_C(0x1800)};
-    aarch64_set_exclusive(&cpu, UINT64_C(0x3000), 4,
+    aarch64_set_exclusive(&cpu, UINT64_C(0x3000), 4, false,
             UINT32_C(0x12345678), 0, NULL, 9, 13);
     struct aarch64_decoded clrex = decode(UINT32_C(0xd5033f5f));
     struct aarch64_execute_result result =
@@ -96,7 +96,7 @@ static void test_monitor_clearing(void) {
     assert(!cpu.exclusive.valid);
     assert(cpu.pc == UINT64_C(0x1804));
 
-    aarch64_set_exclusive(&cpu, UINT64_C(0x4000), 8,
+    aarch64_set_exclusive(&cpu, UINT64_C(0x4000), 8, false,
             UINT64_C(0xabcdef0123456789), 0, NULL, 10, 17);
     struct aarch64_decoded svc = decode(UINT32_C(0xd4000001));
     result = aarch64_execute(&cpu, NULL, &svc);

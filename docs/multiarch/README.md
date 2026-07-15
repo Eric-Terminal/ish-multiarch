@@ -213,7 +213,7 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 
 ## 当前限制
 
-- AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；例如 `CASP`、`LDXP`、`STXP` 尚未实现。
+- AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；例如成对比较交换 `CASP` 尚未实现。
 - 未支持的 AArch64 指令会安全投递 `SIGILL`，未知 Linux 系统调用会返回 `ENOSYS`。
 - `futex` 当前只在同一地址空间模型内支持 `WAIT`、`WAKE` 与 `REQUEUE`，尚无跨进程共享后备对象身份、AArch64 robust list 或 `futex_waitv`；`clone3` 仅接受当前任务模型可安全表达的受限标志集。
 - `mmap` 当前只支持匿名私有映射；文件映射和共享映射尚未实现。`MADV_DONTNEED` 只接受受控 mmap 匿名域或已分配 brk 页，无法确认来源的映射会在写入前被拒绝。

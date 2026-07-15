@@ -33,6 +33,7 @@ struct aarch64_exclusive_monitor {
     qword_t mapping_epoch;
     qword_t write_epoch;
     byte_t size;
+    bool pair;
     bool valid;
 };
 
@@ -132,11 +133,12 @@ static inline void aarch64_set_fpsr(struct cpu_state *cpu, dword_t fpsr) {
 }
 
 static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t address,
-        byte_t size, qword_t value_low, qword_t value_high,
+        byte_t size, bool pair, qword_t value_low, qword_t value_high,
         const struct guest_address_space *address_space,
         qword_t mapping_epoch, qword_t write_epoch) {
     cpu->exclusive.address = address;
     cpu->exclusive.size = size;
+    cpu->exclusive.pair = pair;
     cpu->exclusive.value_low = value_low;
     cpu->exclusive.value_high = value_high;
     cpu->exclusive.address_space = address_space;
@@ -146,9 +148,10 @@ static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t add
 }
 
 static inline bool aarch64_exclusive_matches(const struct cpu_state *cpu,
-        guest_addr_t address, byte_t size) {
+        guest_addr_t address, byte_t size, bool pair) {
+    // 总宽度相同的单寄存器与成对访问也不能共用一次保留。
     return cpu->exclusive.valid && cpu->exclusive.address == address &&
-            cpu->exclusive.size == size;
+            cpu->exclusive.size == size && cpu->exclusive.pair == pair;
 }
 
 static inline void aarch64_clear_exclusive(struct cpu_state *cpu) {

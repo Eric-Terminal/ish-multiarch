@@ -1413,7 +1413,7 @@ static bool execute_load_exclusive(struct cpu_state *cpu,
             tlb, address, bytes, size, &token, fault))
         return false;
     qword_t value = load_little_endian(bytes, size);
-    aarch64_set_exclusive(cpu, address, size, value, 0,
+    aarch64_set_exclusive(cpu, address, size, false, value, 0,
             token.address_space, token.mapping_generation,
             token.write_generation);
     write_register(cpu, instruction->operands.exclusive.rt,
@@ -1436,7 +1436,7 @@ static bool execute_store_exclusive(struct cpu_state *cpu,
             address, size, GUEST_MEMORY_WRITE, fault))
         return false;
 
-    if (!aarch64_exclusive_matches(cpu, address, size)) {
+    if (!aarch64_exclusive_matches(cpu, address, size, false)) {
         aarch64_clear_exclusive(cpu);
         write_register(cpu, status, 32, false, 1);
         cpu->pc += 4;
@@ -1455,6 +1455,89 @@ static bool execute_store_exclusive(struct cpu_state *cpu,
     aarch64_clear_exclusive(cpu);
     enum guest_tlb_store_exclusive_result result = guest_tlb_store_exclusive(
             tlb, address, expected, bytes, size, token, fault);
+    if (result == GUEST_TLB_EXCLUSIVE_FAULT)
+        return false;
+    write_register(cpu, status, 32, false,
+            result == GUEST_TLB_EXCLUSIVE_STORED ? 0 : 1);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_load_exclusive_pair(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t element_size = instruction->operands.exclusive.size;
+    byte_t pair_size = element_size * 2;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    if (!check_exclusive_alignment(
+            address, pair_size, GUEST_MEMORY_READ, fault))
+        return false;
+
+    byte_t bytes[16];
+    struct guest_tlb_exclusive_token token;
+    if (!guest_tlb_load_exclusive(
+            tlb, address, bytes, pair_size, &token, fault))
+        return false;
+    qword_t value_low = load_little_endian(bytes, element_size);
+    qword_t value_high = load_little_endian(
+            bytes + element_size, element_size);
+    aarch64_set_exclusive(cpu, address, pair_size, true,
+            value_low, value_high,
+            token.address_space, token.mapping_generation,
+            token.write_generation);
+    write_register(cpu, instruction->operands.exclusive.rt,
+            instruction->width, false, value_low);
+    write_register(cpu, instruction->operands.exclusive.rt2,
+            instruction->width, false, value_high);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_store_exclusive_pair(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t element_size = instruction->operands.exclusive.size;
+    byte_t pair_size = element_size * 2;
+    byte_t status = instruction->operands.exclusive.rs;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    qword_t value_low = read_register(cpu,
+            instruction->operands.exclusive.rt,
+            instruction->width, false);
+    qword_t value_high = read_register(cpu,
+            instruction->operands.exclusive.rt2,
+            instruction->width, false);
+    if (!check_exclusive_alignment(
+            address, pair_size, GUEST_MEMORY_WRITE, fault))
+        return false;
+
+    if (!aarch64_exclusive_matches(cpu, address, pair_size, true)) {
+        aarch64_clear_exclusive(cpu);
+        write_register(cpu, status, 32, false, 1);
+        cpu->pc += 4;
+        return true;
+    }
+
+    byte_t expected[16];
+    store_little_endian(expected, element_size,
+            cpu->exclusive.value_low);
+    store_little_endian(expected + element_size, element_size,
+            cpu->exclusive.value_high);
+    byte_t replacement[16];
+    store_little_endian(replacement, element_size, value_low);
+    store_little_endian(
+            replacement + element_size, element_size, value_high);
+    struct guest_tlb_exclusive_token token = {
+        .address_space = cpu->exclusive.address_space,
+        .mapping_generation = cpu->exclusive.mapping_epoch,
+        .write_generation = cpu->exclusive.write_epoch,
+    };
+    aarch64_clear_exclusive(cpu);
+    enum guest_tlb_store_exclusive_result result = guest_tlb_store_exclusive(
+            tlb, address, expected, replacement, pair_size, token, fault);
     if (result == GUEST_TLB_EXCLUSIVE_FAULT)
         return false;
     write_register(cpu, status, 32, false,
@@ -1779,6 +1862,18 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_STXR:
         case AARCH64_OP_STLXR:
             if (!execute_store_exclusive(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LDXP:
+        case AARCH64_OP_LDAXP:
+            if (!execute_load_exclusive_pair(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_STXP:
+        case AARCH64_OP_STLXP:
+            if (!execute_store_exclusive_pair(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
