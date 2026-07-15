@@ -124,7 +124,7 @@ static bool page_end(const struct guest_linux_mm *memory,
     return true;
 }
 
-static bool range_is_discardable_anonymous(
+static bool range_supports_dontneed(
         const struct guest_linux_mm *memory, qword_t first,
         qword_t count) {
     for (qword_t index = 0; index < count; index++) {
@@ -135,7 +135,9 @@ static bool range_is_discardable_anonymous(
         if (mapping == NULL ||
                 (mapping->source != GUEST_LINUX_VMA_SOURCE_BRK &&
                 mapping->source !=
-                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE))
+                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE &&
+                mapping->source !=
+                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED))
             return false;
     }
     return true;
@@ -379,11 +381,14 @@ static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
     if (!decode_permissions(protection, &permissions))
         return linux_error(GUEST_LINUX_EINVAL);
 
-    qword_t allowed = GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED |
-            GUEST_LINUX_MAP_ANONYMOUS |
+    qword_t allowed = GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_PRIVATE |
+            GUEST_LINUX_MAP_FIXED | GUEST_LINUX_MAP_ANONYMOUS |
             GUEST_LINUX_MAP_FIXED_NOREPLACE;
+    qword_t mapping_type = flags & GUEST_LINUX_MAP_TYPE;
+    bool shared = mapping_type == GUEST_LINUX_MAP_SHARED;
     if ((flags & ~allowed) != 0 ||
-            (flags & GUEST_LINUX_MAP_TYPE) != GUEST_LINUX_MAP_PRIVATE ||
+            (mapping_type != GUEST_LINUX_MAP_PRIVATE &&
+            mapping_type != GUEST_LINUX_MAP_SHARED) ||
             (flags & GUEST_LINUX_MAP_ANONYMOUS) == 0 ||
             (offset & GUEST_MEMORY_PAGE_MASK) != 0)
         return linux_error(GUEST_LINUX_EINVAL);
@@ -423,15 +428,21 @@ static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
         .last = (guest_addr_t) (first +
                 (count << GUEST_MEMORY_PAGE_BITS)),
         .protection = protection,
-        .source = GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
+        .source = shared ? GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED :
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
     };
     struct guest_linux_vma_set candidate;
     if (!prepare_vma_insert(memory, mapping, &candidate))
         return linux_error(GUEST_LINUX_ENOMEM);
 
-    enum guest_page_table_result result = guest_page_table_map_zero_range(
-            memory->page_table, make_range(first, count), permissions,
-            fixed && !no_replace);
+    struct guest_page_range range = make_range(first, count);
+    enum guest_page_table_result result = shared ?
+            guest_page_table_map_zero_shared_range(
+                    memory->page_table, range, permissions,
+                    fixed && !no_replace) :
+            guest_page_table_map_zero_range(
+                    memory->page_table, range, permissions,
+                    fixed && !no_replace);
     if (result == GUEST_PAGE_TABLE_OK) {
         commit_vma_candidate(memory, &candidate);
         return first;
@@ -559,12 +570,21 @@ static qword_t guest_linux_madvise_unlocked(
     }
     if (advice != GUEST_LINUX_MADV_DONTNEED)
         return 0;
-    if (!range_is_discardable_anonymous(memory, address, count))
+    if (!range_supports_dontneed(memory, address, count))
         return linux_error(GUEST_LINUX_EINVAL);
 
     for (qword_t index = 0; index < count; index++) {
         guest_addr_t page = address +
                 (index << GUEST_MEMORY_PAGE_BITS);
+        const struct guest_linux_vma *mapping = guest_linux_vma_find(
+                &memory->vmas, page);
+        assert(mapping != NULL);
+        // 共享匿名页以后备对象为真值；本层没有可单独丢弃的驻留状态。
+        if (mapping->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED)
+            continue;
+        assert(mapping->source == GUEST_LINUX_VMA_SOURCE_BRK ||
+                mapping->source ==
+                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE);
         byte_t *host_page;
         unsigned permissions;
         enum guest_page_table_result lookup =

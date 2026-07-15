@@ -696,6 +696,23 @@ if not meson.is_cross_build()
             '-DGUEST_PAGE_BACKING_TESTING=1'])
     test('guest_linux_memory', guest_linux_memory_test)
 
+    guest_linux_memory_shared_test = executable(
+        'guest_linux_memory_shared_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/page-table.c',
+            'guest/linux/vma.c',
+            'guest/linux/memory.c',
+            'guest/linux/memory-shared-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1'],
+        dependencies: threads)
+    test('guest_linux_memory_shared', guest_linux_memory_shared_test)
+
     guest_linux_vma_test = executable('guest_linux_vma_test', [
             'guest/linux/vma.c',
             'guest/linux/vma-test.c',

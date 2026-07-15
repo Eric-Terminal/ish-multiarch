@@ -339,7 +339,7 @@ static void test_post_svc_fork(void) {
         UINT32_C(0x91400660), UINT32_C(0xd2801ac8),
         UINT32_C(0xd4000001), UINT32_C(0xaa0003f3),
         UINT32_C(0xd2800000), UINT32_C(0xd2820001),
-        UINT32_C(0xd2800062), UINT32_C(0xd2800443),
+        UINT32_C(0xd2800062), UINT32_C(0xd2800423),
         UINT32_C(0xd2800004), UINT32_C(0xd2800005),
         UINT32_C(0xd2801bc8), UINT32_C(0xd4000001),
         UINT32_C(0xaa0003f4), UINT32_C(0xd2800838),
@@ -421,6 +421,13 @@ static void test_post_svc_fork(void) {
             fixture.vector_reports[0] == 1);
     aarch64_linux_process_destroy(fixture.parent);
     fixture.parent = NULL;
+
+    // 父进程退出后，共享匿名页仍由子进程持有并能观察父路径写入。
+    byte_t shared_marker;
+    struct guest_linux_user_fault fault;
+    assert(aarch64_linux_process_read_memory(fixture.child,
+            FIRST_MMAP, &shared_marker, sizeof(shared_marker), &fault));
+    assert(shared_marker == 'P');
 
     run_to_exit(fixture.child, 2);
     assert(fixture.memory_reports[1] == 1 &&

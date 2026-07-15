@@ -295,7 +295,8 @@ static void test_mmap_validation(void) {
             UINT64_C(0x8), private_anonymous, UINT64_MAX, 0) ==
             encoded_error(GUEST_LINUX_EINVAL));
     assert(guest_linux_mmap(&memory, 0, GUEST_MEMORY_PAGE_SIZE, 0,
-            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_ANONYMOUS,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_PRIVATE |
+                    GUEST_LINUX_MAP_ANONYMOUS,
             UINT64_MAX, 0) == encoded_error(GUEST_LINUX_EINVAL));
     assert(guest_linux_mmap(&memory, 0, GUEST_MEMORY_PAGE_SIZE, 0,
             GUEST_LINUX_MAP_PRIVATE, UINT64_MAX, 0) ==

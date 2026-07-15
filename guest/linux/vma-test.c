@@ -95,6 +95,77 @@ static void test_insert_override_merge_and_find(void) {
     guest_linux_vma_set_destroy(&set);
 }
 
+static void test_source_boundaries_and_clone_independence(void) {
+    const qword_t read = GUEST_LINUX_PROT_READ;
+    const qword_t write = GUEST_LINUX_PROT_WRITE;
+    const qword_t execute = GUEST_LINUX_PROT_EXEC;
+    struct guest_linux_vma_set set;
+    guest_linux_vma_set_init(&set);
+
+    // 权限相同也不能跨越私有、共享来源合并。
+    assert(guest_linux_vma_insert(&set, mapping(PAGE(1), PAGE(3), read,
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE)));
+    assert(guest_linux_vma_insert(&set, mapping(PAGE(3), PAGE(5), read,
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED)));
+    const struct guest_linux_vma adjacent[] = {
+        {PAGE(1), PAGE(3), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE},
+        {PAGE(3), PAGE(5), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED},
+    };
+    assert_same_set(&set, adjacent, array_size(adjacent));
+
+    assert(guest_linux_vma_protect_tracked(
+            &set, PAGE(2), PAGE(4), write));
+    const struct guest_linux_vma protected[] = {
+        {PAGE(1), PAGE(2), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE},
+        {PAGE(2), PAGE(3), write,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE},
+        {PAGE(3), PAGE(4), write,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED},
+        {PAGE(4), PAGE(5), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED},
+    };
+    assert_same_set(&set, protected, array_size(protected));
+
+    guest_linux_vma_set_destroy(&set);
+    guest_linux_vma_set_init(&set);
+    assert(guest_linux_vma_insert(&set, mapping(PAGE(1), PAGE(6), read,
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED)));
+    assert(guest_linux_vma_insert(&set, mapping(PAGE(2), PAGE(5), execute,
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE)));
+    const struct guest_linux_vma split[] = {
+        {PAGE(1), PAGE(2), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED},
+        {PAGE(2), PAGE(5), execute,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE},
+        {PAGE(5), PAGE(6), read,
+                GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED},
+    };
+    assert_same_set(&set, split, array_size(split));
+
+    struct guest_linux_vma_set copy;
+    assert(guest_linux_vma_set_clone(&copy, &set));
+    assert(copy.entries != set.entries);
+    assert_same_set(&copy, split, array_size(split));
+    assert(guest_linux_vma_remove(&set, PAGE(1), PAGE(2)));
+    assert(set.count == 2 && copy.count == 3);
+    assert(copy.entries[0].source ==
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED);
+    assert(guest_linux_vma_protect_tracked(
+            &copy, PAGE(2), PAGE(5), write));
+    assert(copy.entries[1].source ==
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE);
+    assert(copy.entries[1].protection == write);
+    assert(set.entries[0].source ==
+            GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE);
+    assert(set.entries[0].protection == execute);
+
+    guest_linux_vma_set_destroy(&copy);
+    guest_linux_vma_set_destroy(&set);
+}
+
 static void test_remove_trim_split_and_holes(void) {
     struct guest_linux_vma_set set;
     guest_linux_vma_set_init(&set);
@@ -319,6 +390,7 @@ static void test_allocation_failure_is_transactional(void) {
 
 int main(void) {
     test_insert_override_merge_and_find();
+    test_source_boundaries_and_clone_independence();
     test_remove_trim_split_and_holes();
     test_strict_subrange_split_and_remerge();
     test_protect_only_tracked_intersections();

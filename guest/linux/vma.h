@@ -6,6 +6,7 @@
 enum guest_linux_vma_source {
     GUEST_LINUX_VMA_SOURCE_BRK,
     GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
+    GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED,
 };
 
 struct guest_linux_vma {
