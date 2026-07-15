@@ -38,9 +38,16 @@ static struct fd *generic_openat_task_access(struct task *task,
         return ERR_PTR(_EINVAL);
 
     // TODO really, really, seriously reconsider what I'm doing with the strings
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = credentials.euid,
+        .gid = credentials.egid,
+    };
     char path[MAX_PATH];
-    int err = path_normalize_task(task, at, path_raw, path, N_SYMLINK_FOLLOW |
-            (flags & O_CREAT_ ? N_PARENT_DIR_WRITE : 0));
+    int err = path_normalize_task_access(task, at, path_raw, path,
+            N_SYMLINK_FOLLOW |
+            (flags & O_CREAT_ ? N_PARENT_DIR_WRITE : 0), &identity);
     if (err < 0)
         return ERR_PTR(err);
     struct mount *mount = find_mount_and_trim_path(path);
@@ -73,7 +80,7 @@ static struct fd *generic_openat_task_access(struct task *task,
     if (accmode == AC_X && !(flags & O_DIRECTORY_) && !(stat.mode & 0111))
         err = _EACCES;
     else
-        err = access_check_task(task, &stat, accmode);
+        err = access_check_identity(&identity, &stat, accmode);
     if (err < 0)
         goto error;
 
@@ -147,9 +154,12 @@ int generic_getpath(struct fd *fd, char *buf) {
     return 0;
 }
 
-int generic_accessat(struct fd *dirfd, const char *path_raw, int mode) {
+int generic_accessat_task(struct task *task, struct fd *dirfd,
+        const char *path_raw, int mode,
+        const struct fs_access_identity *identity) {
     char path[MAX_PATH];
-    int err = path_normalize(dirfd, path_raw, path, N_SYMLINK_FOLLOW);
+    int err = path_normalize_task_access(task, dirfd, path_raw, path,
+            N_SYMLINK_FOLLOW, identity);
     if (err < 0)
         return err;
 
@@ -159,7 +169,18 @@ int generic_accessat(struct fd *dirfd, const char *path_raw, int mode) {
     mount_release(mount);
     if (err < 0)
         return err;
-    return access_check(&stat, mode);
+    return access_check_identity(identity, &stat, mode);
+}
+
+int generic_accessat(struct fd *dirfd, const char *path_raw, int mode) {
+    struct task_credentials credentials;
+    task_credentials_snapshot(current, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = credentials.euid,
+        .gid = credentials.egid,
+    };
+    return generic_accessat_task(
+            current, dirfd, path_raw, mode, &identity);
 }
 
 int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw) {

@@ -15,6 +15,12 @@
 
 struct aarch64_linux_process;
 
+struct task_credentials {
+    uid_t_ uid, gid;
+    uid_t_ euid, egid;
+    uid_t_ suid, sgid;
+};
+
 // exec 候选映像在 guest 执行栈返回安全点后统一提交。
 struct task_exec_transition {
     struct aarch64_linux_process *process;
@@ -44,6 +50,7 @@ struct task {
     struct list group_links;
     // pid/tgid 通常不可变；非 leader exec 在 pids_lock 下接管 leader PID。
     pid_t_ pid, tgid;
+    // 发布后的写入与跨任务读取必须持有 pids_lock；本任务线程可直接读取。
     uid_t_ uid, gid;
     uid_t_ euid, egid;
     uid_t_ suid, sgid;
@@ -184,6 +191,8 @@ void task_finish_exec(struct task *task, uid_t_ euid, uid_t_ egid,
 pid_t_ task_getpid(const struct task *task);
 pid_t_ task_gettid(const struct task *task);
 pid_t_ task_getppid(const struct task *task);
+void task_credentials_snapshot(
+        const struct task *task, struct task_credentials *credentials);
 void vfork_notify(struct task *task);
 pid_t_ task_setsid(struct task *task);
 void task_leave_session(struct task *task);

@@ -296,6 +296,12 @@ if get_option('kernel') == 'ish'
         path_task_test = executable('path_task_test', 'fs/path-task-test.c', dependencies: ish)
         test('path_task', path_task_test)
 
+        credential_lock_test = executable(
+            'credential_lock_test',
+            'kernel/credential-lock-test.c',
+            dependencies: ish)
+        test('credential_lock', credential_lock_test)
+
         aarch64_syscall_service_test = executable(
             'aarch64_syscall_service_test',
             'kernel/aarch64-syscall-service-test.c',

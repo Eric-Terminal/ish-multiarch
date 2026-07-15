@@ -7,6 +7,7 @@
 
 #include "fs/fd.h"
 #include "fs/path.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/resource.h"
@@ -26,6 +27,14 @@ struct path_close_gate {
     bool released;
     unsigned observed_refcount;
     unsigned close_calls;
+};
+
+struct access_identity_gate {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    const char *path;
+    bool entered;
+    bool released;
 };
 
 struct open_probe {
@@ -49,6 +58,7 @@ struct open_probe {
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
+    struct access_identity_gate *access_gate;
 };
 
 struct file_state {
@@ -132,6 +142,15 @@ static struct fd *probe_open(struct mount *mount,
 static int probe_stat(struct mount *mount, const char *path, struct statbuf *stat) {
     struct open_probe *probe = mount->data;
     strcpy(probe->last_stat_path, path);
+    struct access_identity_gate *gate = probe->access_gate;
+    if (gate != NULL && strcmp(path, gate->path) == 0) {
+        assert(pthread_mutex_lock(&gate->mutex) == 0);
+        gate->entered = true;
+        assert(pthread_cond_signal(&gate->cond) == 0);
+        while (!gate->released)
+            assert(pthread_cond_wait(&gate->cond, &gate->mutex) == 0);
+        assert(pthread_mutex_unlock(&gate->mutex) == 0);
+    }
     mode_t_ mode = S_IFDIR |
             (strcmp(path, "/target/guard") == 0 ? 0100 : 0711);
     if (strcmp(path, "/target/created") == 0)
@@ -171,6 +190,8 @@ static ssize_t probe_readlink(struct mount *mount,
     const char *target;
     if (strcmp(path, "/target/link") == 0)
         target = "/absolute";
+    else if (strcmp(path, "/target/guard-link") == 0)
+        target = "guard";
     else if (strcmp(path, "/explicit/link") == 0)
         target = "explicit";
     else if (strcmp(path, "/target/escape-link") == 0)
@@ -259,8 +280,8 @@ static bool init_fixture(struct task_fixture *fixture, struct mount *mount,
     lock_init(&fixture->fs.lock);
     fixture->fs.umask = umask;
     fixture->task.fs = &fixture->fs;
-    fixture->task.euid = uid;
-    fixture->task.egid = gid;
+    fixture->task.uid = fixture->task.euid = fixture->task.suid = uid;
+    fixture->task.gid = fixture->task.egid = fixture->task.sgid = gid;
     fixture->pwd = make_path_fd(mount, pwd_state, probe, pwd_path);
     fixture->root = make_path_fd(mount, root_state, probe, root_path);
     if (fixture->pwd == NULL || fixture->root == NULL)
@@ -282,6 +303,20 @@ struct path_close_race_context {
     fd_t dirfd;
     sqword_t result;
 };
+
+struct faccessat_race_context {
+    struct task *task;
+    addr_t path;
+    dword_t result;
+};
+
+static void *run_faccessat_race(void *opaque) {
+    struct faccessat_race_context *context = opaque;
+    current = context->task;
+    context->result = sys_faccessat(
+            AT_FDCWD_, context->path, AC_R, 0);
+    return NULL;
+}
 
 static void *run_path_close_race(void *opaque) {
     struct path_close_race_context *context = opaque;
@@ -461,6 +496,24 @@ int main(void) {
     CHECK(path_normalize_task(&target.task, AT_PWD, "guard/child", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/target/guard/child") == 0,
             "中间目录执行权限使用目标任务凭据");
+    const struct fs_access_identity real_identity = {
+        .uid = 3000,
+        .gid = 300,
+    };
+    CHECK(path_normalize_task_access(&target.task, AT_PWD,
+            "guard/child", normalized, N_SYMLINK_FOLLOW,
+            &real_identity) == _EACCES,
+            "显式真实身份同样约束中间目录执行权限");
+    CHECK(path_normalize_task(&target.task, AT_PWD,
+            "guard-link/child", normalized, N_SYMLINK_FOLLOW) == 0 &&
+            strcmp(normalized, "/target/guard/child") == 0,
+            "符号链接递归继续使用有效身份检查中间目录");
+    CHECK(path_normalize_task_access(&target.task, AT_PWD,
+            "guard-link/child", normalized, N_SYMLINK_FOLLOW,
+            &real_identity) == _EACCES,
+            "符号链接递归不得丢失显式真实身份");
+    CHECK(target.task.euid == probe.owner && target.task.egid == probe.group,
+            "显式真实身份检查不得改写目标任务有效身份");
     CHECK(path_normalize_task(&decoy.task, AT_PWD, "../escape", normalized,
             N_SYMLINK_FOLLOW) == 0 && strcmp(normalized, "/escape") == 0,
             "cwd 位于 root 外时保留 Linux 的相对路径行为");
@@ -486,9 +539,91 @@ int main(void) {
             "权限检查使用目标任务 euid");
     CHECK(access_check_task(&decoy.task, &permission, AC_R) == _EACCES,
             "权限检查不得使用 current 以外的凭据");
+    lock(&pids_lock);
     decoy.task.euid = 0;
+    unlock(&pids_lock);
     CHECK(access_check(&permission, AC_W) == 0, "兼容权限入口保留超级用户语义");
+    lock(&pids_lock);
     decoy.task.euid = 2000;
+    unlock(&pids_lock);
+
+    const struct fs_access_identity effective_identity = {
+        .uid = target.task.euid,
+        .gid = target.task.egid,
+    };
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R,
+            &effective_identity) == 0,
+            "显式有效身份可读取仅所有者可读的目标");
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R,
+            &real_identity) == _EACCES,
+            "显式真实身份检查最终对象权限");
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "guard/child", AC_F,
+            &effective_identity) == 0 &&
+            generic_accessat_task(&target.task, AT_PWD,
+                    "guard/child", AC_F, &real_identity) == _EACCES,
+            "F_OK 跳过最终权限但仍按同一身份遍历路径");
+    const struct fs_access_identity root_identity = {0};
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_W,
+            &root_identity) == 0,
+            "显式 root 身份保留超级用户访问语义");
+    CHECK(target.task.euid == probe.owner && target.task.egid == probe.group,
+            "完整访问检查后目标任务有效身份保持不变");
+
+    enum { FACCESSAT_PATH = 0x10000 };
+    task_set_mm(&decoy.task, mm_new());
+    CHECK(decoy.task.mm != NULL, "为 faccessat 竞态测试创建用户地址空间");
+    write_wrlock(&decoy.task.mem->lock);
+    int map_error = pt_map_nothing(
+            decoy.task.mem, PAGE(FACCESSAT_PATH), 1, P_RWX);
+    write_wrunlock(&decoy.task.mem->lock);
+    CHECK(map_error == 0 && user_write_string(
+            FACCESSAT_PATH, "/access-race") == 0,
+            "为 faccessat 竞态测试映射 guest 路径");
+    lock(&pids_lock);
+    decoy.task.uid = probe.owner;
+    decoy.task.gid = probe.group;
+    unlock(&pids_lock);
+
+    struct access_identity_gate access_gate = {
+        .path = "/decoy-root/access-race",
+    };
+    CHECK(pthread_mutex_init(&access_gate.mutex, NULL) == 0 &&
+            pthread_cond_init(&access_gate.cond, NULL) == 0,
+            "初始化 faccessat 身份观察门闩");
+    probe.access_gate = &access_gate;
+    struct faccessat_race_context access_context = {
+        .task = &decoy.task,
+        .path = FACCESSAT_PATH,
+        .result = (dword_t) _EIO,
+    };
+    pthread_t access_thread;
+    CHECK(pthread_create(&access_thread, NULL,
+            run_faccessat_race, &access_context) == 0,
+            "启动 faccessat 身份竞态线程");
+    assert(pthread_mutex_lock(&access_gate.mutex) == 0);
+    while (!access_gate.entered)
+        assert(pthread_cond_wait(&access_gate.cond,
+                &access_gate.mutex) == 0);
+    assert(pthread_mutex_unlock(&access_gate.mutex) == 0);
+
+    struct task_credentials observed_credentials;
+    task_credentials_snapshot(&decoy.task, &observed_credentials);
+    assert(pthread_mutex_lock(&access_gate.mutex) == 0);
+    access_gate.released = true;
+    assert(pthread_cond_signal(&access_gate.cond) == 0);
+    assert(pthread_mutex_unlock(&access_gate.mutex) == 0);
+    CHECK(pthread_join(access_thread, NULL) == 0 &&
+            access_context.result == 0,
+            "真实身份 faccessat 在门闩释放后完成");
+    CHECK(observed_credentials.euid == 2000 &&
+            observed_credentials.egid == 200,
+            "faccessat 阻塞期间不得用真实身份覆盖有效身份");
+    CHECK(decoy.task.euid == 2000 && decoy.task.egid == 200,
+            "faccessat 完成后仍保持有效身份");
+    probe.access_gate = NULL;
+    CHECK(pthread_cond_destroy(&access_gate.cond) == 0 &&
+            pthread_mutex_destroy(&access_gate.mutex) == 0,
+            "销毁 faccessat 身份观察门闩");
 
     char link_target[16] = {0};
     CHECK(file_readlinkat_task(&target.task, AT_FDCWD_, "link",
@@ -759,7 +894,9 @@ int main(void) {
             "chdir 在权限检查前以 ENOTDIR 拒绝普通文件");
 
     uid_t_ target_euid = target.task.euid;
+    lock(&pids_lock);
     target.task.euid = 0;
+    unlock(&pids_lock);
     opens_before = probe.opens;
     closes_before = probe.closes;
     probe.file_mode = S_IFDIR;
@@ -770,7 +907,9 @@ int main(void) {
     fd_close(root_directory);
     CHECK(probe.closes == closes_before + 1,
             "root 目录搜索探针释放唯一 fd 引用");
+    lock(&pids_lock);
     target.task.euid = target_euid;
+    unlock(&pids_lock);
 
     probe.file_mode = S_IFDIR | 0100;
     CHECK(file_chdir_task(&target.task, "link") == 0 &&
@@ -798,6 +937,7 @@ int main(void) {
     target.pwd = target.fs.pwd;
 
     current = NULL;
+    mm_release(decoy.task.mm);
     fdtable_release(decoy.task.files);
     fdtable_release(target.task.files);
     fd_close(decoy.pwd);

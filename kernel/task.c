@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,21 @@ static struct pid pids[MAX_PID + 1] = {};
 lock_t pids_lock = LOCK_INITIALIZER;
 static atomic_bool task_exec_fail_sighand_reservation =
         ATOMIC_VAR_INIT(false);
+
+void task_credentials_snapshot(
+        const struct task *task, struct task_credentials *credentials) {
+    assert(task != NULL && credentials != NULL);
+    lock(&pids_lock);
+    *credentials = (struct task_credentials) {
+        .uid = task->uid,
+        .gid = task->gid,
+        .euid = task->euid,
+        .egid = task->egid,
+        .suid = task->suid,
+        .sgid = task->sgid,
+    };
+    unlock(&pids_lock);
+}
 
 void task_exec_test_fail_sighand_reservation_once(void) {
     atomic_store_explicit(&task_exec_fail_sighand_reservation,
@@ -378,13 +394,33 @@ struct task *pid_get_process_task(dword_t id) {
     return NULL;
 }
 
+static void task_inherit_parent_state(
+        struct task *task, const struct task *parent) {
+    const size_t credentials_begin = offsetof(struct task, uid);
+    const size_t credentials_end = offsetof(struct task, ngroups);
+    memcpy(task, parent, credentials_begin);
+    memcpy((byte_t *) task + credentials_end,
+            (const byte_t *) parent + credentials_end,
+            sizeof(*task) - credentials_end);
+
+    struct task_credentials credentials;
+    task_credentials_snapshot(parent, &credentials);
+    task->uid = credentials.uid;
+    task->gid = credentials.gid;
+    task->euid = credentials.euid;
+    task->egid = credentials.egid;
+    task->suid = credentials.suid;
+    task->sgid = credentials.sgid;
+}
+
 struct task *task_create_(struct task *parent) {
     struct task *task = malloc(sizeof(struct task));
     if (task == NULL)
         return NULL;
     *task = (struct task) {};
     if (parent != NULL) {
-        *task = *parent;
+        // 父任务可在另一 host 线程运行，凭据必须作为一个快照继承。
+        task_inherit_parent_state(task, parent);
     } else {
         task_altstack_reset(task);
     }

@@ -126,6 +126,13 @@ int generic_seek(struct fd *fd, off_t_ off, int whence, off_t_ size);
 #define AC_W 2
 #define AC_X 1
 #define AC_F 0
+struct fs_access_identity {
+    uid_t_ uid;
+    uid_t_ gid;
+};
+int generic_accessat_task(struct task *task, struct fd *dirfd,
+        const char *path, int mode,
+        const struct fs_access_identity *identity);
 int generic_accessat(struct fd *dirfd, const char *path, int mode);
 int generic_statat_task(struct task *task, struct fd *at,
         const char *path, struct statbuf *stat, bool follow_links);
@@ -143,6 +150,8 @@ int generic_mkdirat_task(struct task *task,
 
 int access_check_task(struct task *task, struct statbuf *stat, int check);
 int access_check(struct statbuf *stat, int check);
+int access_check_identity(const struct fs_access_identity *identity,
+        const struct statbuf *stat, int check);
 
 struct mount {
     const char *point;

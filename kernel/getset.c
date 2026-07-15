@@ -55,25 +55,29 @@ dword_t sys_geteuid(void) {
 
 int_t sys_setuid(uid_t_ uid) {
     STRACE("setuid(%d)", uid);
-    if (superuser()) {
+    int_t error = 0;
+    lock(&pids_lock);
+    if (current->euid == 0) {
         current->uid = current->suid = uid;
-    } else {
-        if (uid != current->uid && uid != current->suid)
-            return _EPERM;
+    } else if (uid != current->uid && uid != current->suid) {
+        error = _EPERM;
     }
-    current->euid = uid;
-    return 0;
+    if (error == 0)
+        current->euid = uid;
+    unlock(&pids_lock);
+    return error;
 }
 
 dword_t sys_setresuid(uid_t_ ruid, uid_t_ euid, uid_t_ suid) {
     STRACE("setresuid(%d, %d, %d)", ruid, euid, suid);
-    if (!superuser()) {
+    lock(&pids_lock);
+    if (current->euid != 0) {
         if (ruid != (uid_t) -1 && ruid != current->uid && ruid != current->euid && ruid != current->suid)
-            return _EPERM;
+            goto denied;
         if (euid != (uid_t) -1 && euid != current->uid && euid != current->euid && euid != current->suid)
-            return _EPERM;
+            goto denied;
         if (suid != (uid_t) -1 && suid != current->uid && suid != current->euid && suid != current->suid)
-            return _EPERM;
+            goto denied;
     }
 
     if (ruid != (uid_t) -1)
@@ -82,7 +86,12 @@ dword_t sys_setresuid(uid_t_ ruid, uid_t_ euid, uid_t_ suid) {
         current->euid = euid;
     if (suid != (uid_t) -1)
         current->suid = suid;
+    unlock(&pids_lock);
     return 0;
+
+denied:
+    unlock(&pids_lock);
+    return _EPERM;
 }
 
 int_t sys_getresuid(addr_t ruid_addr, addr_t euid_addr, addr_t suid_addr) {
@@ -120,25 +129,29 @@ dword_t sys_getegid(void) {
 
 int_t sys_setgid(uid_t_ gid) {
     STRACE("setgid(%d)", gid);
-    if (superuser()) {
+    int_t error = 0;
+    lock(&pids_lock);
+    if (current->euid == 0) {
         current->gid = current->sgid = gid;
-    } else {
-        if (gid != current->gid && gid != current->sgid)
-            return _EPERM;
+    } else if (gid != current->gid && gid != current->sgid) {
+        error = _EPERM;
     }
-    current->egid = gid;
-    return 0;
+    if (error == 0)
+        current->egid = gid;
+    unlock(&pids_lock);
+    return error;
 }
 
 dword_t sys_setresgid(uid_t_ rgid, uid_t_ egid, uid_t_ sgid) {
     STRACE("setresgid(%d, %d, %d)", rgid, egid, sgid);
-    if (!superuser()) {
+    lock(&pids_lock);
+    if (current->euid != 0) {
         if (rgid != (uid_t) -1 && rgid != current->gid && rgid != current->egid && rgid != current->sgid)
-            return _EPERM;
+            goto denied;
         if (egid != (uid_t) -1 && egid != current->gid && egid != current->egid && egid != current->sgid)
-            return _EPERM;
+            goto denied;
         if (sgid != (uid_t) -1 && sgid != current->gid && sgid != current->egid && sgid != current->sgid)
-            return _EPERM;
+            goto denied;
     }
 
     if (rgid != (uid_t) -1)
@@ -147,7 +160,12 @@ dword_t sys_setresgid(uid_t_ rgid, uid_t_ egid, uid_t_ sgid) {
         current->egid = egid;
     if (sgid != (uid_t) -1)
         current->sgid = sgid;
+    unlock(&pids_lock);
     return 0;
+
+denied:
+    unlock(&pids_lock);
+    return _EPERM;
 }
 
 int_t sys_getresgid(addr_t rgid_addr, addr_t egid_addr, addr_t sgid_addr) {

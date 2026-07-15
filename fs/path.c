@@ -16,7 +16,7 @@ static char *path_root_floor(char *out, char *current,
     return out;
 }
 
-static int __path_normalize(struct task *task,
+static int __path_normalize(const struct fs_access_identity *identity,
         const char *at_path, const char *path, char *out,
         int flags, int levels, const char *root_path) {
     // you must choose one
@@ -114,7 +114,7 @@ static int __path_normalize(struct task *task,
                         return _ENAMETOOLONG;
                     strcat(expanded_path, "/");
                 }
-                return __path_normalize(task, restart_at, expanded_path,
+                return __path_normalize(identity, restart_at, expanded_path,
                         out, flags, levels + 1, root_path);
             }
 
@@ -127,7 +127,7 @@ static int __path_normalize(struct task *task,
                 if (err >= 0) {
                     if (!S_ISDIR(stat.mode))
                         return _ENOTDIR;
-                    err = access_check_task(task, &stat, AC_X);
+                    err = access_check_identity(identity, &stat, AC_X);
                     if (err < 0)
                         return err;
                 }
@@ -143,8 +143,9 @@ static int __path_normalize(struct task *task,
     return 0;
 }
 
-int path_normalize_task(struct task *task, struct fd *at,
-        const char *path, char *out, int flags) {
+int path_normalize_task_access(struct task *task, struct fd *at,
+        const char *path, char *out, int flags,
+        const struct fs_access_identity *identity) {
     assert(at != NULL);
     if (strcmp(path, "") == 0)
         return _ENOENT;
@@ -192,8 +193,20 @@ int path_normalize_task(struct task *task, struct fd *at,
         unlock(&fs->lock);
     }
 
-    return __path_normalize(task, at != NULL ? at_path : NULL,
+    return __path_normalize(identity, at != NULL ? at_path : NULL,
             path, out, flags, 0, root_path);
+}
+
+int path_normalize_task(struct task *task, struct fd *at,
+        const char *path, char *out, int flags) {
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = credentials.euid,
+        .gid = credentials.egid,
+    };
+    return path_normalize_task_access(
+            task, at, path, out, flags, &identity);
 }
 
 int path_normalize(struct fd *at, const char *path, char *out, int flags) {

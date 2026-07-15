@@ -2,6 +2,7 @@
 #define PATH_H
 
 struct task;
+struct fs_access_identity;
 
 #define AT_PWD (struct fd *) -2
 
@@ -27,6 +28,9 @@ struct task;
 // 兼容入口则使用 current->fs->pwd，并在读取路径期间保持对应 fs 锁。
 int path_normalize_task(struct task *task, struct fd *at,
         const char *path, char *out, int flags);
+int path_normalize_task_access(struct task *task, struct fd *at,
+        const char *path, char *out, int flags,
+        const struct fs_access_identity *identity);
 int path_normalize(struct fd *at, const char *path, char *out, int flags);
 bool path_is_normalized(const char *path);
 

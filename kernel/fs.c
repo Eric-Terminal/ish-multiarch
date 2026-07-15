@@ -22,18 +22,29 @@ static void apply_umask(mode_t_ *mode) {
     unlock(&fs->lock);
 }
 
-int access_check_task(struct task *task, struct statbuf *stat, int check) {
-    if (task->euid == 0) return 0;
+int access_check_identity(const struct fs_access_identity *identity,
+        const struct statbuf *stat, int check) {
+    if (identity->uid == 0) return 0;
     if (check == 0) return 0;
     // 将请求权限移动到文件所有者或所属组对应的位段。
-    if (task->euid == stat->uid) {
+    if (identity->uid == stat->uid) {
         check <<= 6;
-    } else if (task->egid == stat->gid) {
+    } else if (identity->gid == stat->gid) {
         check <<= 3;
     }
     if (!(stat->mode & check))
         return _EACCES;
     return 0;
+}
+
+int access_check_task(struct task *task, struct statbuf *stat, int check) {
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = credentials.euid,
+        .gid = credentials.egid,
+    };
+    return access_check_identity(&identity, stat, check);
 }
 
 int access_check(struct statbuf *stat, int check) {
@@ -55,17 +66,13 @@ dword_t sys_faccessat(fd_t at_f, addr_t path_addr, mode_t_ mode, dword_t flags) 
         return _EBADF;
     STRACE("faccessat(%d, \"%s\", 0x%x, %d)", at_f, path, mode, flags);
 
-    if (flags & AT_EACCESS_)
-        return generic_accessat(at, path, mode);
-
-    uid_t_ uid_tmp = current->euid;
-    uid_t_ gid_tmp = current->egid;
-    current->euid = current->uid;
-    current->egid = current->gid;
-    int err = generic_accessat(at, path, mode);
-    current->euid = uid_tmp;
-    current->egid = gid_tmp;
-    return err;
+    struct task_credentials credentials;
+    task_credentials_snapshot(current, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = flags & AT_EACCESS_ ? credentials.euid : credentials.uid,
+        .gid = flags & AT_EACCESS_ ? credentials.egid : credentials.gid,
+    };
+    return generic_accessat_task(current, at, path, mode, &identity);
 }
 
 fd_t sys_openat(fd_t at_f, addr_t path_addr, dword_t flags, mode_t_ mode) {
