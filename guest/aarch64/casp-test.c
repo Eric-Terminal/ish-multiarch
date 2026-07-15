@@ -173,7 +173,7 @@ static void set_monitor_sentinel(struct cpu_state *cpu,
         const struct guest_address_space *space) {
     aarch64_set_exclusive(cpu, DATA_PAGE + 0x700, 8, true,
             UINT64_C(0x1122334455667788),
-            UINT64_C(0x8877665544332211), space, 7, 11);
+            UINT64_C(0x8877665544332211), space, 7, 11, 13);
 }
 
 static void assert_monitor_equal(
@@ -185,6 +185,7 @@ static void assert_monitor_equal(
     assert(actual->address_space == expected->address_space);
     assert(actual->mapping_epoch == expected->mapping_epoch);
     assert(actual->write_epoch == expected->write_epoch);
+    assert(actual->sync_identity == expected->sync_identity);
     assert(actual->size == expected->size);
     assert(actual->pair == expected->pair);
     assert(actual->valid == expected->valid);
@@ -576,7 +577,7 @@ static void test_reservation_effects(struct test_memory *memory) {
     aarch64_set_exclusive(&success, address, 16, true,
             success.x[0], success.x[1], &memory->space,
             success_token.mapping_generation,
-            success_token.write_generation);
+            success_token.write_generation, success_token.sync_identity);
     struct aarch64_exclusive_monitor success_monitor = success.exclusive;
     assert_retired(execute_word(memory, &success,
             encode(true, false, false, 0, 2, 4)));
@@ -596,7 +597,7 @@ static void test_reservation_effects(struct test_memory *memory) {
             UINT64_C(0x123456789abcdef0),
             UINT64_C(0x0fedcba987654321), &memory->space,
             mismatch_token.mapping_generation,
-            mismatch_token.write_generation);
+            mismatch_token.write_generation, mismatch_token.sync_identity);
     struct aarch64_exclusive_monitor mismatch_monitor = mismatch.exclusive;
     assert_retired(execute_word(memory, &mismatch,
             encode(true, true, true, 0, 2, 4)));
@@ -702,6 +703,7 @@ static void assert_cpu_equivalent(const struct cpu_state *left,
     assert(left->exclusive.value_high == right->exclusive.value_high);
     assert(left->exclusive.mapping_epoch == right->exclusive.mapping_epoch);
     assert(left->exclusive.write_epoch == right->exclusive.write_epoch);
+    assert(left->exclusive.sync_identity == right->exclusive.sync_identity);
     assert(left->exclusive.size == right->exclusive.size);
     assert(left->exclusive.pair == right->exclusive.pair);
     assert(left->exclusive.valid == right->exclusive.valid);

@@ -750,6 +750,16 @@ if not meson.is_cross_build()
         c_args: ['-DISH_GUEST_AARCH64=1'], dependencies: threads)
     test('aarch64_tlb', aarch64_tlb_test)
 
+    aarch64_tlb_shared_test = executable('aarch64_tlb_shared_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/tlb-shared-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'], dependencies: threads)
+    test('aarch64_tlb_shared', aarch64_tlb_shared_test,
+        timeout: 120)
+
     aarch64_page_backing_test = executable('aarch64_page_backing_test', [
             'guest/memory/page-backing.c',
             'guest/memory/page-backing-test.c',
@@ -1093,6 +1103,19 @@ if not meson.is_cross_build()
             'guest/aarch64/exclusive-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_exclusive', aarch64_exclusive_test)
+
+    aarch64_shared_exclusive_test = executable(
+        'aarch64_shared_exclusive_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/shared-exclusive-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'], dependencies: threads)
+    test('aarch64_shared_exclusive', aarch64_shared_exclusive_test)
 
     aarch64_casp_test = executable('aarch64_casp_test',
         'guest/aarch64/casp-test.c',

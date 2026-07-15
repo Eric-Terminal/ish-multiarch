@@ -16,7 +16,8 @@ int main(void) {
     assert(aarch64_get_nzcv(&cpu) == AARCH64_NZCV_MASK);
 
     aarch64_set_exclusive(&cpu, UINT64_C(0x4000), 8, false,
-            UINT64_C(0x1020304050607080), 0, NULL, 7, 11);
+            UINT64_C(0x1020304050607080), 0, NULL, 7, 11, 13);
+    assert(cpu.exclusive.sync_identity == 13);
     assert(aarch64_exclusive_matches(&cpu,
             UINT64_C(0x4000), 8, false));
     assert(!aarch64_exclusive_matches(&cpu,

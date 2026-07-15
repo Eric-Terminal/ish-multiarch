@@ -121,6 +121,8 @@ static void assert_cpu_equal(const struct cpu_state *left,
     assert(left->exclusive.mapping_epoch ==
             right->exclusive.mapping_epoch);
     assert(left->exclusive.write_epoch == right->exclusive.write_epoch);
+    assert(left->exclusive.sync_identity ==
+            right->exclusive.sync_identity);
     assert(left->exclusive.size == right->exclusive.size);
     assert(left->exclusive.pair == right->exclusive.pair);
     assert(left->exclusive.valid == right->exclusive.valid);
@@ -366,13 +368,14 @@ static void test_fast_data_processing_differential(void) {
 
     init_differential_cpu(&initial);
     aarch64_set_exclusive(&initial, DATA_PAGE + 0x40, 8, false,
-            UINT64_C(0x1122), 0, NULL, 3, 5);
+            UINT64_C(0x1122), 0, NULL, 3, 5, 7);
     result = run_fast_differential(
             INSTRUCTION_NOP, initial, AARCH64_STEP_RETIRED);
     assert(result.pc == CODE_PAGE + 4);
     assert(result.cycle == initial.cycle + 1);
     assert(result.exclusive.valid);
     assert(result.exclusive.write_epoch == 5);
+    assert(result.exclusive.sync_identity == 7);
 
     init_differential_cpu(&initial);
     result = run_fast_differential(encode_move_wide(true,
@@ -657,10 +660,11 @@ static void test_fast_svc_differential(void) {
     init_differential_cpu(&threaded_cpu);
     aarch64_set_exclusive(&c_cpu, DATA_PAGE + 0x100, 8, true,
             UINT64_C(0x1122334455667788),
-            UINT64_C(0x99aabbccddeeff00), &c_fixture.space, 7, 11);
+            UINT64_C(0x99aabbccddeeff00), &c_fixture.space, 7, 11, 13);
     aarch64_set_exclusive(&threaded_cpu, DATA_PAGE + 0x100, 8, true,
             UINT64_C(0x1122334455667788),
-            UINT64_C(0x99aabbccddeeff00), &threaded_fixture.space, 7, 11);
+            UINT64_C(0x99aabbccddeeff00), &threaded_fixture.space,
+            7, 11, 13);
 
     struct aarch64_step_result c_result =
             aarch64_run_one(&c_runner, &c_cpu);
@@ -682,6 +686,7 @@ static void test_fast_svc_differential(void) {
     assert(threaded_cpu.exclusive.address_space == &threaded_fixture.space);
     assert(c_cpu.exclusive.mapping_epoch == 7);
     assert(c_cpu.exclusive.write_epoch == 11);
+    assert(c_cpu.exclusive.sync_identity == 13);
     assert_stats(&threaded_runner, 0, 1, 1, 0);
 }
 

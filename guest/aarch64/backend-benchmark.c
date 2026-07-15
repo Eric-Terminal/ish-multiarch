@@ -202,6 +202,7 @@ static bool cpu_equal(const struct cpu_state *left,
             left->exclusive.address_space != right->exclusive.address_space ||
             left->exclusive.mapping_epoch != right->exclusive.mapping_epoch ||
             left->exclusive.write_epoch != right->exclusive.write_epoch ||
+            left->exclusive.sync_identity != right->exclusive.sync_identity ||
             left->exclusive.size != right->exclusive.size ||
             left->exclusive.pair != right->exclusive.pair ||
             left->exclusive.valid != right->exclusive.valid)

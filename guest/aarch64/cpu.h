@@ -32,6 +32,7 @@ struct aarch64_exclusive_monitor {
     const struct guest_address_space *address_space;
     qword_t mapping_epoch;
     qword_t write_epoch;
+    qword_t sync_identity;
     byte_t size;
     bool pair;
     bool valid;
@@ -135,7 +136,8 @@ static inline void aarch64_set_fpsr(struct cpu_state *cpu, dword_t fpsr) {
 static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t address,
         byte_t size, bool pair, qword_t value_low, qword_t value_high,
         const struct guest_address_space *address_space,
-        qword_t mapping_epoch, qword_t write_epoch) {
+        qword_t mapping_epoch, qword_t write_epoch,
+        qword_t sync_identity) {
     cpu->exclusive.address = address;
     cpu->exclusive.size = size;
     cpu->exclusive.pair = pair;
@@ -144,6 +146,7 @@ static inline void aarch64_set_exclusive(struct cpu_state *cpu, guest_addr_t add
     cpu->exclusive.address_space = address_space;
     cpu->exclusive.mapping_epoch = mapping_epoch;
     cpu->exclusive.write_epoch = write_epoch;
+    cpu->exclusive.sync_identity = sync_identity;
     cpu->exclusive.valid = true;
 }
 

@@ -1465,7 +1465,7 @@ static bool execute_load_exclusive(struct cpu_state *cpu,
     qword_t value = load_little_endian(bytes, size);
     aarch64_set_exclusive(cpu, address, size, false, value, 0,
             token.address_space, token.mapping_generation,
-            token.write_generation);
+            token.write_generation, token.sync_identity);
     write_register(cpu, instruction->operands.exclusive.rt,
             instruction->width, false, value);
     cpu->pc += 4;
@@ -1501,6 +1501,7 @@ static bool execute_store_exclusive(struct cpu_state *cpu,
         .address_space = cpu->exclusive.address_space,
         .mapping_generation = cpu->exclusive.mapping_epoch,
         .write_generation = cpu->exclusive.write_epoch,
+        .sync_identity = cpu->exclusive.sync_identity,
     };
     aarch64_clear_exclusive(cpu);
     enum guest_tlb_store_exclusive_result result = guest_tlb_store_exclusive(
@@ -1536,7 +1537,7 @@ static bool execute_load_exclusive_pair(struct cpu_state *cpu,
     aarch64_set_exclusive(cpu, address, pair_size, true,
             value_low, value_high,
             token.address_space, token.mapping_generation,
-            token.write_generation);
+            token.write_generation, token.sync_identity);
     write_register(cpu, instruction->operands.exclusive.rt,
             instruction->width, false, value_low);
     write_register(cpu, instruction->operands.exclusive.rt2,
@@ -1584,6 +1585,7 @@ static bool execute_store_exclusive_pair(struct cpu_state *cpu,
         .address_space = cpu->exclusive.address_space,
         .mapping_generation = cpu->exclusive.mapping_epoch,
         .write_generation = cpu->exclusive.write_epoch,
+        .sync_identity = cpu->exclusive.sync_identity,
     };
     aarch64_clear_exclusive(cpu);
     enum guest_tlb_store_exclusive_result result = guest_tlb_store_exclusive(

@@ -10,6 +10,7 @@
 struct guest_tlb_entry {
     guest_addr_t guest_page;
     byte_t *host_page;
+    const struct guest_page_sync *sync;
     unsigned permissions;
     bool valid;
 };
@@ -24,6 +25,7 @@ struct guest_tlb_exclusive_token {
     const struct guest_address_space *address_space;
     qword_t mapping_generation;
     qword_t write_generation;
+    qword_t sync_identity;
 };
 
 enum guest_tlb_store_exclusive_result {
