@@ -21,10 +21,8 @@ static enum guest_memory_fault_kind resolve_test_page(void *opaque,
     mapping->last_access = access;
     if (page_base != TEST_PAGE)
         return GUEST_MEMORY_FAULT_UNMAPPED;
-    *view = (struct guest_page_view) {
-        .host_page = mapping->page,
-        .permissions = GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE,
-    };
+    view->host_page = mapping->page;
+    view->permissions = GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE;
     return GUEST_MEMORY_FAULT_NONE;
 }
 
@@ -35,7 +33,8 @@ static const struct guest_address_space_ops test_ops = {
 int main(void) {
     struct test_mapping mapping = {0};
     struct guest_address_space space;
-    struct guest_page_view view;
+    struct guest_page_sync stale_sync = {0};
+    struct guest_page_view view = {.sync = &stale_sync};
 
     guest_address_space_init(&space, &test_ops, &mapping, 48);
     assert(space.generation == 1);
@@ -51,6 +50,7 @@ int main(void) {
     assert(guest_address_space_resolve_page(&space, TEST_PAGE,
             GUEST_MEMORY_READ, &view) == GUEST_MEMORY_FAULT_NONE);
     assert(view.host_page == mapping.page);
+    assert(view.sync == NULL);
     assert(mapping.calls == 1);
     assert(mapping.last_page == TEST_PAGE);
     assert(mapping.last_access == GUEST_MEMORY_READ);

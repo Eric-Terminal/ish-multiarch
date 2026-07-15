@@ -166,6 +166,7 @@ enum guest_memory_fault_kind guest_address_space_resolve_page(
     if (!guest_address_space_contains(space, page_base, GUEST_MEMORY_PAGE_SIZE))
         return GUEST_MEMORY_FAULT_ADDRESS_SIZE;
 
+    *view = (struct guest_page_view) {0};
     enum guest_memory_fault_kind fault = space->ops->resolve_page(
             space->opaque, page_base, access, view);
     if (fault != GUEST_MEMORY_FAULT_NONE)
@@ -175,4 +176,63 @@ enum guest_memory_fault_kind guest_address_space_resolve_page(
     if ((view->permissions & access) == 0)
         return GUEST_MEMORY_FAULT_PERMISSION;
     return GUEST_MEMORY_FAULT_NONE;
+}
+
+static void validate_page_sync(const struct guest_page_sync *sync) {
+    assert(sync != NULL && sync->ops != NULL);
+    assert(sync->identity != 0);
+    assert(sync->ops->read_lock != NULL && sync->ops->read_unlock != NULL);
+    assert(sync->ops->write_lock != NULL && sync->ops->write_unlock != NULL);
+    assert(sync->ops->track_exclusive != NULL);
+    assert(sync->ops->exclusive_matches != NULL);
+    assert(sync->ops->written != NULL);
+    use(sync);
+}
+
+qword_t guest_page_sync_identity(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    return sync->identity;
+}
+
+void guest_page_sync_read_lock(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    sync->ops->read_lock(sync->opaque);
+}
+
+void guest_page_sync_read_unlock(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    sync->ops->read_unlock(sync->opaque);
+}
+
+void guest_page_sync_write_lock(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    sync->ops->write_lock(sync->opaque);
+}
+
+void guest_page_sync_write_unlock(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    sync->ops->write_unlock(sync->opaque);
+}
+
+qword_t guest_page_sync_track_exclusive(
+        const struct guest_page_sync *sync, size_t page_offset) {
+    validate_page_sync(sync);
+    assert(page_offset < GUEST_MEMORY_PAGE_SIZE);
+    return sync->ops->track_exclusive(sync->opaque, page_offset);
+}
+
+bool guest_page_sync_exclusive_matches(
+        const struct guest_page_sync *sync, size_t page_offset,
+        qword_t generation) {
+    validate_page_sync(sync);
+    assert(page_offset < GUEST_MEMORY_PAGE_SIZE);
+    return sync->ops->exclusive_matches(
+            sync->opaque, page_offset, generation);
+}
+
+void guest_page_sync_written(const struct guest_page_sync *sync,
+        size_t page_offset, size_t size) {
+    validate_page_sync(sync);
+    assert(size != 0 && size <= GUEST_MEMORY_PAGE_SIZE - page_offset);
+    sync->ops->written(sync->opaque, page_offset, size);
 }

@@ -42,9 +42,36 @@ struct guest_memory_fault {
     enum guest_memory_fault_kind kind;
 };
 
+struct guest_page_sync;
+
+struct guest_page_sync_ops {
+    // track/matches/written 只能在对应同步域写锁内调用。
+    void (*read_lock)(void *opaque);
+    void (*read_unlock)(void *opaque);
+    void (*write_lock)(void *opaque);
+    void (*write_unlock)(void *opaque);
+    qword_t (*track_exclusive)(void *opaque, size_t page_offset);
+    bool (*exclusive_matches)(void *opaque, size_t page_offset,
+            qword_t generation);
+    void (*written)(void *opaque, size_t page_offset, size_t size);
+};
+
+// identity 保留 0；同一进程内所有当前及历史同步域身份均唯一且不复用。
+// 每个同步域只对应一个物理 4 KiB 页；复用该域的 view 必须返回同一
+// host_page，页内 offset 才能与 identity 共同构成稳定物理键。
+// TLB 以 identity 排序共享页锁，Linux 层也可据此构造物理页键。
+struct guest_page_sync {
+    const struct guest_page_sync_ops *ops;
+    void *opaque;
+    qword_t identity;
+};
+
 struct guest_page_view {
     byte_t *host_page;
     unsigned permissions;
+    // NULL 表示页面只受所属 address space 的事务锁保护。非空借用指针
+    // 可以缓存，但只能在持有 address space 锁且映射世代仍匹配时使用。
+    const struct guest_page_sync *sync;
 };
 
 struct guest_address_space_ops {
@@ -99,5 +126,18 @@ bool guest_address_space_contains(const struct guest_address_space *space,
 enum guest_memory_fault_kind guest_address_space_resolve_page(
         struct guest_address_space *space, guest_addr_t page_base,
         enum guest_memory_access access, struct guest_page_view *view);
+qword_t guest_page_sync_identity(const struct guest_page_sync *sync);
+// 调用者先持 address space 锁；多域访问须按 identity 升序加锁并逆序释放。
+void guest_page_sync_read_lock(const struct guest_page_sync *sync);
+void guest_page_sync_read_unlock(const struct guest_page_sync *sync);
+void guest_page_sync_write_lock(const struct guest_page_sync *sync);
+void guest_page_sync_write_unlock(const struct guest_page_sync *sync);
+qword_t guest_page_sync_track_exclusive(
+        const struct guest_page_sync *sync, size_t page_offset);
+bool guest_page_sync_exclusive_matches(
+        const struct guest_page_sync *sync, size_t page_offset,
+        qword_t generation);
+void guest_page_sync_written(const struct guest_page_sync *sync,
+        size_t page_offset, size_t size);
 
 #endif
