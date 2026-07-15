@@ -30,6 +30,12 @@ add_project_arguments('-Wno-switch', language: 'c')
 
 includes = [include_directories('.')]
 
+aarch64_backend_src = [
+    'guest/aarch64/backend.c',
+    'guest/aarch64/runner.c',
+    'guest/aarch64/threaded.c',
+]
+
 aarch64_core_src = [
     'guest/memory/address-space.c',
     'guest/memory/tlb.c',
@@ -38,7 +44,7 @@ aarch64_core_src = [
     'guest/aarch64/decode.c',
     'guest/aarch64/condition.c',
     'guest/aarch64/execute.c',
-    'guest/aarch64/runner.c',
+] + aarch64_backend_src + [
     'guest/aarch64/linux-syscall.c',
     'guest/aarch64/linux-signal-info.c',
     'guest/aarch64/linux-signal-frame.c',
@@ -682,7 +688,7 @@ if not meson.is_cross_build()
             'guest/aarch64/decode.c',
             'guest/aarch64/condition.c',
             'guest/aarch64/execute.c',
-            'guest/aarch64/runner.c',
+        ] + aarch64_backend_src + [
             'guest/aarch64/linux-syscall.c',
             'guest/aarch64/elf64.c',
             'guest/aarch64/elf64-loader.c',
@@ -728,10 +734,21 @@ if not meson.is_cross_build()
             'guest/aarch64/decode.c',
             'guest/aarch64/condition.c',
             'guest/aarch64/execute.c',
-            'guest/aarch64/runner.c',
+        ] + aarch64_backend_src + [
             'guest/aarch64/runner-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_runner', aarch64_runner_test)
+
+    aarch64_backend_test = executable('aarch64_backend_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+        ] + aarch64_backend_src + [
+            'guest/aarch64/backend-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_backend', aarch64_backend_test)
 
     aarch64_load_store_test = executable('aarch64_load_store_test', [
             'guest/memory/address-space.c',
@@ -739,7 +756,7 @@ if not meson.is_cross_build()
             'guest/aarch64/decode.c',
             'guest/aarch64/condition.c',
             'guest/aarch64/execute.c',
-            'guest/aarch64/runner.c',
+        ] + aarch64_backend_src + [
             'guest/aarch64/load-store-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_load_store', aarch64_load_store_test)
@@ -760,7 +777,7 @@ if not meson.is_cross_build()
             'guest/aarch64/decode.c',
             'guest/aarch64/condition.c',
             'guest/aarch64/execute.c',
-            'guest/aarch64/runner.c',
+        ] + aarch64_backend_src + [
             'guest/aarch64/linux-syscall.c',
             'guest/aarch64/program-test.c',
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
