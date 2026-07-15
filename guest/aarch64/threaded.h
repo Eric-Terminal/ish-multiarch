@@ -24,6 +24,7 @@ struct aarch64_threaded_cache_entry {
 struct aarch64_threaded_stats {
     qword_t cache_hits;
     qword_t cache_misses;
+    qword_t fast_dispatches;
     qword_t c_fallbacks;
 };
 
