@@ -784,23 +784,50 @@ int_t sys_set_robust_list_aarch64(qword_t robust_list, qword_t len) {
     return 0;
 }
 
-int_t sys_get_robust_list_aarch64(
-        pid_t_ pid, qword_t *robust_list) {
+enum robust_list_abi {
+    ROBUST_LIST_ABI_I386,
+    ROBUST_LIST_ABI_AARCH64,
+};
+
+// 调用方持有 pids_lock；项目尚无 user namespace 与 capability 模型，
+// 因而用有效 root 身份近似 Linux 的 CAP_SYS_PTRACE 旁路。
+static bool robust_list_access_allowed_locked(const struct task *task) {
+    if (task == current ||
+            (current->group != NULL && current->group == task->group))
+        return true;
+    if (current->euid == 0)
+        return true;
+    return current->uid == task->uid &&
+            current->uid == task->euid &&
+            current->uid == task->suid &&
+            current->gid == task->gid &&
+            current->gid == task->egid &&
+            current->gid == task->sgid;
+}
+
+static int_t robust_list_snapshot(pid_t_ pid, enum robust_list_abi abi,
+        qword_t *robust_list) {
     assert(current != NULL && robust_list != NULL);
     lock(&pids_lock);
-    struct task *task = pid == 0 || pid == current->pid ?
-            current : pid_get_task((dword_t) pid);
+    struct task *task = pid == 0 ?
+            current : pid_get_task_zombie((dword_t) pid);
     int_t result = 0;
     if (task == NULL) {
         result = _ESRCH;
-    } else if (task != current) {
-        // AArch64 ptrace 尚未提供 READ_REALCREDS 等价检查，保守拒绝跨任务读取。
+    } else if (!robust_list_access_allowed_locked(task)) {
         result = _EPERM;
     } else {
-        *robust_list = task->aarch64_robust_list;
+        *robust_list = abi == ROBUST_LIST_ABI_AARCH64 ?
+                task->aarch64_robust_list : task->robust_list;
     }
     unlock(&pids_lock);
     return result;
+}
+
+int_t sys_get_robust_list_aarch64(
+        pid_t_ pid, qword_t *robust_list) {
+    return robust_list_snapshot(
+            pid, ROBUST_LIST_ABI_AARCH64, robust_list);
 }
 
 static qword_t take_aarch64_robust_list(struct task *task) {
@@ -1020,9 +1047,16 @@ static bool cleanup_robust_futex_i386(struct task *task,
     return true;
 }
 
-static void cleanup_robust_list_i386(struct task *task) {
-    addr_t head_address = task->robust_list;
+static addr_t take_i386_robust_list(struct task *task) {
+    lock(&pids_lock);
+    addr_t robust_list = task->robust_list;
     task->robust_list = 0;
+    unlock(&pids_lock);
+    return robust_list;
+}
+
+static void cleanup_robust_list_i386(struct task *task) {
+    addr_t head_address = take_i386_robust_list(task);
     if (head_address == 0)
         return;
 
@@ -1082,27 +1116,28 @@ int_t sys_set_robust_list(addr_t robust_list, dword_t len) {
     STRACE("set_robust_list(%#x, %d)", robust_list, len);
     if (len != sizeof(struct i386_linux_robust_list_head))
         return _EINVAL;
+    lock(&pids_lock);
     current->robust_list = robust_list;
+    unlock(&pids_lock);
     return 0;
 }
 
 int_t sys_get_robust_list(pid_t_ pid, addr_t robust_list_ptr, addr_t len_ptr) {
     STRACE("get_robust_list(%d, %#x, %#x)", pid, robust_list_ptr, len_ptr);
 
-    lock(&pids_lock);
-    struct task *task = pid == 0 || pid == current->pid ?
-            current : pid_get_task((dword_t) pid);
-    int_t lookup_result = task == NULL ? _ESRCH :
-            task != current ? _EPERM : 0;
-    unlock(&pids_lock);
+    qword_t robust_list_snapshot_value;
+    int_t lookup_result = robust_list_snapshot(
+            pid, ROBUST_LIST_ABI_I386,
+            &robust_list_snapshot_value);
     if (lookup_result != 0)
         return lookup_result;
 
     dword_t robust_list_length =
             (dword_t) sizeof(struct i386_linux_robust_list_head);
+    addr_t robust_list = (addr_t) robust_list_snapshot_value;
     if (user_put(len_ptr, robust_list_length))
         return _EFAULT;
-    if (user_put(robust_list_ptr, current->robust_list))
+    if (user_put(robust_list_ptr, robust_list))
         return _EFAULT;
     return 0;
 }

@@ -616,10 +616,13 @@ static bool test_registration_syscalls(void) {
     TEST_CHECK(child != NULL && child->aarch64_robust_list == 0 &&
             fixture.parent->aarch64_robust_list == registered,
             "新任务不继承父任务的 robust 注册");
+    child->uid = child->euid = child->suid = 1001;
+    child->gid = child->egid = child->sgid = 2001;
     current = child;
     TEST_CHECK(sys_get_robust_list_aarch64(
-            fixture.parent->pid, &observed) == _EPERM,
-            "跨任务查询在权限模型完善前保守返回 EPERM");
+            fixture.parent->pid, &observed) == 0 &&
+            observed == registered,
+            "同一线程组可按精确 TID 查询 robust 注册");
     current = fixture.parent;
     task_abort_create(child);
 

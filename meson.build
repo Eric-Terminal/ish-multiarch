@@ -371,6 +371,13 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_robust_futex', aarch64_robust_futex_test)
 
+        robust_list_access_test = executable(
+            'robust_list_access_test',
+            'kernel/robust-list-access-test.c',
+            dependencies: ish)
+        test('robust_list_access', robust_list_access_test,
+            timeout: 60)
+
         aarch64_futex_lifecycle_test = executable(
             'aarch64_futex_lifecycle_test',
             'kernel/aarch64-futex-lifecycle-test.c',

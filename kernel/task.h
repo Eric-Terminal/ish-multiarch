@@ -97,9 +97,10 @@ struct task {
     struct list siblings;
 
     addr_t clear_tid;
+    // 两种 guest 的 robust-list 注册均由 pids_lock 保护。
     addr_t robust_list;
     // AArch64 guest 始终使用 LP64 robust-list 指针，与 host ABI 无关。
-    qword_t aarch64_robust_list; // 由 pids_lock 保护。
+    qword_t aarch64_robust_list;
 
     // locked by pids_lock
     dword_t exit_code;
