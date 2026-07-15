@@ -32,6 +32,12 @@ enum guest_tlb_store_exclusive_result {
     GUEST_TLB_EXCLUSIVE_FAULT,
 };
 
+enum guest_tlb_compare_exchange_result {
+    GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED,
+    GUEST_TLB_COMPARE_EXCHANGE_MISMATCH,
+    GUEST_TLB_COMPARE_EXCHANGE_FAULT,
+};
+
 _Static_assert(sizeof(guest_addr_t) == 8,
         "独立 guest TLB 要求 64 位地址类型");
 _Static_assert((GUEST_TLB_SIZE & (GUEST_TLB_SIZE - 1)) == 0,
@@ -58,5 +64,10 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
         const void *expected, const void *replacement, size_t size,
         struct guest_tlb_exclusive_token token,
         struct guest_memory_fault *fault);
+// observed 仅在完整预检成功后更新，返回值区分交换、比较失败与访存故障。
+enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
+        struct guest_tlb *tlb, guest_addr_t address,
+        const void *expected, const void *replacement, void *observed,
+        size_t size, struct guest_memory_fault *fault);
 
 #endif

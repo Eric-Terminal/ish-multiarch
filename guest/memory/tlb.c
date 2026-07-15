@@ -254,3 +254,43 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
     guest_address_space_write_unlock(tlb->address_space, locked);
     return GUEST_TLB_EXCLUSIVE_STORED;
 }
+
+enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
+        struct guest_tlb *tlb, guest_addr_t address,
+        const void *expected, const void *replacement, void *observed,
+        size_t size, struct guest_memory_fault *fault) {
+    assert((size == 8 || size == 16) &&
+            size <= GUEST_TLB_MAX_ACCESS_SIZE);
+    byte_t expected_bytes[GUEST_TLB_MAX_ACCESS_SIZE];
+    byte_t replacement_bytes[GUEST_TLB_MAX_ACCESS_SIZE];
+    // CAS 会把 observed 写回期望寄存器，先保留输入以允许两者共用缓冲区。
+    memcpy(expected_bytes, expected, size);
+    memcpy(replacement_bytes, replacement, size);
+    bool locked = guest_address_space_write_lock(tlb->address_space);
+    struct guest_tlb_access_chunk chunks[2];
+    unsigned chunk_count;
+    if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+            chunks, &chunk_count, fault)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
+    }
+
+    byte_t *observed_bytes = observed;
+    for (unsigned i = 0; i < chunk_count; i++) {
+        memcpy(observed_bytes, chunks[i].host, chunks[i].size);
+        observed_bytes += chunks[i].size;
+    }
+    if (memcmp(observed, expected_bytes, size) != 0) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_COMPARE_EXCHANGE_MISMATCH;
+    }
+
+    const byte_t *replacement_input = replacement_bytes;
+    for (unsigned i = 0; i < chunk_count; i++) {
+        memcpy(chunks[i].host, replacement_input, chunks[i].size);
+        replacement_input += chunks[i].size;
+    }
+    guest_address_space_written(tlb->address_space, address, size);
+    guest_address_space_write_unlock(tlb->address_space, locked);
+    return GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED;
+}
