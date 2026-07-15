@@ -763,6 +763,17 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_backend', aarch64_backend_test)
 
+    if host_machine.cpu_family() == 'aarch64'
+        aarch64_backend_benchmark = executable(
+            'aarch64_backend_benchmark',
+            'guest/aarch64/backend-benchmark.c',
+            include_directories: includes,
+            c_args: ['-DISH_GUEST_AARCH64=1'],
+            link_with: libish_aarch64_core)
+        benchmark('aarch64_backend_performance',
+            aarch64_backend_benchmark, timeout: 120)
+    endif
+
     aarch64_load_store_test = executable('aarch64_load_store_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
