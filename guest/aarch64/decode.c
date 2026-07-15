@@ -1123,6 +1123,35 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbfa07c00)) == UINT32_C(0x08207c00)) {
+        byte_t rs = (word >> 16) & 0x1f;
+        byte_t rt = word & 0x1f;
+        // 寄存器对只编码首个偶数寄存器，30 的后继 31 表示零寄存器。
+        if ((rs & 1) != 0 || (rt & 1) != 0)
+            return false;
+        bool acquire = ((word >> 22) & 1) != 0;
+        bool release = ((word >> 15) & 1) != 0;
+        enum aarch64_opcode opcode;
+        if (acquire)
+            opcode = release ? AARCH64_OP_CASPAL : AARCH64_OP_CASPA;
+        else
+            opcode = release ? AARCH64_OP_CASPL : AARCH64_OP_CASP;
+        byte_t width = (word >> 30) & 1 ? 64 : 32;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = opcode,
+            .width = width,
+            .operands.compare_swap_pair = {
+                .rs = rs,
+                .rs2 = rs + 1,
+                .rt = rt,
+                .rt2 = rt + 1,
+                .rn = (word >> 5) & 0x1f,
+                .size = width / 8,
+            },
+        };
+        return true;
+    }
+
     dword_t exclusive_pair_load = word & UINT32_C(0xbfff8000);
     if (exclusive_pair_load == UINT32_C(0x887f0000) ||
             exclusive_pair_load == UINT32_C(0x887f8000)) {

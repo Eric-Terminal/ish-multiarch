@@ -62,6 +62,10 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_SIMD_IMM12,
     AARCH64_OP_LOAD_SIMD_IMM9,
     AARCH64_OP_STORE_SIMD_IMM9,
+    AARCH64_OP_CASP,
+    AARCH64_OP_CASPA,
+    AARCH64_OP_CASPL,
+    AARCH64_OP_CASPAL,
     AARCH64_OP_LDXR,
     AARCH64_OP_LDAXR,
     AARCH64_OP_STXR,
@@ -355,6 +359,14 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t table_count;
         } advsimd_table;
+        struct {
+            byte_t rs;
+            byte_t rs2;
+            byte_t rt;
+            byte_t rt2;
+            byte_t rn;
+            byte_t size;
+        } compare_swap_pair;
         struct {
             byte_t rs;
             byte_t rt;

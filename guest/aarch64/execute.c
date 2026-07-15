@@ -1396,6 +1396,56 @@ static bool check_exclusive_alignment(guest_addr_t address, byte_t size,
     return false;
 }
 
+static bool execute_compare_swap_pair(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rs = instruction->operands.compare_swap_pair.rs;
+    byte_t rs2 = instruction->operands.compare_swap_pair.rs2;
+    byte_t rt = instruction->operands.compare_swap_pair.rt;
+    byte_t rt2 = instruction->operands.compare_swap_pair.rt2;
+    byte_t rn = instruction->operands.compare_swap_pair.rn;
+    byte_t element_size = instruction->operands.compare_swap_pair.size;
+    byte_t pair_size = element_size * 2;
+
+    // 地址与四个数据输入允许重叠，任何写回前必须完成全部快照。
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    qword_t compare_low = read_register(cpu, rs,
+            instruction->width, false);
+    qword_t compare_high = read_register(cpu, rs2,
+            instruction->width, false);
+    qword_t replacement_low = read_register(cpu, rt,
+            instruction->width, false);
+    qword_t replacement_high = read_register(cpu, rt2,
+            instruction->width, false);
+    byte_t alignment = rn == 31 ? 16 : pair_size;
+    if (!check_exclusive_alignment(
+            address, alignment, GUEST_MEMORY_WRITE, fault))
+        return false;
+
+    byte_t expected[16];
+    byte_t replacement[16];
+    byte_t observed[16];
+    store_little_endian(expected, element_size, compare_low);
+    store_little_endian(expected + element_size,
+            element_size, compare_high);
+    store_little_endian(replacement, element_size, replacement_low);
+    store_little_endian(replacement + element_size,
+            element_size, replacement_high);
+    enum guest_tlb_compare_exchange_result result =
+            guest_tlb_compare_exchange(tlb, address,
+                    expected, replacement, observed, pair_size, fault);
+    if (result == GUEST_TLB_COMPARE_EXCHANGE_FAULT)
+        return false;
+
+    write_register(cpu, rs, instruction->width, false,
+            load_little_endian(observed, element_size));
+    write_register(cpu, rs2, instruction->width, false,
+            load_little_endian(observed + element_size, element_size));
+    cpu->pc += 4;
+    return true;
+}
+
 static bool execute_load_exclusive(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -1851,6 +1901,14 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_STORE_SIMD_PAIR:
             if (!execute_simd_load_store_pair(cpu, tlb, instruction,
                     &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_CASP:
+        case AARCH64_OP_CASPA:
+        case AARCH64_OP_CASPL:
+        case AARCH64_OP_CASPAL:
+            if (!execute_compare_swap_pair(
+                    cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
         case AARCH64_OP_LDXR:

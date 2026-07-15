@@ -1066,6 +1066,14 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_exclusive', aarch64_exclusive_test)
 
+    aarch64_casp_test = executable('aarch64_casp_test',
+        'guest/aarch64/casp-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        dependencies: threads,
+        link_with: libish_aarch64_core)
+    test('aarch64_casp', aarch64_casp_test)
+
     aarch64_barrier_test = executable('aarch64_barrier_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
