@@ -64,8 +64,8 @@ void task_commit_aarch64_exec(struct task *task) {
             task->aarch64_exec_mm != NULL);
     struct aarch64_linux_process *retired = task->aarch64_process;
 
-    // exec 只在成功提交时清理旧映像；候选失败或丢弃仍保留原注册。
-    futex_cleanup_robust_list_aarch64(task, retired);
+    // 只在成功提交时清理 AArch64 旧映像；候选失败仍保留原注册。
+    futex_cleanup_task_aarch64(task, retired);
 
     // procfs 与 ptrace 先以 pids_lock 固定 task，再读取地址空间元数据。
     lock(&pids_lock);
@@ -103,6 +103,7 @@ struct aarch64_linux_process *task_take_aarch64_process(
 }
 
 void task_release_aarch64_process(struct task *task) {
+    // 原始析构不产生退出副作用；失败构造与候选回滚也会经过这里。
     aarch64_linux_process_destroy(
             task_take_aarch64_process(task));
 }

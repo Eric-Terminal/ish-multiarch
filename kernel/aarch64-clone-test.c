@@ -9,6 +9,7 @@
 
 #include "fs/fd.h"
 #include "guest/aarch64/elf64.h"
+#include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-resource-wire.h"
@@ -91,6 +92,10 @@ static bool wait_for_continue_notification(struct task *task) {
         sched_yield();
     }
     return false;
+}
+
+static bool send_signal_to_pid(pid_t_ pid, dword_t signal) {
+    return sys_kill(pid, signal) == 0;
 }
 
 static bool fail_status_write(void *opaque, qword_t address,
@@ -363,6 +368,15 @@ static bool write_guest_timespec(struct aarch64_linux_process *process,
                     (dword_t) (nsec_bits >> 32), NULL);
 }
 
+static bool write_guest_u64(struct aarch64_linux_process *process,
+        qword_t address, qword_t value) {
+    return aarch64_linux_process_write_u32(
+                    process, address, (dword_t) value, NULL) &&
+            aarch64_linux_process_write_u32(
+                    process, address + 4,
+                    (dword_t) (value >> 32), NULL);
+}
+
 static unsigned exercise_futex_edges(struct task *parent) {
     const qword_t word = STACK_TOP - UINT64_C(0x300);
     const qword_t timeout = word + 16;
@@ -443,6 +457,9 @@ static bool exercise_thread_clone(struct task *parent) {
     const qword_t child_tid = child_stack;
     const qword_t child_ready = child_stack + sizeof(dword_t);
     const qword_t parent_tid = child_ready + sizeof(dword_t);
+    const qword_t robust_head = child_stack - sizeof(qword_t);
+    const qword_t robust_entry = child_stack + UINT64_C(0x40);
+    const qword_t robust_futex = robust_entry + sizeof(qword_t);
     const qword_t tls = UINT64_C(0x1234);
     struct guest_linux_user_fault fault = {0};
     if (!aarch64_linux_process_write_u32(
@@ -486,6 +503,31 @@ static bool exercise_thread_clone(struct task *parent) {
             observed_parent_tid != (dword_t) pid)
         return false;
 
+    /*
+     * robust futex_offset 与 clear-child-tid 共用低 32 位：只有先读取
+     * robust 头、再清零 ctid，退出修复才会命中 robust_futex。
+     */
+    if (!write_guest_u64(parent->aarch64_process,
+                    robust_head, robust_entry) ||
+            !write_guest_u64(parent->aarch64_process,
+                    child_stack, sizeof(qword_t)) ||
+            !write_guest_u64(parent->aarch64_process,
+                    parent_tid, 0) ||
+            !write_guest_u64(parent->aarch64_process,
+                    robust_entry, robust_head) ||
+            !aarch64_linux_process_write_u32(
+                    parent->aarch64_process, robust_futex,
+                    (dword_t) pid, &fault))
+        return false;
+    lock(&pids_lock);
+    child = pid_get_task(pid);
+    bool registered = child != NULL;
+    if (registered)
+        child->aarch64_robust_list = robust_head;
+    unlock(&pids_lock);
+    if (!registered)
+        return false;
+
     bool woken = false;
     for (unsigned i = 0; i < 100000 && !woken; i++) {
         dword_t wake_result = sys_futex_aarch64(
@@ -496,8 +538,7 @@ static bool exercise_thread_clone(struct task *parent) {
         if (!woken)
             sched_yield();
     }
-    if (!woken || !aarch64_linux_process_write_u32(
-            parent->aarch64_process, child_ready, 1, &fault))
+    if (!woken)
         return false;
     bool reaped = false;
     for (unsigned i = 0; i < 100000 && !reaped; i++) {
@@ -508,9 +549,15 @@ static bool exercise_thread_clone(struct task *parent) {
             sched_yield();
     }
     dword_t cleared_child_tid;
+    dword_t robust_after;
     return reaped && aarch64_linux_process_read_u32(
-            parent->aarch64_process, child_tid,
-            &cleared_child_tid, &fault) && cleared_child_tid == 0;
+                    parent->aarch64_process, child_tid,
+                    &cleared_child_tid, &fault) &&
+            cleared_child_tid == 0 &&
+            aarch64_linux_process_read_u32(
+                    parent->aarch64_process, robust_futex,
+                    &robust_after, &fault) &&
+            robust_after == AARCH64_LINUX_FUTEX_OWNER_DIED;
 }
 
 static void clear_pending_signals(struct task *task) {
@@ -654,7 +701,8 @@ static int run_clone_scenario(void) {
         return 31;
     reset_exit_observation();
     exit_hook = observe_exit;
-    send_signal(fault_child, SIGKILL_, SIGINFO_NIL);
+    if (!send_signal_to_pid(fault_pid, SIGKILL_))
+        return 31;
 
     const qword_t failed_status_address = STACK_TOP - 4;
     struct failed_write_observation failed_write = {0};
@@ -713,7 +761,8 @@ static int run_clone_scenario(void) {
     if (!job_child_published)
         return 35;
 
-    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGTSTP_))
+        return 35;
     dword_t stop_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
             WAIT_OPTION_WUNTRACED | WAIT_OPTION_WNOWAIT);
     sdword_t stopped = do_wait4(
@@ -721,7 +770,8 @@ static int run_clone_scenario(void) {
     if (stop_peek != 0 || stopped != job_pid || edge_result.status !=
             ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
         return 36;
-    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGCONT_))
+        return 36;
     dword_t continue_peek = sys_waitid(WAITID_P_PID, job_pid, 0,
             WAIT_OPTION_WCONTINUED | WAIT_OPTION_WNOWAIT);
     sdword_t continued = do_wait4(
@@ -736,16 +786,19 @@ static int run_clone_scenario(void) {
                     &edge_result) != 0)
         return 37;
 
-    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGTSTP_))
+        return 37;
     stopped = do_wait4(
             job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
     if (stopped != job_pid || edge_result.status !=
             ((dword_t) SIGTSTP_ << 8 | UINT32_C(0x7f)))
         return 38;
-    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGCONT_))
+        return 38;
     if (!wait_for_continue_notification(job_child))
         return 39;
-    send_signal(job_child, SIGTSTP_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGTSTP_))
+        return 39;
     stopped = do_wait4(
             job_pid, WAIT_OPTION_WUNTRACED, &edge_result);
     if (stopped != job_pid || edge_result.status !=
@@ -755,12 +808,14 @@ static int run_clone_scenario(void) {
                     &edge_result) != 0)
         return 40;
 
-    send_signal(job_child, SIGCONT_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGCONT_))
+        return 40;
     if (!wait_for_continue_notification(job_child))
         return 41;
     reset_exit_observation();
     exit_hook = observe_exit;
-    send_signal(job_child, SIGKILL_, SIGINFO_NIL);
+    if (!send_signal_to_pid(job_pid, SIGKILL_))
+        return 41;
     bool job_exited = false;
     for (unsigned i = 0; i < 100000 && !job_exited; i++) {
         job_exited = atomic_load_explicit(

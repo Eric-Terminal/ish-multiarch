@@ -800,6 +800,28 @@ void futex_cleanup_robust_list_aarch64(
     }
 }
 
+void futex_cleanup_task_aarch64(
+        struct task *task, struct aarch64_linux_process *process) {
+    futex_cleanup_robust_list_aarch64(task, process);
+    if (process == NULL)
+        return;
+    assert(task->mm != NULL);
+
+    // 活动旧 mm 只由 CLONE_VM task 共同持有；exec 候选使用独立 mm。
+    // opaque wrapper 还包含构造期与观察者引用，不能代替 task 用户数。
+    bool has_other_mm_user = atomic_load_explicit(
+            &task->mm->refcount, memory_order_relaxed) > 1;
+    qword_t clear_tid =
+            aarch64_linux_process_take_clear_child_tid(process);
+    if (clear_tid == 0 || !has_other_mm_user)
+        return;
+
+    (void) aarch64_linux_process_write_u32(
+            process, clear_tid, 0, NULL);
+    // Linux 即使清零故障也会用共享键尝试唤醒，两个地址翻译彼此独立。
+    (void) futex_wake_aarch64(process, clear_tid, 1);
+}
+
 struct robust_list_head_ {
     addr_t list;
     dword_t offset;

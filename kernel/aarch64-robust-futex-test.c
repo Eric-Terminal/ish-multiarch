@@ -300,6 +300,32 @@ static struct task *make_thread(struct task *parent) {
     return task;
 }
 
+static bool configure_clear_child_tid(
+        struct robust_fixture *fixture, qword_t address) {
+    struct aarch64_linux_process *old =
+            fixture->parent->aarch64_process;
+    const struct aarch64_linux_process_thread_config config = {
+        .tid = fixture->parent->pid,
+        .task_opaque = fixture->parent,
+        .clear_child_tid = address,
+    };
+    struct aarch64_linux_process *replacement =
+            aarch64_linux_process_clone_thread(old, &config, NULL);
+    if (replacement == NULL)
+        return false;
+    if (task_take_aarch64_process(fixture->parent) != old)
+        abort();
+    if (!task_attach_aarch64_process(
+            fixture->parent, replacement)) {
+        if (!task_attach_aarch64_process(fixture->parent, old))
+            abort();
+        aarch64_linux_process_destroy(replacement);
+        return false;
+    }
+    aarch64_linux_process_destroy(old);
+    return true;
+}
+
 static void destroy_thread(struct task *parent, struct task *task) {
     current = parent;
     signal_flush_pending(task);
@@ -835,6 +861,63 @@ static bool test_traversal_limit(void) {
     return true;
 }
 
+static bool test_clear_child_tid_release(void) {
+    struct robust_fixture fixture;
+    TEST_CHECK(init_fixture(&fixture),
+            "建立 clear-child-tid 清理夹具");
+    const qword_t writable = ROBUST_BASE + UINT64_C(0x700);
+    const dword_t marker = UINT32_C(0x6a09e667);
+    TEST_CHECK(write_u32(&fixture, writable, marker) &&
+            configure_clear_child_tid(&fixture, writable),
+            "登记单独持有地址空间的 clear-child-tid");
+    const struct aarch64_linux_process_thread_config observer_config = {
+        .tid = fixture.parent->pid + 1,
+        .task_opaque = fixture.parent,
+    };
+    struct aarch64_linux_process *observer =
+            aarch64_linux_process_clone_thread(
+                    fixture.parent->aarch64_process,
+                    &observer_config, NULL);
+    TEST_CHECK(observer != NULL,
+            "建立不持有 metadata mm 的地址空间观察者");
+    futex_cleanup_task_aarch64(
+            fixture.parent, fixture.parent->aarch64_process);
+    dword_t observed;
+    TEST_CHECK(read_u32(&fixture, writable, &observed) &&
+            observed == marker &&
+            aarch64_linux_process_take_clear_child_tid(
+                    fixture.parent->aarch64_process) == 0,
+            "opaque 观察者不冒充 mm 用户触发清零");
+    aarch64_linux_process_destroy(observer);
+
+    const qword_t readonly = TEXT_BASE + ENTRY_OFFSET;
+    TEST_CHECK(read_u32(&fixture, readonly, &observed) &&
+            configure_clear_child_tid(&fixture, readonly),
+            "把 clear-child-tid 指向只读代码页");
+    const dword_t instruction = observed;
+    struct task *waiter_task = make_thread(fixture.parent);
+    struct robust_waiter waiter;
+    TEST_CHECK(waiter_task != NULL,
+            "创建共享旧 mm 的 clear-child-tid 等待任务");
+    mm_retain(fixture.parent->mm);
+    TEST_CHECK(start_waiter(
+                    &waiter, waiter_task, readonly, instruction) &&
+            wait_until_queued(fixture.parent, readonly),
+            "在共享旧 mm 的只读地址上排入等待者");
+    futex_cleanup_task_aarch64(
+            fixture.parent, fixture.parent->aarch64_process);
+    TEST_CHECK(wait_for_stage(&waiter, 2) && join_waiter(&waiter) &&
+            read_u32(&fixture, readonly, &observed) &&
+            observed == instruction &&
+            aarch64_linux_process_take_clear_child_tid(
+                    fixture.parent->aarch64_process) == 0,
+            "清零故障后仍以共享键唤醒且静默消费注册");
+    destroy_thread(fixture.parent, waiter_task);
+    mm_release(fixture.parent->mm);
+    destroy_fixture(&fixture);
+    return true;
+}
+
 typedef bool (*scenario_function)(void);
 
 static bool run_isolated(const char *name, scenario_function scenario) {
@@ -885,6 +968,7 @@ int main(void) {
         {"AArch64 robust 负偏移与故障边界",
                 test_negative_offset_and_fault_boundaries},
         {"AArch64 robust 遍历上限", test_traversal_limit},
+        {"AArch64 clear-child-tid 释放", test_clear_child_tid_release},
     };
     for (size_t index = 0; index < array_size(scenarios); index++) {
         if (!run_isolated(

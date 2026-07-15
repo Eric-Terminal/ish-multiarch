@@ -28,6 +28,7 @@
 #define ROBUST_HEAD (STACK_TOP - 2 * GUEST_MEMORY_PAGE_SIZE + UINT64_C(0x100))
 #define ROBUST_ENTRY (ROBUST_HEAD + UINT64_C(0x40))
 #define ROBUST_FUTEX (ROBUST_ENTRY + UINT64_C(0x8))
+#define CLEAR_CHILD_TID (ROBUST_HEAD + UINT64_C(0x100))
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -116,6 +117,23 @@ static struct aarch64_linux_process *make_process(
     return aarch64_linux_process_create(&config, NULL);
 }
 
+static struct aarch64_linux_process *make_process_with_clear_tid(
+        struct task *task, pid_t_ tid, qword_t clear_child_tid) {
+    struct aarch64_linux_process *base =
+            make_process(task, tid, true);
+    if (base == NULL)
+        return NULL;
+    const struct aarch64_linux_process_thread_config config = {
+        .tid = tid,
+        .task_opaque = task,
+        .clear_child_tid = clear_child_tid,
+    };
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_clone_thread(base, &config, NULL);
+    aarch64_linux_process_destroy(base);
+    return process;
+}
+
 static bool stage_process(struct task *task,
         struct aarch64_linux_process *process) {
     struct mm *mm = mm_new();
@@ -149,10 +167,17 @@ static bool write_robust_state(
 int main(void) {
     struct task parent = {.pid = 1000};
     lock_init(&parent.general_lock);
+    struct mm *initial_mm = mm_new();
+    CHECK(initial_mm != NULL, "创建首个 metadata mm");
+    task_set_mm(&parent, initial_mm);
     current = &parent;
     struct aarch64_linux_process *first =
-            make_process(&parent, parent.pid, true);
-    CHECK(first != NULL, "创建首个 opaque process");
+            make_process_with_clear_tid(
+                    &parent, parent.pid, CLEAR_CHILD_TID);
+    CHECK(first != NULL && aarch64_linux_process_write_u32(
+                    first, CLEAR_CHILD_TID,
+                    (dword_t) parent.pid, NULL),
+            "创建带 clear-child-tid 注册的首个 opaque process");
     CHECK(task_attach_aarch64_process(&parent, first),
             "attach 接受匹配的生产服务闭包");
     CHECK(task_has_aarch64_process(&parent) &&
@@ -173,6 +198,9 @@ int main(void) {
     struct aarch64_linux_process *old_image_observer =
             aarch64_linux_process_clone_thread(
                     first, &observer_config, NULL);
+    // guest 观察者保留旧字节；额外 mm 引用模拟仍存活的 CLONE_VM peer。
+    struct mm *old_metadata_observer = parent.mm;
+    mm_retain(old_metadata_observer);
     CHECK(old_image_observer != NULL &&
             write_robust_state(first, parent.pid) &&
             sys_set_robust_list_aarch64(ROBUST_HEAD,
@@ -180,8 +208,11 @@ int main(void) {
             "在旧 exec 映像登记可观察的 robust 节点");
 
     struct aarch64_linux_process *replacement =
-            make_process(&parent, parent.pid, true);
-    CHECK(replacement != NULL &&
+            make_process_with_clear_tid(
+                    &parent, parent.pid, CLEAR_CHILD_TID);
+    CHECK(replacement != NULL && aarch64_linux_process_write_u32(
+                    replacement, CLEAR_CHILD_TID,
+                    (dword_t) parent.pid, NULL) &&
             stage_process(&parent, replacement) &&
             task_has_aarch64_exec_candidate(&parent) &&
             parent.aarch64_process == first,
@@ -195,6 +226,7 @@ int main(void) {
     aarch64_linux_process_destroy(duplicate_candidate);
     task_commit_aarch64_exec(&parent);
     dword_t old_word;
+    dword_t old_clear_tid;
     qword_t registration = UINT64_MAX;
     CHECK(parent.aarch64_process == replacement &&
             !task_has_aarch64_exec_candidate(&parent) &&
@@ -202,21 +234,42 @@ int main(void) {
                     old_image_observer, ROBUST_FUTEX,
                     &old_word, NULL) &&
             old_word == AARCH64_LINUX_FUTEX_OWNER_DIED &&
+            aarch64_linux_process_read_u32(
+                    old_image_observer, CLEAR_CHILD_TID,
+                    &old_clear_tid, NULL) &&
+            old_clear_tid == 0 &&
             sys_get_robust_list_aarch64(0, &registration) == 0 &&
             registration == 0,
-            "安全点在销毁旧映像前完成 robust 修复并清除注册");
+            "安全点在销毁旧映像前完成 robust 与 clear-child-tid 清理");
     aarch64_linux_process_destroy(old_image_observer);
+    mm_release(old_metadata_observer);
 
     struct aarch64_linux_process *discarded =
-            make_process(&parent, parent.pid, true);
-    CHECK(discarded != NULL && write_robust_state(
+            make_process_with_clear_tid(
+                    &parent, parent.pid, CLEAR_CHILD_TID);
+    CHECK(discarded != NULL && aarch64_linux_process_write_u32(
+                    discarded, CLEAR_CHILD_TID,
+                    (dword_t) parent.pid, NULL) &&
+            write_robust_state(
                     replacement, parent.pid) &&
             sys_set_robust_list_aarch64(ROBUST_HEAD,
                     sizeof(struct aarch64_linux_robust_list_head)) == 0 &&
             stage_process(&parent, discarded),
             "建立可回滚的 exec 候选");
+    const struct aarch64_linux_process_thread_config
+            discarded_observer_config = {
+        .tid = parent.pid + 2,
+        .task_opaque = &parent,
+    };
+    struct aarch64_linux_process *discarded_observer =
+            aarch64_linux_process_clone_thread(
+                    discarded, &discarded_observer_config, NULL);
+    CHECK(discarded_observer != NULL,
+            "保留可回滚候选的地址空间观察者");
     task_discard_aarch64_exec(&parent);
     dword_t preserved_word;
+    dword_t preserved_clear_tid;
+    dword_t discarded_clear_tid;
     CHECK(parent.aarch64_process == replacement &&
             !task_has_aarch64_exec_candidate(&parent) &&
             sys_get_robust_list_aarch64(0, &registration) == 0 &&
@@ -224,8 +277,19 @@ int main(void) {
             aarch64_linux_process_read_u32(
                     replacement, ROBUST_FUTEX,
                     &preserved_word, NULL) &&
-            preserved_word == (dword_t) parent.pid,
-            "回滚候选保留活动映像的 robust 注册与 owner");
+            preserved_word == (dword_t) parent.pid &&
+            aarch64_linux_process_take_clear_child_tid(replacement) ==
+                    CLEAR_CHILD_TID &&
+            aarch64_linux_process_read_u32(
+                    replacement, CLEAR_CHILD_TID,
+                    &preserved_clear_tid, NULL) &&
+            preserved_clear_tid == (dword_t) parent.pid &&
+            aarch64_linux_process_read_u32(
+                    discarded_observer, CLEAR_CHILD_TID,
+                    &discarded_clear_tid, NULL) &&
+            discarded_clear_tid == (dword_t) parent.pid,
+            "回滚候选不触发活动映像或候选映像的退出副作用");
+    aarch64_linux_process_destroy(discarded_observer);
     CHECK(sys_set_robust_list_aarch64(0,
             sizeof(struct aarch64_linux_robust_list_head)) == 0,
             "释放活动映像前清除测试注册");

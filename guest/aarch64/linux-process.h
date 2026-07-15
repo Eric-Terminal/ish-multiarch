@@ -201,6 +201,7 @@ bool aarch64_linux_process_snapshot_futex_words(
         struct aarch64_linux_futex_word_snapshot *snapshots,
         dword_t *first_value,
         struct guest_linux_user_fault *fault);
+// 仅由所属任务在退出或成功 exec 的安全点消费。
 qword_t aarch64_linux_process_take_clear_child_tid(
         struct aarch64_linux_process *process);
 // 单次读取不得超过 GUEST_TLB_MAX_ACCESS_SIZE。
