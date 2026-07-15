@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <string.h>
 
+#include "guest/memory/page-backing.h"
 #include "guest/memory/page-table.h"
 #include "guest/memory/tlb.h"
 
@@ -130,6 +131,64 @@ static void test_supported_address_widths(void) {
             GUEST_MEMORY_READ, &host_page) ==
             GUEST_PAGE_TABLE_INVALID_ADDRESS);
     guest_page_table_destroy(&narrow);
+}
+
+static void test_backing_allocation_failures(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    qword_t generation = table.address_space.generation;
+
+    guest_page_backing_test_fail_allocation_at(0);
+    byte_t *page;
+    assert(guest_page_table_map(&table, RANGE_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &page) ==
+            GUEST_PAGE_TABLE_OUT_OF_MEMORY);
+    assert(table.address_space.generation == generation);
+    assert_not_mapped(&table, RANGE_BASE);
+    assert(guest_page_backing_test_live_count() == 0);
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    assert(guest_page_table_map(&table, RANGE_BASE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &page) ==
+            GUEST_PAGE_TABLE_OK);
+    page[0] = 0x5a;
+    assert(guest_page_backing_test_live_count() == 1);
+    generation = table.address_space.generation;
+    const struct guest_page_range replacement = {
+        .first = RANGE_BASE,
+        .page_count = 3,
+    };
+    for (size_t fail_at = 0; fail_at < 3; fail_at++) {
+        guest_page_backing_test_fail_allocation_at(fail_at);
+        assert(guest_page_table_map_zero_range(&table, replacement,
+                GUEST_MEMORY_READ, true) ==
+                GUEST_PAGE_TABLE_OUT_OF_MEMORY);
+        assert(guest_page_backing_test_allocation_count() == fail_at + 1);
+        assert(table.address_space.generation == generation);
+        assert(lookup_page(&table, RANGE_BASE,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == page);
+        assert(page[0] == 0x5a);
+        assert_not_mapped(&table, RANGE_BASE + GUEST_MEMORY_PAGE_SIZE);
+        assert_not_mapped(&table,
+                RANGE_BASE + 2 * GUEST_MEMORY_PAGE_SIZE);
+        assert(guest_page_backing_test_live_count() == 1);
+    }
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    assert(guest_page_table_map_zero_range(&table, replacement,
+            GUEST_MEMORY_READ, true) == GUEST_PAGE_TABLE_OK);
+    assert(table.address_space.generation == generation + 1);
+    assert(guest_page_backing_test_live_count() == 3);
+    for (qword_t index = 0; index < replacement.page_count; index++) {
+        byte_t *replacement_page = lookup_page(&table,
+                replacement.first + index * GUEST_MEMORY_PAGE_SIZE,
+                GUEST_MEMORY_READ);
+        for (size_t offset = 0; offset < GUEST_MEMORY_PAGE_SIZE; offset++)
+            assert(replacement_page[offset] == 0);
+    }
+    guest_page_table_destroy(&table);
+    assert(guest_page_backing_test_live_count() == 0);
 }
 
 static void test_atomic_map_and_replace(void) {
@@ -392,11 +451,15 @@ static void test_independent_clone(void) {
             &source.address_space, HIGH_PAGE);
 
     guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     struct guest_page_table copy;
     assert(guest_page_table_clone(&copy, &source));
     size_t clone_allocations =
             guest_page_table_test_clone_allocation_count();
+    size_t backing_clone_allocations =
+            guest_page_backing_test_allocation_count();
     assert(clone_allocations > 4);
+    assert(backing_clone_allocations == 6);
     assert(copy.address_space.address_bits ==
             source.address_space.address_bits);
     assert(copy.address_space.generation ==
@@ -435,6 +498,7 @@ static void test_independent_clone(void) {
 
     qword_t source_generation = source.address_space.generation;
     for (size_t fail_at = 0; fail_at < clone_allocations; fail_at++) {
+        unsigned live_before = guest_page_backing_test_live_count();
         guest_page_table_test_fail_clone_allocation_at(fail_at);
         struct guest_page_table failed;
         assert(!guest_page_table_clone(&failed, &source));
@@ -452,8 +516,27 @@ static void test_independent_clone(void) {
         assert(lookup_page(&source, SIBLING_LEVEL2_PAGE,
                 GUEST_MEMORY_READ) == sibling_level2);
         guest_page_table_destroy(&failed);
+        assert(guest_page_backing_test_live_count() == live_before);
     }
     guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
+
+    for (size_t fail_at = 0;
+            fail_at < backing_clone_allocations; fail_at++) {
+        unsigned live_before = guest_page_backing_test_live_count();
+        guest_page_backing_test_fail_allocation_at(fail_at);
+        struct guest_page_table failed;
+        assert(!guest_page_table_clone(&failed, &source));
+        assert(failed.root == NULL &&
+                source.address_space.generation == source_generation);
+        assert(guest_page_backing_test_allocation_count() == fail_at + 1);
+        assert(lookup_page(&source, HIGH_PAGE,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == first);
+        assert(lookup_page(&source, SIBLING_LEVEL2_PAGE,
+                GUEST_MEMORY_READ) == sibling_level2);
+        guest_page_table_destroy(&failed);
+        assert(guest_page_backing_test_live_count() == live_before);
+    }
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
 
     first_copy[0] ^= 0xff;
     second[1] ^= 0xff;
@@ -497,11 +580,15 @@ static void test_independent_clone(void) {
 }
 
 int main(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    assert(guest_page_backing_test_live_count() == 0);
     test_single_page_operations();
     test_supported_address_widths();
+    test_backing_allocation_failures();
     test_atomic_map_and_replace();
     test_conflicts_and_holes();
     test_tree_and_address_boundaries();
     test_independent_clone();
+    assert(guest_page_backing_test_live_count() == 0);
     return 0;
 }

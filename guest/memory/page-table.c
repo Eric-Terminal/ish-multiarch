@@ -1,7 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
-#include <string.h>
-
+#include "guest/memory/page-backing.h"
 #include "guest/memory/page-table.h"
 
 #define GUEST_PAGE_TABLE_INDEX_BITS 9
@@ -9,7 +8,7 @@
 #define GUEST_PAGE_TABLE_INDEX_MASK (GUEST_PAGE_TABLE_ENTRY_COUNT - 1)
 
 struct guest_page_mapping {
-    byte_t *host_page;
+    struct guest_page_backing *backing;
     unsigned permissions;
 };
 
@@ -23,8 +22,8 @@ struct guest_page_table_node {
 
 struct prepared_page_mapping {
     struct guest_page_mapping *mapping;
-    byte_t *new_page;
-    byte_t *old_page;
+    struct guest_page_backing *new_backing;
+    struct guest_page_backing *old_backing;
 };
 
 static unsigned page_index(guest_addr_t address, byte_t shift) {
@@ -47,7 +46,7 @@ static struct guest_page_mapping *find_mapping(struct guest_page_table *table,
         return NULL;
     struct guest_page_mapping *mapping =
             &leaf->entries[page_index(page_base, 12)];
-    return mapping->host_page == NULL ? NULL : mapping;
+    return mapping->backing == NULL ? NULL : mapping;
 }
 
 static enum guest_memory_fault_kind resolve_page(void *opaque,
@@ -59,7 +58,7 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
     if (mapping == NULL)
         return GUEST_MEMORY_FAULT_UNMAPPED;
     *view = (struct guest_page_view) {
-        .host_page = mapping->host_page,
+        .host_page = guest_page_backing_bytes(mapping->backing),
         .permissions = mapping->permissions,
     };
     return GUEST_MEMORY_FAULT_NONE;
@@ -106,15 +105,10 @@ static bool clone_allocation_fails(void) {
     return clone_allocation_count++ == clone_allocation_fail_at;
 }
 
-static void *clone_malloc(size_t size) {
-    return clone_allocation_fails() ? NULL : malloc(size);
-}
-
 static void *clone_calloc(size_t count, size_t size) {
     return clone_allocation_fails() ? NULL : calloc(count, size);
 }
 #else
-#define clone_malloc malloc
 #define clone_calloc calloc
 #endif
 
@@ -137,8 +131,10 @@ bool guest_page_table_init(struct guest_page_table *table,
 }
 
 static void destroy_leaf(struct guest_page_table_leaf *leaf) {
-    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++)
-        free(leaf->entries[i].host_page);
+    for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
+        if (leaf->entries[i].backing != NULL)
+            guest_page_backing_release(leaf->entries[i].backing);
+    }
     free(leaf);
 }
 
@@ -210,16 +206,21 @@ static struct guest_page_table_leaf *clone_leaf(
     for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
         const struct guest_page_mapping *source_mapping =
                 &source->entries[i];
-        if (source_mapping->host_page == NULL)
+        if (source_mapping->backing == NULL)
             continue;
         struct guest_page_mapping *copy_mapping = &copy->entries[i];
-        copy_mapping->host_page = clone_malloc(GUEST_MEMORY_PAGE_SIZE);
-        if (copy_mapping->host_page == NULL) {
+#if defined(GUEST_PAGE_TABLE_TESTING)
+        if (clone_allocation_fails()) {
             destroy_leaf(copy);
             return NULL;
         }
-        memcpy(copy_mapping->host_page, source_mapping->host_page,
-                GUEST_MEMORY_PAGE_SIZE);
+#endif
+        copy_mapping->backing = guest_page_backing_clone(
+                source_mapping->backing);
+        if (copy_mapping->backing == NULL) {
+            destroy_leaf(copy);
+            return NULL;
+        }
         copy_mapping->permissions = source_mapping->permissions;
     }
     return copy;
@@ -363,23 +364,25 @@ enum guest_page_table_result guest_page_table_map(
             table, page_base, &mapping);
     if (prepare != GUEST_PAGE_TABLE_OK)
         return prepare;
-    if (mapping->host_page != NULL) {
-        *host_page = mapping->host_page;
+    if (mapping->backing != NULL) {
+        *host_page = guest_page_backing_bytes(mapping->backing);
         return GUEST_PAGE_TABLE_ALREADY_MAPPED;
     }
-    mapping->host_page = calloc(1, GUEST_MEMORY_PAGE_SIZE);
-    if (mapping->host_page == NULL)
+    mapping->backing = guest_page_backing_create();
+    if (mapping->backing == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     mapping->permissions = permissions;
-    *host_page = mapping->host_page;
+    *host_page = guest_page_backing_bytes(mapping->backing);
     guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
 }
 
 static void discard_prepared_pages(struct prepared_page_mapping *prepared,
         size_t count) {
-    for (size_t i = 0; i < count; i++)
-        free(prepared[i].new_page);
+    for (size_t i = 0; i < count; i++) {
+        if (prepared[i].new_backing != NULL)
+            guest_page_backing_release(prepared[i].new_backing);
+    }
     free(prepared);
 }
 
@@ -410,8 +413,8 @@ enum guest_page_table_result guest_page_table_map_zero_range(
     if (prepared == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     for (size_t i = 0; i < count; i++) {
-        prepared[i].new_page = calloc(1, GUEST_MEMORY_PAGE_SIZE);
-        if (prepared[i].new_page == NULL) {
+        prepared[i].new_backing = guest_page_backing_create();
+        if (prepared[i].new_backing == NULL) {
             discard_prepared_pages(prepared, count);
             return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
         }
@@ -433,14 +436,16 @@ enum guest_page_table_result guest_page_table_map_zero_range(
     }
 
     for (size_t i = 0; i < count; i++) {
-        prepared[i].old_page = prepared[i].mapping->host_page;
-        prepared[i].mapping->host_page = prepared[i].new_page;
+        prepared[i].old_backing = prepared[i].mapping->backing;
+        prepared[i].mapping->backing = prepared[i].new_backing;
         prepared[i].mapping->permissions = permissions;
-        prepared[i].new_page = NULL;
+        prepared[i].new_backing = NULL;
     }
     guest_address_space_changed(&table->address_space);
-    for (size_t i = 0; i < count; i++)
-        free(prepared[i].old_page);
+    for (size_t i = 0; i < count; i++) {
+        if (prepared[i].old_backing != NULL)
+            guest_page_backing_release(prepared[i].old_backing);
+    }
     free(prepared);
     return GUEST_PAGE_TABLE_OK;
 }
@@ -454,7 +459,7 @@ enum guest_page_table_result guest_page_table_lookup(
     struct guest_page_mapping *mapping = find_mapping(table, page_base);
     if (mapping == NULL)
         return GUEST_PAGE_TABLE_NOT_MAPPED;
-    *host_page = mapping->host_page;
+    *host_page = guest_page_backing_bytes(mapping->backing);
     *permissions = mapping->permissions;
     return GUEST_PAGE_TABLE_OK;
 }
@@ -469,7 +474,7 @@ static bool node_is_empty(const struct guest_page_table_node *node) {
 
 static bool leaf_is_empty(const struct guest_page_table_leaf *leaf) {
     for (unsigned i = 0; i < GUEST_PAGE_TABLE_ENTRY_COUNT; i++) {
-        if (leaf->entries[i].host_page != NULL)
+        if (leaf->entries[i].backing != NULL)
             return false;
     }
     return true;
@@ -490,10 +495,10 @@ static enum guest_page_table_result unmap_page(
     if (level2 == NULL)
         return GUEST_PAGE_TABLE_NOT_MAPPED;
     struct guest_page_table_leaf *leaf = level2->entries[index2];
-    if (leaf == NULL || leaf->entries[index3].host_page == NULL)
+    if (leaf == NULL || leaf->entries[index3].backing == NULL)
         return GUEST_PAGE_TABLE_NOT_MAPPED;
 
-    free(leaf->entries[index3].host_page);
+    guest_page_backing_release(leaf->entries[index3].backing);
     leaf->entries[index3] = (struct guest_page_mapping) {0};
     if (leaf_is_empty(leaf)) {
         free(leaf);

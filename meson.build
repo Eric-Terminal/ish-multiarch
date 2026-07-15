@@ -52,6 +52,7 @@ aarch64_backend_src = [
 aarch64_core_src = [
     'guest/memory/address-space.c',
     'guest/memory/tlb.c',
+    'guest/memory/page-backing.c',
     'guest/memory/page-table.c',
     'guest/linux/user-memory.c',
     'guest/aarch64/decode.c',
@@ -673,6 +674,7 @@ if not meson.is_cross_build()
         'aarch64_linux_user_memory_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
             'guest/linux/user-memory.c',
             'guest/linux/user-memory-test.c',
@@ -682,6 +684,7 @@ if not meson.is_cross_build()
     guest_linux_memory_test = executable('guest_linux_memory_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
             'guest/linux/memory.c',
             'guest/linux/memory-test.c',
@@ -697,6 +700,7 @@ if not meson.is_cross_build()
     aarch64_elf64_loader_test = executable('aarch64_elf64_loader_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
             'guest/aarch64/decode.c',
             'guest/aarch64/condition.c',
@@ -711,6 +715,7 @@ if not meson.is_cross_build()
 
     aarch64_linux_stack_test = executable('aarch64_linux_stack_test', [
             'guest/memory/address-space.c',
+            'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
             'guest/memory/tlb.c',
             'guest/aarch64/linux-stack.c',
@@ -732,13 +737,23 @@ if not meson.is_cross_build()
         c_args: ['-DISH_GUEST_AARCH64=1'], dependencies: threads)
     test('aarch64_tlb', aarch64_tlb_test)
 
+    aarch64_page_backing_test = executable('aarch64_page_backing_test', [
+            'guest/memory/page-backing.c',
+            'guest/memory/page-backing-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1'], dependencies: threads)
+    test('aarch64_page_backing', aarch64_page_backing_test)
+
     aarch64_page_table_test = executable('aarch64_page_table_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
             'guest/memory/page-table.c',
             'guest/memory/page-table-test.c',
         ], include_directories: includes,
         c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
             '-DGUEST_PAGE_TABLE_TESTING=1'])
     test('aarch64_page_table', aarch64_page_table_test)
 
