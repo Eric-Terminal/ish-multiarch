@@ -112,6 +112,9 @@ static int load_entry(struct prg_header ph, addr_t bias, struct fd *fd) {
     // TODO find a better place for these to avoid code duplication
     mem_pt(current->mem, PAGE(addr))->data->fd = fd_retain(fd);
     mem_pt(current->mem, PAGE(addr))->data->file_offset = offset - PGOFFSET(addr);
+    mem_pt(current->mem, PAGE(addr))->data->file_backing_offset =
+            (offset - PGOFFSET(addr)) / (qword_t) real_page_size *
+            (qword_t) real_page_size;
 
     if (memsize > filesize) {
         // put zeroes between addr + filesize and addr + memsize, call that bss

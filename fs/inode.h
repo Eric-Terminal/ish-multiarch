@@ -9,6 +9,8 @@ struct fd;
 
 struct inode_data {
     unsigned refcount;
+    // 对应 Linux inode sequence：释放后也绝不复用，供共享 futex 建键。
+    qword_t futex_sequence;
     ino_t number;
     struct mount *mount;
     struct list chain;

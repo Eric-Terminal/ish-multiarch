@@ -7,6 +7,7 @@
 lock_t inodes_lock = LOCK_INITIALIZER;
 #define INODES_HASH_SIZE (1 << 10)
 static struct list inodes_hash[INODES_HASH_SIZE];
+static qword_t last_futex_sequence;
 
 int current_pid(void);
 
@@ -26,7 +27,10 @@ struct inode_data *inode_get_unlocked(struct mount *mount, ino_t ino) {
     struct inode_data *inode = inode_get_data(mount, ino);
     if (inode == NULL) {
         inode = malloc(sizeof(struct inode_data));
+        if (last_futex_sequence == UINT64_MAX)
+            die("inode futex 序列号已耗尽");
         inode->refcount = 0;
+        inode->futex_sequence = ++last_futex_sequence;
         inode->number = ino;
         mount_retain(mount);
         inode->mount = mount;

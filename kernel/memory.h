@@ -10,6 +10,8 @@
 #include "misc.h"
 
 struct mem {
+    // 单调且不复用；PRIVATE futex 不把 host 指针当作身份。
+    qword_t identity;
     struct pt_entry **pgdir;
     int pgdir_used;
 
@@ -35,13 +37,17 @@ void mem_next_page(struct mem *mem, page_t *page);
 #define LEAK_DEBUG 0
 
 struct data {
+    // 匿名共享后备释放后，仍存活的 futex 键不得与新对象发生 ABA。
+    qword_t identity;
     void *data; // immutable
     size_t size; // also immutable
     atomic_uint refcount;
 
     // for display in /proc/pid/maps
     struct fd *fd;
-    size_t file_offset;
+    qword_t file_offset;
+    // data[0] 对应的真实文件字节偏移，独立于 Apple host 页大小。
+    qword_t file_backing_offset;
     const char *name;
 #if LEAK_DEBUG
     int pid;
@@ -91,16 +97,37 @@ int pt_copy_on_write(struct mem *src, struct mem *dst, page_t start, page_t page
 // Must call with mem read-locked.
 void *mem_ptr(struct mem *mem, addr_t addr, int type);
 
+enum mem_futex_backing_kind {
+    MEM_FUTEX_BACKING_PRIVATE,
+    MEM_FUTEX_BACKING_SHARED_MEMORY,
+    MEM_FUTEX_BACKING_SHARED_FILE,
+};
+
+struct mem_futex_word_snapshot {
+    enum mem_futex_backing_kind kind;
+    qword_t identity;
+    qword_t offset;
+};
+
+// 在一次最终页表读事务内解析最多两个 futex 字；故障时不修改输出。
+bool mem_snapshot_futex_words(struct mem *mem,
+        const addr_t *addresses, size_t count,
+        struct mem_futex_word_snapshot *snapshots,
+        dword_t *first_value);
+
 enum mem_compare_exchange_result {
     MEM_COMPARE_EXCHANGE_SUCCESS,
     MEM_COMPARE_EXCHANGE_MISMATCH,
     MEM_COMPARE_EXCHANGE_FAULT,
 };
 
-// 在单次页表写事务内完成 COW 与 32 位比较交换；故障时不修改 observed。
+// 在单次页表写事务内完成 COW、32 位比较交换和映射快照。
+// 故障时不修改 observed 与 snapshot。
 enum mem_compare_exchange_result mem_compare_exchange_u32(
         struct mem *mem, addr_t address,
-        dword_t expected, dword_t replacement, dword_t *observed);
+        dword_t expected, dword_t replacement,
+        dword_t *observed,
+        struct mem_futex_word_snapshot *snapshot);
 int mem_segv_reason(struct mem *mem, addr_t addr);
 
 extern size_t real_page_size;

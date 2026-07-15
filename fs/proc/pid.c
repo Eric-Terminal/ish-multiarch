@@ -213,13 +213,13 @@ void proc_maps_dump(struct task *task, struct proc_data *buf) {
         } else if (data->fd != NULL) {
             generic_getpath(start_pt->data->fd, path);
         }
-        proc_printf(buf, "%08x-%08x %c%c%c%c %08lx 00:00 %-10d %s\n",
+        proc_printf(buf, "%08x-%08x %c%c%c%c %08llx 00:00 %-10d %s\n",
                 start << PAGE_BITS, end << PAGE_BITS,
                 start_pt->flags & P_READ ? 'r' : '-',
                 start_pt->flags & P_WRITE ? 'w' : '-',
                 start_pt->flags & P_EXEC ? 'x' : '-',
                 start_pt->flags & P_SHARED ? '-' : 'p',
-                (unsigned long) data->file_offset, // offset
+                (unsigned long long) data->file_offset, // offset
                 0, // inode
                 path);
     }

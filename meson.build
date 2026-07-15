@@ -381,6 +381,14 @@ if get_option('kernel') == 'ish'
             i386_robust_futex_lifecycle_test,
             timeout: 60)
 
+        i386_futex_shared_test = executable(
+            'i386_futex_shared_test',
+            'kernel/i386-futex-shared-test.c',
+            dependencies: ish)
+        test('i386_futex_shared',
+            i386_futex_shared_test,
+            timeout: 60)
+
         aarch64_cross_abi_exec_lifecycle_test = executable(
             'aarch64_cross_abi_exec_lifecycle_test',
             'kernel/aarch64-cross-abi-exec-lifecycle-test.c',

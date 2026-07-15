@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #define DEFAULT_CHANNEL memory
 #include "debug.h"
@@ -15,12 +16,26 @@
 #include "kernel/vdso.h"
 #include "kernel/task.h"
 #include "fs/fd.h"
+#include "fs/inode.h"
 
 // increment the change count
 static void mem_changed(struct mem *mem);
 static struct mmu_ops mem_mmu_ops;
+static lock_t identity_lock = LOCK_INITIALIZER;
+static qword_t last_memory_identity;
+static qword_t last_data_identity;
+
+static qword_t allocate_identity(qword_t *last_identity) {
+    lock(&identity_lock);
+    if (*last_identity == UINT64_MAX)
+        die("i386 内存身份已耗尽");
+    qword_t identity = ++*last_identity;
+    unlock(&identity_lock);
+    return identity;
+}
 
 void mem_init(struct mem *mem) {
+    mem->identity = allocate_identity(&last_memory_identity);
     mem->pgdir = calloc(MEM_PGDIR_SIZE, sizeof(struct pt_entry *));
     mem->pgdir_used = 0;
     mem->mmu.ops = &mem_mmu_ops;
@@ -114,6 +129,7 @@ int pt_map(struct mem *mem, page_t start, pages_t pages, void *memory, size_t of
     if (data == NULL)
         return _ENOMEM;
     *data = (struct data) {
+        .identity = allocate_identity(&last_data_identity),
         .data = memory,
         .size = pages * PAGE_SIZE + offset,
 
@@ -180,10 +196,13 @@ int pt_set_flags(struct mem *mem, page_t start, pages_t pages, int flags) {
             return _ENOMEM;
     for (page_t page = start; page < start + pages; page++) {
         struct pt_entry *entry = mem_pt(mem, page);
-        int old_flags = entry->flags;
-        entry->flags = flags;
+        unsigned old_flags = entry->flags;
+        unsigned new_flags =
+                (old_flags & ~(unsigned) P_RWX) |
+                ((unsigned) flags & (unsigned) P_RWX);
+        entry->flags = new_flags;
         // check if protection is increasing
-        if ((flags & ~old_flags) & (P_READ|P_WRITE)) {
+        if ((new_flags & ~old_flags) & (P_READ | P_WRITE)) {
             void *data = (char *) entry->data->data + entry->offset;
             // force to be page aligned
             data = (void *) ((uintptr_t) data & ~(real_page_size - 1));
@@ -295,6 +314,82 @@ void *mem_ptr(struct mem *mem, addr_t addr, int type) {
     return ptr;
 }
 
+static struct mem_futex_word_snapshot
+mem_futex_word_snapshot_locked(
+        const struct pt_entry *entry, addr_t address) {
+    if (!(entry->flags & P_SHARED))
+        return (struct mem_futex_word_snapshot) {
+            .kind = MEM_FUTEX_BACKING_PRIVATE,
+        };
+
+    const struct data *data = entry->data;
+    qword_t entry_offset =
+            (qword_t) entry->offset + PGOFFSET(address);
+    if (data->fd != NULL && S_ISREG(data->fd->type) &&
+            data->fd->inode != NULL &&
+            data->fd->inode->futex_sequence != 0) {
+        return (struct mem_futex_word_snapshot) {
+            .kind = MEM_FUTEX_BACKING_SHARED_FILE,
+            .identity = data->fd->inode->futex_sequence,
+            .offset = data->file_backing_offset + entry_offset,
+        };
+    }
+    return (struct mem_futex_word_snapshot) {
+        .kind = MEM_FUTEX_BACKING_SHARED_MEMORY,
+        .identity = data->identity,
+        .offset = entry_offset,
+    };
+}
+
+bool mem_snapshot_futex_words(struct mem *mem,
+        const addr_t *addresses, size_t count,
+        struct mem_futex_word_snapshot *snapshots,
+        dword_t *first_value) {
+    assert(mem != NULL && addresses != NULL &&
+            count != 0 && count <= 2 && snapshots != NULL);
+
+    // 先触发可能的栈向下增长，再在不释放的最终读锁内固定全部映射。
+    for (size_t index = 0; index < count; index++) {
+        read_wrlock(&mem->lock);
+        void *pointer = mem_ptr(mem, addresses[index], MEM_READ);
+        bool mapped = pointer != NULL;
+        read_wrunlock(&mem->lock);
+        if (!mapped)
+            return false;
+    }
+
+    struct mem_futex_word_snapshot local_snapshots[2];
+    dword_t local_first_value = 0;
+    read_wrlock(&mem->lock);
+    for (size_t index = 0; index < count; index++) {
+        void *raw_pointer = mem_ptr_nofault(
+                mem, addresses[index], MEM_READ);
+        if (raw_pointer == NULL ||
+                (uintptr_t) raw_pointer % _Alignof(dword_t) != 0) {
+            read_wrunlock(&mem->lock);
+            return false;
+        }
+        struct pt_entry *entry = mem_pt(
+                mem, PAGE(addresses[index]));
+        assert(entry != NULL);
+        local_snapshots[index] =
+                mem_futex_word_snapshot_locked(
+                        entry, addresses[index]);
+        if (index == 0 && first_value != NULL) {
+            dword_t *pointer = raw_pointer;
+            local_first_value = __atomic_load_n(
+                    pointer, __ATOMIC_SEQ_CST);
+        }
+    }
+    read_wrunlock(&mem->lock);
+
+    memcpy(snapshots, local_snapshots,
+            count * sizeof(*snapshots));
+    if (first_value != NULL)
+        *first_value = local_first_value;
+    return true;
+}
+
 static dword_t *mem_prepare_atomic_u32_write_locked(
         struct mem *mem, addr_t address) {
     if ((address & (sizeof(dword_t) - 1)) != 0)
@@ -332,8 +427,10 @@ static dword_t *mem_prepare_atomic_u32_write_locked(
 
 enum mem_compare_exchange_result mem_compare_exchange_u32(
         struct mem *mem, addr_t address,
-        dword_t expected, dword_t replacement, dword_t *observed) {
-    assert(mem != NULL && observed != NULL);
+        dword_t expected, dword_t replacement,
+        dword_t *observed,
+        struct mem_futex_word_snapshot *snapshot) {
+    assert(mem != NULL && observed != NULL && snapshot != NULL);
     write_wrlock(&mem->lock);
     dword_t *pointer =
             mem_prepare_atomic_u32_write_locked(mem, address);
@@ -342,11 +439,16 @@ enum mem_compare_exchange_result mem_compare_exchange_u32(
         return MEM_COMPARE_EXCHANGE_FAULT;
     }
 
+    struct pt_entry *entry = mem_pt(mem, PAGE(address));
+    assert(entry != NULL);
+    struct mem_futex_word_snapshot actual_snapshot =
+            mem_futex_word_snapshot_locked(entry, address);
     dword_t actual = expected;
     bool exchanged = __atomic_compare_exchange_n(
             pointer, &actual, replacement, false,
             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     *observed = actual;
+    *snapshot = actual_snapshot;
     write_wrunlock(&mem->lock);
     return exchanged ? MEM_COMPARE_EXCHANGE_SUCCESS :
             MEM_COMPARE_EXCHANGE_MISMATCH;

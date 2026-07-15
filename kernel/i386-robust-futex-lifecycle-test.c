@@ -590,12 +590,20 @@ static bool test_unaligned_host_mapping_fault(void) {
             "准备 host 未对齐的 robust futex 字");
 
     dword_t observed = UINT32_C(0x6a09e667);
+    struct mem_futex_word_snapshot snapshot = {
+        .kind = MEM_FUTEX_BACKING_SHARED_FILE,
+        .identity = UINT64_C(0xbb67ae8584caa73b),
+        .offset = UINT64_C(0x3c6ef372fe94f82b),
+    };
     TEST_CHECK(mem_compare_exchange_u32(fixture.task.mem,
                     entry + offset, owner,
-                    TEST_FUTEX_OWNER_DIED, &observed) ==
+                    TEST_FUTEX_OWNER_DIED, &observed, &snapshot) ==
                     MEM_COMPARE_EXCHANGE_FAULT &&
-            observed == UINT32_C(0x6a09e667),
-            "未对齐 host 原子比较交换按故障返回且不改 observed");
+            observed == UINT32_C(0x6a09e667) &&
+            snapshot.kind == MEM_FUTEX_BACKING_SHARED_FILE &&
+            snapshot.identity == UINT64_C(0xbb67ae8584caa73b) &&
+            snapshot.offset == UINT64_C(0x3c6ef372fe94f82b),
+            "未对齐 host 原子比较交换按故障返回且不改输出");
 
     TEST_CHECK(register_robust_head(&fixture, head),
             "注册 host 未对齐映射上的 robust 头");

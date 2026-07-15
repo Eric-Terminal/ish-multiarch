@@ -46,7 +46,8 @@ void mm_release(struct mm *mm) {
     }
 }
 
-static addr_t do_mmap(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, dword_t offset) {
+static addr_t do_mmap(addr_t addr, dword_t len, dword_t prot,
+        dword_t flags, fd_t fd_no, qword_t offset) {
     int err;
     pages_t pages = PAGE_ROUND_UP(len);
     if (!pages) return _EINVAL;
@@ -56,7 +57,9 @@ static addr_t do_mmap(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_
             return _EINVAL;
         page = PAGE(addr);
         if (!(flags & MMAP_FIXED) && !pt_is_hole(current->mem, page, pages)) {
-            addr = 0;
+            page = pt_find_hole(current->mem, pages);
+            if (page == BAD_PAGE)
+                return _ENOMEM;
         }
     } else {
         page = pt_find_hole(current->mem, pages);
@@ -77,16 +80,22 @@ static addr_t do_mmap(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_
             return _EBADF;
         if (fd->ops->mmap == NULL)
             return _ENODEV;
-        if ((err = fd->ops->mmap(fd, current->mem, page, pages, offset, prot, flags)) < 0)
+        if ((err = fd->ops->mmap(fd, current->mem,
+                page, pages, (off_t) offset, prot, flags)) < 0)
             return err;
         mem_pt(current->mem, page)->data->fd = fd_retain(fd);
         mem_pt(current->mem, page)->data->file_offset = offset;
+        mem_pt(current->mem, page)->data->file_backing_offset =
+                offset - offset % (qword_t) real_page_size;
     }
     return page << PAGE_BITS;
 }
 
-static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, dword_t offset) {
-    STRACE("mmap(0x%x, 0x%x, 0x%x, 0x%x, %d, %d)", addr, len, prot, flags, fd_no, offset);
+static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot,
+        dword_t flags, fd_t fd_no, qword_t offset) {
+    STRACE("mmap(0x%x, 0x%x, 0x%x, 0x%x, %d, %llu)",
+            addr, len, prot, flags, fd_no,
+            (unsigned long long) offset);
     if (len == 0)
         return _EINVAL;
     if (prot & ~P_RWX)
@@ -101,7 +110,8 @@ static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot, dword_t flags,
 }
 
 addr_t sys_mmap2(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, dword_t offset) {
-    return mmap_common(addr, len, prot, flags, fd_no, offset << PAGE_BITS);
+    return mmap_common(addr, len, prot, flags, fd_no,
+            (qword_t) offset << PAGE_BITS);
 }
 
 struct mmap_arg_struct {
@@ -142,38 +152,63 @@ int_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags) {
         FIXME("missing MREMAP_FIXED");
         return _EINVAL;
     }
-    pages_t old_pages = PAGE(old_len);
-    pages_t new_pages = PAGE(new_len);
-
-    // shrinking always works
-    if (new_pages <= old_pages) {
-        int err = pt_unmap(current->mem, PAGE(addr) + new_pages, old_pages - new_pages);
-        if (err < 0)
-            return _EFAULT;
-        return addr;
-    }
-
-    struct pt_entry *entry = mem_pt(current->mem, PAGE(addr));
-    if (entry == NULL)
+    if (old_len == 0 || new_len == 0)
+        return _EINVAL;
+    pages_t old_pages = (pages_t) (
+            ((qword_t) old_len + PAGE_SIZE - 1) >> PAGE_BITS);
+    pages_t new_pages = (pages_t) (
+            ((qword_t) new_len + PAGE_SIZE - 1) >> PAGE_BITS);
+    page_t start_page = PAGE(addr);
+    if ((qword_t) start_page + old_pages > MEM_PAGES ||
+            (qword_t) start_page + new_pages > MEM_PAGES)
         return _EFAULT;
+
+    write_wrlock(&current->mem->lock);
+    int_t result;
+    struct pt_entry *entry = mem_pt(current->mem, start_page);
+    if (entry == NULL) {
+        result = _EFAULT;
+        goto out;
+    }
     dword_t pt_flags = entry->flags;
-    for (page_t page = PAGE(addr); page < PAGE(addr) + old_pages; page++) {
+    for (pages_t index = 0; index < old_pages; index++) {
+        page_t page = start_page + index;
         entry = mem_pt(current->mem, page);
-        if (entry == NULL && entry->flags != pt_flags)
-            return _EFAULT;
+        if (entry == NULL || entry->flags != pt_flags) {
+            result = _EFAULT;
+            goto out;
+        }
     }
-    if (!(pt_flags & P_ANONYMOUS)) {
-        FIXME("mremap grow on file mappings");
-        return _EFAULT;
+
+    if (new_pages <= old_pages) {
+        pages_t removed_pages = old_pages - new_pages;
+        int err = removed_pages == 0 ? 0 :
+                pt_unmap(current->mem,
+                        start_page + new_pages, removed_pages);
+        result = err < 0 ? _EFAULT : (int_t) addr;
+        goto out;
     }
-    page_t extra_start = PAGE(addr) + old_pages;
+    if (!(pt_flags & P_ANONYMOUS) || (pt_flags & P_SHARED)) {
+        // 共享匿名扩展必须由真正的单一 shmem 后备承载，不能伪造同键副本。
+        FIXME("尚未实现共享或文件映射的 mremap 扩展");
+        result = _EFAULT;
+        goto out;
+    }
+    page_t extra_start = start_page + old_pages;
     pages_t extra_pages = new_pages - old_pages;
-    if (!pt_is_hole(current->mem, extra_start, extra_pages))
-        return _ENOMEM;
+    if (!pt_is_hole(current->mem, extra_start, extra_pages)) {
+        result = _ENOMEM;
+        goto out;
+    }
     int err = pt_map_nothing(current->mem, extra_start, extra_pages, pt_flags);
-    if (err < 0)
-        return err;
-    return addr;
+    if (err < 0) {
+        result = err;
+        goto out;
+    }
+    result = (int_t) addr;
+out:
+    write_wrunlock(&current->mem->lock);
+    return result;
 }
 
 int_t sys_mprotect(addr_t addr, uint_t len, int_t prot) {
