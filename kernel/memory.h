@@ -90,6 +90,17 @@ int pt_copy_on_write(struct mem *src, struct mem *dst, page_t start, page_t page
 
 // Must call with mem read-locked.
 void *mem_ptr(struct mem *mem, addr_t addr, int type);
+
+enum mem_compare_exchange_result {
+    MEM_COMPARE_EXCHANGE_SUCCESS,
+    MEM_COMPARE_EXCHANGE_MISMATCH,
+    MEM_COMPARE_EXCHANGE_FAULT,
+};
+
+// 在单次页表写事务内完成 COW 与 32 位比较交换；故障时不修改 observed。
+enum mem_compare_exchange_result mem_compare_exchange_u32(
+        struct mem *mem, addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed);
 int mem_segv_reason(struct mem *mem, addr_t addr);
 
 extern size_t real_page_size;

@@ -9,6 +9,8 @@ struct task;
 int futex_wake(addr_t uaddr, dword_t val);
 int futex_wake_aarch64(struct aarch64_linux_process *process,
         qword_t uaddr, dword_t val);
+// 仅供已提交的 i386 任务退出或成功 exec；调用时旧地址空间仍须存活。
+void futex_cleanup_task_i386(struct task *task);
 // 仅供已提交任务退出或成功 exec；调用时旧地址空间仍须存活。
 void futex_cleanup_task_aarch64(
         struct task *task, struct aarch64_linux_process *process);

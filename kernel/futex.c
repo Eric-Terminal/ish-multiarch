@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "kernel/calls.h"
+#include "guest/linux/futex-abi.h"
 #include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-time-abi.h"
@@ -92,14 +93,19 @@ static void *futex_malloc(size_t size) {
     return malloc(size);
 }
 
-static struct futex_key i386_futex_key(addr_t addr) {
+static struct futex_key i386_futex_key_for_memory(
+        const struct mem *memory, addr_t addr) {
     return (struct futex_key) {
         .kind = FUTEX_KEY_I386_POINTER,
         .identity.i386 = {
-            .memory_identity = current->mem,
+            .memory_identity = memory,
             .address = addr,
         },
     };
+}
+
+static struct futex_key i386_futex_key(addr_t addr) {
+    return i386_futex_key_for_memory(current->mem, addr);
 }
 
 static struct futex_key aarch64_virtual_futex_key(
@@ -834,15 +840,135 @@ void futex_cleanup_task_aarch64(
     (void) futex_wake_aarch64(process, clear_tid, 1);
 }
 
-struct robust_list_head_ {
-    addr_t list;
-    dword_t offset;
-    addr_t list_op_pending;
-};
+static addr_t i386_robust_entry_address(dword_t pointer) {
+    return pointer & I386_LINUX_ROBUST_LIST_ADDRESS_MASK;
+}
+
+static bool i386_robust_entry_is_pi(dword_t pointer) {
+    return (pointer & I386_LINUX_ROBUST_LIST_PI) != 0;
+}
+
+static bool cleanup_robust_futex_i386(struct task *task,
+        addr_t entry, sdword_t offset, bool pi, bool pending) {
+    // compat Linux 先按 32 位模加法计算地址，负偏移与边界回绕都保留。
+    addr_t address = entry + (dword_t) offset;
+    if ((address & (sizeof(dword_t) - 1)) != 0)
+        return false;
+
+    struct futex_key key =
+            i386_futex_key_for_memory(task->mem, address);
+    lock(&futex_lock);
+    read_wrlock(&task->mem->lock);
+    void *raw_pointer = mem_ptr(
+            task->mem, address, MEM_READ);
+    if (raw_pointer == NULL ||
+            (uintptr_t) raw_pointer % _Alignof(dword_t) != 0) {
+        read_wrunlock(&task->mem->lock);
+        unlock(&futex_lock);
+        return false;
+    }
+    dword_t *pointer = raw_pointer;
+    dword_t observed = __atomic_load_n(pointer, __ATOMIC_SEQ_CST);
+    read_wrunlock(&task->mem->lock);
+    for (;;) {
+        dword_t owner = observed & GUEST_LINUX_FUTEX_TID_MASK;
+        if (pending && !pi && owner == 0) {
+            (void) wake_futex_locked(&key, 1);
+            break;
+        }
+        if (owner != (dword_t) task->pid)
+            break;
+
+        dword_t replacement =
+                (observed & GUEST_LINUX_FUTEX_WAITERS) |
+                GUEST_LINUX_FUTEX_OWNER_DIED;
+        dword_t next_observed = observed;
+        enum mem_compare_exchange_result result =
+                mem_compare_exchange_u32(task->mem,
+                        address, observed, replacement,
+                        &next_observed);
+        if (result == MEM_COMPARE_EXCHANGE_FAULT) {
+            unlock(&futex_lock);
+            return false;
+        }
+        if (result == MEM_COMPARE_EXCHANGE_MISMATCH) {
+            observed = next_observed;
+            continue;
+        }
+        if (!pi && (observed & GUEST_LINUX_FUTEX_WAITERS) != 0)
+            (void) wake_futex_locked(&key, 1);
+        break;
+    }
+
+    unlock(&futex_lock);
+    return true;
+}
+
+static void cleanup_robust_list_i386(struct task *task) {
+    addr_t head_address = task->robust_list;
+    task->robust_list = 0;
+    if (head_address == 0)
+        return;
+
+    struct i386_linux_robust_list_head head;
+    if (user_read_task(task, head_address, &head, sizeof(head)))
+        return;
+
+    addr_t entry = i386_robust_entry_address(head.next);
+    bool entry_pi = i386_robust_entry_is_pi(head.next);
+    addr_t pending = i386_robust_entry_address(
+            head.list_op_pending);
+    bool pending_pi = i386_robust_entry_is_pi(
+            head.list_op_pending);
+    for (dword_t count = 0;
+            entry != head_address &&
+            count < GUEST_LINUX_ROBUST_LIST_LIMIT;
+            count++) {
+        dword_t next_pointer;
+        bool next_loaded = user_read_task(task, entry,
+                &next_pointer, sizeof(next_pointer)) == 0;
+        if (entry != pending && !cleanup_robust_futex_i386(
+                task, entry, head.futex_offset,
+                entry_pi, false))
+            return;
+        // Linux 会先修复当前节点，再以预先读取的 next 故障终止遍历。
+        if (!next_loaded)
+            return;
+        entry = i386_robust_entry_address(next_pointer);
+        entry_pi = i386_robust_entry_is_pi(next_pointer);
+    }
+
+    if (pending != 0) {
+        (void) cleanup_robust_futex_i386(task, pending,
+                head.futex_offset, pending_pi, true);
+    }
+}
+
+void futex_cleanup_task_i386(struct task *task) {
+    assert(task != NULL && task == current &&
+            task->mm != NULL && task->mem != NULL);
+    cleanup_robust_list_i386(task);
+
+    bool has_other_mm_user = atomic_load_explicit(
+            &task->mm->refcount, memory_order_relaxed) > 1;
+    addr_t clear_tid = task->clear_tid;
+    task->clear_tid = 0;
+    if (clear_tid == 0 || !has_other_mm_user)
+        return;
+
+    pid_t_ zero = 0;
+    (void) user_put_task(task, clear_tid, zero);
+    // Linux 即使清零故障也会继续尝试唤醒；注册在此之前已经消费。
+    struct futex_key key =
+            i386_futex_key_for_memory(task->mem, clear_tid);
+    lock(&futex_lock);
+    (void) wake_futex_locked(&key, 1);
+    unlock(&futex_lock);
+}
 
 int_t sys_set_robust_list(addr_t robust_list, dword_t len) {
     STRACE("set_robust_list(%#x, %d)", robust_list, len);
-    if (len != sizeof(struct robust_list_head_))
+    if (len != sizeof(struct i386_linux_robust_list_head))
         return _EINVAL;
     current->robust_list = robust_list;
     return 0;
@@ -852,14 +978,19 @@ int_t sys_get_robust_list(pid_t_ pid, addr_t robust_list_ptr, addr_t len_ptr) {
     STRACE("get_robust_list(%d, %#x, %#x)", pid, robust_list_ptr, len_ptr);
 
     lock(&pids_lock);
-    struct task *task = pid_get_task(pid);
+    struct task *task = pid == 0 || pid == current->pid ?
+            current : pid_get_task((dword_t) pid);
+    int_t lookup_result = task == NULL ? _ESRCH :
+            task != current ? _EPERM : 0;
     unlock(&pids_lock);
-    if (task != current)
-        return _EPERM;
+    if (lookup_result != 0)
+        return lookup_result;
 
-    if (user_put(robust_list_ptr, current->robust_list))
+    dword_t robust_list_length =
+            (dword_t) sizeof(struct i386_linux_robust_list_head);
+    if (user_put(len_ptr, robust_list_length))
         return _EFAULT;
-    if (user_put(len_ptr, (int[]) {sizeof(struct robust_list_head_)}))
+    if (user_put(robust_list_ptr, current->robust_list))
         return _EFAULT;
     return 0;
 }

@@ -373,6 +373,22 @@ if get_option('kernel') == 'ish'
             aarch64_futex_lifecycle_test,
             timeout: 60)
 
+        i386_robust_futex_lifecycle_test = executable(
+            'i386_robust_futex_lifecycle_test',
+            'kernel/i386-robust-futex-lifecycle-test.c',
+            dependencies: ish)
+        test('i386_robust_futex_lifecycle',
+            i386_robust_futex_lifecycle_test,
+            timeout: 60)
+
+        aarch64_cross_abi_exec_lifecycle_test = executable(
+            'aarch64_cross_abi_exec_lifecycle_test',
+            'kernel/aarch64-cross-abi-exec-lifecycle-test.c',
+            dependencies: ish)
+        test('aarch64_cross_abi_exec_lifecycle',
+            aarch64_cross_abi_exec_lifecycle_test,
+            timeout: 60)
+
         aarch64_clone3_syscall_test = executable(
             'aarch64_clone3_syscall_test',
             'kernel/aarch64-clone3-syscall-test.c',

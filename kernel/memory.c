@@ -295,6 +295,63 @@ void *mem_ptr(struct mem *mem, addr_t addr, int type) {
     return ptr;
 }
 
+static dword_t *mem_prepare_atomic_u32_write_locked(
+        struct mem *mem, addr_t address) {
+    if ((address & (sizeof(dword_t) - 1)) != 0)
+        return NULL;
+
+    page_t page = PAGE(address);
+    struct pt_entry *entry = mem_pt(mem, page);
+    if (entry == NULL || !(entry->flags & P_WRITE))
+        return NULL;
+
+    asbestos_invalidate_page(mem->mmu.asbestos, page);
+    if (entry->flags & P_COW) {
+        const void *source =
+                (const char *) entry->data->data + entry->offset;
+        void *copy = mmap(NULL, PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        if (copy == MAP_FAILED)
+            return NULL;
+        memcpy(copy, source, PAGE_SIZE);
+        unsigned flags = entry->flags & ~(unsigned) P_COW;
+        if (pt_map(mem, page, 1, copy, 0, flags) < 0) {
+            (void) munmap(copy, PAGE_SIZE);
+            return NULL;
+        }
+    }
+
+    void *raw_pointer = mem_ptr_nofault(
+            mem, address, MEM_WRITE);
+    if (raw_pointer == NULL ||
+            (uintptr_t) raw_pointer % _Alignof(dword_t) != 0)
+        return NULL;
+    return raw_pointer;
+}
+
+enum mem_compare_exchange_result mem_compare_exchange_u32(
+        struct mem *mem, addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed) {
+    assert(mem != NULL && observed != NULL);
+    write_wrlock(&mem->lock);
+    dword_t *pointer =
+            mem_prepare_atomic_u32_write_locked(mem, address);
+    if (pointer == NULL) {
+        write_wrunlock(&mem->lock);
+        return MEM_COMPARE_EXCHANGE_FAULT;
+    }
+
+    dword_t actual = expected;
+    bool exchanged = __atomic_compare_exchange_n(
+            pointer, &actual, replacement, false,
+            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    *observed = actual;
+    write_wrunlock(&mem->lock);
+    return exchanged ? MEM_COMPARE_EXCHANGE_SUCCESS :
+            MEM_COMPARE_EXCHANGE_MISMATCH;
+}
+
 static void *mem_mmu_translate(struct mmu *mmu, addr_t addr, int type) {
     return mem_ptr_nofault(container_of(mmu, struct mem, mmu), addr, type);
 }

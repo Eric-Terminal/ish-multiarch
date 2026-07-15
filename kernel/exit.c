@@ -54,10 +54,8 @@ noreturn void do_exit(int status) {
         struct aarch64_linux_process *process =
                 current->aarch64_process;
         futex_cleanup_task_aarch64(current, process);
-    } else if (current->clear_tid != 0) {
-        pid_t_ zero = 0;
-        if (user_put(current->clear_tid, zero) == 0)
-            futex_wake(current->clear_tid, 1);
+    } else {
+        futex_cleanup_task_i386(current);
     }
 
     // 最后一个进入退出流程的线程负责在资源仍完整时退休组定时器。

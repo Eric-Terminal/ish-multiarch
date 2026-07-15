@@ -12,6 +12,7 @@
 #include "misc.h"
 #include "kernel/calls.h"
 #include "kernel/aarch64-exec.h"
+#include "kernel/futex.h"
 #include "kernel/random.h"
 #include "kernel/errno.h"
 #include "fs/fd.h"
@@ -219,6 +220,9 @@ static int elf_exec(struct fd *fd, const char *file, struct exec_args argv, stru
     // killed before it even starts. please don't be too sad about it, it's
     // just a process.
     //
+    // robust 与 clear-child-tid 必须在旧 i386 地址空间仍可访问时退休。
+    futex_cleanup_task_i386(current);
+
     // general_lock protects current->mm. otherwise procfs might read the
     // pointer before it's released and then try to lock it after it's
     // released.

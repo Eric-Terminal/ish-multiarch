@@ -234,14 +234,14 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 
 - AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；当前已实现 32/64 位 `CASP`、`CASPA`、`CASPL` 与 `CASPAL`，但尚未覆盖完整 `FEAT_LSE`，guest 的 `AT_HWCAP` 暂不宣告 `HWCAP_ATOMICS`。
 - 未支持的 AArch64 指令会安全投递 `SIGILL`，未知 Linux 系统调用会返回 `ENOSYS`。
-- `futex` 当前只在同一地址空间模型内支持 `WAIT`、`WAKE` 与 `REQUEUE`，尚无跨进程共享后备对象身份、AArch64 robust list 或 `futex_waitv`；`clone3` 仅接受当前任务模型可安全表达的受限标志集。
+- AArch64 `futex` 已支持 `WAIT`、`WAKE`、`REQUEUE`、匿名共享后备的跨进程键、robust list 与 clear-child-tid 退出清理；i386 也会在退出及成功 exec 时清理 robust list 与 clear-child-tid。i386 等待队列仍以同一 `mm` 和地址为键，尚不能让不同 `mm` 的共享映射互相唤醒；`FUTEX_LOCK_PI`、`futex_waitv` 等操作仍未实现。`clone3` 仅接受当前任务模型可安全表达的受限标志集。
 - `mmap` 当前支持匿名私有映射与严格的 `MAP_SHARED | MAP_ANONYMOUS`；共享后备在 fork 后双向可见，而权限、解除映射和固定替换仍归各地址空间独立管理。文件映射与 `MAP_SHARED_VALIDATE` 尚未实现。`MADV_DONTNEED` 会清零匿名私有映射或已分配 brk 页；匿名共享页保留共同后备内容，但当前模型尚不表达可单独驱逐的 PTE/RSS 驻留状态。
 - `pidfd` 类接口尚缺少稳定的任务代际、引用和权限模型；`openat2` 尚未表达 `RESOLVE_*` 路径约束；`futex_waitv` 尚未建立原子多队列等待与共享后备对象身份模型，因此不做会弱化语义的伪实现。
 - `pselect6`、`ppoll` 与 `epoll_create1/epoll_ctl/epoll_pwait` 已接入当前的文件事件和信号掩码模型，不代表所有 Linux I/O 复用语义均已实现。
 - `FPREM` 在单次模拟中完成完整余数，不暴露实现相关的 `C2=1` 中间化简步骤。
 - `FXTRACT` 已覆盖数值分类，但通用 x87 异常标志、控制字掩码与未掩码陷阱尚未完整模拟；依赖 `FNSTSW` 精确观察异常状态的程序仍可能存在差异。
 - 一般有限正数输入的 `log2` 仅承诺确定性近似，不承诺正确舍入。
-- 多线程进程跨架构替换映像尚未实现；不安全的该类 `exec` 会返回 `EBUSY`。
+- 多线程进程跨架构替换映像尚未实现；不安全的该类 `exec` 会返回 `EBUSY`。i386 同架构 `exec` 也尚未实现 Linux `de_thread()` 的完整线程组收敛语义。
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
 - 网络验证目前只覆盖基础 TCP 客户端路径，不代表 UDP、IPv6 或全部 socket 选项均已实现。
 - Apple 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core、完整静态库的普通与全归档链接闭包、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest、不衡量后端性能，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
