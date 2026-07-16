@@ -219,6 +219,17 @@ static enum aarch64_elf64_load_error map_segment_pages(
     return AARCH64_ELF64_LOAD_OK;
 }
 
+static enum aarch64_elf64_load_error make_page_anonymous(
+        struct guest_page_table *table, guest_addr_t page) {
+    enum guest_page_table_result result = guest_page_table_set_origin(
+            table, page, GUEST_PAGE_ORIGIN_ANONYMOUS);
+    if (result == GUEST_PAGE_TABLE_OUT_OF_MEMORY)
+        return AARCH64_ELF64_LOAD_OUT_OF_MEMORY;
+    if (result != GUEST_PAGE_TABLE_OK)
+        return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
+    return AARCH64_ELF64_LOAD_OK;
+}
+
 static enum aarch64_elf64_load_error classify_segment_pages(
         struct guest_page_table *table,
         struct guest_file_source *file_source,
@@ -256,12 +267,11 @@ static enum aarch64_elf64_load_error classify_segment_pages(
                 ~GUEST_MEMORY_PAGE_MASK;
     } else {
         if ((zero_start & GUEST_MEMORY_PAGE_MASK) != 0 &&
-                (segment->permissions & GUEST_MEMORY_WRITE) != 0 &&
-                guest_page_table_set_origin(table,
-                        zero_start & ~GUEST_MEMORY_PAGE_MASK,
-                        GUEST_PAGE_ORIGIN_ANONYMOUS) !=
-                                GUEST_PAGE_TABLE_OK) {
-            return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
+                (segment->permissions & GUEST_MEMORY_WRITE) != 0) {
+            enum aarch64_elf64_load_error error = make_page_anonymous(
+                    table, zero_start & ~GUEST_MEMORY_PAGE_MASK);
+            if (error != AARCH64_ELF64_LOAD_OK)
+                return error;
         }
         anonymous_start = (zero_start + GUEST_MEMORY_PAGE_MASK) &
                 ~GUEST_MEMORY_PAGE_MASK;
@@ -273,10 +283,12 @@ static enum aarch64_elf64_load_error classify_segment_pages(
             (segment->permissions & GUEST_MEMORY_EXECUTE);
     for (guest_addr_t page = anonymous_start;
             page < anonymous_end; page += GUEST_MEMORY_PAGE_SIZE) {
-        if (guest_page_table_set_origin(table, page,
-                    GUEST_PAGE_ORIGIN_ANONYMOUS) != GUEST_PAGE_TABLE_OK ||
-                guest_page_table_protect(table, page,
-                        anonymous_permissions) != GUEST_PAGE_TABLE_OK)
+        enum aarch64_elf64_load_error error =
+                make_page_anonymous(table, page);
+        if (error != AARCH64_ELF64_LOAD_OK)
+            return error;
+        if (guest_page_table_protect(table, page,
+                anonymous_permissions) != GUEST_PAGE_TABLE_OK)
             return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
     }
     return AARCH64_ELF64_LOAD_OK;

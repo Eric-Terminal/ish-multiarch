@@ -12,6 +12,7 @@ struct guest_tlb_entry {
     byte_t *host_page;
     const struct guest_page_sync *sync;
     unsigned permissions;
+    bool copy_on_write;
     bool valid;
 };
 

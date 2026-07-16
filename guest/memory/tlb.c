@@ -9,6 +9,7 @@ struct guest_tlb_access_chunk {
     size_t size;
     size_t page_offset;
     const struct guest_page_sync *sync;
+    bool copy_on_write;
 };
 
 struct guest_tlb_sync_set {
@@ -66,6 +67,7 @@ static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         chunk->page_offset = (size_t) (address & GUEST_MEMORY_PAGE_MASK);
         chunk->host = entry->host_page + chunk->page_offset;
         chunk->sync = entry->sync;
+        chunk->copy_on_write = entry->copy_on_write;
         return GUEST_MEMORY_FAULT_NONE;
     }
 
@@ -83,11 +85,13 @@ static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         .host_page = view.host_page,
         .sync = view.sync,
         .permissions = view.permissions,
+        .copy_on_write = view.copy_on_write,
         .valid = true,
     };
     chunk->page_offset = (size_t) (address & GUEST_MEMORY_PAGE_MASK);
     chunk->host = entry->host_page + chunk->page_offset;
     chunk->sync = entry->sync;
+    chunk->copy_on_write = entry->copy_on_write;
     return GUEST_MEMORY_FAULT_NONE;
 }
 
@@ -140,6 +144,23 @@ static bool prepare_access(struct guest_tlb *tlb, guest_addr_t address,
         remaining -= chunk_size;
     }
     return true;
+}
+
+static bool prepare_write_access(struct guest_tlb *tlb,
+        guest_addr_t address, size_t size,
+        struct guest_tlb_access_chunk chunks[2], unsigned *chunk_count,
+        struct guest_memory_fault *fault) {
+    if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+            chunks, chunk_count, fault))
+        return false;
+    if (size == 0)
+        return true;
+    if (!guest_address_space_prepare_write(
+            tlb->address_space, address, size, fault))
+        return false;
+    // 写前事务可能换入匿名 backing；旧 host 指针与同步域不得继续使用。
+    return prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+            chunks, chunk_count, fault);
 }
 
 static void collect_syncs(const struct guest_tlb_access_chunk chunks[2],
@@ -281,7 +302,7 @@ bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
     bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+    if (!prepare_write_access(tlb, address, size,
             chunks, &chunk_count, fault)) {
         guest_address_space_write_unlock(tlb->address_space, locked);
         return false;
@@ -356,6 +377,19 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
         expected_bytes += chunks[i].size;
     }
 
+    if (chunks[0].copy_on_write) {
+        unlock_syncs(&syncs, true);
+        if (!guest_address_space_prepare_write(
+                tlb->address_space, address, size, fault)) {
+            guest_address_space_write_unlock(
+                    tlb->address_space, locked);
+            return GUEST_TLB_EXCLUSIVE_FAULT;
+        }
+        // COW fault 会清除架构独占保留；本次 STXR 不提交写入。
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_EXCLUSIVE_FAILED;
+    }
+
     const byte_t *replacement_bytes = replacement;
     for (unsigned i = 0; i < chunk_count; i++) {
         memcpy(chunks[i].host, replacement_bytes, chunks[i].size);
@@ -383,14 +417,11 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
     bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_access(tlb, address, size, GUEST_MEMORY_WRITE,
+    if (!prepare_write_access(tlb, address, size,
             chunks, &chunk_count, fault)) {
         guest_address_space_write_unlock(tlb->address_space, locked);
         return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
     }
-    // Linux 原子写在比较前已完成写故障；即使值不匹配，私有文件页也已 COW。
-    guest_address_space_write_prepared(
-            tlb->address_space, address, size);
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
     lock_syncs(&syncs, true);

@@ -6,6 +6,7 @@
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-runtime.h"
 #include "guest/memory/address-space.h"
+#include "guest/memory/page-backing.h"
 #include "guest/memory/page-table.h"
 
 #define TEST_FILE_SIZE 0x500
@@ -625,6 +626,12 @@ static void test_exclusive_monitor_reset(void) {
     assert(parent != NULL);
     configured_syscalls = (struct guest_linux_syscall_service) {0};
 
+    // 先完成可写文件段私有化，确保本用例只观察 fork 对独占监视器
+    // 的影响。
+    struct guest_linux_user_fault write_fault;
+    assert(aarch64_linux_process_write_u32(parent, DATA_ADDRESS,
+            UINT32_C(0x11), &write_fault));
+
     // LDXR 已完成但 STXR 尚未执行，父监视器保留，子监视器失效。
     for (unsigned i = 0; i < 4; i++) {
         assert(aarch64_linux_process_run_one(parent).status ==
@@ -899,10 +906,101 @@ static void test_snapshot_faults(void) {
     aarch64_linux_process_destroy(fixture.process);
 }
 
+static void test_private_file_futex_cow_oom(void) {
+    unsigned live_baseline = guest_page_backing_test_live_count();
+    static const dword_t program[] = {
+        UINT32_C(0xd2800000), UINT32_C(0xd2800ba8),
+        UINT32_C(0xd4000001),
+    };
+    byte_t file[TEST_FILE_SIZE];
+    make_test_elf(file, program, sizeof(program) / sizeof(program[0]));
+    struct aarch64_linux_process_config config = make_config(
+            file, PARENT_TID, NULL, NULL, NULL);
+    struct aarch64_linux_process *process = create_process(&config);
+    assert(process != NULL);
+    unsigned live_with_process = guest_page_backing_test_live_count();
+    assert(live_with_process > live_baseline);
+
+    const struct aarch64_linux_futex_word_snapshot untouched = {
+        .shared_identity = UINT64_C(0x1122334455667788),
+        .file_identity = UINT64_C(0x1020304050607080),
+        .page_offset = UINT64_C(0x8877665544332211),
+        .file_offset = UINT64_C(0x8070605040302010),
+    };
+    const qword_t address = DATA_ADDRESS;
+    dword_t first_value = UINT32_C(0xaabbccdd);
+    struct aarch64_linux_futex_word_snapshot snapshot = untouched;
+    struct guest_linux_user_fault fault;
+
+    guest_page_backing_test_fail_allocation_at(0);
+    assert(!aarch64_linux_process_snapshot_futex_words(
+            process, &address, 1, true,
+            &snapshot, &first_value, &fault));
+    assert(memcmp(&snapshot, &untouched, sizeof(snapshot)) == 0 &&
+            first_value == UINT32_C(0xaabbccdd));
+    assert(fault.address == DATA_ADDRESS &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY &&
+            guest_page_backing_test_live_count() == live_with_process);
+
+    const bool private_mapping = false;
+    const dword_t expected = UINT32_C(0x11);
+    snapshot = untouched;
+    guest_page_backing_test_fail_allocation_at(0);
+    fault = (struct guest_linux_user_fault) {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
+    };
+    assert(aarch64_linux_process_prepare_futex_waitv(
+            process, &address, &private_mapping, &expected, 1,
+            &snapshot, &fault) ==
+            AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY);
+    assert(memcmp(&snapshot, &untouched, sizeof(snapshot)) == 0);
+    assert(fault.address == DATA_ADDRESS &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY &&
+            guest_page_backing_test_live_count() == live_with_process);
+
+    // waitv 失败不能提前提交 COW；再次注入时仍应走文件页复制路径。
+    snapshot = untouched;
+    first_value = UINT32_C(0xaabbccdd);
+    guest_page_backing_test_fail_allocation_at(0);
+    fault = (struct guest_linux_user_fault) {
+        .address = UINT64_MAX,
+        .access = UINT32_MAX,
+        .kind = UINT32_MAX,
+    };
+    assert(!aarch64_linux_process_snapshot_futex_words(
+            process, &address, 1, true,
+            &snapshot, &first_value, &fault));
+    assert(memcmp(&snapshot, &untouched, sizeof(snapshot)) == 0 &&
+            first_value == UINT32_C(0xaabbccdd) &&
+            fault.address == DATA_ADDRESS &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY &&
+            guest_page_backing_test_live_count() == live_with_process);
+
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    assert(aarch64_linux_process_snapshot_futex_words(
+            process, &address, 1, true,
+            &snapshot, &first_value, &fault));
+    assert(snapshot.shared_identity == 0 &&
+            snapshot.file_identity == 0 &&
+            snapshot.page_offset ==
+                    (DATA_ADDRESS & GUEST_MEMORY_PAGE_MASK) &&
+            snapshot.file_offset == 0 && first_value == expected);
+
+    aarch64_linux_process_destroy(process);
+    assert(guest_page_backing_test_live_count() == live_baseline);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+}
+
 int main(void) {
     test_post_svc_fork();
     test_exclusive_monitor_reset();
     test_thread_shared_memory();
     test_snapshot_faults();
+    test_private_file_futex_cow_oom();
     return 0;
 }

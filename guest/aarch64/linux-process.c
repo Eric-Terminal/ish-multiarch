@@ -676,16 +676,22 @@ static bool futex_shared_key_unavailable(
     return (view->permissions & GUEST_MEMORY_WRITE) == 0;
 }
 
-static void futex_apply_private_file_cow(
+static enum guest_memory_fault_kind futex_apply_private_file_cow(
         struct guest_page_table *table, guest_addr_t page_base,
         struct guest_page_view *view) {
-    if (view->origin != GUEST_PAGE_ORIGIN_FILE || view->sync != NULL ||
-            (view->permissions & GUEST_MEMORY_WRITE) == 0)
-        return;
+    if (!view->copy_on_write)
+        return GUEST_MEMORY_FAULT_NONE;
+    assert(view->origin == GUEST_PAGE_ORIGIN_FILE && view->sync != NULL);
+    // FUTEX_READ 在 FOLL_WRITE 失败后会回退只读固定；文件页仍使用 inode 键。
+    if ((view->permissions & GUEST_MEMORY_WRITE) == 0)
+        return GUEST_MEMORY_FAULT_NONE;
     // Linux 共享 futex 的 FOLL_WRITE 固定会先私有化可写 MAP_PRIVATE 文件页。
-    assert(guest_page_table_set_origin(table, page_base,
-            GUEST_PAGE_ORIGIN_ANONYMOUS) == GUEST_PAGE_TABLE_OK);
-    view->origin = GUEST_PAGE_ORIGIN_ANONYMOUS;
+    struct guest_memory_fault fault;
+    if (!guest_address_space_prepare_write(&table->address_space,
+            page_base, sizeof(dword_t), &fault))
+        return fault.kind;
+    return guest_address_space_resolve_page(&table->address_space,
+            page_base, GUEST_MEMORY_READ, view);
 }
 
 static void futex_address_space_unlock(
@@ -735,9 +741,14 @@ bool aarch64_linux_process_snapshot_futex_words(
             break;
         }
         if (shared_key) {
-            futex_apply_private_file_cow(
+            fault_kind = futex_apply_private_file_cow(
                     &process->memory->page_table,
                     page_base, &views[index]);
+            if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+                fault_address = (guest_addr_t) address;
+                fault_access = GUEST_MEMORY_WRITE;
+                break;
+            }
         }
         if (shared_key && futex_shared_key_unavailable(&views[index])) {
             fault_address = (guest_addr_t) address;
@@ -746,7 +757,8 @@ bool aarch64_linux_process_snapshot_futex_words(
             break;
         }
         resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
-            .shared_identity = views[index].sync == NULL ? 0 :
+            .shared_identity = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE || views[index].sync == NULL ? 0 :
                     guest_page_sync_identity(views[index].sync),
             .file_identity = views[index].origin ==
                     GUEST_PAGE_ORIGIN_FILE ?
@@ -844,11 +856,21 @@ aarch64_linux_process_prepare_futex_waitv(
                 space, page_base, GUEST_MEMORY_READ, &views[index]);
         if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
             fault_address = (guest_addr_t) address;
-            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            result = fault_kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY ?
+                    AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY :
+                    AARCH64_LINUX_FUTEX_WAITV_FAULT;
             break;
         }
-        futex_apply_private_file_cow(
+        fault_kind = futex_apply_private_file_cow(
                 &process->memory->page_table, page_base, &views[index]);
+        if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+            fault_address = (guest_addr_t) address;
+            fault_access = GUEST_MEMORY_WRITE;
+            result = fault_kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY ?
+                    AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY :
+                    AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            break;
+        }
         if (futex_shared_key_unavailable(&views[index])) {
             fault_address = (guest_addr_t) address;
             fault_access = GUEST_MEMORY_WRITE;
@@ -857,7 +879,8 @@ aarch64_linux_process_prepare_futex_waitv(
             break;
         }
         resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
-            .shared_identity = views[index].sync == NULL ? 0 :
+            .shared_identity = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE || views[index].sync == NULL ? 0 :
                     guest_page_sync_identity(views[index].sync),
             .file_identity = views[index].origin ==
                     GUEST_PAGE_ORIGIN_FILE ?
@@ -901,7 +924,9 @@ aarch64_linux_process_prepare_futex_waitv(
     }
     futex_address_space_unlock(space, has_shared_key, locked);
 
-    if (result == AARCH64_LINUX_FUTEX_WAITV_FAULT && fault != NULL) {
+    if ((result == AARCH64_LINUX_FUTEX_WAITV_FAULT ||
+            result == AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY) &&
+            fault != NULL) {
         const struct guest_memory_fault memory_fault = {
             .address = fault_address,
             .access = fault_access,

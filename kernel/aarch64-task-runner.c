@@ -64,6 +64,11 @@ int aarch64_task_fault_signal(
             *info = SIGINFO_NIL;
             info->sig = SIGKILL_;
             return SIGKILL_;
+        case GUEST_MEMORY_FAULT_OUT_OF_MEMORY:
+            // COW 缺页无法取得宿主页时不能伪装成地址或权限错误。
+            *info = SIGINFO_NIL;
+            info->sig = SIGKILL_;
+            return SIGKILL_;
         case GUEST_MEMORY_FAULT_UNMAPPED:
             signal = SIGSEGV_;
             code = SEGV_MAPERR_;

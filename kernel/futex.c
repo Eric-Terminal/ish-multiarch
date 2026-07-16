@@ -602,7 +602,7 @@ static int futex_waitv_locked(struct futex_waitv_entry *entries,
     return result;
 }
 
-static bool snapshot_aarch64_futex_keys_locked(
+static int snapshot_aarch64_futex_keys_locked(
         struct aarch64_linux_process *process,
         const qword_t *addresses, size_t count,
         struct futex_key *keys, dword_t *first_value,
@@ -610,10 +610,14 @@ static bool snapshot_aarch64_futex_keys_locked(
     assert(process != NULL && addresses != NULL &&
             count != 0 && count <= 2 && keys != NULL);
     struct aarch64_linux_futex_word_snapshot snapshots[2];
+    struct guest_linux_user_fault local_fault = {0};
+    struct guest_linux_user_fault *snapshot_fault =
+            fault == NULL ? &local_fault : fault;
     if (!aarch64_linux_process_snapshot_futex_words(
             process, addresses, count, true,
-            snapshots, first_value, fault))
-        return false;
+            snapshots, first_value, snapshot_fault))
+        return snapshot_fault->kind ==
+                GUEST_MEMORY_FAULT_OUT_OF_MEMORY ? _ENOMEM : _EFAULT;
 
     qword_t memory_identity =
             aarch64_linux_process_memory_identity(process);
@@ -631,7 +635,7 @@ static bool snapshot_aarch64_futex_keys_locked(
                     memory_identity, addresses[index]);
         }
     }
-    return true;
+    return 0;
 }
 
 static int prepare_i386_futex_waitv_locked(
@@ -698,6 +702,8 @@ static int prepare_aarch64_futex_waitv_locked(
             return _EINVAL;
         case AARCH64_LINUX_FUTEX_WAITV_FAULT:
             return _EFAULT;
+        case AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY:
+            return _ENOMEM;
         case AARCH64_LINUX_FUTEX_WAITV_MISMATCH:
             return _EAGAIN;
         case AARCH64_LINUX_FUTEX_WAITV_READY:
@@ -835,19 +841,19 @@ static int wait_aarch64_futex(
     lock(&futex_lock);
     struct futex_key key;
     dword_t observed;
-    bool loaded;
+    int load_result;
     if (private_mapping) {
         key = aarch64_virtual_futex_key(
                 aarch64_linux_process_memory_identity(process), address);
-        loaded = aarch64_linux_process_read_u32(
-                process, address, &observed, fault);
+        load_result = aarch64_linux_process_read_u32(
+                process, address, &observed, fault) ? 0 : _EFAULT;
     } else {
         qword_t addresses[] = {address};
-        loaded = snapshot_aarch64_futex_keys_locked(
+        load_result = snapshot_aarch64_futex_keys_locked(
                 process, addresses, 1, &key, &observed, fault);
     }
-    int result = loaded ? futex_wait_locked(
-            &key, expected, observed, NULL, deadline) : _EFAULT;
+    int result = load_result == 0 ? futex_wait_locked(
+            &key, expected, observed, NULL, deadline) : load_result;
     unlock(&futex_lock);
     STRACE("%d end futex(FUTEX_WAIT)", current->pid);
     return result;
@@ -869,9 +875,10 @@ static int wake_aarch64_futex(
         result = wake_futex_locked(&key, wake_max);
     } else {
         qword_t addresses[] = {address};
-        result = snapshot_aarch64_futex_keys_locked(
-                process, addresses, 1, &key, NULL, fault) ?
-                wake_futex_locked(&key, wake_max) : _EFAULT;
+        int snapshot_result = snapshot_aarch64_futex_keys_locked(
+                process, addresses, 1, &key, NULL, fault);
+        result = snapshot_result == 0 ?
+                wake_futex_locked(&key, wake_max) : snapshot_result;
     }
     unlock(&futex_lock);
     return result;
@@ -905,11 +912,11 @@ static int requeue_aarch64_futex(
             source_address,
             target_address,
         };
-        result = snapshot_aarch64_futex_keys_locked(
-                process, addresses, 2, keys, NULL, fault) ?
-                requeue_futex_locked(
-                        &keys[0], wake_max,
-                        requeue_max, &keys[1]) : _EFAULT;
+        int snapshot_result = snapshot_aarch64_futex_keys_locked(
+                process, addresses, 2, keys, NULL, fault);
+        result = snapshot_result == 0 ? requeue_futex_locked(
+                &keys[0], wake_max,
+                requeue_max, &keys[1]) : snapshot_result;
     }
     unlock(&futex_lock);
     return result;
@@ -1331,7 +1338,7 @@ static bool cleanup_robust_futex_aarch64(
         if (!pi && (observed & AARCH64_LINUX_FUTEX_WAITERS) != 0) {
             struct futex_key key;
             if (snapshot_aarch64_futex_keys_locked(
-                    process, addresses, 1, &key, NULL, NULL))
+                    process, addresses, 1, &key, NULL, NULL) == 0)
                 (void) wake_futex_locked(&key, 1);
         }
         unlock(&futex_lock);

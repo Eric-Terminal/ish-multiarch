@@ -34,6 +34,7 @@ enum guest_memory_fault_kind {
     GUEST_MEMORY_FAULT_UNMAPPED,
     GUEST_MEMORY_FAULT_PERMISSION,
     GUEST_MEMORY_FAULT_ALIGNMENT,
+    GUEST_MEMORY_FAULT_OUT_OF_MEMORY,
 };
 
 // 页面来源只描述 guest 可观察的后备类型，不暴露宿主对象或指针。
@@ -95,6 +96,8 @@ struct guest_page_view {
     // 仅 FILE 来源为非零；offset 是该 guest 页首字节对应的文件字节位置。
     qword_t file_identity;
     qword_t file_offset;
+    // true 表示当前文件 backing 只在首次写前共享，写入必须先换成匿名副本。
+    bool copy_on_write;
     // NULL 表示页面只受所属 address space 的事务锁保护。非空借用指针
     // 可以缓存，但只能在持有 address space 锁且映射世代仍匹配时使用。
     const struct guest_page_sync *sync;
@@ -106,8 +109,11 @@ struct guest_address_space_ops {
     void (*read_unlock)(void *opaque, bool locked);
     bool (*write_lock)(void *opaque);
     void (*write_unlock)(void *opaque, bool locked);
-    // 非空时，在写访问权限已成功解析后执行不依赖实际存储的后备转换。
-    void (*write_prepared)(void *opaque, guest_addr_t address, size_t size);
+    // 非空时，在整段写权限验证后、实际访问前事务式准备后备。调用者
+    // 必须持有 address-space 写锁；成功可能替换 host_page 并推进映射
+    // 世代，调用方必须重新解析。
+    bool (*prepare_write)(void *opaque, guest_addr_t address, size_t size,
+            struct guest_memory_fault *fault);
     // 非空时，在写事务实际提交后更新页级后备元数据。
     void (*written)(void *opaque, guest_addr_t address, size_t size);
     enum guest_memory_fault_kind (*resolve_page)(void *opaque,
@@ -151,9 +157,10 @@ void guest_address_space_read_unlock(
 bool guest_address_space_write_lock(struct guest_address_space *space);
 void guest_address_space_write_unlock(
         struct guest_address_space *space, bool locked);
-void guest_address_space_write_prepared(
-        struct guest_address_space *space,
-        guest_addr_t address, size_t size);
+// 调用者必须持有 address-space 写锁，并已验证整段 WRITE 权限。
+bool guest_address_space_prepare_write(
+        struct guest_address_space *space, guest_addr_t address,
+        size_t size, struct guest_memory_fault *fault);
 bool guest_address_space_contains(const struct guest_address_space *space,
         guest_addr_t address, size_t size);
 enum guest_memory_fault_kind guest_address_space_resolve_page(

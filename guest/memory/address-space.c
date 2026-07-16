@@ -199,13 +199,23 @@ void guest_address_space_write_unlock(
         space->ops->write_unlock(space->opaque, locked);
 }
 
-void guest_address_space_write_prepared(
-        struct guest_address_space *space,
-        guest_addr_t address, size_t size) {
+bool guest_address_space_prepare_write(
+        struct guest_address_space *space, guest_addr_t address,
+        size_t size, struct guest_memory_fault *fault) {
+    assert(fault != NULL);
     assert(size != 0);
     assert(guest_address_space_contains(space, address, size));
-    if (space->ops->write_prepared != NULL)
-        space->ops->write_prepared(space->opaque, address, size);
+    *fault = (struct guest_memory_fault) {
+        .address = address,
+        .access = GUEST_MEMORY_WRITE,
+        .kind = GUEST_MEMORY_FAULT_NONE,
+    };
+    if (space->ops->prepare_write == NULL)
+        return true;
+    bool prepared = space->ops->prepare_write(
+            space->opaque, address, size, fault);
+    assert(prepared == (fault->kind == GUEST_MEMORY_FAULT_NONE));
+    return prepared;
 }
 
 bool guest_address_space_contains(const struct guest_address_space *space,

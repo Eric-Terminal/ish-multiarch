@@ -776,6 +776,7 @@ if not meson.is_cross_build()
         aarch64_core_src + ['guest/aarch64/linux-process-fork-test.c'],
         include_directories: includes,
         c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
             '-DGUEST_PAGE_TABLE_TESTING=1',
             '-DAARCH64_LINUX_PROCESS_TESTING=1'])
     test('aarch64_linux_process_fork',
@@ -859,7 +860,9 @@ if not meson.is_cross_build()
             'guest/aarch64/elf64.c',
             'guest/aarch64/elf64-loader.c',
             'guest/aarch64/elf64-loader-test.c',
-        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1'])
     test('aarch64_elf64_loader', aarch64_elf64_loader_test)
 
     aarch64_linux_stack_test = executable('aarch64_linux_stack_test', [
@@ -915,6 +918,18 @@ if not meson.is_cross_build()
             '-DGUEST_PAGE_BACKING_TESTING=1',
             '-DGUEST_PAGE_TABLE_TESTING=1'])
     test('aarch64_page_table', aarch64_page_table_test)
+
+    aarch64_page_table_cow_thread_test = executable(
+        'aarch64_page_table_cow_thread_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/page-table.c',
+            'guest/memory/page-table-cow-thread-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'], dependencies: threads)
+    test('aarch64_page_table_cow_thread',
+        aarch64_page_table_cow_thread_test)
 
     aarch64_runner_test = executable('aarch64_runner_test', [
             'guest/memory/address-space.c',

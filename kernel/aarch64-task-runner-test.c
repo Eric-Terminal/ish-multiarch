@@ -264,6 +264,7 @@ static int test_fault_mapping(void) {
         int code;
         dword_t payload_kind;
         qword_t address;
+        qword_t reported_address;
     } cases[] = {
         {
             .message = "未映射读映射 SIGSEGV MAPERR",
@@ -271,6 +272,7 @@ static int test_fault_mapping(void) {
             .signal = SIGSEGV_, .code = SEGV_MAPERR_,
             .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
             .address = UINT64_C(0x0000400011110000),
+            .reported_address = UINT64_C(0x0000400011110000),
         },
         {
             .message = "只执行页写入映射 SIGSEGV ACCERR",
@@ -278,6 +280,7 @@ static int test_fault_mapping(void) {
             .signal = SIGSEGV_, .code = SEGV_ACCERR_,
             .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
             .address = UINT64_C(0x0000400022220000),
+            .reported_address = UINT64_C(0x0000400022220000),
         },
         {
             .message = "独占访问未对齐映射 SIGBUS ADRALN",
@@ -285,12 +288,22 @@ static int test_fault_mapping(void) {
             .signal = SIGBUS_, .code = BUS_ADRALN_,
             .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
             .address = UINT64_C(0x0000400033330001),
+            .reported_address = UINT64_C(0x0000400033330001),
         },
         {
             .message = "地址尺寸异常精确映射不可捕获 SIGKILL",
             .kind = GUEST_MEMORY_FAULT_ADDRESS_SIZE,
             .signal = SIGKILL_, .code = SI_KERNEL_,
             .payload_kind = SIGNAL_INFO_PAYLOAD_NONE,
+            .address = UINT64_C(0x0001000000000000),
+        },
+        {
+            .message =
+                    "私有文件 COW 内存耗尽映射不可捕获 SIGKILL",
+            .kind = GUEST_MEMORY_FAULT_OUT_OF_MEMORY,
+            .signal = SIGKILL_, .code = SI_KERNEL_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_NONE,
+            .address = UINT64_C(0x0000400044440000),
         },
     };
 
@@ -301,12 +314,14 @@ static int test_fault_mapping(void) {
             .kind = cases[index].kind,
         };
         struct siginfo_ info;
+        memset(&info, 0xa5, sizeof(info));
         int signal = aarch64_task_fault_signal(&fault, &info);
         CHECK(signal == cases[index].signal &&
                 info.sig == cases[index].signal &&
+                info.sig_errno == SIGINFO_NIL.sig_errno &&
                 info.code == cases[index].code &&
                 info.payload_kind == cases[index].payload_kind &&
-                info.fault.addr == cases[index].address,
+                info.fault.addr == cases[index].reported_address,
                 cases[index].message);
     }
     return 0;

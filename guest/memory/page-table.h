@@ -68,7 +68,8 @@ enum guest_page_table_result guest_page_table_map_special(
 enum guest_page_table_result guest_page_table_set_file_source(
         struct guest_page_table *table, guest_addr_t page_base,
         struct guest_file_source *source, qword_t file_offset);
-// 这里只接受 ANONYMOUS 或 SPECIAL，并会释放原文件来源引用。
+// 这里只接受 ANONYMOUS 或 SPECIAL，并会释放原文件来源引用；私有文件页
+// 和共享页转 SPECIAL 会先复制 backing，其余非文件页保留既有共享属性。
 enum guest_page_table_result guest_page_table_set_origin(
         struct guest_page_table *table, guest_addr_t page_base,
         enum guest_page_origin origin);

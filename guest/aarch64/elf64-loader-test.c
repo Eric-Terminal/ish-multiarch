@@ -4,6 +4,7 @@
 #include "guest/aarch64/elf64-loader.h"
 #include "guest/aarch64/linux-syscall.h"
 #include "guest/aarch64/runner.h"
+#include "guest/memory/page-backing.h"
 
 #define TEST_FILE_SIZE 8192
 #define TEST_BASE UINT64_C(0x400000)
@@ -254,6 +255,48 @@ static void test_load_page_origins(void) {
     guest_page_table_destroy(&table);
 }
 
+static void assert_cow_allocation_failure_is_out_of_memory(
+        const byte_t file[TEST_FILE_SIZE]) {
+    struct aarch64_elf64_image image;
+    assert(aarch64_elf64_parse(file, TEST_FILE_SIZE, &image) ==
+            AARCH64_ELF64_OK);
+    unsigned live_before = guest_page_backing_test_live_count();
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    struct aarch64_elf64_load_result result;
+    memset(&result, 0xa5, sizeof(result));
+
+    // 第一次分配建立文件页，第二次分配是文件页转匿名页所需的 COW。
+    guest_page_backing_test_fail_allocation_at(1);
+    assert(load_test_image(&image, &table, 0, &result) ==
+            AARCH64_ELF64_LOAD_OUT_OF_MEMORY);
+    assert(guest_page_backing_test_allocation_count() == 2);
+    assert(guest_page_backing_test_live_count() == live_before);
+    byte_t *host_page;
+    unsigned permissions;
+    assert(guest_page_table_lookup(&table, TEST_BASE,
+            &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
+
+    guest_page_table_destroy(&table);
+    assert(guest_page_backing_test_live_count() == live_before);
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+}
+
+static void test_cow_allocation_failure(void) {
+    byte_t partial_bss[TEST_FILE_SIZE];
+    make_test_elf(partial_bss);
+    assert_cow_allocation_failure_is_out_of_memory(partial_bss);
+
+    byte_t overlapping_anonymous[TEST_FILE_SIZE];
+    make_test_elf(overlapping_anonymous);
+    byte_t *anonymous_segment = overlapping_anonymous +
+            AARCH64_ELF64_HEADER_SIZE +
+            2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    put_program_header(anonymous_segment, 1, 6, 0, TEST_BASE,
+            0, UINT64_C(0x100), UINT64_C(0x1000));
+    assert_cow_allocation_failure_is_out_of_memory(overlapping_anonymous);
+}
+
 int main(void) {
     test_file_source = guest_file_source_create(
             TEST_FILE_IDENTITY, NULL, NULL);
@@ -271,6 +314,7 @@ int main(void) {
     make_test_pie(pie);
     test_load_and_run(pie, TEST_PIE_LOAD_BIAS);
     test_load_page_origins();
+    test_cow_allocation_failure();
 
     byte_t overlapping_bss[TEST_FILE_SIZE];
     make_test_elf(overlapping_bss);
