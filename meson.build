@@ -302,6 +302,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('credential_lock', credential_lock_test)
 
+        log_buffer_test = executable(
+            'log_buffer_test',
+            'kernel/log-buffer-test.c',
+            dependencies: ish)
+        test('log_buffer', log_buffer_test)
+
         aarch64_syscall_service_test = executable(
             'aarch64_syscall_service_test',
             'kernel/aarch64-syscall-service-test.c',

@@ -108,11 +108,16 @@ static void output_line(const char *line) {
 }
 
 void ish_vprintk(const char *msg, va_list args) {
-    // format the message
-    // I'm trusting you to not pass an absurdly long message
     static __thread char buf[16384] = "";
     static __thread size_t buf_size = 0;
-    buf_size += vsprintf(buf + buf_size, msg, args);
+    size_t available = sizeof(buf) - buf_size;
+    int formatted = vsnprintf(buf + buf_size, available, msg, args);
+    if (formatted < 0) {
+        buf[buf_size] = '\0';
+        return;
+    }
+    bool truncated = (size_t) formatted >= available;
+    buf_size += truncated ? available - 1 : (size_t) formatted;
 
     // output up to the last newline, leave the rest in the buffer
     lock(&log_lock);
@@ -125,8 +130,14 @@ void ish_vprintk(const char *msg, va_list args) {
         buf_size -= p + 1 - b;
         b = p + 1;
     }
+    // 无换行片段填满缓冲区时先提交已有前缀，后续日志仍可继续记录。
+    if (truncated && buf_size != 0) {
+        output_line(b);
+        b += buf_size;
+        buf_size = 0;
+    }
     unlock(&log_lock);
-    memmove(buf, b, strlen(b) + 1);
+    memmove(buf, b, buf_size + 1);
 }
 void ish_printk(const char *msg, ...) {
     va_list args;
