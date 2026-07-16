@@ -35,6 +35,7 @@
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define TEST_FILE_IDENTITY UINT64_C(0x1000000000000008)
 #define SHARED_BASE UINT64_C(0x0000000100000000)
 #define PRIVATE_BASE UINT64_C(0x0000000100010000)
 #define READ_ONLY_PRIVATE_BASE UINT64_C(0x0000000100020000)
@@ -275,9 +276,14 @@ static struct aarch64_linux_process *make_process(
     *pin_cow_protect_steps = total_steps - *setup_steps;
     const char *arguments[] = {"futex-waitv-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            TEST_FILE_IDENTITY, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -291,7 +297,10 @@ static struct aarch64_linux_process *make_process(
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool init_fixture(struct fixture *fixture) {

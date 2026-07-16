@@ -127,8 +127,11 @@ int main(void) {
             AARCH64_ELF64_OK);
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
+    struct guest_file_source *file_source = guest_file_source_create(
+            UINT64_C(0xe000000000000001), NULL, NULL);
+    assert(file_source != NULL);
     struct aarch64_elf64_load_result loaded;
-    assert(aarch64_elf64_load(&image, &table, 0, &loaded) ==
+    assert(aarch64_elf64_load(&image, file_source, &table, 0, &loaded) ==
             AARCH64_ELF64_LOAD_OK);
 
     const char *arguments[] = {"e0"};
@@ -182,5 +185,6 @@ int main(void) {
     assert(cpu.pc == loaded.entry + 9 * 4);
     guest_linux_mm_destroy(&memory);
     guest_page_table_destroy(&table);
+    guest_file_source_release(file_source);
     return 0;
 }

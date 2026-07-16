@@ -5,9 +5,20 @@
 #include "guest/aarch64/linux-syscall.h"
 #include "guest/aarch64/runner.h"
 
-#define TEST_FILE_SIZE 1024
+#define TEST_FILE_SIZE 8192
 #define TEST_BASE UINT64_C(0x400000)
 #define TEST_PIE_LOAD_BIAS UINT64_C(0x0000400000000000)
+#define TEST_FILE_IDENTITY UINT64_C(0x1020304050607080)
+
+static struct guest_file_source *test_file_source;
+
+static enum aarch64_elf64_load_error load_test_image(
+        const struct aarch64_elf64_image *image,
+        struct guest_page_table *table, guest_addr_t load_bias,
+        struct aarch64_elf64_load_result *result) {
+    return aarch64_elf64_load(
+            image, test_file_source, table, load_bias, result);
+}
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -62,7 +73,7 @@ static void make_test_elf(byte_t file[TEST_FILE_SIZE]) {
     put_program_header(headers + AARCH64_ELF64_PROGRAM_HEADER_SIZE,
             1, 5, 0, TEST_BASE, 0x180, 0x180, 0x1000);
     put_program_header(headers + 2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
-            1, 6, 0x180, TEST_BASE + 0x180, 0x20, 0x100, 0x1000);
+            1, 7, 0x180, TEST_BASE + 0x180, 0x20, 0x100, 0x1000);
 
     put_u32(file + 0x100, UINT32_C(0xd2800540));
     put_u32(file + 0x104, UINT32_C(0xd2800ba8));
@@ -92,6 +103,14 @@ static enum guest_page_origin resolve_page_origin(
     return view.origin;
 }
 
+static struct guest_page_view resolve_page_view(
+        struct guest_page_table *table, guest_addr_t page) {
+    struct guest_page_view view;
+    assert(guest_address_space_resolve_page(&table->address_space, page,
+            GUEST_MEMORY_READ, &view) == GUEST_MEMORY_FAULT_NONE);
+    return view;
+}
+
 static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
         guest_addr_t load_bias) {
     struct aarch64_elf64_image image;
@@ -100,7 +119,7 @@ static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
     struct aarch64_elf64_load_result loaded;
-    assert(aarch64_elf64_load(&image, &table, load_bias, &loaded) ==
+    assert(load_test_image(&image, &table, load_bias, &loaded) ==
             AARCH64_ELF64_LOAD_OK);
     assert(loaded.load_bias == load_bias);
     guest_addr_t image_base = image.position_independent ? load_bias : TEST_BASE;
@@ -151,9 +170,9 @@ static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
 static void test_load_page_origins(void) {
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
-    put_u16(file + 56, 7);
+    put_u16(file + 56, 8);
     byte_t *headers = file + AARCH64_ELF64_HEADER_SIZE;
-    qword_t header_size = 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    qword_t header_size = 8 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
     put_u64(headers + 32, header_size);
     put_u64(headers + 40, header_size);
     qword_t first_load_size = AARCH64_ELF64_HEADER_SIZE + header_size;
@@ -162,7 +181,7 @@ static void test_load_page_origins(void) {
     put_u64(headers + AARCH64_ELF64_PROGRAM_HEADER_SIZE + 40,
             first_load_size);
     put_program_header(headers + 2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
-            1, 6, 0, TEST_BASE + UINT64_C(0x1000),
+            1, 4, 0, TEST_BASE + UINT64_C(0x1000),
             0, UINT64_C(0x1000), UINT64_C(0x1000));
     put_program_header(headers + 3 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
             1, 6, 0, TEST_BASE + UINT64_C(0x2000),
@@ -179,8 +198,16 @@ static void test_load_page_origins(void) {
             1, 4, UINT64_C(0x200),
             TEST_BASE + UINT64_C(0x4200),
             4, 8, UINT64_C(0x1000));
+    put_program_header(headers + 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 4, UINT64_C(0x1200),
+            TEST_BASE + UINT64_C(0x5200),
+            4, 4, UINT64_C(0x1000));
     const byte_t marker[4] = {0x31, 0x41, 0x59, 0x26};
+    const byte_t read_only_tail[4] = {0x92, 0x65, 0x35, 0x89};
+    const byte_t second_marker[4] = {0x53, 0x58, 0x27, 0x97};
     memcpy(file + 0x200, marker, sizeof(marker));
+    memcpy(file + 0x204, read_only_tail, sizeof(read_only_tail));
+    memcpy(file + 0x1200, second_marker, sizeof(second_marker));
 
     struct aarch64_elf64_image image;
     assert(aarch64_elf64_parse(file, sizeof(file), &image) ==
@@ -188,28 +215,49 @@ static void test_load_page_origins(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
     struct aarch64_elf64_load_result loaded;
-    assert(aarch64_elf64_load(&image, &table, 0, &loaded) ==
+    assert(load_test_image(&image, &table, 0, &loaded) ==
             AARCH64_ELF64_LOAD_OK);
-    assert(resolve_page_origin(&table, TEST_BASE) ==
-            GUEST_PAGE_ORIGIN_FILE);
-    assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x1000)) ==
-            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    byte_t *host_page;
+    unsigned permissions;
+    struct guest_page_view view = resolve_page_view(&table, TEST_BASE);
+    assert(view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            view.file_identity == TEST_FILE_IDENTITY &&
+            view.file_offset == 0);
+    view = resolve_page_view(&table, TEST_BASE + UINT64_C(0x1000));
+    assert(view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            view.file_identity == 0 && view.file_offset == 0);
+    assert(guest_page_table_lookup(&table,
+            TEST_BASE + UINT64_C(0x1000),
+            &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
+    assert(permissions == (GUEST_MEMORY_READ | GUEST_MEMORY_WRITE));
     assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x2000)) ==
             GUEST_PAGE_ORIGIN_FILE);
     assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x3000)) ==
             GUEST_PAGE_ORIGIN_FILE);
     assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x4000)) ==
             GUEST_PAGE_ORIGIN_FILE);
-    byte_t *host_page;
-    unsigned permissions;
+    view = resolve_page_view(&table, TEST_BASE + UINT64_C(0x5000));
+    assert(view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            view.file_identity == TEST_FILE_IDENTITY &&
+            view.file_offset == UINT64_C(0x1000));
     assert(guest_page_table_lookup(&table,
             TEST_BASE + UINT64_C(0x2000),
             &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
     assert(memcmp(host_page + 0x200, marker, sizeof(marker)) == 0);
+    assert(memcmp(host_page + 0x204,
+            read_only_tail, sizeof(read_only_tail)) == 0);
+    assert(guest_page_table_lookup(&table,
+            TEST_BASE + UINT64_C(0x5000),
+            &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
+    assert(memcmp(host_page + 0x200,
+            second_marker, sizeof(second_marker)) == 0);
     guest_page_table_destroy(&table);
 }
 
 int main(void) {
+    test_file_source = guest_file_source_create(
+            TEST_FILE_IDENTITY, NULL, NULL);
+    assert(test_file_source != NULL);
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
     test_load_and_run(file, 0);
@@ -241,7 +289,7 @@ int main(void) {
     struct guest_page_table overlap;
     assert(guest_page_table_init(&overlap, 48));
     struct aarch64_elf64_load_result result;
-    assert(aarch64_elf64_load(&image, &overlap, 0, &result) ==
+    assert(load_test_image(&image, &overlap, 0, &result) ==
             AARCH64_ELF64_LOAD_OK);
     byte_t *host_page;
     unsigned permissions;
@@ -250,7 +298,34 @@ int main(void) {
     assert(memcmp(host_page + 0x170, overlapping_bss + 0x170, 4) == 0);
     for (size_t i = 0x174; i < 0x1a0; i++)
         assert(host_page[i] == 0);
+    struct guest_page_view overlap_view =
+            resolve_page_view(&overlap, TEST_BASE);
+    assert(overlap_view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            overlap_view.file_identity == 0 &&
+            overlap_view.file_offset == 0);
     guest_page_table_destroy(&overlap);
+
+    byte_t overlapping_permissions[TEST_FILE_SIZE];
+    make_test_elf(overlapping_permissions);
+    byte_t *last_segment = overlapping_permissions +
+            AARCH64_ELF64_HEADER_SIZE +
+            2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    put_u32(last_segment + 4, 4);
+    assert(aarch64_elf64_parse(overlapping_permissions,
+            sizeof(overlapping_permissions), &image) == AARCH64_ELF64_OK);
+    struct guest_page_table permission_overlap;
+    assert(guest_page_table_init(&permission_overlap, 48));
+    assert(load_test_image(&image, &permission_overlap, 0, &result) ==
+            AARCH64_ELF64_LOAD_OK);
+    assert(guest_page_table_lookup(&permission_overlap, TEST_BASE,
+            &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
+    assert(permissions == GUEST_MEMORY_READ);
+    struct guest_page_view permission_view =
+            resolve_page_view(&permission_overlap, TEST_BASE);
+    assert(permission_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            permission_view.file_identity == TEST_FILE_IDENTITY &&
+            permission_view.file_offset == 0);
+    guest_page_table_destroy(&permission_overlap);
 
     assert(aarch64_elf64_parse(file, sizeof(file), &image) ==
             AARCH64_ELF64_OK);
@@ -258,7 +333,7 @@ int main(void) {
     assert(guest_page_table_init(&conflict, 48));
     assert(guest_page_table_map(&conflict, TEST_BASE,
             GUEST_MEMORY_READ, &host_page) == GUEST_PAGE_TABLE_OK);
-    assert(aarch64_elf64_load(&image, &conflict, 0, &result) ==
+    assert(load_test_image(&image, &conflict, 0, &result) ==
             AARCH64_ELF64_LOAD_MAPPING_CONFLICT);
     guest_page_table_destroy(&conflict);
 
@@ -274,7 +349,7 @@ int main(void) {
             AARCH64_ELF64_OK);
     struct guest_page_table unsupported;
     assert(guest_page_table_init(&unsupported, 48));
-    assert(aarch64_elf64_load(&image, &unsupported, 0, &result) ==
+    assert(load_test_image(&image, &unsupported, 0, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     guest_page_table_destroy(&unsupported);
 
@@ -286,7 +361,7 @@ int main(void) {
             sizeof(mismatched_phdr), &image) == AARCH64_ELF64_OK);
     struct guest_page_table bad_phdr;
     assert(guest_page_table_init(&bad_phdr, 48));
-    assert(aarch64_elf64_load(&image, &bad_phdr, 0, &result) ==
+    assert(load_test_image(&image, &bad_phdr, 0, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     assert(guest_page_table_lookup(&bad_phdr, TEST_BASE,
             &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
@@ -296,12 +371,12 @@ int main(void) {
             AARCH64_ELF64_OK);
     struct guest_page_table invalid_bias;
     assert(guest_page_table_init(&invalid_bias, 48));
-    assert(aarch64_elf64_load(&image, &invalid_bias, 0, &result) ==
+    assert(load_test_image(&image, &invalid_bias, 0, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
-    assert(aarch64_elf64_load(&image, &invalid_bias,
+    assert(load_test_image(&image, &invalid_bias,
             TEST_PIE_LOAD_BIAS + 1, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
-    assert(aarch64_elf64_load(&image, &invalid_bias,
+    assert(load_test_image(&image, &invalid_bias,
             TEST_PIE_LOAD_BIAS + GUEST_MEMORY_PAGE_SIZE,
             &result) == AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     guest_page_table_destroy(&invalid_bias);
@@ -310,7 +385,7 @@ int main(void) {
             AARCH64_ELF64_OK);
     struct guest_page_table fixed_rebase;
     assert(guest_page_table_init(&fixed_rebase, 48));
-    assert(aarch64_elf64_load(&image, &fixed_rebase,
+    assert(load_test_image(&image, &fixed_rebase,
             TEST_PIE_LOAD_BIAS, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     guest_page_table_destroy(&fixed_rebase);
@@ -330,7 +405,7 @@ int main(void) {
             sizeof(overflowing_pie), &image) == AARCH64_ELF64_OK);
     struct guest_page_table overflow;
     assert(guest_page_table_init(&overflow, 48));
-    assert(aarch64_elf64_load(&image, &overflow,
+    assert(load_test_image(&image, &overflow,
             TEST_PIE_LOAD_BIAS, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     guest_page_table_destroy(&overflow);
@@ -352,7 +427,7 @@ int main(void) {
             sizeof(brk_boundary_file), &image) == AARCH64_ELF64_OK);
     struct guest_page_table brk_boundary;
     assert(guest_page_table_init(&brk_boundary, 48));
-    assert(aarch64_elf64_load(&image, &brk_boundary, 0, &result) ==
+    assert(load_test_image(&image, &brk_boundary, 0, &result) ==
             AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT);
     assert(guest_page_table_lookup(&brk_boundary, high_base,
             &host_page, &permissions) == GUEST_PAGE_TABLE_NOT_MAPPED);
@@ -376,7 +451,7 @@ int main(void) {
             GUEST_MEMORY_READ, &sentinel_page) == GUEST_PAGE_TABLE_OK);
     sentinel_page[0] = 0x7d;
     qword_t generation = late_conflict.address_space.generation;
-    assert(aarch64_elf64_load(&image, &late_conflict, 0, &result) ==
+    assert(load_test_image(&image, &late_conflict, 0, &result) ==
             AARCH64_ELF64_LOAD_MAPPING_CONFLICT);
     assert(late_conflict.address_space.generation == generation);
     assert(guest_page_table_lookup(&late_conflict, TEST_BASE,
@@ -387,5 +462,6 @@ int main(void) {
             &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
     assert(permissions == GUEST_MEMORY_READ);
     guest_page_table_destroy(&late_conflict);
+    guest_file_source_release(test_file_source);
     return 0;
 }

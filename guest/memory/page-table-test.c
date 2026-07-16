@@ -38,6 +38,15 @@ static struct guest_page_view resolve_view(struct guest_page_table *table,
     return view;
 }
 
+struct file_source_probe {
+    unsigned releases;
+};
+
+static void release_file_source_probe(void *opaque) {
+    struct file_source_probe *probe = opaque;
+    probe->releases++;
+}
+
 static byte_t tlb_read_byte(struct guest_tlb *tlb, guest_addr_t address) {
     struct guest_memory_fault fault;
     byte_t value;
@@ -419,19 +428,30 @@ static void test_page_origins(void) {
     byte_t *page;
     const guest_addr_t special_page =
             NEXT_PAGE + GUEST_MEMORY_PAGE_SIZE;
+    const qword_t file_identity = UINT64_C(0x123456789abcdef0);
+    const qword_t file_offset = UINT64_C(0x34567000);
+    struct file_source_probe source_probe = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            file_identity, &source_probe, release_file_source_probe);
+    assert(file_source != NULL);
     assert(guest_page_table_map(&table, HIGH_PAGE,
             GUEST_MEMORY_READ, &page) == GUEST_PAGE_TABLE_OK);
     assert(guest_page_table_map_file(&table, NEXT_PAGE,
-            GUEST_MEMORY_READ, &page) == GUEST_PAGE_TABLE_OK);
+            GUEST_MEMORY_READ, file_source, file_offset,
+            &page) == GUEST_PAGE_TABLE_OK);
     assert(guest_page_table_map_special(&table, special_page,
             GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE,
             &page) == GUEST_PAGE_TABLE_OK);
-    assert(resolve_view(&table, HIGH_PAGE).origin ==
-            GUEST_PAGE_ORIGIN_ANONYMOUS);
-    assert(resolve_view(&table, NEXT_PAGE).origin ==
-            GUEST_PAGE_ORIGIN_FILE);
-    assert(resolve_view(&table, special_page).origin ==
-            GUEST_PAGE_ORIGIN_SPECIAL);
+    struct guest_page_view view = resolve_view(&table, HIGH_PAGE);
+    assert(view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            view.file_identity == 0 && view.file_offset == 0);
+    view = resolve_view(&table, NEXT_PAGE);
+    assert(view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            view.file_identity == file_identity &&
+            view.file_offset == file_offset);
+    view = resolve_view(&table, special_page);
+    assert(view.origin == GUEST_PAGE_ORIGIN_SPECIAL &&
+            view.file_identity == 0 && view.file_offset == 0);
 
     assert(guest_page_table_protect(&table, NEXT_PAGE,
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
@@ -442,18 +462,23 @@ static void test_page_origins(void) {
     assert(guest_page_table_clone(&copy, &table));
     assert(resolve_view(&copy, HIGH_PAGE).origin ==
             GUEST_PAGE_ORIGIN_ANONYMOUS);
-    assert(resolve_view(&copy, NEXT_PAGE).origin ==
-            GUEST_PAGE_ORIGIN_FILE);
+    view = resolve_view(&copy, NEXT_PAGE);
+    assert(view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            view.file_identity == file_identity &&
+            view.file_offset == file_offset);
     assert(resolve_view(&copy, special_page).origin ==
             GUEST_PAGE_ORIGIN_SPECIAL);
+    guest_file_source_release(file_source);
+    assert(source_probe.releases == 0);
 
     struct guest_tlb tlb;
     guest_tlb_init(&tlb, &table.address_space);
     assert(tlb_read_byte(&tlb, NEXT_PAGE) == 0);
     qword_t generation = table.address_space.generation;
     tlb_write_byte(&tlb, NEXT_PAGE, 0x5a);
-    assert(resolve_view(&table, NEXT_PAGE).origin ==
-            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    view = resolve_view(&table, NEXT_PAGE);
+    assert(view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            view.file_identity == 0 && view.file_offset == 0);
     assert(resolve_view(&copy, NEXT_PAGE).origin ==
             GUEST_PAGE_ORIGIN_FILE);
     assert(table.address_space.generation == generation + 1);
@@ -477,7 +502,9 @@ static void test_page_origins(void) {
     assert(resolve_view(&table, special_page).origin ==
             GUEST_PAGE_ORIGIN_ANONYMOUS);
     guest_page_table_destroy(&copy);
+    assert(source_probe.releases == 1);
     guest_page_table_destroy(&table);
+    assert(source_probe.releases == 1);
 }
 
 static void test_conflicts_and_holes(void) {
@@ -769,6 +796,22 @@ static void test_mixed_clone_failures(void) {
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
     shared_page[0] = 0x7a;
 
+    const guest_addr_t file_address =
+            shared_range.first + GUEST_MEMORY_PAGE_SIZE;
+    const qword_t file_identity = UINT64_C(0x5a17e001);
+    const qword_t file_offset = UINT64_C(0x2f000);
+    struct file_source_probe source_probe = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            file_identity, &source_probe, release_file_source_probe);
+    assert(file_source != NULL);
+    byte_t *file_page;
+    assert(guest_page_table_map_file(&source, file_address,
+            GUEST_MEMORY_READ, file_source, file_offset,
+            &file_page) == GUEST_PAGE_TABLE_OK);
+    file_page[0] = 0x6b;
+    guest_file_source_release(file_source);
+    assert(source_probe.releases == 0);
+
     static const guest_addr_t private_addresses[] = {
         HIGH_PAGE,
         NEXT_PAGE,
@@ -791,10 +834,16 @@ static void test_mixed_clone_failures(void) {
     size_t private_clone_allocations =
             guest_page_backing_test_allocation_count();
     assert(clone_allocations > 4);
-    assert(private_clone_allocations == array_size(private_addresses));
+    assert(private_clone_allocations ==
+            array_size(private_addresses) + 1);
     assert(lookup_page(&probe, shared_range.first,
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) == shared_page);
+    struct guest_page_view file_view = resolve_view(&probe, file_address);
+    assert(file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            file_view.file_identity == file_identity &&
+            file_view.file_offset == file_offset);
     guest_page_table_destroy(&probe);
+    assert(source_probe.releases == 0);
 
     for (size_t fail_at = 0; fail_at < clone_allocations; fail_at++) {
         unsigned live_before = guest_page_backing_test_live_count();
@@ -816,6 +865,13 @@ static void test_mixed_clone_failures(void) {
             assert(private_pages[index][0] == (byte_t) (0x80 + index));
         }
         guest_page_table_destroy(&failed);
+        file_view = resolve_view(&source, file_address);
+        assert(file_view.host_page == file_page &&
+                file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+                file_view.file_identity == file_identity &&
+                file_view.file_offset == file_offset &&
+                file_page[0] == 0x6b);
+        assert(source_probe.releases == 0);
 
         // 解除源映射后对象必须消失，否则失败路径遗留了一份共享引用。
         assert(guest_page_table_unmap(&source, shared_range.first) ==
@@ -844,6 +900,13 @@ static void test_mixed_clone_failures(void) {
         assert(guest_page_backing_test_allocation_count() == fail_at + 1);
         assert(guest_page_backing_test_live_count() == live_before);
         guest_page_table_destroy(&failed);
+        file_view = resolve_view(&source, file_address);
+        assert(file_view.host_page == file_page &&
+                file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+                file_view.file_identity == file_identity &&
+                file_view.file_offset == file_offset &&
+                file_page[0] == 0x6b);
+        assert(source_probe.releases == 0);
 
         assert(guest_page_table_unmap(&source, shared_range.first) ==
                 GUEST_PAGE_TABLE_OK);
@@ -860,7 +923,20 @@ static void test_mixed_clone_failures(void) {
 
     guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_table lifetime_copy;
+    assert(guest_page_table_clone(&lifetime_copy, &source));
+    file_view = resolve_view(&lifetime_copy, file_address);
+    assert(file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            file_view.file_identity == file_identity &&
+            file_view.file_offset == file_offset);
     guest_page_table_destroy(&source);
+    assert(source_probe.releases == 0);
+    file_view = resolve_view(&lifetime_copy, file_address);
+    assert(file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            file_view.file_identity == file_identity &&
+            file_view.file_offset == file_offset);
+    guest_page_table_destroy(&lifetime_copy);
+    assert(source_probe.releases == 1);
     assert(guest_page_backing_test_live_count() == 0);
 }
 
@@ -873,8 +949,21 @@ static void test_independent_clone(void) {
     byte_t *top;
     byte_t *sibling_leaf;
     byte_t *sibling_level2;
+    byte_t *file_page;
+    const guest_addr_t file_address = GUEST_MEMORY_PAGE_SIZE;
+    const qword_t file_identity = UINT64_C(0x5a17e002);
+    const qword_t file_offset = UINT64_C(0x3c000);
+    struct file_source_probe source_probe = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            file_identity, &source_probe, release_file_source_probe);
+    assert(file_source != NULL);
     const guest_addr_t top_page = (UINT64_C(1) << 48) -
             GUEST_MEMORY_PAGE_SIZE;
+    assert(guest_page_table_map_file(&source, file_address,
+            GUEST_MEMORY_READ, file_source, file_offset,
+            &file_page) == GUEST_PAGE_TABLE_OK);
+    guest_file_source_release(file_source);
+    assert(source_probe.releases == 0);
     assert(guest_page_table_map(&source, HIGH_PAGE,
             GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, &first) ==
             GUEST_PAGE_TABLE_OK);
@@ -889,6 +978,7 @@ static void test_independent_clone(void) {
     assert(guest_page_table_map(&source, SIBLING_LEVEL2_PAGE,
             GUEST_MEMORY_READ, &sibling_level2) == GUEST_PAGE_TABLE_OK);
     for (size_t i = 0; i < GUEST_MEMORY_PAGE_SIZE; i++) {
+        file_page[i] = (byte_t) (i * 13 + 1);
         first[i] = (byte_t) (i * 17 + 3);
         second[i] = (byte_t) (i * 29 + 5);
         third[i] = (byte_t) (i * 31 + 7);
@@ -909,7 +999,7 @@ static void test_independent_clone(void) {
     size_t backing_clone_allocations =
             guest_page_backing_test_allocation_count();
     assert(clone_allocations > 4);
-    assert(backing_clone_allocations == 6);
+    assert(backing_clone_allocations == 7);
     assert(copy.address_space.address_bits ==
             source.address_space.address_bits);
     assert(copy.address_space.generation ==
@@ -932,11 +1022,20 @@ static void test_independent_clone(void) {
             SIBLING_LEAF_PAGE, GUEST_MEMORY_READ);
     byte_t *sibling_level2_copy = lookup_page(&copy,
             SIBLING_LEVEL2_PAGE, GUEST_MEMORY_READ);
-    assert(first_copy != first && second_copy != second &&
+    byte_t *file_page_copy = lookup_page(&copy,
+            file_address, GUEST_MEMORY_READ);
+    struct guest_page_view file_view = resolve_view(&copy, file_address);
+    assert(file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            file_view.file_identity == file_identity &&
+            file_view.file_offset == file_offset);
+    assert(file_page_copy != file_page && first_copy != first &&
+            second_copy != second &&
             third_copy != third && top_copy != top &&
             sibling_leaf_copy != sibling_leaf &&
             sibling_level2_copy != sibling_level2);
-    assert(memcmp(first_copy, first, GUEST_MEMORY_PAGE_SIZE) == 0 &&
+    assert(memcmp(file_page_copy, file_page,
+                    GUEST_MEMORY_PAGE_SIZE) == 0 &&
+            memcmp(first_copy, first, GUEST_MEMORY_PAGE_SIZE) == 0 &&
             memcmp(second_copy, second, GUEST_MEMORY_PAGE_SIZE) == 0 &&
             memcmp(third_copy, third, GUEST_MEMORY_PAGE_SIZE) == 0 &&
             memcmp(top_copy, top, GUEST_MEMORY_PAGE_SIZE) == 0 &&
@@ -966,6 +1065,12 @@ static void test_independent_clone(void) {
         assert(lookup_page(&source, SIBLING_LEVEL2_PAGE,
                 GUEST_MEMORY_READ) == sibling_level2);
         guest_page_table_destroy(&failed);
+        file_view = resolve_view(&source, file_address);
+        assert(file_view.host_page == file_page &&
+                file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+                file_view.file_identity == file_identity &&
+                file_view.file_offset == file_offset);
+        assert(source_probe.releases == 0);
         assert(guest_page_backing_test_live_count() == live_before);
     }
     guest_page_table_test_fail_clone_allocation_at(SIZE_MAX);
@@ -984,6 +1089,12 @@ static void test_independent_clone(void) {
         assert(lookup_page(&source, SIBLING_LEVEL2_PAGE,
                 GUEST_MEMORY_READ) == sibling_level2);
         guest_page_table_destroy(&failed);
+        file_view = resolve_view(&source, file_address);
+        assert(file_view.host_page == file_page &&
+                file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+                file_view.file_identity == file_identity &&
+                file_view.file_offset == file_offset);
+        assert(source_probe.releases == 0);
         assert(guest_page_backing_test_live_count() == live_before);
     }
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
@@ -1025,8 +1136,14 @@ static void test_independent_clone(void) {
     assert(!guest_page_table_clone(NULL, &source));
     assert(!guest_page_table_clone(&rejected, NULL));
 
-    guest_page_table_destroy(&copy);
     guest_page_table_destroy(&source);
+    assert(source_probe.releases == 0);
+    file_view = resolve_view(&copy, file_address);
+    assert(file_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            file_view.file_identity == file_identity &&
+            file_view.file_offset == file_offset);
+    guest_page_table_destroy(&copy);
+    assert(source_probe.releases == 1);
 }
 
 int main(void) {

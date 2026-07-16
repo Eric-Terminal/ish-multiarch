@@ -20,6 +20,8 @@ struct statbuf {
     dword_t mtime_nsec;
     dword_t ctime;
     dword_t ctime_nsec;
+    // provider 内部的无损设备身份；只用于 inode 去重，不导出 guest ABI。
+    qword_t inode_device;
 };
 
 struct oldstat {

@@ -21,6 +21,7 @@ struct aarch64_elf64_load_result {
 
 enum aarch64_elf64_load_error aarch64_elf64_load(
         const struct aarch64_elf64_image *image,
+        struct guest_file_source *file_source,
         struct guest_page_table *table, guest_addr_t load_bias,
         struct aarch64_elf64_load_result *result);
 

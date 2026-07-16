@@ -398,10 +398,20 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
     struct guest_tlb_mapping_snapshot resolved_snapshot;
     if (snapshot != NULL) {
         assert(chunk_count == 1);
+        struct guest_page_view view;
+        enum guest_memory_fault_kind snapshot_fault =
+                guest_address_space_resolve_page(tlb->address_space,
+                        address & ~GUEST_MEMORY_PAGE_MASK,
+                        GUEST_MEMORY_WRITE, &view);
+        assert(snapshot_fault == GUEST_MEMORY_FAULT_NONE);
+        qword_t page_offset = address & GUEST_MEMORY_PAGE_MASK;
         resolved_snapshot = (struct guest_tlb_mapping_snapshot) {
-            .shared_identity = chunks[0].sync == NULL ? 0 :
-                    guest_page_sync_identity(chunks[0].sync),
-            .page_offset = chunks[0].page_offset,
+            .shared_identity = view.sync == NULL ? 0 :
+                    guest_page_sync_identity(view.sync),
+            .file_identity = view.file_identity,
+            .page_offset = page_offset,
+            .file_offset = view.file_identity == 0 ? 0 :
+                    view.file_offset + page_offset,
         };
     }
 

@@ -37,6 +37,7 @@
 #define ENTRY_ADDRESS (TEXT_BASE + ENTRY_OFFSET)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define TEST_FILE_IDENTITY UINT64_C(0x1000000000000007)
 
 struct runner_fixture {
     struct task task;
@@ -116,9 +117,14 @@ static struct aarch64_linux_process *make_process(
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE];
     for (byte_t index = 0; index < sizeof(random); index++)
         random[index] = index;
+    struct guest_file_source *file_source = guest_file_source_create(
+            TEST_FILE_IDENTITY, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -134,7 +140,10 @@ static struct aarch64_linux_process *make_process(
         .signals = use_kernel_services ?
                 &ish_aarch64_linux_signal_service : NULL,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static void init_fixture(struct runner_fixture *fixture) {

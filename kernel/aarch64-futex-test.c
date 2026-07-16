@@ -32,6 +32,7 @@
 #define PADZERO_BASE UINT64_C(0x710000)
 #define PIN_COW_BASE UINT64_C(0x720000)
 #define CAS_COW_BASE UINT64_C(0x730000)
+#define FILE_ALIAS_BASE UINT64_C(0x740000)
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
@@ -46,6 +47,8 @@
 #define SHORT_TIMEOUT (PRIVATE_BASE + UINT64_C(0xf20))
 #define UNMAPPED_ADDRESS UINT64_C(0x20000000)
 #define INVALID_ADDRESS (UINT64_C(1) << 48)
+#define TEST_FILE_IDENTITY UINT64_C(0x7a64000000000001)
+#define OTHER_FILE_IDENTITY UINT64_C(0x7a64000000000002)
 
 #define FUTEX_WAIT_ 0
 #define FUTEX_WAKE_ 1
@@ -206,10 +209,10 @@ static size_t make_image(byte_t file[IMAGE_SIZE],
     put_u64(file + 32, AARCH64_ELF64_HEADER_SIZE);
     put_u16(file + 52, AARCH64_ELF64_HEADER_SIZE);
     put_u16(file + 54, AARCH64_ELF64_PROGRAM_HEADER_SIZE);
-    put_u16(file + 56, 7);
+    put_u16(file + 56, 8);
 
     byte_t *headers = file + AARCH64_ELF64_HEADER_SIZE;
-    qword_t header_size = 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    qword_t header_size = 8 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
     put_program_header(headers, 6, 4,
             AARCH64_ELF64_HEADER_SIZE,
             TEXT_BASE + AARCH64_ELF64_HEADER_SIZE,
@@ -231,6 +234,9 @@ static size_t make_image(byte_t file[IMAGE_SIZE],
             GUEST_MEMORY_PAGE_SIZE);
     put_program_header(headers + 6 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
             1, 6, 0, CAS_COW_BASE, 4, 4,
+            GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 4, 0, FILE_ALIAS_BASE, IMAGE_SIZE, IMAGE_SIZE,
             GUEST_MEMORY_PAGE_SIZE);
     if (instruction_count >
             (IMAGE_SIZE - ENTRY_OFFSET) / sizeof(*program))
@@ -286,7 +292,7 @@ static struct task *make_parent(struct tgroup *group) {
 static struct aarch64_linux_process *make_process(struct task *task,
         size_t *setup_steps, size_t *text_cow_steps,
         size_t *cas_cow_protect_steps,
-        size_t *pin_cow_protect_steps) {
+        size_t *pin_cow_protect_steps, qword_t file_identity) {
     byte_t file[IMAGE_SIZE];
     size_t total_steps = make_image(file, setup_steps,
             text_cow_steps, cas_cow_protect_steps);
@@ -295,9 +301,14 @@ static struct aarch64_linux_process *make_process(struct task *task,
             *cas_cow_protect_steps;
     const char *arguments[] = {"futex-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            file_identity, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -311,7 +322,10 @@ static struct aarch64_linux_process *make_process(struct task *task,
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool init_fixture(struct futex_fixture *fixture) {
@@ -324,7 +338,8 @@ static bool init_fixture(struct futex_fixture *fixture) {
             make_process(fixture->parent, &setup_steps,
                     &fixture->text_cow_steps,
                     &fixture->cas_cow_protect_steps,
-                    &fixture->pin_cow_protect_steps);
+                    &fixture->pin_cow_protect_steps,
+                    TEST_FILE_IDENTITY);
     if (process == NULL)
         return false;
     for (size_t step = 0; step < setup_steps; step++) {
@@ -402,6 +417,27 @@ static struct task *make_related_task(struct task *parent,
         process = aarch64_linux_process_fork(
                 parent->aarch64_process, &config, NULL);
     }
+    if (process == NULL || !task_attach_aarch64_process(task, process)) {
+        aarch64_linux_process_destroy(process);
+        task_abort_create(task);
+        return NULL;
+    }
+    return task;
+}
+
+static struct task *make_independent_task(
+        struct task *parent, qword_t file_identity) {
+    struct task *task = task_create_(parent);
+    if (task == NULL)
+        return NULL;
+    size_t setup_steps;
+    size_t text_cow_steps;
+    size_t cas_cow_protect_steps;
+    size_t pin_cow_protect_steps;
+    struct aarch64_linux_process *process = make_process(
+            task, &setup_steps, &text_cow_steps,
+            &cas_cow_protect_steps, &pin_cow_protect_steps,
+            file_identity);
     if (process == NULL || !task_attach_aarch64_process(task, process)) {
         aarch64_linux_process_destroy(process);
         task_abort_create(task);
@@ -759,6 +795,7 @@ static bool test_read_only_shared_key_permissions(void) {
         .shared_identity = UINT64_MAX,
         .file_identity = UINT64_MAX,
         .page_offset = UINT64_MAX,
+        .file_offset = UINT64_MAX,
     };
     TEST_CHECK(aarch64_linux_process_compare_exchange_futex_u32(
                     fixture.parent->aarch64_process,
@@ -768,6 +805,8 @@ static bool test_read_only_shared_key_permissions(void) {
             cas_observed == UINT32_C(0x464c457f) &&
             cas_snapshot.shared_identity == 0 &&
             cas_snapshot.file_identity == 0 &&
+            cas_snapshot.page_offset == 0 &&
+            cas_snapshot.file_offset == 0 &&
             run_delayed_steps(
                     &fixture, &fixture.cas_cow_protect_steps),
             "原子写比较不匹配仍完成私有文件页 COW 后再降权");
@@ -809,6 +848,69 @@ static bool test_read_only_shared_key_permissions(void) {
             fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
             "特殊信号跳板不能伪装成文件后备共享键");
 
+    destroy_fixture(&fixture);
+    return true;
+}
+
+static bool test_independent_file_key_domains(void) {
+    struct futex_fixture fixture;
+    TEST_CHECK(init_fixture(&fixture),
+            "建立独立文件来源 futex 键测试夹具");
+    struct task *same_file = make_independent_task(
+            fixture.parent, TEST_FILE_IDENTITY);
+    struct task *other_file = make_independent_task(
+            fixture.parent, OTHER_FILE_IDENTITY);
+    TEST_CHECK(same_file != NULL && other_file != NULL,
+            "建立同文件与异文件的独立 AArch64 进程");
+
+    dword_t parent_value;
+    dword_t same_value;
+    dword_t other_value;
+    struct guest_linux_user_fault fault = {0};
+    TEST_CHECK(aarch64_linux_process_read_u32(
+                    fixture.parent->aarch64_process,
+                    TEXT_BASE, &parent_value, &fault) &&
+            aarch64_linux_process_read_u32(
+                    same_file->aarch64_process,
+                    TEXT_BASE, &same_value, &fault) &&
+            aarch64_linux_process_read_u32(
+                    other_file->aarch64_process,
+                    TEXT_BASE, &other_value, &fault) &&
+            parent_value == UINT32_C(0x464c457f) &&
+            same_value == parent_value && other_value == parent_value,
+            "三个独立映像观察相同的只读文件字节");
+
+    struct waiter same_waiter;
+    TEST_CHECK(start_waiter(&same_waiter, same_file,
+                    TEXT_BASE, FUTEX_WAIT_, same_value, 0) &&
+            wait_until_queued(same_file, TEXT_BASE, 0, 1),
+            "同文件独立进程在原虚拟地址登记等待");
+    TEST_CHECK(call_futex(fixture.parent,
+                    FILE_ALIAS_BASE + sizeof(dword_t),
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            completed_waiters(&same_waiter, 1) == 0,
+            "同文件不同绝对偏移不得串键");
+    TEST_CHECK(call_futex(fixture.parent, FILE_ALIAS_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 1 &&
+            join_waiter(&same_waiter, 0),
+            "同文件同偏移可跨来源对象、进程与虚拟地址唤醒");
+
+    struct waiter other_waiter;
+    TEST_CHECK(start_waiter(&other_waiter, other_file,
+                    TEXT_BASE, FUTEX_WAIT_, other_value, 0) &&
+            wait_until_queued(other_file, TEXT_BASE, 0, 1),
+            "不同文件身份的独立进程登记等待");
+    TEST_CHECK(call_futex(fixture.parent, FILE_ALIAS_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            completed_waiters(&other_waiter, 1) == 0,
+            "不同文件身份的相同偏移不得误唤醒");
+    TEST_CHECK(call_futex(other_file, TEXT_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 1 &&
+            join_waiter(&other_waiter, 0),
+            "不同文件身份仍能在自身键域完成唤醒");
+
+    destroy_related_task(fixture.parent, other_file);
+    destroy_related_task(fixture.parent, same_file);
     destroy_fixture(&fixture);
     return true;
 }
@@ -1200,6 +1302,8 @@ int main(void) {
                 test_edges_and_thread_private},
         {"AArch64 futex 只读共享键权限",
                 test_read_only_shared_key_permissions},
+        {"AArch64 futex 独立文件键域",
+                test_independent_file_key_domains},
         {"AArch64 futex fork 键域", test_fork_key_domains},
         {"AArch64 futex REQUEUE 语义", test_requeue_semantics},
         {"AArch64 futex REQUEUE 失败原子性", test_requeue_failures},

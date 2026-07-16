@@ -50,6 +50,19 @@ struct guest_memory_fault {
 };
 
 struct guest_page_sync;
+struct guest_file_source;
+
+/*
+ * 文件来源身份由上层文件系统提供，必须在当前 host 生命周期内非零且不复用。
+ * create 成功后接管 opaque；最后一份映射引用释放时调用 release_opaque。
+ * opaque 与 release_opaque 必须同时为空或同时非空。
+ */
+struct guest_file_source *guest_file_source_create(qword_t identity,
+        void *opaque, void (*release_opaque)(void *opaque));
+struct guest_file_source *guest_file_source_retain(
+        struct guest_file_source *source);
+void guest_file_source_release(struct guest_file_source *source);
+qword_t guest_file_source_identity(const struct guest_file_source *source);
 
 struct guest_page_sync_ops {
     // track/matches/written 只能在对应同步域写锁内调用。
@@ -79,6 +92,9 @@ struct guest_page_view {
     enum guest_page_origin origin;
     // 页表后备身份在当前及历史对象间不复用；私有页也必须提供非零值。
     qword_t backing_identity;
+    // 仅 FILE 来源为非零；offset 是该 guest 页首字节对应的文件字节位置。
+    qword_t file_identity;
+    qword_t file_offset;
     // NULL 表示页面只受所属 address space 的事务锁保护。非空借用指针
     // 可以缓存，但只能在持有 address space 锁且映射世代仍匹配时使用。
     const struct guest_page_sync *sync;

@@ -62,6 +62,8 @@ struct aarch64_linux_executable_info {
 struct aarch64_linux_process_config {
     const void *elf_data;
     size_t elf_size;
+    // create 调用期间借用；成功映射会按页保留来源引用。
+    struct guest_file_source *elf_file_source;
     qword_t load_bias;
     // 以下 guest 布局字段均按 4 KiB 页对齐；brk_limit 是可请求的最大 break。
     qword_t stack_top;
@@ -106,6 +108,7 @@ struct aarch64_linux_process_thread_config {
 struct aarch64_linux_interpreter_image {
     const void *data;
     size_t size;
+    struct guest_file_source *file_source;
     qword_t load_bias;
 };
 
@@ -132,9 +135,12 @@ struct aarch64_linux_process_result {
 struct aarch64_linux_futex_word_snapshot {
     // 0 表示由调用方按 PRIVATE 或 mm-shared 虚拟域建键；非零值标识同步域。
     qword_t shared_identity;
-    // 缺少 inode 身份时，以独立键域中的页后备身份避免与匿名 COW 键碰撞。
+    // FILE 来源使用稳定文件对象身份；其他来源保持 0。
     qword_t file_identity;
+    // 始终是 host_page 内偏移；读取 futex 字时只能使用该字段。
     qword_t page_offset;
+    // FILE 来源是文件内绝对字节偏移；其他来源保持 0。
+    qword_t file_offset;
 };
 
 enum aarch64_linux_futex_waitv_prepare_result {
@@ -318,6 +324,17 @@ _Static_assert(sizeof(((struct aarch64_linux_process_config *) 0)->
 _Static_assert(sizeof(((struct aarch64_linux_interpreter_image *) 0)->
                 load_bias) == 8,
         "AArch64 解释器 load bias 必须保持 64 位");
+_Static_assert(offsetof(struct aarch64_linux_futex_word_snapshot,
+                shared_identity) == 0 &&
+        offsetof(struct aarch64_linux_futex_word_snapshot,
+                file_identity) == 8 &&
+        offsetof(struct aarch64_linux_futex_word_snapshot,
+                page_offset) == 16 &&
+        offsetof(struct aarch64_linux_futex_word_snapshot,
+                file_offset) == 24 &&
+        sizeof(struct aarch64_linux_futex_word_snapshot) == 32 &&
+        _Alignof(struct aarch64_linux_futex_word_snapshot) == 8,
+        "AArch64 futex 映射快照必须保持四个 64 位字段");
 _Static_assert(offsetof(struct aarch64_linux_process_result, status) == 0 &&
         offsetof(struct aarch64_linux_process_result, signal) == 4 &&
         offsetof(struct aarch64_linux_process_result, exit_status) == 8 &&

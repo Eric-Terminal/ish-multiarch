@@ -43,7 +43,9 @@ enum guest_tlb_compare_exchange_result {
 struct guest_tlb_mapping_snapshot {
     // 0 表示地址空间私有页；非零值标识共享物理页同步域。
     qword_t shared_identity;
+    qword_t file_identity;
     qword_t page_offset;
+    qword_t file_offset;
 };
 
 _Static_assert(sizeof(guest_addr_t) == 8,

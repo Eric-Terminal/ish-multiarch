@@ -17,6 +17,7 @@
 #include "fs/real.h"
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
+#include "guest/memory/address-space.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
@@ -47,6 +48,8 @@
 #define EXEC_ENVP_OFFSET UINT64_C(0x1a0)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define BLOCKING_IMAGE_FILE_IDENTITY UINT64_C(0x45584543424c4f43)
+#define EXECVE_IMAGE_FILE_IDENTITY UINT64_C(0x455845435645494d)
 
 #define CUSTOM_HANDLER UINT64_C(0x0000000000400200)
 #define CUSTOM_RESTORER UINT64_C(0x0000000000400300)
@@ -418,11 +421,18 @@ static struct aarch64_linux_process *make_old_process(
         make_execve_image(image);
     else
         make_blocking_image(image);
+    struct guest_file_source *file_source = guest_file_source_create(
+            execve_caller ? EXECVE_IMAGE_FILE_IDENTITY :
+                    BLOCKING_IMAGE_FILE_IDENTITY,
+            NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     static const char *arguments[] = {"old-aarch64"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
     const struct aarch64_linux_process_config config = {
         .elf_data = image,
         .elf_size = IMAGE_SIZE,
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -436,7 +446,10 @@ static struct aarch64_linux_process *make_old_process(
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool prepare_shared_files(struct task *observer,

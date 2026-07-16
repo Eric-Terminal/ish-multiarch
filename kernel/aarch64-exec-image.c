@@ -1,10 +1,13 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "fs/inode.h"
 #include "fs/path.h"
 #include "guest/aarch64/linux-process.h"
+#include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec-image.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
@@ -12,12 +15,19 @@
 
 #define AARCH64_EXEC_IMAGE_READ_CHUNK (1024 * 1024)
 
+static void release_snapshot_fd(void *opaque) {
+    fd_close(opaque);
+}
+
 static int snapshot_fd(struct fd *fd,
         struct ish_aarch64_exec_image *image) {
     struct statbuf stat;
     int error = fd->mount->fs->fstat(fd, &stat);
     if (error < 0)
         return error;
+    if (!S_ISREG(fd->type) || fd->inode == NULL ||
+            fd->inode->futex_sequence == 0)
+        return _ENOEXEC;
 
     size_t size = (size_t) stat.size;
     if ((qword_t) size != stat.size || stat.size > INT64_MAX)
@@ -25,12 +35,8 @@ static int snapshot_fd(struct fd *fd,
     byte_t *data = malloc(size == 0 ? 1 : size);
     if (data == NULL)
         return _ENOMEM;
-    if (size == 0) {
-        *image = (struct ish_aarch64_exec_image) {
-            .data = data,
-        };
-        return 0;
-    }
+    if (size == 0)
+        goto out_source;
 
     bool positioned = fd->ops->pread != NULL;
     off_t_ saved_offset = 0;
@@ -87,9 +93,19 @@ out_unlock:
         unlock(&fd->lock);
     if (error < 0)
         goto out_free;
+out_source:;
+    struct fd *source_fd = fd_retain(fd);
+    struct guest_file_source *file_source = guest_file_source_create(
+            fd->inode->futex_sequence, source_fd, release_snapshot_fd);
+    if (file_source == NULL) {
+        fd_close(source_fd);
+        error = _ENOMEM;
+        goto out_free;
+    }
     *image = (struct ish_aarch64_exec_image) {
         .data = data,
         .size = size,
+        .file_source = file_source,
     };
     return 0;
 
@@ -102,6 +118,8 @@ void ish_aarch64_exec_images_destroy(
         struct ish_aarch64_exec_images *images) {
     if (images == NULL)
         return;
+    guest_file_source_release(images->main.file_source);
+    guest_file_source_release(images->interpreter.file_source);
     free(images->main.data);
     free(images->interpreter.data);
     *images = (struct ish_aarch64_exec_images) {0};

@@ -6,9 +6,11 @@
 
 #include "emu/interrupt.h"
 #include "fs/fd.h"
+#include "fs/inode.h"
 #include "fs/path.h"
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
+#include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-exec-image.h"
 #include "kernel/aarch64-signal-service.h"
@@ -38,6 +40,13 @@
 #define INTERPRETER_PATH "/lib/ld-musl-aarch64.so.1"
 #define RESOLVED_INTERPRETER TARGET_ROOT INTERPRETER_PATH
 #define RESOLVED_MAIN TARGET_ROOT "/bin/test"
+#define TEST_DIRECTORY_DEVICE 1
+#define TEST_ROOT_INODE 1
+#define TEST_PWD_INODE 2
+#define TEST_MAIN_DEVICE 11
+#define TEST_MAIN_INODE 101
+#define TEST_INTERPRETER_DEVICE 12
+#define TEST_INTERPRETER_INODE 202
 #define AARCH64_MOV_X0_42 UINT32_C(0xd2800540)
 #define AARCH64_MOV_X8_EXIT UINT32_C(0xd2800ba8)
 #define AARCH64_SVC_0 UINT32_C(0xd4000001)
@@ -73,6 +82,8 @@ struct file_state {
     qword_t stat_size;
     size_t read_limit;
     int read_error;
+    dev_t device;
+    ino_t inode;
     bool directory;
     bool interpreter;
     bool owned;
@@ -369,6 +380,10 @@ static struct fd *probe_open(struct mount *mount,
                 probe->interpreter_stat_size : probe->main_stat_size,
         .read_limit = probe->read_limit,
         .read_error = interpreter ? probe->interpreter_read_error : 0,
+        .device = interpreter ?
+                TEST_INTERPRETER_DEVICE : TEST_MAIN_DEVICE,
+        .inode = interpreter ?
+                TEST_INTERPRETER_INODE : TEST_MAIN_INODE,
         .interpreter = interpreter,
         .owned = true,
     };
@@ -379,15 +394,19 @@ static struct fd *probe_open(struct mount *mount,
 static int probe_stat(struct mount *mount,
         const char *path, struct statbuf *stat) {
     struct fs_probe *probe = mount->data;
+    bool interpreter = strcmp(path, RESOLVED_INTERPRETER) == 0;
+    bool main = strcmp(path, RESOLVED_MAIN) == 0;
     *stat = (struct statbuf) {
-        .inode = 1,
-        .mode = strcmp(path, RESOLVED_INTERPRETER) == 0 ?
+        .dev = interpreter ? TEST_INTERPRETER_DEVICE :
+                (main ? TEST_MAIN_DEVICE : TEST_DIRECTORY_DEVICE),
+        .inode = interpreter ? TEST_INTERPRETER_INODE :
+                (main ? TEST_MAIN_INODE : TEST_ROOT_INODE),
+        .mode = interpreter ?
                 probe->interpreter_mode :
-                (strcmp(path, RESOLVED_MAIN) == 0 ?
-                probe->main_mode : S_IFDIR | 0711),
-        .uid = strcmp(path, RESOLVED_INTERPRETER) == 0 ?
+                (main ? probe->main_mode : S_IFDIR | 0711),
+        .uid = interpreter ?
                 probe->interpreter_uid : probe->main_uid,
-        .gid = strcmp(path, RESOLVED_INTERPRETER) == 0 ?
+        .gid = interpreter ?
                 probe->interpreter_gid : probe->main_gid,
     };
     return 0;
@@ -396,7 +415,8 @@ static int probe_stat(struct mount *mount,
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct file_state *state = fd->data;
     *stat = (struct statbuf) {
-        .inode = state->interpreter ? 2 : 1,
+        .dev = (qword_t) state->device,
+        .inode = (qword_t) state->inode,
         .mode = state->directory ? S_IFDIR | 0711 :
                 (state->interpreter ? state->probe->interpreter_mode :
                 (state->owned ? state->probe->main_mode :
@@ -432,6 +452,7 @@ static struct fd *make_fd(struct mount *mount,
     fd->type = state->directory ? S_IFDIR : S_IFREG;
     fd->mount = mount;
     mount_retain(mount);
+    fd->inode = inode_get(mount, state->device, state->inode);
     return fd;
 }
 
@@ -450,11 +471,15 @@ static bool init_fixture(struct task_fixture *fixture,
     fixture->root_state = (struct file_state) {
         .probe = probe,
         .path = TARGET_ROOT,
+        .device = TEST_DIRECTORY_DEVICE,
+        .inode = TEST_ROOT_INODE,
         .directory = true,
     };
     fixture->pwd_state = (struct file_state) {
         .probe = probe,
         .path = TARGET_PWD,
+        .device = TEST_DIRECTORY_DEVICE,
+        .inode = TEST_PWD_INODE,
         .directory = true,
     };
     fixture->root = make_fd(fixture->mount,
@@ -532,6 +557,8 @@ static struct fd *make_main_fd(struct task_fixture *fixture,
         .size = size,
         .stat_size = stat_size,
         .read_limit = 13,
+        .device = TEST_MAIN_DEVICE,
+        .inode = TEST_MAIN_INODE,
     };
     return make_fd(fixture->mount, state, &stream_ops);
 }
@@ -539,8 +566,10 @@ static struct fd *make_main_fd(struct task_fixture *fixture,
 static bool images_are_empty(
         const struct ish_aarch64_exec_images *images) {
     return images->main.data == NULL && images->main.size == 0 &&
+            images->main.file_source == NULL &&
             images->interpreter.data == NULL &&
-            images->interpreter.size == 0;
+            images->interpreter.size == 0 &&
+            images->interpreter.file_source == NULL;
 }
 
 static bool runs_to_exit(
@@ -591,8 +620,18 @@ int main(void) {
             "顺序短读恢复主 fd offset 且 pread 短读循环到末尾");
     CHECK(strcmp(probe.opened_path, RESOLVED_INTERPRETER) == 0,
             "绝对 PT_INTERP 路径受目标 task root 约束");
-    CHECK(probe.opens == 1 && probe.closes == 1,
-            "解释器 fd 在成功快照后立即关闭");
+    CHECK(probe.opens == 1 && probe.closes == 0,
+            "解释器来源保留底层 fd 直到最后一份引用释放");
+    CHECK(images.main.file_source != NULL &&
+            images.interpreter.file_source != NULL,
+            "主程序与解释器快照都保留文件来源");
+    qword_t main_file_identity =
+            guest_file_source_identity(images.main.file_source);
+    qword_t interpreter_file_identity =
+            guest_file_source_identity(images.interpreter.file_source);
+    CHECK(main_file_identity != 0 && interpreter_file_identity != 0 &&
+            main_file_identity != interpreter_file_identity,
+            "主程序与解释器使用不同的非零文件来源身份");
     memset(main_file, 0xa5, sizeof(main_file));
     memset(interpreter_file, 0x5a, sizeof(interpreter_file));
     CHECK(images.main.size == sizeof(expected_main) &&
@@ -602,8 +641,14 @@ int main(void) {
             memcmp(images.interpreter.data, expected_interpreter,
                     sizeof(expected_interpreter)) == 0,
             "快照不借用主程序或解释器源缓冲区");
+    CHECK(guest_file_source_identity(images.main.file_source) ==
+                    main_file_identity &&
+            guest_file_source_identity(images.interpreter.file_source) ==
+                    interpreter_file_identity,
+            "文件来源身份在快照生命周期内保持稳定");
     ish_aarch64_exec_images_destroy(&images);
-    CHECK(images_are_empty(&images), "销毁后清零两份快照描述符");
+    CHECK(images_are_empty(&images) && probe.closes == 1,
+            "销毁后清零快照并关闭解释器来源持有的 fd");
     fd_close(main_fd);
     make_main_image(main_file, false);
     unsigned opens_before = probe.opens;

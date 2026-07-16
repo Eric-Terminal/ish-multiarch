@@ -29,6 +29,7 @@
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define TEST_FILE_IDENTITY UINT64_C(0x1000000000000009)
 #define ARGUMENT_ADDRESS UINT64_C(0x0000400012340000)
 #define ARGUMENT_MEMORY_SIZE 256
 #define CLONE3_SYSCALL_NUMBER UINT64_C(435)
@@ -193,9 +194,14 @@ static struct aarch64_linux_process *make_process(struct task *task) {
     make_image(file);
     const char *arguments[] = {"clone3-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
+    struct guest_file_source *file_source = guest_file_source_create(
+            TEST_FILE_IDENTITY, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -209,7 +215,10 @@ static struct aarch64_linux_process *make_process(struct task *task) {
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool init_fixture(struct clone3_fixture *fixture) {

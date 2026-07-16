@@ -18,6 +18,8 @@
 #define MAIN_BRK_LIMIT (MAIN_LOAD_BIAS + UINT64_C(0x100000))
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define MAIN_FILE_IDENTITY UINT64_C(0x1000000000000003)
+#define INTERPRETER_FILE_IDENTITY UINT64_C(0x1000000000000004)
 
 #define AARCH64_MOV_X0_42 UINT32_C(0xd2800540)
 #define AARCH64_MOV_X8_WRITE UINT32_C(0xd2800808)
@@ -262,6 +264,8 @@ static void init_fixture(struct dynamic_fixture *fixture,
     fixture->config = (struct aarch64_linux_process_config) {
         .elf_data = fixture->main_file,
         .elf_size = sizeof(fixture->main_file),
+        .elf_file_source = guest_file_source_create(
+                MAIN_FILE_IDENTITY, NULL, NULL),
         .load_bias = MAIN_LOAD_BIAS,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
@@ -280,8 +284,39 @@ static void init_fixture(struct dynamic_fixture *fixture,
     fixture->interpreter = (struct aarch64_linux_interpreter_image) {
         .data = fixture->interpreter_file,
         .size = sizeof(fixture->interpreter_file),
+        .file_source = guest_file_source_create(
+                INTERPRETER_FILE_IDENTITY, NULL, NULL),
         .load_bias = INTERPRETER_LOAD_BIAS,
     };
+    assert(fixture->config.elf_file_source != NULL &&
+            fixture->interpreter.file_source != NULL);
+}
+
+static struct aarch64_linux_process *create_dynamic_process(
+        struct aarch64_linux_process_config *config,
+        struct aarch64_linux_interpreter_image *interpreter,
+        struct aarch64_linux_process_error *error) {
+    assert(config->elf_file_source != NULL &&
+            interpreter->file_source != NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create_with_interpreter(
+                    config, interpreter, error);
+    guest_file_source_release(config->elf_file_source);
+    guest_file_source_release(interpreter->file_source);
+    config->elf_file_source = NULL;
+    interpreter->file_source = NULL;
+    return process;
+}
+
+static struct aarch64_linux_process *create_main_process(
+        struct aarch64_linux_process_config *config,
+        struct aarch64_linux_process_error *error) {
+    assert(config->elf_file_source != NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(config, error);
+    guest_file_source_release(config->elf_file_source);
+    config->elf_file_source = NULL;
+    return process;
 }
 
 static void run_dynamic_process(struct aarch64_linux_process *process,
@@ -312,16 +347,15 @@ static void run_dynamic_process(struct aarch64_linux_process *process,
 }
 
 static void assert_create_error(
-        const struct aarch64_linux_process_config *config,
-        const struct aarch64_linux_interpreter_image *interpreter,
+        struct aarch64_linux_process_config *config,
+        struct aarch64_linux_interpreter_image *interpreter,
         enum aarch64_linux_process_error_stage expected_stage,
         dword_t expected_detail) {
     struct aarch64_linux_process_error error = {
         .stage = UINT32_MAX,
         .detail = UINT32_MAX,
     };
-    assert(aarch64_linux_process_create_with_interpreter(
-            config, interpreter, &error) == NULL);
+    assert(create_dynamic_process(config, interpreter, &error) == NULL);
     assert(error.stage == (dword_t) expected_stage);
     assert(error.detail == expected_detail);
 }
@@ -334,7 +368,7 @@ static void test_dynamic_run_and_ownership(void) {
         .detail = UINT32_MAX,
     };
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create_with_interpreter(
+            create_dynamic_process(
                     &fixture.config, &fixture.interpreter, &error);
     assert(process != NULL);
     assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_NONE &&
@@ -364,7 +398,7 @@ static void test_fixed_main_with_pie_interpreter(void) {
     fixture.probe.expected_main_phdr =
             FIXED_MAIN_BASE + AARCH64_ELF64_HEADER_SIZE;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create_with_interpreter(
+            create_dynamic_process(
                     &fixture.config, &fixture.interpreter, NULL);
     assert(process != NULL);
     run_dynamic_process(process, &fixture.probe);
@@ -375,8 +409,9 @@ static void test_interpreter_configuration_errors(void) {
     struct dynamic_fixture fixture;
     init_fixture(&fixture, true, false);
     struct aarch64_linux_process_error error;
-    assert(aarch64_linux_process_create(
-            &fixture.config, &error) == NULL);
+    assert(create_main_process(&fixture.config, &error) == NULL);
+    guest_file_source_release(fixture.interpreter.file_source);
+    fixture.interpreter.file_source = NULL;
     assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_INTERPRETER);
     assert(error.detail == AARCH64_LINUX_INTERPRETER_CONFIG_REQUIRED);
 
@@ -388,11 +423,14 @@ static void test_interpreter_configuration_errors(void) {
     init_fixture(&fixture, true, false);
     struct aarch64_linux_interpreter_image invalid =
             fixture.interpreter;
+    fixture.interpreter.file_source = NULL;
     invalid.data = NULL;
     assert_create_error(&fixture.config, &invalid,
             AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
             AARCH64_LINUX_INTERPRETER_CONFIG_INVALID);
+    init_fixture(&fixture, true, false);
     invalid = fixture.interpreter;
+    fixture.interpreter.file_source = NULL;
     invalid.size = 0;
     assert_create_error(&fixture.config, &invalid,
             AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
@@ -406,7 +444,7 @@ static void test_nested_interpreter_is_not_followed(void) {
     put_u64(fixture.interpreter_file + AARCH64_ELF64_HEADER_SIZE +
             AARCH64_ELF64_PROGRAM_HEADER_SIZE + 32, 0);
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create_with_interpreter(
+            create_dynamic_process(
                     &fixture.config, &fixture.interpreter, NULL);
     assert(process != NULL);
     run_dynamic_process(process, &fixture.probe);
@@ -463,7 +501,7 @@ static void test_interpreter_adjacent_to_main_brk_reservation(void) {
     fixture.interpreter.load_bias = MAIN_BRK_LIMIT;
     fixture.probe.expected_interpreter_base = MAIN_BRK_LIMIT;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create_with_interpreter(
+            create_dynamic_process(
                     &fixture.config, &fixture.interpreter, NULL);
     assert(process != NULL);
     run_dynamic_process(process, &fixture.probe);
@@ -476,7 +514,7 @@ static void test_empty_main_brk_reservation(void) {
     fixture.config.brk_limit =
             MAIN_LOAD_BIAS + GUEST_MEMORY_PAGE_SIZE;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create_with_interpreter(
+            create_dynamic_process(
                     &fixture.config, &fixture.interpreter, NULL);
     assert(process != NULL);
     run_dynamic_process(process, &fixture.probe);

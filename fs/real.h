@@ -6,6 +6,7 @@
 extern const struct fd_ops realfs_fdops;
 extern const struct fs_ops realfs;
 
+qword_t realfs_inode_device(dev_t device);
 struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mode);
 
 ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize);

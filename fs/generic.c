@@ -61,13 +61,14 @@ static struct fd *generic_openat_task_access(struct task *task,
     fd->mount = mount;
 
     lock(&inodes_lock); // TODO: don't do this
-    struct statbuf stat;
+    struct statbuf stat = {};
     err = fd->mount->fs->fstat(fd, &stat);
     if (err < 0) {
         unlock(&inodes_lock);
         goto error;
     }
-    fd->inode = inode_get_unlocked(mount, stat.inode);
+    fd->inode = inode_get_unlocked(
+            mount, stat.inode_device, stat.inode);
     unlock(&inodes_lock);
     fd->type = stat.mode & S_IFMT;
     fd->flags = flags;

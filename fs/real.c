@@ -63,6 +63,12 @@ static int open_flags_fake_from_real(int flags) {
 }
 #pragma clang diagnostic pop
 
+qword_t realfs_inode_device(dev_t device) {
+    _Static_assert(sizeof(dev_t) <= sizeof(qword_t),
+            "宿主设备身份必须能无损装入内部键");
+    return (qword_t) device;
+}
+
 struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mode) {
     int real_flags = open_flags_real_from_fake(flags);
     int fd_no = openat(mount->root_fd, fix_path(path), real_flags, mode);
@@ -97,6 +103,7 @@ static void copy_stat(struct statbuf *fake_stat, struct stat *real_stat) {
     fake_stat->atime = real_stat->st_atime;
     fake_stat->mtime = real_stat->st_mtime;
     fake_stat->ctime = real_stat->st_ctime;
+    fake_stat->inode_device = realfs_inode_device(real_stat->st_dev);
 #if __APPLE__
 #define TIMESPEC(x) st_##x##timespec
 #elif __linux__

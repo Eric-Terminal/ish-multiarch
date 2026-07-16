@@ -143,6 +143,7 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
     const struct aarch64_linux_process_config config = {
         .elf_data = images.main.data,
         .elf_size = images.main.size,
+        .elf_file_source = images.main.file_source,
         .load_bias = main_image.position_independent != 0 ?
                 AARCH64_EXEC_PIE_BIAS : 0,
         .stack_top = AARCH64_EXEC_STACK_TOP,
@@ -169,6 +170,7 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
     const struct aarch64_linux_interpreter_image interpreter = {
         .data = images.interpreter.data,
         .size = images.interpreter.size,
+        .file_source = images.interpreter.file_source,
         .load_bias = AARCH64_EXEC_INTERPRETER_BIAS,
     };
     struct aarch64_linux_process_error process_error;

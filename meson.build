@@ -259,6 +259,10 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        inode_identity_test = executable(
+            'inode_identity_test', 'fs/inode-test.c', dependencies: ish)
+        test('inode_identity', inode_identity_test)
+
         file_lock_test = executable(
             'file_lock_test', 'fs/lock-test.c', dependencies: ish)
         test('file_lock', file_lock_test)

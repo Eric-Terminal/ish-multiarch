@@ -18,6 +18,7 @@
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
 #define PIE_LOAD_BIAS UINT64_C(0x0000400000000000)
 #define SIGNAL_HANDLER (TEXT_BASE + UINT64_C(0x140))
+#define TEST_FILE_IDENTITY UINT64_C(0x1000000000000001)
 
 static const char process_interpreter_path[] =
         "/lib/ld-musl-aarch64.so.1";
@@ -288,6 +289,8 @@ static struct aarch64_linux_process_config make_config(
     return (struct aarch64_linux_process_config) {
         .elf_data = file,
         .elf_size = file_size,
+        .elf_file_source = guest_file_source_create(
+                TEST_FILE_IDENTITY, NULL, NULL),
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -300,6 +303,19 @@ static struct aarch64_linux_process_config make_config(
         .random = random,
         .tid = 1234,
     };
+}
+
+static struct aarch64_linux_process *create_process(
+        struct aarch64_linux_process_config *config,
+        struct aarch64_linux_process_error *error) {
+    if (config == NULL)
+        return aarch64_linux_process_create(NULL, error);
+    assert(config->elf_file_source != NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(config, error);
+    guest_file_source_release(config->elf_file_source);
+    config->elf_file_source = NULL;
+    return process;
 }
 
 static void make_default_inputs(
@@ -360,7 +376,7 @@ static void test_load_run_and_ownership(void) {
         .detail = UINT32_MAX,
     };
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, &error);
+            create_process(&config, &error);
     assert(process != NULL);
     assert(error.stage == AARCH64_LINUX_PROCESS_ERROR_NONE &&
             error.detail == 0);
@@ -437,7 +453,7 @@ static void test_static_pie(void) {
     };
     config.syscalls = &syscalls;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
     unsigned steps = 0;
     struct aarch64_linux_process_result result;
@@ -461,20 +477,20 @@ static void assert_fresh_create_succeeds(
             array_size(arguments), environment,
             array_size(environment), random);
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
     aarch64_linux_process_destroy(process);
 }
 
 static void assert_create_fails(
-        const struct aarch64_linux_process_config *config,
+        struct aarch64_linux_process_config *config,
         enum aarch64_linux_process_error_stage expected_stage,
         dword_t expected_detail) {
     struct aarch64_linux_process_error error = {
         .stage = UINT32_MAX,
         .detail = UINT32_MAX,
     };
-    assert(aarch64_linux_process_create(config, &error) == NULL);
+    assert(create_process(config, &error) == NULL);
     assert(error.stage == (dword_t) expected_stage);
     assert(error.detail == expected_detail);
 }
@@ -537,6 +553,24 @@ static void test_failure_transactions(void) {
     struct aarch64_linux_process_config config = make_config(
             file, sizeof(file), "/bin/process-test", arguments,
             array_size(arguments), environment,
+            array_size(environment), random);
+
+    struct guest_file_source *missing_source = config.elf_file_source;
+    config.elf_file_source = NULL;
+    struct aarch64_linux_process_error missing_source_error = {
+        .stage = UINT32_MAX,
+        .detail = UINT32_MAX,
+    };
+    assert(aarch64_linux_process_create(
+            &config, &missing_source_error) == NULL);
+    assert(missing_source_error.stage ==
+            AARCH64_LINUX_PROCESS_ERROR_ARGUMENT &&
+            missing_source_error.detail == 0);
+    guest_file_source_release(missing_source);
+    assert_fresh_create_succeeds(file);
+
+    config = make_config(file, sizeof(file), "/bin/process-test",
+            arguments, array_size(arguments), environment,
             array_size(environment), random);
 
     config.tid = 0;
@@ -636,9 +670,12 @@ static void test_failure_transactions(void) {
     assert_fresh_create_succeeds(file);
 
     // brk 末端与 trampoline 相邻不构成重叠。
+    config = make_config(file, sizeof(file), "/bin/process-test",
+            arguments, array_size(arguments), environment,
+            array_size(environment), random);
     config.brk_limit = SIGNAL_TRAMPOLINE;
     struct aarch64_linux_process *adjacent =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(adjacent != NULL);
     aarch64_linux_process_destroy(adjacent);
 
@@ -670,7 +707,7 @@ static void test_poll_events(void) {
     config.task_opaque = &task_opaque;
     config.signals = &service;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
 
     struct aarch64_linux_process_result result =
@@ -705,7 +742,7 @@ static struct aarch64_linux_process *create_fault_process(
             file, TEST_FILE_SIZE, "/bin/process-test", arguments,
             array_size(arguments), environment,
             array_size(environment), random);
-    return aarch64_linux_process_create(&config, NULL);
+    return create_process(&config, NULL);
 }
 
 static void test_fault_events(void) {
@@ -779,7 +816,7 @@ static void test_exit_group_event(void) {
             array_size(arguments), environment,
             array_size(environment), random);
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
     assert(aarch64_linux_process_run_one(process).status ==
             AARCH64_LINUX_PROCESS_RUNNABLE);
@@ -899,7 +936,7 @@ static void test_independent_handler_poll(void) {
     config.task_opaque = &task_opaque;
     config.signals = &signals;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
 
     struct aarch64_linux_process_result result =
@@ -960,7 +997,7 @@ static void test_signal_trampoline_closure(void) {
     config.syscalls = &syscalls;
     config.signals = &signals;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
     assert(aarch64_linux_process_uses_services(process,
             config.tid, &task_opaque, &syscalls, &signals));
@@ -1059,7 +1096,7 @@ static void test_exec_completion_event(void) {
     config.syscalls = &syscalls;
     config.signals = &signals;
     struct aarch64_linux_process *process =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config, NULL);
     assert(process != NULL);
     assert(aarch64_linux_process_run_one(process).status ==
             AARCH64_LINUX_PROCESS_RUNNABLE);

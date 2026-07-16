@@ -1,5 +1,8 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "guest/memory/address-space.h"
@@ -14,6 +17,57 @@ _Static_assert((GUEST_MEMORY_EXCLUSIVE_BUCKET_COUNT &
         "独占记录桶数必须为二次幂");
 _Static_assert(GUEST_MEMORY_EXCLUSIVE_WAYS > 0,
         "独占记录每组至少需要一路");
+
+struct guest_file_source {
+    atomic_uint refcount;
+    qword_t identity;
+    void *opaque;
+    void (*release_opaque)(void *opaque);
+};
+
+struct guest_file_source *guest_file_source_create(qword_t identity,
+        void *opaque, void (*release_opaque)(void *opaque)) {
+    assert(identity != 0);
+    assert((opaque == NULL) == (release_opaque == NULL));
+    struct guest_file_source *source = malloc(sizeof(*source));
+    if (source == NULL)
+        return NULL;
+    *source = (struct guest_file_source) {
+        .refcount = ATOMIC_VAR_INIT(1),
+        .identity = identity,
+        .opaque = opaque,
+        .release_opaque = release_opaque,
+    };
+    return source;
+}
+
+struct guest_file_source *guest_file_source_retain(
+        struct guest_file_source *source) {
+    if (source == NULL)
+        return NULL;
+    unsigned previous = atomic_fetch_add_explicit(
+            &source->refcount, 1, memory_order_relaxed);
+    assert(previous != 0 && previous != UINT_MAX);
+    return source;
+}
+
+void guest_file_source_release(struct guest_file_source *source) {
+    if (source == NULL)
+        return;
+    unsigned previous = atomic_fetch_sub_explicit(
+            &source->refcount, 1, memory_order_acq_rel);
+    assert(previous != 0);
+    if (previous != 1)
+        return;
+    if (source->release_opaque != NULL)
+        source->release_opaque(source->opaque);
+    free(source);
+}
+
+qword_t guest_file_source_identity(const struct guest_file_source *source) {
+    assert(source != NULL && source->identity != 0);
+    return source->identity;
+}
 
 void guest_address_space_init(struct guest_address_space *space,
         const struct guest_address_space_ops *ops, void *opaque,

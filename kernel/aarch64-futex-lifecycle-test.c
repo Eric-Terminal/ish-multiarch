@@ -32,6 +32,7 @@
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define ELF_FILE_IDENTITY UINT64_C(0x46555445584c4946)
 #define STATUS_BASE UINT64_C(0x10000000)
 #define TRANSIENT_BASE (STATUS_BASE + GUEST_MEMORY_PAGE_SIZE)
 #define CHILD_STACK (STACK_TOP - UINT64_C(0x400))
@@ -330,11 +331,16 @@ static struct task *make_parent(struct tgroup *group) {
 static struct aarch64_linux_process *make_process(struct task *task) {
     byte_t file[IMAGE_SIZE];
     make_image(file);
+    struct guest_file_source *file_source = guest_file_source_create(
+            ELF_FILE_IDENTITY, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const char *arguments[] = {"futex-lifecycle-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -348,7 +354,10 @@ static struct aarch64_linux_process *make_process(struct task *task) {
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool init_fixture(struct lifecycle_fixture *fixture) {

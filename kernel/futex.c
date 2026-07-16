@@ -47,7 +47,7 @@ struct futex_key {
         } aarch64_virtual;
         struct {
             qword_t shared_identity;
-            qword_t page_offset;
+            qword_t object_offset;
         } aarch64_physical;
     } identity;
 };
@@ -170,21 +170,21 @@ static struct futex_key aarch64_mm_shared_futex_key(
 }
 
 static struct futex_key aarch64_physical_futex_key(
-        qword_t shared_identity, qword_t page_offset) {
+        qword_t shared_identity, qword_t object_offset) {
     assert(shared_identity != 0);
     return (struct futex_key) {
         .kind = FUTEX_KEY_AARCH64_PHYSICAL,
         .identity.aarch64_physical = {
             .shared_identity = shared_identity,
-            .page_offset = page_offset,
+            .object_offset = object_offset,
         },
     };
 }
 
 static struct futex_key aarch64_file_page_futex_key(
-        qword_t backing_identity, qword_t page_offset) {
+        qword_t file_identity, qword_t file_offset) {
     struct futex_key key = aarch64_physical_futex_key(
-            backing_identity, page_offset);
+            file_identity, file_offset);
     key.kind = FUTEX_KEY_AARCH64_FILE_PAGE;
     return key;
 }
@@ -216,8 +216,8 @@ static bool futex_keys_equal(
         case FUTEX_KEY_AARCH64_PHYSICAL:
             return left->identity.aarch64_physical.shared_identity ==
                             right->identity.aarch64_physical.shared_identity &&
-                    left->identity.aarch64_physical.page_offset ==
-                            right->identity.aarch64_physical.page_offset;
+                    left->identity.aarch64_physical.object_offset ==
+                            right->identity.aarch64_physical.object_offset;
     }
     assert(false);
     return false;
@@ -262,7 +262,7 @@ static size_t futex_hash_index(const struct futex_key *key) {
             mixed = mix_hash_word(mixed, fold_qword(
                     key->identity.aarch64_physical.shared_identity));
             mixed = mix_hash_word(mixed, fold_qword(
-                    key->identity.aarch64_physical.page_offset));
+                    key->identity.aarch64_physical.object_offset));
             break;
         default:
             assert(false);
@@ -621,7 +621,7 @@ static bool snapshot_aarch64_futex_keys_locked(
         if (snapshots[index].file_identity != 0) {
             keys[index] = aarch64_file_page_futex_key(
                     snapshots[index].file_identity,
-                    snapshots[index].page_offset);
+                    snapshots[index].file_offset);
         } else if (snapshots[index].shared_identity != 0) {
             keys[index] = aarch64_physical_futex_key(
                     snapshots[index].shared_identity,
@@ -713,7 +713,7 @@ static int prepare_aarch64_futex_waitv_locked(
         } else if (snapshots[index].file_identity != 0) {
             entries[index].key = aarch64_file_page_futex_key(
                     snapshots[index].file_identity,
-                    snapshots[index].page_offset);
+                    snapshots[index].file_offset);
         } else if (snapshots[index].shared_identity == 0) {
             entries[index].key = aarch64_mm_shared_futex_key(
                     memory_identity, entries[index].address);
@@ -731,7 +731,7 @@ static struct futex_key aarch64_shared_futex_key_from_snapshot(
         const struct aarch64_linux_futex_word_snapshot *snapshot) {
     if (snapshot->file_identity != 0) {
         return aarch64_file_page_futex_key(
-                snapshot->file_identity, snapshot->page_offset);
+                snapshot->file_identity, snapshot->file_offset);
     }
     if (snapshot->shared_identity != 0) {
         return aarch64_physical_futex_key(

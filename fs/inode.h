@@ -11,6 +11,8 @@ struct inode_data {
     unsigned refcount;
     // 对应 Linux inode sequence：释放后也绝不复用，供共享 futex 建键。
     qword_t futex_sequence;
+    // 文件系统 provider 提供的无损设备身份，不使用 guest ABI 的 st_dev。
+    qword_t device;
     ino_t number;
     struct mount *mount;
     struct list chain;
@@ -23,7 +25,8 @@ struct inode_data {
     lock_t lock;
 };
 
-struct inode_data *inode_get(struct mount *mount, ino_t inode);
+struct inode_data *inode_get(
+        struct mount *mount, qword_t device, ino_t inode);
 void inode_retain(struct inode_data *inode);
 void inode_release(struct inode_data *inode);
 
@@ -35,7 +38,8 @@ void inode_release(struct inode_data *inode);
 // To quote @dril: i despise this lock. id love nothing more than to kick it
 // through the wall and shatter it into 100 deadlocks. But i need it
 extern lock_t inodes_lock;
-struct inode_data *inode_get_unlocked(struct mount *mount, ino_t inode);
+struct inode_data *inode_get_unlocked(
+        struct mount *mount, qword_t device, ino_t inode);
 
 // calls mount->fs->inode_orphaned if this inode is orphaned, while holding indoes_lock
 void inode_check_orphaned(struct mount *mount, ino_t ino);

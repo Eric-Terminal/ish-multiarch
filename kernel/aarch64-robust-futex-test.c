@@ -32,6 +32,7 @@
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
+#define ELF_FILE_IDENTITY UINT64_C(0x524f42555354454c)
 #define ROBUST_BASE UINT64_C(0x10000000)
 #define ROBUST_PAGES UINT64_C(10)
 #define READONLY_ROBUST_BASE \
@@ -249,11 +250,16 @@ static struct aarch64_linux_process *make_process(
     size_t total_steps = make_image(
             file, setup_steps, readonly_steps);
     *restore_steps = total_steps - *setup_steps - *readonly_steps;
+    struct guest_file_source *file_source = guest_file_source_create(
+            ELF_FILE_IDENTITY, NULL, NULL);
+    if (file_source == NULL)
+        return NULL;
     const char *arguments[] = {"robust-futex-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
     const struct aarch64_linux_process_config config = {
         .elf_data = file,
         .elf_size = sizeof(file),
+        .elf_file_source = file_source,
         .stack_top = STACK_TOP,
         .stack_size = 2 * GUEST_MEMORY_PAGE_SIZE,
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -267,7 +273,10 @@ static struct aarch64_linux_process *make_process(
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
     };
-    return aarch64_linux_process_create(&config, NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(&config, NULL);
+    guest_file_source_release(file_source);
+    return process;
 }
 
 static bool init_fixture(struct robust_fixture *fixture) {

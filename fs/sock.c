@@ -108,7 +108,7 @@ static int unix_socket_get(const char *path_raw, struct fd *bind_fd, uint32_t *s
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
-    struct statbuf stat;
+    struct statbuf stat = {};
     err = mount->fs->stat(mount, path, &stat);
 
     // If bind was called, there are some funny semantics.
@@ -145,7 +145,8 @@ static int unix_socket_get(const char *path_raw, struct fd *bind_fd, uint32_t *s
     }
 
     // Look up the socket ID for the inode number.
-    struct inode_data *inode = inode_get(mount, stat.inode);
+    struct inode_data *inode = inode_get(
+            mount, stat.inode_device, stat.inode);
     lock(&inode->lock);
     if (inode->socket_id == 0)
         inode->socket_id = unix_socket_next_id();

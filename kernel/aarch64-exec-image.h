@@ -4,11 +4,13 @@
 #include "misc.h"
 
 struct fd;
+struct guest_file_source;
 struct task;
 
 struct ish_aarch64_exec_image {
     void *data;
     size_t size;
+    struct guest_file_source *file_source;
 };
 
 struct ish_aarch64_exec_images {

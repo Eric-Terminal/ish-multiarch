@@ -22,6 +22,7 @@
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
 #define PARENT_TID 101
 #define CHILD_TID 202
+#define TEST_FILE_IDENTITY UINT64_C(0x1000000000000002)
 
 static const char *const process_arguments[] = {"fork-test"};
 static const byte_t process_random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {
@@ -102,6 +103,8 @@ static struct aarch64_linux_process_config make_config(
     return (struct aarch64_linux_process_config) {
         .elf_data = file,
         .elf_size = TEST_FILE_SIZE,
+        .elf_file_source = guest_file_source_create(
+                TEST_FILE_IDENTITY, NULL, NULL),
         .stack_top = STACK_TOP,
         .stack_size = UINT64_C(0x10000),
         .signal_trampoline_page = SIGNAL_TRAMPOLINE,
@@ -115,6 +118,16 @@ static struct aarch64_linux_process_config make_config(
         .syscalls = syscalls,
         .signals = signals,
     };
+}
+
+static struct aarch64_linux_process *create_process(
+        struct aarch64_linux_process_config *config) {
+    assert(config->elf_file_source != NULL);
+    struct aarch64_linux_process *process =
+            aarch64_linux_process_create(config, NULL);
+    guest_file_source_release(config->elf_file_source);
+    config->elf_file_source = NULL;
+    return process;
 }
 
 static qword_t read_user_qword(
@@ -236,6 +249,32 @@ static qword_t dispatch_fork_fixture(
         assert(parent_identity != 0 && child_identity != 0 &&
                 parent_identity != child_identity);
 
+        const qword_t file_address = TEXT_BASE + PROGRAM_OFFSET;
+        struct aarch64_linux_futex_word_snapshot parent_file_snapshot;
+        struct aarch64_linux_futex_word_snapshot child_file_snapshot;
+        dword_t parent_file_value;
+        dword_t child_file_value;
+        struct guest_linux_user_fault snapshot_fault;
+        assert(aarch64_linux_process_snapshot_futex_words(
+                fixture->parent, &file_address, 1, true,
+                &parent_file_snapshot, &parent_file_value,
+                &snapshot_fault));
+        assert(aarch64_linux_process_snapshot_futex_words(
+                fixture->child, &file_address, 1, true,
+                &child_file_snapshot, &child_file_value,
+                &snapshot_fault));
+        assert(parent_file_snapshot.shared_identity == 0 &&
+                child_file_snapshot.shared_identity == 0);
+        assert(parent_file_snapshot.file_identity ==
+                TEST_FILE_IDENTITY &&
+                child_file_snapshot.file_identity ==
+                        parent_file_snapshot.file_identity);
+        assert(parent_file_snapshot.page_offset == PROGRAM_OFFSET &&
+                child_file_snapshot.page_offset == PROGRAM_OFFSET);
+        assert(parent_file_snapshot.file_offset == PROGRAM_OFFSET &&
+                child_file_snapshot.file_offset == PROGRAM_OFFSET);
+        assert(parent_file_value == child_file_value);
+
         const qword_t addresses[2] = {
             FIRST_MMAP,
             FIRST_MMAP + sizeof(dword_t),
@@ -244,7 +283,6 @@ static qword_t dispatch_fork_fixture(
         struct aarch64_linux_futex_word_snapshot child_snapshots[2];
         dword_t parent_value;
         dword_t child_value;
-        struct guest_linux_user_fault snapshot_fault;
         assert(aarch64_linux_process_snapshot_futex_words(
                 fixture->parent, addresses, 2, true, parent_snapshots,
                 &parent_value, &snapshot_fault));
@@ -263,6 +301,12 @@ static qword_t dispatch_fork_fixture(
                 parent_snapshots[1].page_offset == sizeof(dword_t) &&
                 child_snapshots[0].page_offset == 0 &&
                 child_snapshots[1].page_offset == sizeof(dword_t));
+        for (size_t index = 0; index < 2; index++) {
+            assert(parent_snapshots[index].file_identity == 0 &&
+                    parent_snapshots[index].file_offset == 0);
+            assert(child_snapshots[index].file_identity == 0 &&
+                    child_snapshots[index].file_offset == 0);
+        }
         assert(parent_value == UINT32_C(0x41) &&
                 child_value == parent_value);
 
@@ -276,7 +320,9 @@ static qword_t dispatch_fork_fixture(
         assert(observed == UINT32_C(0x41) &&
                 cas_snapshot.shared_identity ==
                         fixture->shared_identity &&
-                cas_snapshot.page_offset == 0);
+                cas_snapshot.file_identity == 0 &&
+                cas_snapshot.page_offset == 0 &&
+                cas_snapshot.file_offset == 0);
         assert(aarch64_linux_process_read_u32(
                 fixture->child, FIRST_MMAP, &child_value,
                 &snapshot_fault));
@@ -291,7 +337,9 @@ static qword_t dispatch_fork_fixture(
         assert(observed == UINT32_C(0x42) &&
                 cas_snapshot.shared_identity ==
                         fixture->shared_identity &&
-                cas_snapshot.page_offset == 0);
+                cas_snapshot.file_identity == 0 &&
+                cas_snapshot.page_offset == 0 &&
+                cas_snapshot.file_offset == 0);
         assert(aarch64_linux_process_compare_exchange_u32(
                 fixture->parent, FIRST_MMAP, UINT32_C(0x42),
                 UINT32_C(0x41), &observed, &snapshot_fault) ==
@@ -486,7 +534,7 @@ static void test_post_svc_fork(void) {
     struct aarch64_linux_process_config config = make_config(
             file, PARENT_TID, &fixture.parent_task,
             &configured_syscalls, &configured_signals);
-    fixture.parent = aarch64_linux_process_create(&config, NULL);
+    fixture.parent = create_process(&config);
     assert(fixture.parent != NULL);
     configured_syscalls = (struct guest_linux_syscall_service) {0};
     configured_signals = (struct guest_linux_signal_service) {0};
@@ -573,7 +621,7 @@ static void test_exclusive_monitor_reset(void) {
             file, PARENT_TID, &fixture.parent_task,
             &configured_syscalls, NULL);
     struct aarch64_linux_process *parent =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config);
     assert(parent != NULL);
     configured_syscalls = (struct guest_linux_syscall_service) {0};
 
@@ -655,7 +703,7 @@ static void test_thread_shared_memory(void) {
             file, PARENT_TID, &fixture.parent_task,
             &syscall_service, NULL);
     struct aarch64_linux_process *parent =
-            aarch64_linux_process_create(&config, NULL);
+            create_process(&config);
     assert(parent != NULL);
     qword_t memory_identity =
             aarch64_linux_process_memory_identity(parent);
@@ -731,7 +779,9 @@ static qword_t dispatch_snapshot_fault_fixture(
 
     const struct aarch64_linux_futex_word_snapshot untouched = {
         .shared_identity = UINT64_C(0x1122334455667788),
+        .file_identity = UINT64_C(0x1020304050607080),
         .page_offset = UINT64_C(0x8877665544332211),
+        .file_offset = UINT64_C(0x8070605040302010),
     };
     struct aarch64_linux_futex_word_snapshot snapshots[2] = {
         untouched, untouched,
@@ -749,7 +799,9 @@ static qword_t dispatch_snapshot_fault_fixture(
             &first_value, &snapshot_fault));
     assert(snapshots[0].shared_identity ==
             untouched.shared_identity &&
+            snapshots[0].file_identity == untouched.file_identity &&
             snapshots[0].page_offset == untouched.page_offset &&
+            snapshots[0].file_offset == untouched.file_offset &&
             first_value == UINT32_C(0xaabbccdd));
     assert(snapshot_fault.address == DATA_ADDRESS &&
             snapshot_fault.access == GUEST_MEMORY_READ &&
@@ -758,7 +810,9 @@ static qword_t dispatch_snapshot_fault_fixture(
     dword_t observed = UINT32_C(0x55667788);
     struct aarch64_linux_futex_word_snapshot cas_snapshot = {
         .shared_identity = UINT64_C(0x123456789abcdef0),
+        .file_identity = UINT64_C(0x3141592653589793),
         .page_offset = UINT64_C(0x0fedcba987654321),
+        .file_offset = UINT64_C(0x2718281828459045),
     };
     snapshot_fault = (struct guest_linux_user_fault) {
         .address = UINT64_MAX,
@@ -773,7 +827,9 @@ static qword_t dispatch_snapshot_fault_fixture(
     assert(observed == UINT32_C(0x55667788));
     assert(cas_snapshot.shared_identity ==
                     UINT64_C(0x123456789abcdef0) &&
-            cas_snapshot.page_offset == UINT64_C(0x0fedcba987654321));
+            cas_snapshot.file_identity == UINT64_C(0x3141592653589793) &&
+            cas_snapshot.page_offset == UINT64_C(0x0fedcba987654321) &&
+            cas_snapshot.file_offset == UINT64_C(0x2718281828459045));
     assert(snapshot_fault.address == DATA_ADDRESS &&
             snapshot_fault.access == GUEST_MEMORY_WRITE &&
             snapshot_fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
@@ -793,7 +849,9 @@ static qword_t dispatch_snapshot_fault_fixture(
     for (size_t index = 0; index < 2; index++) {
         assert(snapshots[index].shared_identity ==
                 untouched.shared_identity);
+        assert(snapshots[index].file_identity == untouched.file_identity);
         assert(snapshots[index].page_offset == untouched.page_offset);
+        assert(snapshots[index].file_offset == untouched.file_offset);
     }
     assert(first_value == UINT32_C(0xaabbccdd));
     assert(snapshot_fault.address == BRK_LIMIT &&
@@ -822,7 +880,7 @@ static void test_snapshot_faults(void) {
     };
     struct aarch64_linux_process_config config = make_config(
             file, PARENT_TID, &fixture, &syscalls, NULL);
-    fixture.process = aarch64_linux_process_create(&config, NULL);
+    fixture.process = create_process(&config);
     assert(fixture.process != NULL);
     run_to_exit(fixture.process, 0);
     assert(fixture.calls == 1);
@@ -830,7 +888,9 @@ static void test_snapshot_faults(void) {
             aarch64_linux_process_memory_identity(fixture.process);
     aarch64_linux_process_destroy(fixture.process);
 
-    fixture.process = aarch64_linux_process_create(&config, NULL);
+    config.elf_file_source = guest_file_source_create(
+            TEST_FILE_IDENTITY, NULL, NULL);
+    fixture.process = create_process(&config);
     assert(fixture.process != NULL);
     qword_t replacement_identity =
             aarch64_linux_process_memory_identity(fixture.process);

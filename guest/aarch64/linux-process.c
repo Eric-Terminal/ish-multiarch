@@ -212,7 +212,8 @@ static bool ranges_overlap(qword_t first_start, qword_t first_end,
 static bool valid_config(
         const struct aarch64_linux_process_config *config) {
     if (config == NULL || config->elf_data == NULL ||
-            config->elf_size == 0 || config->executable == NULL ||
+            config->elf_size == 0 || config->elf_file_source == NULL ||
+            config->executable == NULL ||
             config->random == NULL || config->tid <= 0 ||
             config->tid > AARCH64_LINUX_MAX_TID ||
             (config->argument_count != 0 && config->arguments == NULL) ||
@@ -353,7 +354,8 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
 
     struct aarch64_elf64_image interpreter_image;
     if (interpreter != NULL) {
-        if (interpreter->data == NULL || interpreter->size == 0)
+        if (interpreter->data == NULL || interpreter->size == 0 ||
+                interpreter->file_source == NULL)
             return create_failed(NULL, error,
                     AARCH64_LINUX_PROCESS_ERROR_INTERPRETER,
                     AARCH64_LINUX_INTERPRETER_CONFIG_INVALID);
@@ -381,7 +383,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
 
     struct aarch64_elf64_load_result main_loaded;
     enum aarch64_elf64_load_error load_error = aarch64_elf64_load(
-            &main_image, page_table,
+            &main_image, config->elf_file_source, page_table,
             (guest_addr_t) config->load_bias, &main_loaded);
     if (load_error != AARCH64_ELF64_LOAD_OK)
         return create_failed(process, error,
@@ -391,7 +393,7 @@ struct aarch64_linux_process *aarch64_linux_process_create_with_interpreter(
     struct aarch64_elf64_load_result interpreter_loaded = {0};
     if (interpreter != NULL) {
         load_error = aarch64_elf64_load(
-                &interpreter_image, page_table,
+                &interpreter_image, interpreter->file_source, page_table,
                 (guest_addr_t) interpreter->load_bias,
                 &interpreter_loaded);
         if (load_error != AARCH64_ELF64_LOAD_OK)
@@ -748,8 +750,12 @@ bool aarch64_linux_process_snapshot_futex_words(
                     guest_page_sync_identity(views[index].sync),
             .file_identity = views[index].origin ==
                     GUEST_PAGE_ORIGIN_FILE ?
-                    views[index].backing_identity : 0,
+                    views[index].file_identity : 0,
             .page_offset = address & GUEST_MEMORY_PAGE_MASK,
+            .file_offset = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE ?
+                    views[index].file_offset +
+                            (address & GUEST_MEMORY_PAGE_MASK) : 0,
         };
     }
 
@@ -855,8 +861,12 @@ aarch64_linux_process_prepare_futex_waitv(
                     guest_page_sync_identity(views[index].sync),
             .file_identity = views[index].origin ==
                     GUEST_PAGE_ORIGIN_FILE ?
-                    views[index].backing_identity : 0,
+                    views[index].file_identity : 0,
             .page_offset = address & GUEST_MEMORY_PAGE_MASK,
+            .file_offset = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE ?
+                    views[index].file_offset +
+                            (address & GUEST_MEMORY_PAGE_MASK) : 0,
         };
     }
 
@@ -956,7 +966,9 @@ enum aarch64_linux_process_compare_exchange_result
     if (result != GUEST_TLB_COMPARE_EXCHANGE_FAULT) {
         *snapshot = (struct aarch64_linux_futex_word_snapshot) {
             .shared_identity = resolved.shared_identity,
+            .file_identity = resolved.file_identity,
             .page_offset = resolved.page_offset,
+            .file_offset = resolved.file_offset,
         };
     }
     if (result == GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED)
