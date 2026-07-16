@@ -388,6 +388,9 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
         guest_address_space_write_unlock(tlb->address_space, locked);
         return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
     }
+    // Linux 原子写在比较前已完成写故障；即使值不匹配，私有文件页也已 COW。
+    guest_address_space_write_prepared(
+            tlb->address_space, address, size);
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
     lock_syncs(&syncs, true);

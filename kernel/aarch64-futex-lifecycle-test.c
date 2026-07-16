@@ -423,7 +423,7 @@ static bool snapshot_word(struct task *task, qword_t address,
         struct aarch64_linux_futex_word_snapshot *snapshot) {
     const qword_t addresses[] = {address};
     return aarch64_linux_process_snapshot_futex_words(
-            task->aarch64_process, addresses, 1,
+            task->aarch64_process, addresses, 1, true,
             snapshot, NULL, NULL);
 }
 

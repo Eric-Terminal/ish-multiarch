@@ -119,6 +119,8 @@ void guest_address_space_written(struct guest_address_space *space,
         if (granule == last)
             break;
     }
+    if (space->ops->written != NULL)
+        space->ops->written(space->opaque, address, size);
 }
 
 bool guest_address_space_read_lock(struct guest_address_space *space) {
@@ -141,6 +143,15 @@ void guest_address_space_write_unlock(
         struct guest_address_space *space, bool locked) {
     if (space->ops->write_unlock != NULL)
         space->ops->write_unlock(space->opaque, locked);
+}
+
+void guest_address_space_write_prepared(
+        struct guest_address_space *space,
+        guest_addr_t address, size_t size) {
+    assert(size != 0);
+    assert(guest_address_space_contains(space, address, size));
+    if (space->ops->write_prepared != NULL)
+        space->ops->write_prepared(space->opaque, address, size);
 }
 
 bool guest_address_space_contains(const struct guest_address_space *space,

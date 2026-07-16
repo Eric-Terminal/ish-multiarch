@@ -264,7 +264,11 @@ int realfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off
     off_t correction = offset - real_offset;
     char *memory = mmap(NULL, (pages * PAGE_SIZE) + correction,
             mmap_prot, mmap_flags, fd->real_fd, real_offset);
-    return pt_map(mem, start, pages, memory, correction, prot);
+    unsigned page_flags = (unsigned) prot | P_FILE_BACKED;
+    // 私有文件页须在首次 guest 写或共享 futex 写固定时显式脱离文件后备。
+    if (flags & MMAP_PRIVATE)
+        page_flags |= P_COW;
+    return pt_map(mem, start, pages, memory, correction, page_flags);
 }
 
 ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {

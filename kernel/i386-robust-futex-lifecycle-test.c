@@ -22,6 +22,7 @@
 #define TEST_FUTEX_WAIT 0
 #define TEST_FUTEX_WAKE 1
 #define TEST_FUTEX_REQUEUE 3
+#define TEST_FUTEX_PRIVATE UINT32_C(0x80)
 
 #define TEST_FUTEX_WAITERS UINT32_C(0x80000000)
 #define TEST_FUTEX_OWNER_DIED UINT32_C(0x40000000)
@@ -563,6 +564,116 @@ static bool test_private_cow_isolation(void) {
     return true;
 }
 
+static bool test_readonly_private_cleanup_continues(void) {
+    struct test_fixture fixture;
+    TEST_CHECK(fixture_init(&fixture),
+            "建立只读匿名私有 robust 清理夹具");
+    TEST_CHECK(map_pages(&fixture, TEST_BASE, 2, P_RWX),
+            "映射只读与可写 robust 测试页");
+
+    const addr_t readonly_page = TEST_BASE;
+    const addr_t writable_page = TEST_BASE + PAGE_SIZE;
+    const addr_t head = writable_page + UINT32_C(0x40);
+    const addr_t mismatch = readonly_page + UINT32_C(0x100);
+    const addr_t pending = readonly_page + UINT32_C(0x180);
+    const addr_t owned = writable_page + UINT32_C(0x100);
+    const sdword_t offset = 8;
+    const dword_t owner = (dword_t) fixture.task.pid;
+    const dword_t mismatch_value =
+            ((owner + 7) & TEST_FUTEX_TID_MASK) |
+            TEST_FUTEX_WAITERS;
+    const dword_t owned_value = owner | TEST_FUTEX_WAITERS;
+    const dword_t pending_value = TEST_FUTEX_WAITERS;
+    TEST_CHECK(write_head(&fixture, head, mismatch, offset, pending) &&
+            write_u32(&fixture, mismatch, owned) &&
+            write_u32(&fixture, owned, head) &&
+            write_u32(&fixture, mismatch + offset, mismatch_value) &&
+            write_u32(&fixture, owned + offset, owned_value) &&
+            write_u32(&fixture, pending + offset, pending_value),
+            "准备 owner mismatch、后续 owned 与 pending 节点");
+
+    struct futex_waiter waiter;
+    TEST_CHECK(waiter_start(&fixture, &waiter, 2150,
+                    pending + offset, pending_value) &&
+            wait_until_queued(&fixture, pending + offset, 1) &&
+            protect_pages(&fixture, readonly_page, 1, P_READ) &&
+            register_robust_head(&fixture, head),
+            "等待者入队后把匿名私有页降为只读并注册 robust 头");
+    futex_cleanup_task_i386(&fixture.task);
+
+    dword_t mismatch_after;
+    dword_t owned_after;
+    dword_t pending_after;
+    TEST_CHECK(read_u32(&fixture, mismatch + offset, &mismatch_after) &&
+            read_u32(&fixture, owned + offset, &owned_after) &&
+            read_u32(&fixture, pending + offset, &pending_after) &&
+            mismatch_after == mismatch_value &&
+            owned_after ==
+                    (TEST_FUTEX_WAITERS | TEST_FUTEX_OWNER_DIED) &&
+            pending_after == pending_value &&
+            fixture.task.robust_list == 0,
+            "只读 owner mismatch 不终止遍历且 pending 不被错误修改");
+    TEST_CHECK(call_futex(&fixture, pending + offset,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 0 &&
+            waiter_stage(&waiter) == 1 &&
+            protect_pages(&fixture, readonly_page, 1, P_RWX) &&
+            call_futex(&fixture, pending + offset,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 1 &&
+            waiter_join_and_destroy(&waiter),
+            "只读 pending 不误唤醒且恢复写权限后由 mm-shared 键回收");
+
+    fixture_destroy(&fixture);
+    return true;
+}
+
+static bool test_owner_death_rechecks_shared_key(void) {
+    struct test_fixture fixture;
+    TEST_CHECK(fixture_init(&fixture),
+            "建立 robust fresh-key 测试夹具");
+    TEST_CHECK(map_pages(&fixture, TEST_BASE, 2, P_RWX),
+            "映射 robust 头与待切换来源的 futex 页");
+
+    const addr_t head = TEST_BASE + UINT32_C(0x40);
+    const addr_t entry = TEST_BASE + PAGE_SIZE + UINT32_C(0x100);
+    const sdword_t offset = 8;
+    const addr_t word = entry + offset;
+    const dword_t owned =
+            (dword_t) fixture.task.pid | TEST_FUTEX_WAITERS;
+    TEST_CHECK(write_head(&fixture, head, entry, offset, 0) &&
+            write_u32(&fixture, entry, head) &&
+            write_u32(&fixture, word, owned),
+            "准备带等待者位的 robust 节点");
+
+    struct futex_waiter waiter;
+    TEST_CHECK(waiter_start(&fixture, &waiter, 2175,
+                    word, owned) &&
+            wait_until_queued(&fixture, word, 1),
+            "在普通匿名共享键上登记等待者");
+    write_wrlock(&fixture.task.mem->lock);
+    mem_pt(fixture.task.mem, PAGE(word))->flags |= P_SPECIAL;
+    write_wrunlock(&fixture.task.mem->lock);
+    TEST_CHECK(register_robust_head(&fixture, head),
+            "在 owner-death CAS 前把当前映射切换为特殊来源");
+    futex_cleanup_task_i386(&fixture.task);
+
+    dword_t after;
+    TEST_CHECK(read_u32(&fixture, word, &after) &&
+            after == (TEST_FUTEX_WAITERS | TEST_FUTEX_OWNER_DIED) &&
+            waiter_stage(&waiter) == 1,
+            "CAS 成功后 fresh 共享取键拒绝特殊页且不误唤醒旧队列");
+    write_wrlock(&fixture.task.mem->lock);
+    mem_pt(fixture.task.mem, PAGE(word))->flags &= ~(unsigned) P_SPECIAL;
+    write_wrunlock(&fixture.task.mem->lock);
+    TEST_CHECK(call_futex(&fixture, word,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 1 &&
+            waiter_join_and_destroy(&waiter),
+            "恢复普通来源后回收原 mm-shared 等待者");
+
+    fixture_destroy(&fixture);
+    return true;
+}
+
 static bool test_unaligned_host_mapping_fault(void) {
     struct test_fixture fixture;
     TEST_CHECK(fixture_init(&fixture),
@@ -621,8 +732,9 @@ static bool test_clear_child_tid_mm_users_and_write_fault(void) {
     struct test_fixture fixture;
     TEST_CHECK(fixture_init(&fixture),
             "建立 i386 clear-child-tid 夹具");
-    TEST_CHECK(map_pages(&fixture, TEST_CTID_BASE, 1, P_RWX),
-            "映射 clear-child-tid 测试页");
+    TEST_CHECK(map_pages(&fixture, TEST_CTID_BASE, 1,
+                    P_RWX | P_SHARED),
+            "映射共享 clear-child-tid 测试页");
 
     const addr_t clear_tid = TEST_CTID_BASE + UINT32_C(0x100);
     const dword_t marker = UINT32_C(0x6a09e667);
@@ -638,7 +750,7 @@ static bool test_clear_child_tid_mm_users_and_write_fault(void) {
             "mm_users==1 时只消费 ctid 注册而不访问用户字");
 
     TEST_CHECK(protect_pages(&fixture,
-                    TEST_CTID_BASE, 1, P_READ),
+                    TEST_CTID_BASE, 1, P_READ | P_SHARED),
             "把 clear-child-tid 页降为只读");
     struct futex_waiter waiter;
     TEST_CHECK(waiter_start(&fixture, &waiter, 2200,
@@ -776,6 +888,10 @@ int main(void) {
                 test_traversal_limit},
         {"i386 robust 私有 COW 隔离",
                 test_private_cow_isolation},
+        {"i386 robust 只读匿名私有页继续遍历",
+                test_readonly_private_cleanup_continues},
+        {"i386 robust owner-death fresh 共享键",
+                test_owner_death_rechecks_shared_key},
         {"i386 robust host 未对齐映射故障",
                 test_unaligned_host_mapping_fault},
         {"i386 clear-child-tid mm 用户与写故障",

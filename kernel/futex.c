@@ -21,9 +21,12 @@
 
 enum futex_key_kind {
     FUTEX_KEY_I386_VIRTUAL,
+    FUTEX_KEY_I386_MM_SHARED,
     FUTEX_KEY_I386_SHARED_MEMORY,
     FUTEX_KEY_I386_SHARED_FILE,
     FUTEX_KEY_AARCH64_VIRTUAL,
+    FUTEX_KEY_AARCH64_MM_SHARED,
+    FUTEX_KEY_AARCH64_FILE_PAGE,
     FUTEX_KEY_AARCH64_PHYSICAL,
 };
 
@@ -125,6 +128,13 @@ static struct futex_key i386_virtual_futex_key(
     };
 }
 
+static struct futex_key i386_mm_shared_futex_key(
+        const struct mem *memory, addr_t address) {
+    struct futex_key key = i386_virtual_futex_key(memory, address);
+    key.kind = FUTEX_KEY_I386_MM_SHARED;
+    return key;
+}
+
 static struct futex_key i386_physical_futex_key(
         enum futex_key_kind kind,
         qword_t shared_identity, qword_t backing_offset) {
@@ -151,6 +161,14 @@ static struct futex_key aarch64_virtual_futex_key(
     };
 }
 
+static struct futex_key aarch64_mm_shared_futex_key(
+        qword_t memory_identity, qword_t address) {
+    struct futex_key key = aarch64_virtual_futex_key(
+            memory_identity, address);
+    key.kind = FUTEX_KEY_AARCH64_MM_SHARED;
+    return key;
+}
+
 static struct futex_key aarch64_physical_futex_key(
         qword_t shared_identity, qword_t page_offset) {
     assert(shared_identity != 0);
@@ -163,12 +181,21 @@ static struct futex_key aarch64_physical_futex_key(
     };
 }
 
+static struct futex_key aarch64_file_page_futex_key(
+        qword_t backing_identity, qword_t page_offset) {
+    struct futex_key key = aarch64_physical_futex_key(
+            backing_identity, page_offset);
+    key.kind = FUTEX_KEY_AARCH64_FILE_PAGE;
+    return key;
+}
+
 static bool futex_keys_equal(
         const struct futex_key *left, const struct futex_key *right) {
     if (left->kind != right->kind)
         return false;
     switch (left->kind) {
         case FUTEX_KEY_I386_VIRTUAL:
+        case FUTEX_KEY_I386_MM_SHARED:
             return left->identity.i386_virtual.memory_identity ==
                             right->identity.i386_virtual.memory_identity &&
                     left->identity.i386_virtual.address ==
@@ -180,10 +207,12 @@ static bool futex_keys_equal(
                     left->identity.i386_physical.backing_offset ==
                             right->identity.i386_physical.backing_offset;
         case FUTEX_KEY_AARCH64_VIRTUAL:
+        case FUTEX_KEY_AARCH64_MM_SHARED:
             return left->identity.aarch64_virtual.memory_identity ==
                             right->identity.aarch64_virtual.memory_identity &&
                     left->identity.aarch64_virtual.address ==
                             right->identity.aarch64_virtual.address;
+        case FUTEX_KEY_AARCH64_FILE_PAGE:
         case FUTEX_KEY_AARCH64_PHYSICAL:
             return left->identity.aarch64_physical.shared_identity ==
                             right->identity.aarch64_physical.shared_identity &&
@@ -208,6 +237,7 @@ static size_t futex_hash_index(const struct futex_key *key) {
             UINT32_C(0x811c9dc5), (dword_t) key->kind);
     switch (key->kind) {
         case FUTEX_KEY_I386_VIRTUAL:
+        case FUTEX_KEY_I386_MM_SHARED:
             mixed = mix_hash_word(mixed, fold_qword(
                     key->identity.i386_virtual.memory_identity));
             mixed = mix_hash_word(mixed,
@@ -221,11 +251,13 @@ static size_t futex_hash_index(const struct futex_key *key) {
                     key->identity.i386_physical.backing_offset));
             break;
         case FUTEX_KEY_AARCH64_VIRTUAL:
+        case FUTEX_KEY_AARCH64_MM_SHARED:
             mixed = mix_hash_word(mixed, fold_qword(
                     key->identity.aarch64_virtual.memory_identity));
             mixed = mix_hash_word(mixed, fold_qword(
                     key->identity.aarch64_virtual.address));
             break;
+        case FUTEX_KEY_AARCH64_FILE_PAGE:
         case FUTEX_KEY_AARCH64_PHYSICAL:
             mixed = mix_hash_word(mixed, fold_qword(
                     key->identity.aarch64_physical.shared_identity));
@@ -289,12 +321,12 @@ static void futex_put_unlocked(struct futex *futex) {
     }
 }
 
-static struct futex_key i386_futex_key_from_snapshot(
+static struct futex_key i386_shared_futex_key_from_snapshot(
         struct mem *memory, addr_t address,
         const struct mem_futex_word_snapshot *snapshot) {
     switch (snapshot->kind) {
         case MEM_FUTEX_BACKING_PRIVATE:
-            return i386_virtual_futex_key(memory, address);
+            return i386_mm_shared_futex_key(memory, address);
         case MEM_FUTEX_BACKING_SHARED_MEMORY:
             return i386_physical_futex_key(
                     FUTEX_KEY_I386_SHARED_MEMORY,
@@ -305,24 +337,26 @@ static struct futex_key i386_futex_key_from_snapshot(
                     snapshot->identity, snapshot->offset);
     }
     assert(false);
-    return i386_virtual_futex_key(memory, address);
+    return i386_mm_shared_futex_key(memory, address);
 }
 
 // 调用时持有 futex_lock；一次页表读事务会固定全部键及可选首值。
-static bool snapshot_i386_futex_keys_locked(
+static int snapshot_i386_futex_keys_locked(
         struct mem *memory, const addr_t *addresses, size_t count,
         struct futex_key *keys, dword_t *first_value) {
     assert(memory != NULL && addresses != NULL &&
             count != 0 && count <= 2 && keys != NULL);
     struct mem_futex_word_snapshot snapshots[2];
-    if (!mem_snapshot_futex_words(
-            memory, addresses, count, snapshots, first_value))
-        return false;
+    int result = mem_snapshot_futex_words(
+            memory, addresses, count, true,
+            snapshots, first_value);
+    if (result < 0)
+        return result;
     for (size_t index = 0; index < count; index++) {
-        keys[index] = i386_futex_key_from_snapshot(
+        keys[index] = i386_shared_futex_key_from_snapshot(
                 memory, addresses[index], &snapshots[index]);
     }
-    return true;
+    return 0;
 }
 
 // 调用和返回时均持有 futex_lock；wait_for 会在睡眠期间暂时释放它。
@@ -577,18 +611,23 @@ static bool snapshot_aarch64_futex_keys_locked(
             count != 0 && count <= 2 && keys != NULL);
     struct aarch64_linux_futex_word_snapshot snapshots[2];
     if (!aarch64_linux_process_snapshot_futex_words(
-            process, addresses, count, snapshots, first_value, fault))
+            process, addresses, count, true,
+            snapshots, first_value, fault))
         return false;
 
     qword_t memory_identity =
             aarch64_linux_process_memory_identity(process);
     for (size_t index = 0; index < count; index++) {
-        if (snapshots[index].shared_identity != 0) {
+        if (snapshots[index].file_identity != 0) {
+            keys[index] = aarch64_file_page_futex_key(
+                    snapshots[index].file_identity,
+                    snapshots[index].page_offset);
+        } else if (snapshots[index].shared_identity != 0) {
             keys[index] = aarch64_physical_futex_key(
                     snapshots[index].shared_identity,
                     snapshots[index].page_offset);
         } else {
-            keys[index] = aarch64_virtual_futex_key(
+            keys[index] = aarch64_mm_shared_futex_key(
                     memory_identity, addresses[index]);
         }
     }
@@ -619,6 +658,8 @@ static int prepare_i386_futex_waitv_locked(
             return _EFAULT;
         case MEM_FUTEX_WAITV_MISMATCH:
             return _EAGAIN;
+        case MEM_FUTEX_WAITV_NO_MEMORY:
+            return _ENOMEM;
         case MEM_FUTEX_WAITV_READY:
             break;
     }
@@ -627,7 +668,7 @@ static int prepare_i386_futex_waitv_locked(
         addr_t address = (addr_t) entries[index].address;
         entries[index].key = entries[index].private_mapping ?
                 i386_virtual_futex_key(memory, address) :
-                i386_futex_key_from_snapshot(
+                i386_shared_futex_key_from_snapshot(
                         memory, address, &snapshots[index]);
     }
     return 0;
@@ -666,9 +707,15 @@ static int prepare_aarch64_futex_waitv_locked(
     qword_t memory_identity =
             aarch64_linux_process_memory_identity(process);
     for (size_t index = 0; index < count; index++) {
-        if (entries[index].private_mapping ||
-                snapshots[index].shared_identity == 0) {
+        if (entries[index].private_mapping) {
             entries[index].key = aarch64_virtual_futex_key(
+                    memory_identity, entries[index].address);
+        } else if (snapshots[index].file_identity != 0) {
+            entries[index].key = aarch64_file_page_futex_key(
+                    snapshots[index].file_identity,
+                    snapshots[index].page_offset);
+        } else if (snapshots[index].shared_identity == 0) {
+            entries[index].key = aarch64_mm_shared_futex_key(
                     memory_identity, entries[index].address);
         } else {
             entries[index].key = aarch64_physical_futex_key(
@@ -679,14 +726,18 @@ static int prepare_aarch64_futex_waitv_locked(
     return 0;
 }
 
-static struct futex_key aarch64_futex_key_from_snapshot(
+static struct futex_key aarch64_shared_futex_key_from_snapshot(
         struct aarch64_linux_process *process, qword_t address,
         const struct aarch64_linux_futex_word_snapshot *snapshot) {
+    if (snapshot->file_identity != 0) {
+        return aarch64_file_page_futex_key(
+                snapshot->file_identity, snapshot->page_offset);
+    }
     if (snapshot->shared_identity != 0) {
         return aarch64_physical_futex_key(
                 snapshot->shared_identity, snapshot->page_offset);
     }
-    return aarch64_virtual_futex_key(
+    return aarch64_mm_shared_futex_key(
             aarch64_linux_process_memory_identity(process), address);
 }
 
@@ -714,16 +765,17 @@ static int wait_i386_futex(struct mem *memory, addr_t address,
     struct mem_futex_word_snapshot snapshot;
     struct futex_key key;
     dword_t observed;
-    bool loaded = mem_snapshot_futex_words(
-            memory, addresses, 1, &snapshot, &observed);
-    if (loaded) {
+    int load_result = mem_snapshot_futex_words(
+            memory, addresses, 1, !private_mapping,
+            &snapshot, &observed);
+    if (load_result == 0) {
         key = private_mapping ?
                 i386_virtual_futex_key(memory, address) :
-                i386_futex_key_from_snapshot(
+                i386_shared_futex_key_from_snapshot(
                         memory, address, &snapshot);
     }
-    int result = loaded ? futex_wait_locked(
-            &key, expected, observed, timeout, NULL) : _EFAULT;
+    int result = load_result == 0 ? futex_wait_locked(
+            &key, expected, observed, timeout, NULL) : load_result;
     unlock(&futex_lock);
     STRACE("%d end futex(FUTEX_WAIT)", current->pid);
     return result;
@@ -739,9 +791,10 @@ static int wake_i386_futex(struct mem *memory, addr_t address,
         result = wake_futex_locked(&key, wake_max);
     } else {
         const addr_t addresses[] = {address};
-        result = snapshot_i386_futex_keys_locked(
-                memory, addresses, 1, &key, NULL) ?
-                wake_futex_locked(&key, wake_max) : _EFAULT;
+        int snapshot_result = snapshot_i386_futex_keys_locked(
+                memory, addresses, 1, &key, NULL);
+        result = snapshot_result == 0 ?
+                wake_futex_locked(&key, wake_max) : snapshot_result;
     }
     unlock(&futex_lock);
     return result;
@@ -763,11 +816,12 @@ static int requeue_i386_futex(struct mem *memory,
             source_address,
             target_address,
         };
-        result = snapshot_i386_futex_keys_locked(
-                memory, addresses, 2, keys, NULL) ?
+        int snapshot_result = snapshot_i386_futex_keys_locked(
+                memory, addresses, 2, keys, NULL);
+        result = snapshot_result == 0 ?
                 requeue_futex_locked(
                         &keys[0], wake_max,
-                        requeue_max, &keys[1]) : _EFAULT;
+                        requeue_max, &keys[1]) : snapshot_result;
     }
     unlock(&futex_lock);
     return result;
@@ -865,7 +919,7 @@ int futex_wake(addr_t uaddr, dword_t wake_max) {
     assert(current != NULL && current->mem != NULL);
     if ((uaddr & (sizeof(dword_t) - 1)) != 0)
         return _EINVAL;
-    // clear-child-tid 使用共享语义；私有页会自然退回虚拟键。
+    // clear-child-tid 使用共享语义；私有匿名页退回 mm-shared 虚拟域。
     return wake_i386_futex(
             current->mem, uaddr, false, wake_max);
 }
@@ -1234,17 +1288,24 @@ static bool cleanup_robust_futex_aarch64(
     struct aarch64_linux_futex_word_snapshot snapshot;
     dword_t observed;
     if (!aarch64_linux_process_snapshot_futex_words(
-            process, addresses, 1, &snapshot, &observed, NULL)) {
+            process, addresses, 1, false,
+            &snapshot, &observed, NULL)) {
         unlock(&futex_lock);
         return false;
     }
 
     for (;;) {
-        struct futex_key key = aarch64_futex_key_from_snapshot(
-                process, address, &snapshot);
         dword_t owner = observed & AARCH64_LINUX_FUTEX_TID_MASK;
         if (pending && !pi && owner == 0) {
-            (void) wake_futex_locked(&key, 1);
+            struct aarch64_linux_futex_word_snapshot wake_snapshot;
+            if (aarch64_linux_process_snapshot_futex_words(
+                    process, addresses, 1, true,
+                    &wake_snapshot, NULL, NULL)) {
+                struct futex_key key =
+                        aarch64_shared_futex_key_from_snapshot(
+                                process, address, &wake_snapshot);
+                (void) wake_futex_locked(&key, 1);
+            }
             unlock(&futex_lock);
             return true;
         }
@@ -1268,9 +1329,10 @@ static bool cleanup_robust_futex_aarch64(
             continue;
 
         if (!pi && (observed & AARCH64_LINUX_FUTEX_WAITERS) != 0) {
-            key = aarch64_futex_key_from_snapshot(
-                    process, address, &snapshot);
-            (void) wake_futex_locked(&key, 1);
+            struct futex_key key;
+            if (snapshot_aarch64_futex_keys_locked(
+                    process, addresses, 1, &key, NULL, NULL))
+                (void) wake_futex_locked(&key, 1);
         }
         unlock(&futex_lock);
         return true;
@@ -1367,17 +1429,21 @@ static bool cleanup_robust_futex_i386(struct task *task,
     const addr_t addresses[] = {address};
     struct mem_futex_word_snapshot snapshot;
     dword_t observed;
-    if (!mem_snapshot_futex_words(task->mem,
-            addresses, 1, &snapshot, &observed)) {
+    if (mem_snapshot_futex_words(task->mem,
+            addresses, 1, false, &snapshot, &observed) < 0) {
         unlock(&futex_lock);
         return false;
     }
     for (;;) {
-        struct futex_key key = i386_futex_key_from_snapshot(
-                task->mem, address, &snapshot);
         dword_t owner = observed & GUEST_LINUX_FUTEX_TID_MASK;
         if (pending && !pi && owner == 0) {
-            (void) wake_futex_locked(&key, 1);
+            struct mem_futex_word_snapshot wake_snapshot;
+            if (mem_snapshot_futex_words(task->mem,
+                    addresses, 1, true, &wake_snapshot, NULL) == 0) {
+                struct futex_key key = i386_shared_futex_key_from_snapshot(
+                        task->mem, address, &wake_snapshot);
+                (void) wake_futex_locked(&key, 1);
+            }
             break;
         }
         if (owner != (dword_t) task->pid)
@@ -1401,9 +1467,10 @@ static bool cleanup_robust_futex_i386(struct task *task,
         if (result == MEM_COMPARE_EXCHANGE_MISMATCH)
             continue;
         if (!pi && (observed & GUEST_LINUX_FUTEX_WAITERS) != 0) {
-            key = i386_futex_key_from_snapshot(
-                    task->mem, address, &snapshot);
-            (void) wake_futex_locked(&key, 1);
+            struct futex_key key;
+            if (snapshot_i386_futex_keys_locked(
+                    task->mem, addresses, 1, &key, NULL) == 0)
+                (void) wake_futex_locked(&key, 1);
         }
         break;
     }

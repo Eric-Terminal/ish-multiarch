@@ -36,6 +36,13 @@ enum guest_memory_fault_kind {
     GUEST_MEMORY_FAULT_ALIGNMENT,
 };
 
+// 页面来源只描述 guest 可观察的后备类型，不暴露宿主对象或指针。
+enum guest_page_origin {
+    GUEST_PAGE_ORIGIN_ANONYMOUS,
+    GUEST_PAGE_ORIGIN_FILE,
+    GUEST_PAGE_ORIGIN_SPECIAL,
+};
+
 struct guest_memory_fault {
     guest_addr_t address;
     enum guest_memory_access access;
@@ -69,6 +76,9 @@ struct guest_page_sync {
 struct guest_page_view {
     byte_t *host_page;
     unsigned permissions;
+    enum guest_page_origin origin;
+    // 页表后备身份在当前及历史对象间不复用；私有页也必须提供非零值。
+    qword_t backing_identity;
     // NULL 表示页面只受所属 address space 的事务锁保护。非空借用指针
     // 可以缓存，但只能在持有 address space 锁且映射世代仍匹配时使用。
     const struct guest_page_sync *sync;
@@ -80,6 +90,10 @@ struct guest_address_space_ops {
     void (*read_unlock)(void *opaque, bool locked);
     bool (*write_lock)(void *opaque);
     void (*write_unlock)(void *opaque, bool locked);
+    // 非空时，在写访问权限已成功解析后执行不依赖实际存储的后备转换。
+    void (*write_prepared)(void *opaque, guest_addr_t address, size_t size);
+    // 非空时，在写事务实际提交后更新页级后备元数据。
+    void (*written)(void *opaque, guest_addr_t address, size_t size);
     enum guest_memory_fault_kind (*resolve_page)(void *opaque,
             guest_addr_t page_base, enum guest_memory_access access,
             struct guest_page_view *view);
@@ -121,6 +135,9 @@ void guest_address_space_read_unlock(
 bool guest_address_space_write_lock(struct guest_address_space *space);
 void guest_address_space_write_unlock(
         struct guest_address_space *space, bool locked);
+void guest_address_space_write_prepared(
+        struct guest_address_space *space,
+        guest_addr_t address, size_t size);
 bool guest_address_space_contains(const struct guest_address_space *space,
         guest_addr_t address, size_t size);
 enum guest_memory_fault_kind guest_address_space_resolve_page(

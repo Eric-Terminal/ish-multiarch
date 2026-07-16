@@ -56,6 +56,16 @@ void guest_page_table_write_unlock(
 enum guest_page_table_result guest_page_table_map(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, byte_t **host_page);
+// 文件页与特殊内核页需要保留来源，供 fault/futex 等路径精确判定。
+enum guest_page_table_result guest_page_table_map_file(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page);
+enum guest_page_table_result guest_page_table_map_special(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page);
+enum guest_page_table_result guest_page_table_set_origin(
+        struct guest_page_table *table, guest_addr_t page_base,
+        enum guest_page_origin origin);
 // host_page 只适合冻结页表或调用方已知为私有页的管理操作。
 // 可能与其他地址空间共享的数据访问必须经过 TLB。
 enum guest_page_table_result guest_page_table_lookup(

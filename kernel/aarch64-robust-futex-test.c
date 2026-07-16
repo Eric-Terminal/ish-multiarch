@@ -34,6 +34,8 @@
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
 #define ROBUST_BASE UINT64_C(0x10000000)
 #define ROBUST_PAGES UINT64_C(10)
+#define READONLY_ROBUST_BASE \
+    (ROBUST_BASE + ROBUST_PAGES * GUEST_MEMORY_PAGE_SIZE)
 #define INVALID_ADDRESS (UINT64_C(1) << 48)
 
 #define AARCH64_LINUX_SYS_FUTEX 98
@@ -54,6 +56,8 @@
 struct robust_fixture {
     struct task *parent;
     struct tgroup group;
+    size_t readonly_steps;
+    size_t restore_steps;
 };
 
 struct robust_waiter {
@@ -117,21 +121,49 @@ static void append_move(dword_t *program, size_t *count,
     }
 }
 
-static size_t make_image(byte_t file[IMAGE_SIZE]) {
-    dword_t program[48];
+static void append_mmap(dword_t *program, size_t *count,
+        qword_t address, qword_t length,
+        qword_t protection, qword_t flags) {
+    append_move(program, count, 0, address);
+    append_move(program, count, 1, length);
+    append_move(program, count, 2, protection);
+    append_move(program, count, 3, flags);
+    append_move(program, count, 4, UINT64_MAX);
+    append_move(program, count, 5, 0);
+    append_move(program, count, 8, 222);
+    program[(*count)++] = UINT32_C(0xd4000001);
+}
+
+static void append_mprotect(dword_t *program, size_t *count,
+        qword_t address, qword_t protection) {
+    append_move(program, count, 0, address);
+    append_move(program, count, 1, GUEST_MEMORY_PAGE_SIZE);
+    append_move(program, count, 2, protection);
+    append_move(program, count, 8, 226);
+    program[(*count)++] = UINT32_C(0xd4000001);
+}
+
+static size_t make_image(byte_t file[IMAGE_SIZE], size_t *setup_steps,
+        size_t *readonly_steps) {
+    dword_t program[64];
     size_t instruction_count = 0;
-    append_move(program, &instruction_count, 0, ROBUST_BASE);
-    append_move(program, &instruction_count, 1,
-            ROBUST_PAGES * GUEST_MEMORY_PAGE_SIZE);
-    append_move(program, &instruction_count, 2,
-            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE);
-    append_move(program, &instruction_count, 3,
+    append_mmap(program, &instruction_count, ROBUST_BASE,
+            ROBUST_PAGES * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
             GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED |
             GUEST_LINUX_MAP_ANONYMOUS);
-    append_move(program, &instruction_count, 4, UINT64_MAX);
-    append_move(program, &instruction_count, 5, 0);
-    append_move(program, &instruction_count, 8, 222);
-    program[instruction_count++] = UINT32_C(0xd4000001);
+    append_mmap(program, &instruction_count, READONLY_ROBUST_BASE,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED |
+            GUEST_LINUX_MAP_ANONYMOUS);
+    *setup_steps = instruction_count;
+    append_mprotect(program, &instruction_count,
+            READONLY_ROBUST_BASE, GUEST_LINUX_PROT_READ);
+    *readonly_steps = instruction_count - *setup_steps;
+    append_mprotect(program, &instruction_count,
+            READONLY_ROBUST_BASE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE);
 
     memset(file, 0, IMAGE_SIZE);
     file[0] = 0x7f;
@@ -211,9 +243,12 @@ static struct task *make_parent(struct tgroup *group) {
 }
 
 static struct aarch64_linux_process *make_process(
-        struct task *task, size_t *setup_steps) {
+        struct task *task, size_t *setup_steps,
+        size_t *readonly_steps, size_t *restore_steps) {
     byte_t file[IMAGE_SIZE];
-    *setup_steps = make_image(file);
+    size_t total_steps = make_image(
+            file, setup_steps, readonly_steps);
+    *restore_steps = total_steps - *setup_steps - *readonly_steps;
     const char *arguments[] = {"robust-futex-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
     const struct aarch64_linux_process_config config = {
@@ -242,7 +277,9 @@ static bool init_fixture(struct robust_fixture *fixture) {
         return false;
     size_t setup_steps;
     struct aarch64_linux_process *process =
-            make_process(fixture->parent, &setup_steps);
+            make_process(fixture->parent, &setup_steps,
+                    &fixture->readonly_steps,
+                    &fixture->restore_steps);
     if (process == NULL)
         return false;
     for (size_t step = 0; step < setup_steps; step++) {
@@ -251,6 +288,30 @@ static bool init_fixture(struct robust_fixture *fixture) {
             return false;
     }
     return task_attach_aarch64_process(fixture->parent, process);
+}
+
+static bool protect_readonly_robust_page(
+        struct robust_fixture *fixture) {
+    for (size_t step = 0; step < fixture->readonly_steps; step++) {
+        if (aarch64_linux_process_run_one(
+                fixture->parent->aarch64_process).status !=
+                AARCH64_LINUX_PROCESS_RUNNABLE)
+            return false;
+    }
+    fixture->readonly_steps = 0;
+    return true;
+}
+
+static bool restore_writable_robust_page(
+        struct robust_fixture *fixture) {
+    for (size_t step = 0; step < fixture->restore_steps; step++) {
+        if (aarch64_linux_process_run_one(
+                fixture->parent->aarch64_process).status !=
+                AARCH64_LINUX_PROCESS_RUNNABLE)
+            return false;
+    }
+    fixture->restore_steps = 0;
+    return true;
 }
 
 static void destroy_fixture(struct robust_fixture *fixture) {
@@ -738,6 +799,71 @@ static bool test_listed_pending_and_pi_cleanup(void) {
     return true;
 }
 
+static bool test_readonly_private_cleanup_continues(void) {
+    struct robust_fixture fixture;
+    TEST_CHECK(init_fixture(&fixture),
+            "建立只读匿名私有 robust 清理夹具");
+    const qword_t head = ROBUST_BASE + UINT64_C(0x600);
+    const qword_t owned = ROBUST_BASE + UINT64_C(0x680);
+    const qword_t mismatch = READONLY_ROBUST_BASE + UINT64_C(0x100);
+    const qword_t pending = READONLY_ROBUST_BASE + UINT64_C(0x180);
+    const sqword_t offset = 8;
+    const dword_t owner = (dword_t) fixture.parent->pid;
+    const dword_t mismatch_value =
+            ((owner + 7) & AARCH64_LINUX_FUTEX_TID_MASK) |
+            AARCH64_LINUX_FUTEX_WAITERS;
+    const dword_t owned_value = owner | AARCH64_LINUX_FUTEX_WAITERS;
+    const dword_t pending_value = AARCH64_LINUX_FUTEX_WAITERS;
+    TEST_CHECK(write_head(&fixture, head, mismatch, offset, pending) &&
+            write_u64(&fixture, mismatch, owned) &&
+            write_u64(&fixture, owned, head) &&
+            write_u32(&fixture, mismatch + offset, mismatch_value) &&
+            write_u32(&fixture, owned + offset, owned_value) &&
+            write_u32(&fixture, pending + offset, pending_value),
+            "准备 owner mismatch、后续 owned 与 pending 节点");
+
+    struct task *waiter_task = make_thread(fixture.parent);
+    struct robust_waiter waiter;
+    TEST_CHECK(waiter_task != NULL &&
+            start_waiter(&waiter, waiter_task,
+                    pending + offset, pending_value) &&
+            wait_until_queued(fixture.parent, pending + offset) &&
+            protect_readonly_robust_page(&fixture) &&
+            sys_set_robust_list_aarch64(head,
+                    sizeof(struct aarch64_linux_robust_list_head)) == 0,
+            "等待者入队后把匿名私有页降为只读并注册 robust 头");
+    futex_cleanup_robust_list_aarch64(
+            fixture.parent, fixture.parent->aarch64_process);
+
+    dword_t mismatch_after;
+    dword_t owned_after;
+    dword_t pending_after;
+    qword_t registration = UINT64_MAX;
+    TEST_CHECK(read_u32(&fixture, mismatch + offset, &mismatch_after) &&
+            read_u32(&fixture, owned + offset, &owned_after) &&
+            read_u32(&fixture, pending + offset, &pending_after) &&
+            mismatch_after == mismatch_value &&
+            owned_after == (AARCH64_LINUX_FUTEX_WAITERS |
+                    AARCH64_LINUX_FUTEX_OWNER_DIED) &&
+            pending_after == pending_value &&
+            sys_get_robust_list_aarch64(0, &registration) == 0 &&
+            registration == 0,
+            "只读 owner mismatch 不终止遍历且 pending 不被错误修改");
+    TEST_CHECK(call_futex(fixture.parent, pending + offset,
+                    FUTEX_WAKE_ | GUEST_LINUX_FUTEX_PRIVATE_FLAG,
+                    1, 0, 0) == 0 &&
+            waiter_stage(&waiter) == 1 &&
+            restore_writable_robust_page(&fixture) &&
+            call_futex(fixture.parent, pending + offset,
+                    FUTEX_WAKE_, 1, 0, 0) == 1 &&
+            join_waiter(&waiter),
+            "只读 pending 不误唤醒且恢复写权限后由 mm-shared 键回收");
+    destroy_thread(fixture.parent, waiter_task);
+
+    destroy_fixture(&fixture);
+    return true;
+}
+
 static bool test_negative_offset_and_fault_boundaries(void) {
     struct robust_fixture fixture;
     TEST_CHECK(init_fixture(&fixture), "建立 robust 边界夹具");
@@ -968,6 +1094,8 @@ int main(void) {
         {"AArch64 robust 注册系统调用", test_registration_syscalls},
         {"AArch64 robust 链表与 pending 清理",
                 test_listed_pending_and_pi_cleanup},
+        {"AArch64 robust 只读匿名私有页继续遍历",
+                test_readonly_private_cleanup_continues},
         {"AArch64 robust 负偏移与故障边界",
                 test_negative_offset_and_fault_boundaries},
         {"AArch64 robust 遍历上限", test_traversal_limit},

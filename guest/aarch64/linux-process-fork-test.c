@@ -246,10 +246,10 @@ static qword_t dispatch_fork_fixture(
         dword_t child_value;
         struct guest_linux_user_fault snapshot_fault;
         assert(aarch64_linux_process_snapshot_futex_words(
-                fixture->parent, addresses, 2, parent_snapshots,
+                fixture->parent, addresses, 2, true, parent_snapshots,
                 &parent_value, &snapshot_fault));
         assert(aarch64_linux_process_snapshot_futex_words(
-                fixture->child, addresses, 2, child_snapshots,
+                fixture->child, addresses, 2, true, child_snapshots,
                 &child_value, &snapshot_fault));
         fixture->shared_identity = parent_snapshots[0].shared_identity;
         assert(fixture->shared_identity != 0 &&
@@ -321,7 +321,8 @@ static qword_t dispatch_fork_fixture(
         struct aarch64_linux_futex_word_snapshot snapshots[2];
         dword_t first_value;
         assert(aarch64_linux_process_snapshot_futex_words(
-                process, addresses, 2, snapshots, &first_value, fault));
+                process, addresses, 2, true,
+                snapshots, &first_value, fault));
         assert(snapshots[0].shared_identity ==
                 fixture->shared_identity &&
                 snapshots[0].page_offset == 0 &&
@@ -744,7 +745,7 @@ static qword_t dispatch_snapshot_fault_fixture(
     const qword_t protected_address = DATA_ADDRESS;
     assert(!aarch64_linux_process_snapshot_futex_words(
             fixture->process,
-            &protected_address, 1, snapshots,
+            &protected_address, 1, true, snapshots,
             &first_value, &snapshot_fault));
     assert(snapshots[0].shared_identity ==
             untouched.shared_identity &&
@@ -787,7 +788,7 @@ static qword_t dispatch_snapshot_fault_fixture(
         .kind = UINT32_MAX,
     };
     assert(!aarch64_linux_process_snapshot_futex_words(
-            fixture->process, partially_valid_addresses, 2,
+            fixture->process, partially_valid_addresses, 2, true,
             snapshots, &first_value, &snapshot_fault));
     for (size_t index = 0; index < 2; index++) {
         assert(snapshots[index].shared_identity ==

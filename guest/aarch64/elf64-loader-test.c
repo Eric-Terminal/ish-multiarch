@@ -84,6 +84,14 @@ static void make_test_pie(byte_t file[TEST_FILE_SIZE]) {
     put_u64(file + 0x180, UINT64_C(0x4ac));
 }
 
+static enum guest_page_origin resolve_page_origin(
+        struct guest_page_table *table, guest_addr_t page) {
+    struct guest_page_view view;
+    assert(guest_address_space_resolve_page(&table->address_space, page,
+            GUEST_MEMORY_READ, &view) == GUEST_MEMORY_FAULT_NONE);
+    return view.origin;
+}
+
 static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
         guest_addr_t load_bias) {
     struct aarch64_elf64_image image;
@@ -107,6 +115,8 @@ static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
     assert(guest_page_table_lookup(&table, image_base,
             &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
     assert(permissions == GUEST_MEMORY_PERMISSION_MASK);
+    assert(resolve_page_origin(&table, image_base) ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
     assert(memcmp(host_page + 0x100, file + 0x100, 12) == 0);
     assert(memcmp(host_page + 0x180, file + 0x180, 0x20) == 0);
     if (image.position_independent) {
@@ -138,6 +148,67 @@ static void test_load_and_run(const byte_t file[TEST_FILE_SIZE],
     guest_page_table_destroy(&table);
 }
 
+static void test_load_page_origins(void) {
+    byte_t file[TEST_FILE_SIZE];
+    make_test_elf(file);
+    put_u16(file + 56, 7);
+    byte_t *headers = file + AARCH64_ELF64_HEADER_SIZE;
+    qword_t header_size = 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    put_u64(headers + 32, header_size);
+    put_u64(headers + 40, header_size);
+    qword_t first_load_size = AARCH64_ELF64_HEADER_SIZE + header_size;
+    put_u64(headers + AARCH64_ELF64_PROGRAM_HEADER_SIZE + 32,
+            first_load_size);
+    put_u64(headers + AARCH64_ELF64_PROGRAM_HEADER_SIZE + 40,
+            first_load_size);
+    put_program_header(headers + 2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, TEST_BASE + UINT64_C(0x1000),
+            0, UINT64_C(0x1000), UINT64_C(0x1000));
+    put_program_header(headers + 3 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, TEST_BASE + UINT64_C(0x2000),
+            0, UINT64_C(0x300), UINT64_C(0x1000));
+    put_program_header(headers + 4 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 4, UINT64_C(0x200),
+            TEST_BASE + UINT64_C(0x2200),
+            4, 4, UINT64_C(0x1000));
+    put_program_header(headers + 5 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, TEST_BASE + UINT64_C(0x3000),
+            UINT64_C(0x100), UINT64_C(0x100), UINT64_C(0x1000));
+    // 只读段的页内补零故障会被忽略，因此页面仍保留文件来源。
+    put_program_header(headers + 6 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 4, UINT64_C(0x200),
+            TEST_BASE + UINT64_C(0x4200),
+            4, 8, UINT64_C(0x1000));
+    const byte_t marker[4] = {0x31, 0x41, 0x59, 0x26};
+    memcpy(file + 0x200, marker, sizeof(marker));
+
+    struct aarch64_elf64_image image;
+    assert(aarch64_elf64_parse(file, sizeof(file), &image) ==
+            AARCH64_ELF64_OK);
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    struct aarch64_elf64_load_result loaded;
+    assert(aarch64_elf64_load(&image, &table, 0, &loaded) ==
+            AARCH64_ELF64_LOAD_OK);
+    assert(resolve_page_origin(&table, TEST_BASE) ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x1000)) ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x2000)) ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x3000)) ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(resolve_page_origin(&table, TEST_BASE + UINT64_C(0x4000)) ==
+            GUEST_PAGE_ORIGIN_FILE);
+    byte_t *host_page;
+    unsigned permissions;
+    assert(guest_page_table_lookup(&table,
+            TEST_BASE + UINT64_C(0x2000),
+            &host_page, &permissions) == GUEST_PAGE_TABLE_OK);
+    assert(memcmp(host_page + 0x200, marker, sizeof(marker)) == 0);
+    guest_page_table_destroy(&table);
+}
+
 int main(void) {
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
@@ -151,6 +222,7 @@ int main(void) {
     byte_t pie[TEST_FILE_SIZE];
     make_test_pie(pie);
     test_load_and_run(pie, TEST_PIE_LOAD_BIAS);
+    test_load_page_origins();
 
     byte_t overlapping_bss[TEST_FILE_SIZE];
     make_test_elf(overlapping_bss);

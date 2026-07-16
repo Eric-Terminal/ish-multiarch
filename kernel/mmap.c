@@ -170,11 +170,13 @@ int_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags) {
         result = _EFAULT;
         goto out;
     }
-    dword_t pt_flags = entry->flags;
+    const dword_t page_state_flags = P_COW | P_FILE_BACKED;
+    dword_t mapping_flags = entry->flags & ~page_state_flags;
     for (pages_t index = 0; index < old_pages; index++) {
         page_t page = start_page + index;
         entry = mem_pt(current->mem, page);
-        if (entry == NULL || entry->flags != pt_flags) {
+        if (entry == NULL ||
+                (entry->flags & ~page_state_flags) != mapping_flags) {
             result = _EFAULT;
             goto out;
         }
@@ -188,7 +190,8 @@ int_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags) {
         result = err < 0 ? _EFAULT : (int_t) addr;
         goto out;
     }
-    if (!(pt_flags & P_ANONYMOUS) || (pt_flags & P_SHARED)) {
+    if (!(mapping_flags & P_ANONYMOUS) ||
+            (mapping_flags & P_SHARED)) {
         // 共享匿名扩展必须由真正的单一 shmem 后备承载，不能伪造同键副本。
         FIXME("尚未实现共享或文件映射的 mremap 扩展");
         result = _EFAULT;
@@ -200,7 +203,8 @@ int_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags) {
         result = _ENOMEM;
         goto out;
     }
-    int err = pt_map_nothing(current->mem, extra_start, extra_pages, pt_flags);
+    int err = pt_map_nothing(
+            current->mem, extra_start, extra_pages, mapping_flags);
     if (err < 0) {
         result = err;
         goto out;

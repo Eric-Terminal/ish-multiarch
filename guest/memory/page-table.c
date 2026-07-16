@@ -10,6 +10,7 @@
 struct guest_page_mapping {
     struct guest_page_backing *backing;
     unsigned permissions;
+    enum guest_page_origin origin;
     bool shared;
 };
 
@@ -58,11 +59,14 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
     struct guest_page_mapping *mapping = find_mapping(table, page_base);
     if (mapping == NULL)
         return GUEST_MEMORY_FAULT_UNMAPPED;
+    const struct guest_page_sync *sync =
+            guest_page_backing_sync(mapping->backing);
     *view = (struct guest_page_view) {
         .host_page = guest_page_backing_bytes(mapping->backing),
         .permissions = mapping->permissions,
-        .sync = mapping->shared ?
-                guest_page_backing_sync(mapping->backing) : NULL,
+        .origin = mapping->origin,
+        .backing_identity = guest_page_sync_identity(sync),
+        .sync = mapping->shared ? sync : NULL,
     };
     return GUEST_MEMORY_FAULT_NONE;
 }
@@ -83,11 +87,47 @@ static void address_space_write_unlock(void *opaque, bool locked) {
     guest_page_table_write_unlock(opaque, locked);
 }
 
+static void anonymize_private_file_pages(
+        void *opaque, guest_addr_t address, size_t size) {
+    // 调用者持有页表写事务；这里只改来源，不能替换或释放当前 backing。
+    struct guest_page_table *table = opaque;
+    guest_addr_t first = address & ~GUEST_MEMORY_PAGE_MASK;
+    guest_addr_t last = (address + (guest_addr_t) size - 1) &
+            ~GUEST_MEMORY_PAGE_MASK;
+    bool changed = false;
+    for (guest_addr_t page = first;; page += GUEST_MEMORY_PAGE_SIZE) {
+        struct guest_page_mapping *mapping = find_mapping(table, page);
+        assert(mapping != NULL);
+        // 私有文件页被 guest 写入后已成为该地址空间的匿名副本。
+        if (!mapping->shared &&
+                mapping->origin == GUEST_PAGE_ORIGIN_FILE) {
+            mapping->origin = GUEST_PAGE_ORIGIN_ANONYMOUS;
+            changed = true;
+        }
+        if (page == last)
+            break;
+    }
+    if (changed)
+        guest_address_space_changed(&table->address_space);
+}
+
+static void address_space_write_prepared(
+        void *opaque, guest_addr_t address, size_t size) {
+    anonymize_private_file_pages(opaque, address, size);
+}
+
+static void address_space_written(
+        void *opaque, guest_addr_t address, size_t size) {
+    anonymize_private_file_pages(opaque, address, size);
+}
+
 static const struct guest_address_space_ops page_table_ops = {
     .read_lock = address_space_read_lock,
     .read_unlock = address_space_read_unlock,
     .write_lock = address_space_write_lock,
     .write_unlock = address_space_write_unlock,
+    .write_prepared = address_space_write_prepared,
+    .written = address_space_written,
     .resolve_page = resolve_page,
 };
 
@@ -230,6 +270,7 @@ static struct guest_page_table_leaf *clone_leaf(
             }
         }
         copy_mapping->permissions = source_mapping->permissions;
+        copy_mapping->origin = source_mapping->origin;
         copy_mapping->shared = source_mapping->shared;
     }
     return copy;
@@ -360,9 +401,10 @@ static enum guest_page_table_result prepare_mapping_slot(
     return GUEST_PAGE_TABLE_OK;
 }
 
-enum guest_page_table_result guest_page_table_map(
+static enum guest_page_table_result map_page(
         struct guest_page_table *table, guest_addr_t page_base,
-        unsigned permissions, byte_t **host_page) {
+        unsigned permissions, enum guest_page_origin origin,
+        byte_t **host_page) {
     assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
     assert(host_page != NULL);
     if (!valid_page(table, page_base))
@@ -381,9 +423,49 @@ enum guest_page_table_result guest_page_table_map(
     if (mapping->backing == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     mapping->permissions = permissions;
+    mapping->origin = origin;
     mapping->shared = false;
     *host_page = guest_page_backing_bytes(mapping->backing);
     guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_map(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page) {
+    return map_page(table, page_base, permissions,
+            GUEST_PAGE_ORIGIN_ANONYMOUS, host_page);
+}
+
+enum guest_page_table_result guest_page_table_map_file(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page) {
+    return map_page(table, page_base, permissions,
+            GUEST_PAGE_ORIGIN_FILE, host_page);
+}
+
+enum guest_page_table_result guest_page_table_map_special(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, byte_t **host_page) {
+    return map_page(table, page_base, permissions,
+            GUEST_PAGE_ORIGIN_SPECIAL, host_page);
+}
+
+enum guest_page_table_result guest_page_table_set_origin(
+        struct guest_page_table *table, guest_addr_t page_base,
+        enum guest_page_origin origin) {
+    assert(origin == GUEST_PAGE_ORIGIN_ANONYMOUS ||
+            origin == GUEST_PAGE_ORIGIN_FILE ||
+            origin == GUEST_PAGE_ORIGIN_SPECIAL);
+    if (!valid_page(table, page_base))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+    struct guest_page_mapping *mapping = find_mapping(table, page_base);
+    if (mapping == NULL)
+        return GUEST_PAGE_TABLE_NOT_MAPPED;
+    if (mapping->origin != origin) {
+        mapping->origin = origin;
+        guest_address_space_changed(&table->address_space);
+    }
     return GUEST_PAGE_TABLE_OK;
 }
 
@@ -449,6 +531,7 @@ static enum guest_page_table_result map_zero_range(
         prepared[i].old_backing = prepared[i].mapping->backing;
         prepared[i].mapping->backing = prepared[i].new_backing;
         prepared[i].mapping->permissions = permissions;
+        prepared[i].mapping->origin = GUEST_PAGE_ORIGIN_ANONYMOUS;
         prepared[i].mapping->shared = shared;
         prepared[i].new_backing = NULL;
     }

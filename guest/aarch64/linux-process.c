@@ -659,9 +659,44 @@ static void export_fault(struct guest_linux_user_fault *destination,
     };
 }
 
+static bool futex_shared_key_unavailable(
+        const struct guest_page_view *view) {
+    if (view->origin == GUEST_PAGE_ORIGIN_SPECIAL) {
+        assert(view->sync == NULL);
+        return true;
+    }
+    if (view->origin == GUEST_PAGE_ORIGIN_FILE)
+        return false;
+    assert(view->origin == GUEST_PAGE_ORIGIN_ANONYMOUS);
+    // MAP_SHARED 匿名页由类 shmem 同步域提供跨进程对象键。
+    if (view->sync != NULL)
+        return false;
+    return (view->permissions & GUEST_MEMORY_WRITE) == 0;
+}
+
+static void futex_apply_private_file_cow(
+        struct guest_page_table *table, guest_addr_t page_base,
+        struct guest_page_view *view) {
+    if (view->origin != GUEST_PAGE_ORIGIN_FILE || view->sync != NULL ||
+            (view->permissions & GUEST_MEMORY_WRITE) == 0)
+        return;
+    // Linux 共享 futex 的 FOLL_WRITE 固定会先私有化可写 MAP_PRIVATE 文件页。
+    assert(guest_page_table_set_origin(table, page_base,
+            GUEST_PAGE_ORIGIN_ANONYMOUS) == GUEST_PAGE_TABLE_OK);
+    view->origin = GUEST_PAGE_ORIGIN_ANONYMOUS;
+}
+
+static void futex_address_space_unlock(
+        struct guest_address_space *space, bool write, bool locked) {
+    if (write)
+        guest_address_space_write_unlock(space, locked);
+    else
+        guest_address_space_read_unlock(space, locked);
+}
+
 bool aarch64_linux_process_snapshot_futex_words(
         struct aarch64_linux_process *process,
-        const qword_t *addresses, size_t count,
+        const qword_t *addresses, size_t count, bool shared_key,
         struct aarch64_linux_futex_word_snapshot *snapshots,
         dword_t *first_value,
         struct guest_linux_user_fault *fault) {
@@ -675,8 +710,10 @@ bool aarch64_linux_process_snapshot_futex_words(
     struct guest_page_view views[2];
     struct aarch64_linux_futex_word_snapshot resolved[2];
     enum guest_memory_fault_kind fault_kind = GUEST_MEMORY_FAULT_NONE;
+    enum guest_memory_access fault_access = GUEST_MEMORY_READ;
     guest_addr_t fault_address = 0;
-    bool locked = guest_address_space_read_lock(space);
+    bool locked = shared_key ? guest_address_space_write_lock(space) :
+            guest_address_space_read_lock(space);
     for (size_t index = 0; index < count; index++) {
         qword_t address = addresses[index];
         if (!guest_address_space_contains(
@@ -695,9 +732,23 @@ bool aarch64_linux_process_snapshot_futex_words(
             fault_address = (guest_addr_t) address;
             break;
         }
+        if (shared_key) {
+            futex_apply_private_file_cow(
+                    &process->memory->page_table,
+                    page_base, &views[index]);
+        }
+        if (shared_key && futex_shared_key_unavailable(&views[index])) {
+            fault_address = (guest_addr_t) address;
+            fault_access = GUEST_MEMORY_WRITE;
+            fault_kind = GUEST_MEMORY_FAULT_PERMISSION;
+            break;
+        }
         resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
             .shared_identity = views[index].sync == NULL ? 0 :
                     guest_page_sync_identity(views[index].sync),
+            .file_identity = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE ?
+                    views[index].backing_identity : 0,
             .page_offset = address & GUEST_MEMORY_PAGE_MASK,
         };
     }
@@ -713,13 +764,13 @@ bool aarch64_linux_process_snapshot_futex_words(
         if (first->sync != NULL)
             guest_page_sync_read_unlock(first->sync);
     }
-    guest_address_space_read_unlock(space, locked);
+    futex_address_space_unlock(space, shared_key, locked);
 
     if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
         if (fault != NULL) {
             const struct guest_memory_fault memory_fault = {
                 .address = fault_address,
-                .access = GUEST_MEMORY_READ,
+                .access = fault_access,
                 .kind = fault_kind,
             };
             export_fault(fault, &memory_fault);
@@ -755,7 +806,11 @@ aarch64_linux_process_prepare_futex_waitv(
     enum guest_memory_access fault_access = GUEST_MEMORY_READ;
     guest_addr_t fault_address = 0;
 
-    bool locked = guest_address_space_read_lock(space);
+    bool has_shared_key = false;
+    for (size_t index = 0; index < count; index++)
+        has_shared_key |= !private_mappings[index];
+    bool locked = has_shared_key ? guest_address_space_write_lock(space) :
+            guest_address_space_read_lock(space);
     for (size_t index = 0; index < count; index++) {
         qword_t address = addresses[index];
         if ((address & (sizeof(dword_t) - 1)) != 0) {
@@ -786,9 +841,9 @@ aarch64_linux_process_prepare_futex_waitv(
             result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
             break;
         }
-        // 只读匿名私有页没有可供共享 futex 固定的跨进程后备键。
-        if (views[index].sync == NULL &&
-                (views[index].permissions & GUEST_MEMORY_WRITE) == 0) {
+        futex_apply_private_file_cow(
+                &process->memory->page_table, page_base, &views[index]);
+        if (futex_shared_key_unavailable(&views[index])) {
             fault_address = (guest_addr_t) address;
             fault_access = GUEST_MEMORY_WRITE;
             fault_kind = GUEST_MEMORY_FAULT_PERMISSION;
@@ -798,6 +853,9 @@ aarch64_linux_process_prepare_futex_waitv(
         resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
             .shared_identity = views[index].sync == NULL ? 0 :
                     guest_page_sync_identity(views[index].sync),
+            .file_identity = views[index].origin ==
+                    GUEST_PAGE_ORIGIN_FILE ?
+                    views[index].backing_identity : 0,
             .page_offset = address & GUEST_MEMORY_PAGE_MASK,
         };
     }
@@ -831,7 +889,7 @@ aarch64_linux_process_prepare_futex_waitv(
         if (observed != expected[index])
             result = AARCH64_LINUX_FUTEX_WAITV_MISMATCH;
     }
-    guest_address_space_read_unlock(space, locked);
+    futex_address_space_unlock(space, has_shared_key, locked);
 
     if (result == AARCH64_LINUX_FUTEX_WAITV_FAULT && fault != NULL) {
         const struct guest_memory_fault memory_fault = {

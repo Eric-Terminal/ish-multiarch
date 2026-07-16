@@ -413,6 +413,73 @@ static void test_atomic_map_and_replace(void) {
     guest_page_table_destroy(&table);
 }
 
+static void test_page_origins(void) {
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    byte_t *page;
+    const guest_addr_t special_page =
+            NEXT_PAGE + GUEST_MEMORY_PAGE_SIZE;
+    assert(guest_page_table_map(&table, HIGH_PAGE,
+            GUEST_MEMORY_READ, &page) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map_file(&table, NEXT_PAGE,
+            GUEST_MEMORY_READ, &page) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map_special(&table, special_page,
+            GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE,
+            &page) == GUEST_PAGE_TABLE_OK);
+    assert(resolve_view(&table, HIGH_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    assert(resolve_view(&table, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(resolve_view(&table, special_page).origin ==
+            GUEST_PAGE_ORIGIN_SPECIAL);
+
+    assert(guest_page_table_protect(&table, NEXT_PAGE,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(resolve_view(&table, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_FILE);
+    struct guest_page_table copy;
+    assert(guest_page_table_clone(&copy, &table));
+    assert(resolve_view(&copy, HIGH_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    assert(resolve_view(&copy, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(resolve_view(&copy, special_page).origin ==
+            GUEST_PAGE_ORIGIN_SPECIAL);
+
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &table.address_space);
+    assert(tlb_read_byte(&tlb, NEXT_PAGE) == 0);
+    qword_t generation = table.address_space.generation;
+    tlb_write_byte(&tlb, NEXT_PAGE, 0x5a);
+    assert(resolve_view(&table, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    assert(resolve_view(&copy, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_FILE);
+    assert(table.address_space.generation == generation + 1);
+    generation = table.address_space.generation;
+    tlb_write_byte(&tlb, NEXT_PAGE + 1, 0xa5);
+    assert(table.address_space.generation == generation);
+    struct guest_page_table written_copy;
+    assert(guest_page_table_clone(&written_copy, &table));
+    assert(resolve_view(&written_copy, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    guest_page_table_destroy(&written_copy);
+
+    const struct guest_page_range replacement = {
+        .first = NEXT_PAGE,
+        .page_count = 2,
+    };
+    assert(guest_page_table_map_zero_range(&table, replacement,
+            GUEST_MEMORY_READ, true) == GUEST_PAGE_TABLE_OK);
+    assert(resolve_view(&table, NEXT_PAGE).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    assert(resolve_view(&table, special_page).origin ==
+            GUEST_PAGE_ORIGIN_ANONYMOUS);
+    guest_page_table_destroy(&copy);
+    guest_page_table_destroy(&table);
+}
+
 static void test_conflicts_and_holes(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
@@ -966,6 +1033,7 @@ int main(void) {
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     assert(guest_page_backing_test_live_count() == 0);
     test_single_page_operations();
+    test_page_origins();
     test_supported_address_widths();
     test_backing_allocation_failures();
     test_shared_map_rollback();

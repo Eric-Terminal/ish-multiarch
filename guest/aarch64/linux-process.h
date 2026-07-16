@@ -130,8 +130,10 @@ struct aarch64_linux_process_result {
 };
 
 struct aarch64_linux_futex_word_snapshot {
-    // 0 表示私有映射；非零值标识共享页的同步域。
+    // 0 表示由调用方按 PRIVATE 或 mm-shared 虚拟域建键；非零值标识同步域。
     qword_t shared_identity;
+    // 缺少 inode 身份时，以独立键域中的页后备身份避免与匿名 COW 键碰撞。
+    qword_t file_identity;
     qword_t page_offset;
 };
 
@@ -201,11 +203,12 @@ bool aarch64_linux_process_contains_user_range(
         qword_t address, size_t size);
 /*
  * addresses 仅接受一到两个对齐的 32 位 futex 字。全部地址会在同一
- * 地址空间读事务内解析，失败时 snapshots 与 first_value 保持不变。
+ * 地址空间事务内解析，失败时 snapshots 与 first_value 保持不变；
+ * shared_key 为真时还会执行写固定、私有文件页 COW 与特殊页拒绝。
  */
 bool aarch64_linux_process_snapshot_futex_words(
         struct aarch64_linux_process *process,
-        const qword_t *addresses, size_t count,
+        const qword_t *addresses, size_t count, bool shared_key,
         struct aarch64_linux_futex_word_snapshot *snapshots,
         dword_t *first_value,
         struct guest_linux_user_fault *fault);

@@ -20,7 +20,7 @@ enum guest_page_table_result aarch64_linux_map_signal_trampoline(
     if (page_base == 0)
         return GUEST_PAGE_TABLE_INVALID_ADDRESS;
     byte_t *page;
-    enum guest_page_table_result result = guest_page_table_map(
+    enum guest_page_table_result result = guest_page_table_map_special(
             table, page_base,
             GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE, &page);
     if (result != GUEST_PAGE_TABLE_OK)

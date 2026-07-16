@@ -27,12 +27,21 @@
 
 #define IMAGE_SIZE 1024
 #define TEXT_BASE UINT64_C(0x400000)
+#define BSS_BASE UINT64_C(0x600000)
+#define RUNTIME_COW_BASE UINT64_C(0x700000)
+#define PADZERO_BASE UINT64_C(0x710000)
+#define PIN_COW_BASE UINT64_C(0x720000)
+#define CAS_COW_BASE UINT64_C(0x730000)
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
 #define SHARED_BASE UINT64_C(0x10000000)
 #define UNRELATED_SHARED_BASE (SHARED_BASE + GUEST_MEMORY_PAGE_SIZE)
 #define PRIVATE_BASE (UNRELATED_SHARED_BASE + GUEST_MEMORY_PAGE_SIZE)
+#define READ_ONLY_PRIVATE_BASE (PRIVATE_BASE + GUEST_MEMORY_PAGE_SIZE)
+#define READ_ONLY_SHARED_BASE \
+    (READ_ONLY_PRIVATE_BASE + GUEST_MEMORY_PAGE_SIZE)
+#define READ_ONLY_STACK_BASE (STACK_TOP - 2 * GUEST_MEMORY_PAGE_SIZE)
 #define LONG_TIMEOUT (PRIVATE_BASE + UINT64_C(0xf00))
 #define SHORT_TIMEOUT (PRIVATE_BASE + UINT64_C(0xf20))
 #define UNMAPPED_ADDRESS UINT64_C(0x20000000)
@@ -54,6 +63,9 @@
 struct futex_fixture {
     struct task *parent;
     struct tgroup group;
+    size_t text_cow_steps;
+    size_t cas_cow_protect_steps;
+    size_t pin_cow_protect_steps;
 };
 
 struct waiter {
@@ -111,11 +123,10 @@ static void append_move(dword_t *program, size_t *count,
 }
 
 static void append_mmap(dword_t *program, size_t *count,
-        qword_t address, qword_t flags) {
+        qword_t address, qword_t protection, qword_t flags) {
     append_move(program, count, 0, address);
     append_move(program, count, 1, GUEST_MEMORY_PAGE_SIZE);
-    append_move(program, count, 2,
-            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE);
+    append_move(program, count, 2, protection);
     append_move(program, count, 3, flags);
     append_move(program, count, 4, UINT64_MAX);
     append_move(program, count, 5, 0);
@@ -123,18 +134,62 @@ static void append_mmap(dword_t *program, size_t *count,
     program[(*count)++] = UINT32_C(0xd4000001);
 }
 
-static size_t make_image(byte_t file[IMAGE_SIZE]) {
-    dword_t program[64];
+static void append_mprotect(dword_t *program, size_t *count,
+        qword_t address, qword_t protection) {
+    append_move(program, count, 0, address);
+    append_move(program, count, 1, GUEST_MEMORY_PAGE_SIZE);
+    append_move(program, count, 2, protection);
+    append_move(program, count, 8, 226);
+    program[(*count)++] = UINT32_C(0xd4000001);
+}
+
+static size_t make_image(byte_t file[IMAGE_SIZE],
+        size_t *setup_steps, size_t *text_cow_steps,
+        size_t *cas_cow_protect_steps) {
+    dword_t program[128];
     size_t instruction_count = 0;
     append_mmap(program, &instruction_count, SHARED_BASE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
             GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED |
             GUEST_LINUX_MAP_ANONYMOUS);
     append_mmap(program, &instruction_count, UNRELATED_SHARED_BASE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
             GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED |
             GUEST_LINUX_MAP_ANONYMOUS);
     append_mmap(program, &instruction_count, PRIVATE_BASE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
             GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED |
             GUEST_LINUX_MAP_ANONYMOUS);
+    append_mmap(program, &instruction_count, READ_ONLY_PRIVATE_BASE,
+            GUEST_LINUX_PROT_READ,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED |
+            GUEST_LINUX_MAP_ANONYMOUS);
+    append_mmap(program, &instruction_count, READ_ONLY_SHARED_BASE,
+            GUEST_LINUX_PROT_READ,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED |
+            GUEST_LINUX_MAP_ANONYMOUS);
+    append_mprotect(program, &instruction_count,
+            READ_ONLY_STACK_BASE, GUEST_LINUX_PROT_READ);
+    append_mprotect(program, &instruction_count,
+            BSS_BASE, GUEST_LINUX_PROT_READ);
+    append_move(program, &instruction_count, 0, RUNTIME_COW_BASE);
+    append_move(program, &instruction_count, 1, UINT32_C(0x12345678));
+    program[instruction_count++] = UINT32_C(0xb9000001);
+    append_mprotect(program, &instruction_count,
+            RUNTIME_COW_BASE, GUEST_LINUX_PROT_READ);
+    append_mprotect(program, &instruction_count,
+            PADZERO_BASE, GUEST_LINUX_PROT_READ);
+    *setup_steps = instruction_count;
+    append_mprotect(program, &instruction_count, TEXT_BASE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE |
+            GUEST_LINUX_PROT_EXEC);
+    *text_cow_steps = instruction_count - *setup_steps;
+    append_mprotect(program, &instruction_count,
+            CAS_COW_BASE, GUEST_LINUX_PROT_READ);
+    *cas_cow_protect_steps =
+            instruction_count - *setup_steps - *text_cow_steps;
+    append_mprotect(program, &instruction_count,
+            PIN_COW_BASE, GUEST_LINUX_PROT_READ);
 
     memset(file, 0, IMAGE_SIZE);
     file[0] = 0x7f;
@@ -151,10 +206,10 @@ static size_t make_image(byte_t file[IMAGE_SIZE]) {
     put_u64(file + 32, AARCH64_ELF64_HEADER_SIZE);
     put_u16(file + 52, AARCH64_ELF64_HEADER_SIZE);
     put_u16(file + 54, AARCH64_ELF64_PROGRAM_HEADER_SIZE);
-    put_u16(file + 56, 2);
+    put_u16(file + 56, 7);
 
     byte_t *headers = file + AARCH64_ELF64_HEADER_SIZE;
-    qword_t header_size = 2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
+    qword_t header_size = 7 * AARCH64_ELF64_PROGRAM_HEADER_SIZE;
     put_program_header(headers, 6, 4,
             AARCH64_ELF64_HEADER_SIZE,
             TEXT_BASE + AARCH64_ELF64_HEADER_SIZE,
@@ -162,6 +217,21 @@ static size_t make_image(byte_t file[IMAGE_SIZE]) {
     put_program_header(headers + AARCH64_ELF64_PROGRAM_HEADER_SIZE,
             1, 5, 0, TEXT_BASE, IMAGE_SIZE,
             IMAGE_SIZE, GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 2 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, BSS_BASE, 0,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 3 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, RUNTIME_COW_BASE, 4, 4,
+            GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 4 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, PADZERO_BASE, 4, 8,
+            GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 5 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, PIN_COW_BASE, 4, 4,
+            GUEST_MEMORY_PAGE_SIZE);
+    put_program_header(headers + 6 * AARCH64_ELF64_PROGRAM_HEADER_SIZE,
+            1, 6, 0, CAS_COW_BASE, 4, 4,
+            GUEST_MEMORY_PAGE_SIZE);
     if (instruction_count >
             (IMAGE_SIZE - ENTRY_OFFSET) / sizeof(*program))
         abort();
@@ -214,9 +284,15 @@ static struct task *make_parent(struct tgroup *group) {
 }
 
 static struct aarch64_linux_process *make_process(struct task *task,
-        size_t *setup_steps) {
+        size_t *setup_steps, size_t *text_cow_steps,
+        size_t *cas_cow_protect_steps,
+        size_t *pin_cow_protect_steps) {
     byte_t file[IMAGE_SIZE];
-    *setup_steps = make_image(file);
+    size_t total_steps = make_image(file, setup_steps,
+            text_cow_steps, cas_cow_protect_steps);
+    *pin_cow_protect_steps =
+            total_steps - *setup_steps - *text_cow_steps -
+            *cas_cow_protect_steps;
     const char *arguments[] = {"futex-test"};
     byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {0};
     const struct aarch64_linux_process_config config = {
@@ -245,7 +321,10 @@ static bool init_fixture(struct futex_fixture *fixture) {
         return false;
     size_t setup_steps;
     struct aarch64_linux_process *process =
-            make_process(fixture->parent, &setup_steps);
+            make_process(fixture->parent, &setup_steps,
+                    &fixture->text_cow_steps,
+                    &fixture->cas_cow_protect_steps,
+                    &fixture->pin_cow_protect_steps);
     if (process == NULL)
         return false;
     for (size_t step = 0; step < setup_steps; step++) {
@@ -260,6 +339,18 @@ static bool init_fixture(struct futex_fixture *fixture) {
                     process, SHARED_BASE, 0, &fault) &&
             aarch64_linux_process_write_u32(
                     process, PRIVATE_BASE, 0, &fault);
+}
+
+static bool run_delayed_steps(
+        struct futex_fixture *fixture, size_t *remaining) {
+    for (size_t step = 0; step < *remaining; step++) {
+        if (aarch64_linux_process_run_one(
+                fixture->parent->aarch64_process).status !=
+                AARCH64_LINUX_PROCESS_RUNNABLE)
+            return false;
+    }
+    *remaining = 0;
+    return true;
 }
 
 static void destroy_fixture(struct futex_fixture *fixture) {
@@ -533,6 +624,195 @@ static bool test_edges_and_thread_private(void) {
     return true;
 }
 
+static bool test_read_only_shared_key_permissions(void) {
+    struct futex_fixture fixture;
+    TEST_CHECK(init_fixture(&fixture), "建立只读 futex 键测试夹具");
+    struct guest_linux_user_fault fault = {0};
+
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+            FUTEX_WAIT_, 1, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == READ_ONLY_PRIVATE_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
+            "共享 WAIT 拒绝只读匿名私有页并报告写权限故障");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+            FUTEX_WAKE_, 1, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == READ_ONLY_PRIVATE_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
+            "共享 WAKE 拒绝只读匿名私有页");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+            FUTEX_REQUEUE_, 0, 1, READ_ONLY_SHARED_BASE,
+            &fault) == (dword_t) _EFAULT &&
+            fault.address == READ_ONLY_PRIVATE_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
+            "共享 REQUEUE 在源键阶段拒绝只读匿名私有页");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_SHARED_BASE,
+            FUTEX_REQUEUE_, 0, 1, READ_ONLY_PRIVATE_BASE,
+            &fault) == (dword_t) _EFAULT &&
+            fault.address == READ_ONLY_PRIVATE_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
+            "共享 REQUEUE 在队列副作用前校验只读私有目标键");
+
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+            FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_, 1, 0, 0,
+            &fault) == (dword_t) _EAGAIN &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+                    FUTEX_WAKE_ | FUTEX_PRIVATE_FLAG_,
+                    1, 0, 0, &fault) == 0 &&
+            call_futex(fixture.parent, READ_ONLY_PRIVATE_BASE,
+                    FUTEX_REQUEUE_ | FUTEX_PRIVATE_FLAG_, 0, 1,
+                    READ_ONLY_SHARED_BASE, &fault) == 0,
+            "PRIVATE 操作保留只读页的虚拟键语义");
+
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_SHARED_BASE,
+            FUTEX_WAIT_, 1, 0, 0, &fault) == (dword_t) _EAGAIN &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            call_futex(fixture.parent, READ_ONLY_SHARED_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            call_futex(fixture.parent, READ_ONLY_SHARED_BASE,
+                    FUTEX_REQUEUE_, 0, 1,
+                    READ_ONLY_SHARED_BASE, &fault) == 0,
+            "只读匿名共享页仍可形成稳定物理键");
+
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, READ_ONLY_STACK_BASE,
+            FUTEX_WAIT_, 1, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == READ_ONLY_STACK_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, READ_ONLY_STACK_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    1, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "只读初始栈保留匿名私有来源并允许 PRIVATE 读取");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, TEXT_BASE + ENTRY_OFFSET,
+            FUTEX_WAIT_, 0, 0, 0, &fault) == (dword_t) _EAGAIN &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE,
+            "只读 ELF 文件页通过来源检查并到达值比较");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, BSS_BASE,
+            FUTEX_WAIT_, 1, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == BSS_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, BSS_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    1, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "只读 ELF 纯 BSS 页保留匿名来源");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, RUNTIME_COW_BASE,
+            FUTEX_WAIT_, 0, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == RUNTIME_COW_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, RUNTIME_COW_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    0, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "运行期写入后降权的 ELF 私有页已经转为匿名来源");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, PADZERO_BASE,
+            FUTEX_WAIT_, 0, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == PADZERO_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, PADZERO_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    0, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "可写 PT_LOAD 的文件尾补零页保留匿名 COW 来源");
+
+    const qword_t text_word = TEXT_BASE + ENTRY_OFFSET;
+    dword_t text_value;
+    struct task *file_waiter_task = make_related_task(
+            fixture.parent, true);
+    struct waiter file_waiter;
+    TEST_CHECK(file_waiter_task != NULL &&
+            aarch64_linux_process_read_u32(
+                    fixture.parent->aarch64_process,
+                    text_word, &text_value, &fault) &&
+            write_timespec(fixture.parent, SHORT_TIMEOUT,
+                    0, 500000000) &&
+            start_waiter(&file_waiter, file_waiter_task,
+                    text_word, FUTEX_WAIT_, text_value,
+                    SHORT_TIMEOUT) &&
+            wait_until_queued(fixture.parent, text_word, 0, 1),
+            "在只读文件页键上登记等待者");
+    TEST_CHECK(run_delayed_steps(
+                    &fixture, &fixture.text_cow_steps) &&
+            call_futex(fixture.parent, text_word,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            completed_waiters(&file_waiter, 1) == 0 &&
+            join_waiter(&file_waiter, (dword_t) _ETIMEDOUT),
+            "文件页写固定后的匿名键不得误唤醒旧文件页等待者");
+    destroy_related_task(fixture.parent, file_waiter_task);
+
+    dword_t cas_observed = UINT32_MAX;
+    struct aarch64_linux_futex_word_snapshot cas_snapshot = {
+        .shared_identity = UINT64_MAX,
+        .file_identity = UINT64_MAX,
+        .page_offset = UINT64_MAX,
+    };
+    TEST_CHECK(aarch64_linux_process_compare_exchange_futex_u32(
+                    fixture.parent->aarch64_process,
+                    CAS_COW_BASE, 1, 2, &cas_observed,
+                    &cas_snapshot, &fault) ==
+                            AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH &&
+            cas_observed == UINT32_C(0x464c457f) &&
+            cas_snapshot.shared_identity == 0 &&
+            cas_snapshot.file_identity == 0 &&
+            run_delayed_steps(
+                    &fixture, &fixture.cas_cow_protect_steps),
+            "原子写比较不匹配仍完成私有文件页 COW 后再降权");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, CAS_COW_BASE,
+                    FUTEX_WAIT_, 1, 0, 0, &fault) ==
+                            (dword_t) _EFAULT &&
+            fault.address == CAS_COW_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, CAS_COW_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    1, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "CAS mismatch 后的只读匿名页拒绝共享键但保留 PRIVATE 读取");
+
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, PIN_COW_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            run_delayed_steps(
+                    &fixture, &fixture.pin_cow_protect_steps),
+            "共享 futex 写固定私有化仍可写的纯文件页后再降权");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, PIN_COW_BASE,
+                    FUTEX_WAKE_, 1, 0, 0, &fault) ==
+                            (dword_t) _EFAULT &&
+            fault.address == PIN_COW_BASE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION &&
+            call_futex(fixture.parent, PIN_COW_BASE,
+                    FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_,
+                    0, 0, 0, &fault) == (dword_t) _EAGAIN,
+            "仅由共享取键触发的文件页 COW 降权后拒绝共享键");
+    fault = (struct guest_linux_user_fault) {0};
+    TEST_CHECK(call_futex(fixture.parent, SIGNAL_TRAMPOLINE,
+            FUTEX_WAIT_, 0, 0, 0, &fault) == (dword_t) _EFAULT &&
+            fault.address == SIGNAL_TRAMPOLINE &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_PERMISSION,
+            "特殊信号跳板不能伪装成文件后备共享键");
+
+    destroy_fixture(&fixture);
+    return true;
+}
+
 static bool test_fork_key_domains(void) {
     struct futex_fixture fixture;
     TEST_CHECK(init_fixture(&fixture), "建立 fork 键域测试夹具");
@@ -560,6 +840,13 @@ static bool test_fork_key_domains(void) {
             11, LONG_TIMEOUT), "启动 fork 父进程私有等待者");
     TEST_CHECK(wait_until_queued(thread, private_word,
             FUTEX_PRIVATE_FLAG_, 1), "私有等待者入队");
+    TEST_CHECK(call_futex(thread, private_word,
+            FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
+            call_futex(thread, private_word,
+                    FUTEX_REQUEUE_, 0, 1,
+                    private_word + sizeof(dword_t), &fault) == 0 &&
+            completed_waiters(&private_waiter, 1) == 0,
+            "同一 mm 与 VA 的 mm-shared 操作不命中 PRIVATE 队列");
     TEST_CHECK(call_futex(child, private_word,
             FUTEX_WAKE_ | FUTEX_PRIVATE_FLAG_, 1, 0, 0,
             &fault) == 0 && completed_waiters(&private_waiter, 1) == 0,
@@ -575,6 +862,14 @@ static bool test_fork_key_domains(void) {
             "启动私有映射非 PRIVATE 等待者");
     TEST_CHECK(wait_until_queued(thread, fallback_word, 0, 1),
             "私有映射回退键等待入队");
+    TEST_CHECK(call_futex(thread, fallback_word,
+            FUTEX_WAKE_ | FUTEX_PRIVATE_FLAG_, 1, 0, 0,
+            &fault) == 0 &&
+            call_futex(thread, fallback_word,
+                    FUTEX_REQUEUE_ | FUTEX_PRIVATE_FLAG_, 0, 1,
+                    fallback_word + sizeof(dword_t), &fault) == 0 &&
+            completed_waiters(&fallback_waiter, 1) == 0,
+            "同一 mm 与 VA 的 PRIVATE 操作不命中 mm-shared 队列");
     TEST_CHECK(call_futex(child, fallback_word,
             FUTEX_WAKE_, 1, 0, 0, &fault) == 0 &&
             completed_waiters(&fallback_waiter, 1) == 0,
@@ -903,6 +1198,8 @@ int main(void) {
     } scenarios[] = {
         {"AArch64 futex 边界与线程私有键",
                 test_edges_and_thread_private},
+        {"AArch64 futex 只读共享键权限",
+                test_read_only_shared_key_permissions},
         {"AArch64 futex fork 键域", test_fork_key_domains},
         {"AArch64 futex REQUEUE 语义", test_requeue_semantics},
         {"AArch64 futex REQUEUE 失败原子性", test_requeue_failures},

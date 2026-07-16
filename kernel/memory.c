@@ -252,8 +252,56 @@ static void *mem_ptr_nofault(struct mem *mem, addr_t addr, int type) {
     return entry->data->data + entry->offset + PGOFFSET(addr);
 }
 
+static size_t private_cow_fail_at = SIZE_MAX;
+static size_t private_cow_count;
+
+void mem_test_fail_private_cow_at(size_t index) {
+    private_cow_fail_at = index;
+    private_cow_count = 0;
+}
+
+// 调用者持有页表写锁；物理页私有化不能丢失所属 VMA 的展示元数据。
+static int mem_private_cow_locked(struct mem *mem, page_t page) {
+    struct pt_entry *entry = mem_pt(mem, page);
+    assert(entry != NULL && (entry->flags & P_COW) != 0);
+    if (private_cow_fail_at != SIZE_MAX &&
+            private_cow_count++ == private_cow_fail_at)
+        return _ENOMEM;
+    struct data *source_data = entry->data;
+    const void *source =
+            (const char *) source_data->data + entry->offset;
+    void *copy = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    if (copy == MAP_FAILED)
+        return errno_map();
+    memcpy(copy, source, PAGE_SIZE);
+    struct fd *file = source_data->fd == NULL ? NULL :
+            fd_retain(source_data->fd);
+    qword_t file_offset = file == NULL ? source_data->file_offset :
+            source_data->file_backing_offset + entry->offset;
+    qword_t file_backing_offset = file == NULL ?
+            source_data->file_backing_offset : file_offset;
+    const char *name = source_data->name;
+    unsigned flags = entry->flags &
+            ~((unsigned) P_COW | (unsigned) P_FILE_BACKED);
+    int result = pt_map(mem, page, 1, copy, 0, flags);
+    if (result < 0) {
+        if (file != NULL)
+            fd_close(file);
+        (void) munmap(copy, PAGE_SIZE);
+        return result;
+    }
+    struct data *private_data = mem_pt(mem, page)->data;
+    private_data->fd = file;
+    private_data->file_offset = file_offset;
+    private_data->file_backing_offset = file_backing_offset;
+    private_data->name = name;
+    return 0;
+}
+
 void *mem_ptr(struct mem *mem, addr_t addr, int type) {
     void *old_ptr = mem_ptr_nofault(mem, addr, type); // just for an assert
+    bool mapping_rechecked = false;
 
     page_t page = PAGE(addr);
     struct pt_entry *entry = mem_pt(mem, page);
@@ -288,45 +336,47 @@ void *mem_ptr(struct mem *mem, addr_t addr, int type) {
         // if page is unwritable, well tough luck
         if (type != MEM_WRITE_PTRACE && !(entry->flags & P_WRITE))
             return NULL;
-        if (type == MEM_WRITE_PTRACE) {
-            // TODO: Is P_WRITE really correct? The page shouldn't be writable without ptrace.
-            entry->flags |= P_WRITE | P_COW;
-        }
         // get rid of any compiled blocks in this page
         asbestos_invalidate_page(mem->mmu.asbestos, page);
-        // if page is cow, ~~milk~~ copy it
-        if (entry->flags & P_COW) {
-            void *data = (char *) entry->data->data + entry->offset;
-            void *copy = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-
-            // copy/paste from above
+        if (type == MEM_WRITE_PTRACE || (entry->flags & P_COW)) {
             read_wrunlock(&mem->lock);
             write_wrlock(&mem->lock);
-            memcpy(copy, data, PAGE_SIZE);
-            pt_map(mem, page, 1, copy, 0, entry->flags &~ P_COW);
+            mapping_rechecked = true;
+            entry = mem_pt(mem, page);
+            bool copied = entry != NULL;
+            if (copied && type != MEM_WRITE_PTRACE &&
+                    !(entry->flags & P_WRITE))
+                copied = false;
+            if (copied && type == MEM_WRITE_PTRACE) {
+                // ptrace 写入只改变当前锁定映射，不沿用升级前的陈旧 entry。
+                entry->flags |= P_WRITE | P_COW;
+            }
+            if (copied) {
+                asbestos_invalidate_page(mem->mmu.asbestos, page);
+                if (entry->flags & P_COW)
+                    copied = mem_private_cow_locked(mem, page) == 0;
+            }
             write_wrunlock(&mem->lock);
             read_wrlock(&mem->lock);
+            if (!copied)
+                return NULL;
         }
     }
 
     void *ptr = mem_ptr_nofault(mem, addr, type);
-    assert(old_ptr == NULL || old_ptr == ptr || type == MEM_WRITE_PTRACE);
+    assert(old_ptr == NULL || old_ptr == ptr ||
+            type == MEM_WRITE_PTRACE || mapping_rechecked);
     return ptr;
 }
 
 static struct mem_futex_word_snapshot
 mem_futex_word_snapshot_locked(
         const struct pt_entry *entry, addr_t address) {
-    if (!(entry->flags & P_SHARED))
-        return (struct mem_futex_word_snapshot) {
-            .kind = MEM_FUTEX_BACKING_PRIVATE,
-        };
-
     const struct data *data = entry->data;
     qword_t entry_offset =
             (qword_t) entry->offset + PGOFFSET(address);
-    if (data->fd != NULL && S_ISREG(data->fd->type) &&
+    if ((entry->flags & P_FILE_BACKED) != 0 &&
+            data->fd != NULL && S_ISREG(data->fd->type) &&
             data->fd->inode != NULL &&
             data->fd->inode->futex_sequence != 0) {
         return (struct mem_futex_word_snapshot) {
@@ -335,6 +385,10 @@ mem_futex_word_snapshot_locked(
             .offset = data->file_backing_offset + entry_offset,
         };
     }
+    if (!(entry->flags & P_SHARED))
+        return (struct mem_futex_word_snapshot) {
+            .kind = MEM_FUTEX_BACKING_PRIVATE,
+        };
     return (struct mem_futex_word_snapshot) {
         .kind = MEM_FUTEX_BACKING_SHARED_MEMORY,
         .identity = data->identity,
@@ -342,37 +396,105 @@ mem_futex_word_snapshot_locked(
     };
 }
 
-bool mem_snapshot_futex_words(struct mem *mem,
-        const addr_t *addresses, size_t count,
+static bool mem_has_stable_file_futex_key_locked(
+        const struct pt_entry *entry) {
+    const struct data *data = entry->data;
+    return (entry->flags & P_FILE_BACKED) != 0 &&
+            data->fd != NULL && S_ISREG(data->fd->type) &&
+            data->fd->inode != NULL &&
+            data->fd->inode->futex_sequence != 0;
+}
+
+static void mem_futex_transaction_lock(
+        struct mem *mem, bool write) {
+    if (write)
+        write_wrlock(&mem->lock);
+    else
+        read_wrlock(&mem->lock);
+}
+
+static void mem_futex_transaction_unlock(
+        struct mem *mem, bool write) {
+    if (write)
+        write_wrunlock(&mem->lock);
+    else
+        read_wrunlock(&mem->lock);
+}
+
+static int mem_prepare_shared_futex_key_locked(
+        struct mem *mem, addr_t address) {
+    page_t page = PAGE(address);
+    struct pt_entry *entry = mem_pt(mem, page);
+    assert(entry != NULL);
+    if (entry->flags & P_SPECIAL)
+        return _EFAULT;
+
+    // FOLL_WRITE 会让可写私有文件页和 fork COW 页先成为当前 mm 的副本。
+    if (!(entry->flags & P_SHARED) && (entry->flags & P_WRITE) &&
+            (entry->flags & (P_COW | P_FILE_BACKED))) {
+        int result = mem_private_cow_locked(mem, page);
+        if (result < 0)
+            return result;
+        entry = mem_pt(mem, page);
+        assert(entry != NULL);
+    }
+
+    if (entry->flags & P_FILE_BACKED)
+        return mem_has_stable_file_futex_key_locked(entry) ? 0 : _EFAULT;
+    // 无文件后备的只读私有页不能通过共享键的写固定阶段。
+    return (entry->flags & P_SHARED) != 0 ||
+            (entry->flags & P_WRITE) != 0 ? 0 : _EFAULT;
+}
+
+int mem_snapshot_futex_words(struct mem *mem,
+        const addr_t *addresses, size_t count, bool shared_key,
         struct mem_futex_word_snapshot *snapshots,
         dword_t *first_value) {
     assert(mem != NULL && addresses != NULL &&
             count != 0 && count <= 2 && snapshots != NULL);
 
-    // 先触发可能的栈向下增长，再在不释放的最终读锁内固定全部映射。
+    // 先触发可能的栈向下增长，再在不释放的最终事务内固定全部映射。
     for (size_t index = 0; index < count; index++) {
         read_wrlock(&mem->lock);
         void *pointer = mem_ptr(mem, addresses[index], MEM_READ);
         bool mapped = pointer != NULL;
         read_wrunlock(&mem->lock);
         if (!mapped)
-            return false;
+            return _EFAULT;
     }
 
     struct mem_futex_word_snapshot local_snapshots[2];
     dword_t local_first_value = 0;
-    read_wrlock(&mem->lock);
+    mem_futex_transaction_lock(mem, shared_key);
     for (size_t index = 0; index < count; index++) {
+        struct pt_entry *entry = mem_pt(
+                mem, PAGE(addresses[index]));
+        if (entry == NULL) {
+            mem_futex_transaction_unlock(mem, shared_key);
+            return _EFAULT;
+        }
+        // i386 页表以任一硬件访问位表示可读；PROT_NONE 不可取值或固定键。
+        if ((entry->flags & P_RWX) == 0) {
+            mem_futex_transaction_unlock(mem, shared_key);
+            return _EFAULT;
+        }
+        if (shared_key) {
+            int result = mem_prepare_shared_futex_key_locked(
+                    mem, addresses[index]);
+            if (result < 0) {
+                mem_futex_transaction_unlock(mem, shared_key);
+                return result;
+            }
+        }
+        entry = mem_pt(mem, PAGE(addresses[index]));
+        assert(entry != NULL);
         void *raw_pointer = mem_ptr_nofault(
                 mem, addresses[index], MEM_READ);
         if (raw_pointer == NULL ||
                 (uintptr_t) raw_pointer % _Alignof(dword_t) != 0) {
-            read_wrunlock(&mem->lock);
-            return false;
+            mem_futex_transaction_unlock(mem, shared_key);
+            return _EFAULT;
         }
-        struct pt_entry *entry = mem_pt(
-                mem, PAGE(addresses[index]));
-        assert(entry != NULL);
         local_snapshots[index] =
                 mem_futex_word_snapshot_locked(
                         entry, addresses[index]);
@@ -382,13 +504,13 @@ bool mem_snapshot_futex_words(struct mem *mem,
                     pointer, __ATOMIC_SEQ_CST);
         }
     }
-    read_wrunlock(&mem->lock);
+    mem_futex_transaction_unlock(mem, shared_key);
 
     memcpy(snapshots, local_snapshots,
             count * sizeof(*snapshots));
     if (first_value != NULL)
         *first_value = local_first_value;
-    return true;
+    return 0;
 }
 
 enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
@@ -400,21 +522,25 @@ enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
             count != 0 && count <= GUEST_LINUX_FUTEX_WAITV_MAX &&
             snapshots != NULL);
 
+    bool has_shared_key = false;
+    for (size_t index = 0; index < count; index++)
+        has_shared_key |= !private_mappings[index];
+
     for (;;) {
         struct mem_futex_word_snapshot resolved
                 [GUEST_LINUX_FUTEX_WAITV_MAX];
         qword_t fault_address = 0;
         bool retry_fault = false;
 
-        read_wrlock(&mem->lock);
+        mem_futex_transaction_lock(mem, has_shared_key);
         for (size_t index = 0; index < count; index++) {
             qword_t wide_address = addresses[index];
             if ((wide_address & (sizeof(dword_t) - 1)) != 0) {
-                read_wrunlock(&mem->lock);
+                mem_futex_transaction_unlock(mem, has_shared_key);
                 return MEM_FUTEX_WAITV_ALIGNMENT;
             }
             if (wide_address > UINT32_MAX) {
-                read_wrunlock(&mem->lock);
+                mem_futex_transaction_unlock(mem, has_shared_key);
                 return MEM_FUTEX_WAITV_FAULT;
             }
 
@@ -434,12 +560,20 @@ enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
             }
             struct pt_entry *entry = mem_pt(mem, PAGE(address));
             assert(entry != NULL);
-            // 只读匿名私有页没有可供共享 futex 固定的跨进程后备键。
-            if ((entry->flags & P_ANONYMOUS) != 0 &&
-                    (entry->flags & (P_SHARED | P_WRITE)) == 0) {
-                read_wrunlock(&mem->lock);
+            if ((entry->flags & P_RWX) == 0) {
+                mem_futex_transaction_unlock(mem, has_shared_key);
                 return MEM_FUTEX_WAITV_FAULT;
             }
+            int prepare_result =
+                    mem_prepare_shared_futex_key_locked(mem, address);
+            if (prepare_result < 0) {
+                mem_futex_transaction_unlock(mem, has_shared_key);
+                return prepare_result == _ENOMEM ?
+                        MEM_FUTEX_WAITV_NO_MEMORY :
+                        MEM_FUTEX_WAITV_FAULT;
+            }
+            entry = mem_pt(mem, PAGE(address));
+            assert(entry != NULL);
             resolved[index] = mem_futex_word_snapshot_locked(
                     entry, address);
         }
@@ -454,16 +588,22 @@ enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
                     retry_fault = true;
                     break;
                 }
+                struct pt_entry *entry = mem_pt(mem, PAGE(address));
+                assert(entry != NULL);
+                if ((entry->flags & P_RWX) == 0) {
+                    mem_futex_transaction_unlock(mem, has_shared_key);
+                    return MEM_FUTEX_WAITV_FAULT;
+                }
                 dword_t observed = __atomic_load_n(
                         pointer, __ATOMIC_SEQ_CST);
                 if (observed != expected[index]) {
-                    read_wrunlock(&mem->lock);
+                    mem_futex_transaction_unlock(mem, has_shared_key);
                     return MEM_FUTEX_WAITV_MISMATCH;
                 }
             }
         }
 
-        read_wrunlock(&mem->lock);
+        mem_futex_transaction_unlock(mem, has_shared_key);
         if (!retry_fault) {
             memcpy(snapshots, resolved,
                     count * sizeof(*snapshots));
@@ -492,19 +632,8 @@ static dword_t *mem_prepare_atomic_u32_write_locked(
 
     asbestos_invalidate_page(mem->mmu.asbestos, page);
     if (entry->flags & P_COW) {
-        const void *source =
-                (const char *) entry->data->data + entry->offset;
-        void *copy = mmap(NULL, PAGE_SIZE,
-                PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-        if (copy == MAP_FAILED)
+        if (mem_private_cow_locked(mem, page) < 0)
             return NULL;
-        memcpy(copy, source, PAGE_SIZE);
-        unsigned flags = entry->flags & ~(unsigned) P_COW;
-        if (pt_map(mem, page, 1, copy, 0, flags) < 0) {
-            (void) munmap(copy, PAGE_SIZE);
-            return NULL;
-        }
     }
 
     void *raw_pointer = mem_ptr_nofault(

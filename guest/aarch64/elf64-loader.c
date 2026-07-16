@@ -219,6 +219,57 @@ static enum aarch64_elf64_load_error map_segment_pages(
     return AARCH64_ELF64_LOAD_OK;
 }
 
+static enum aarch64_elf64_load_error classify_segment_pages(
+        struct guest_page_table *table,
+        const struct aarch64_elf64_program_header *segment) {
+    // 按 PT_LOAD 顺序重放文件映射与补零；后段重叠映射决定最终页面来源。
+    if (segment->file_size != 0) {
+        guest_addr_t first = segment->virtual_address &
+                ~GUEST_MEMORY_PAGE_MASK;
+        guest_addr_t last = (segment->virtual_address +
+                segment->file_size - 1) & ~GUEST_MEMORY_PAGE_MASK;
+        for (guest_addr_t page = first;; page += GUEST_MEMORY_PAGE_SIZE) {
+            if (guest_page_table_set_origin(table, page,
+                    GUEST_PAGE_ORIGIN_FILE) != GUEST_PAGE_TABLE_OK)
+                return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
+            if (page == last)
+                break;
+        }
+    }
+    if (segment->memory_size == segment->file_size)
+        return AARCH64_ELF64_LOAD_OK;
+
+    guest_addr_t zero_start = segment->virtual_address +
+            segment->file_size;
+    guest_addr_t memory_end = segment->virtual_address +
+            segment->memory_size;
+    guest_addr_t anonymous_start;
+    if (segment->file_size == 0) {
+        anonymous_start = segment->virtual_address &
+                ~GUEST_MEMORY_PAGE_MASK;
+    } else {
+        if ((zero_start & GUEST_MEMORY_PAGE_MASK) != 0 &&
+                (segment->permissions & GUEST_MEMORY_WRITE) != 0 &&
+                guest_page_table_set_origin(table,
+                        zero_start & ~GUEST_MEMORY_PAGE_MASK,
+                        GUEST_PAGE_ORIGIN_ANONYMOUS) !=
+                                GUEST_PAGE_TABLE_OK) {
+            return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
+        }
+        anonymous_start = (zero_start + GUEST_MEMORY_PAGE_MASK) &
+                ~GUEST_MEMORY_PAGE_MASK;
+    }
+    guest_addr_t anonymous_end = (memory_end + GUEST_MEMORY_PAGE_MASK) &
+            ~GUEST_MEMORY_PAGE_MASK;
+    for (guest_addr_t page = anonymous_start;
+            page < anonymous_end; page += GUEST_MEMORY_PAGE_SIZE) {
+        if (guest_page_table_set_origin(table, page,
+                GUEST_PAGE_ORIGIN_ANONYMOUS) != GUEST_PAGE_TABLE_OK)
+            return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
+    }
+    return AARCH64_ELF64_LOAD_OK;
+}
+
 static enum aarch64_elf64_load_error copy_segment(
         const struct aarch64_elf64_image *image,
         struct guest_page_table *table,
@@ -340,6 +391,8 @@ enum aarch64_elf64_load_error aarch64_elf64_load(
             return AARCH64_ELF64_LOAD_UNSUPPORTED_LAYOUT;
         }
         error = copy_segment(image, table, &segment);
+        if (error == AARCH64_ELF64_LOAD_OK)
+            error = classify_segment_pages(table, &segment);
         if (error != AARCH64_ELF64_LOAD_OK) {
             rollback_segment_pages(image, table, load_bias);
             return error;

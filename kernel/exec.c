@@ -339,7 +339,8 @@ static int elf_exec(struct fd *fd, const char *file,
         goto fatal_exec_locked;
     vdso_page += 1;
     if ((err = pt_map(new_mem, vdso_page, vdso_pages,
-                    (void *) vdso_data, 0, 0)) < 0)
+                    (void *) vdso_data, 0,
+                    P_READ | P_EXEC | P_SPECIAL)) < 0)
         goto fatal_exec_locked;
     mem_pt(new_mem, vdso_page)->data->name = "[vdso]";
     new_mm->vdso = vdso_page << PAGE_BITS;
@@ -350,7 +351,9 @@ static int elf_exec(struct fd *fd, const char *file,
     page_t vvar_page = pt_find_hole(new_mem, VVAR_PAGES);
     if (vvar_page == BAD_PAGE)
         goto fatal_exec_locked;
-    if ((err = pt_map_nothing(new_mem, vvar_page, VVAR_PAGES, 0)) < 0)
+    if ((err = pt_map_nothing(
+                new_mem, vvar_page, VVAR_PAGES,
+                P_READ | P_SPECIAL)) < 0)
         goto fatal_exec_locked;
     mem_pt(new_mem, vvar_page)->data->name = "[vvar]";
 

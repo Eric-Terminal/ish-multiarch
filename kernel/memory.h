@@ -69,12 +69,15 @@ struct pt_entry {
 #define P_RWX (P_READ | P_WRITE | P_EXEC)
 #define P_GROWSDOWN (1 << 3)
 #define P_COW (1 << 4)
+#define P_SPECIAL (1 << 5)
 #define P_WRITABLE(flags) (flags & P_WRITE && !(flags & P_COW))
 
 // mapping was created with pt_map_nothing
 #define P_ANONYMOUS (1 << 6)
 // mapping was created with MAP_SHARED, should not CoW
 #define P_SHARED (1 << 7)
+// 当前页内容仍直接来自文件后备；COW 后清除，但 VMA 展示元数据继续保留。
+#define P_FILE_BACKED (1 << 8)
 
 bool pt_is_hole(struct mem *mem, page_t start, pages_t pages);
 page_t pt_find_hole(struct mem *mem, pages_t size);
@@ -114,13 +117,21 @@ enum mem_futex_waitv_prepare_result {
     MEM_FUTEX_WAITV_ALIGNMENT,
     MEM_FUTEX_WAITV_FAULT,
     MEM_FUTEX_WAITV_MISMATCH,
+    MEM_FUTEX_WAITV_NO_MEMORY,
 };
 
-// 在一次最终页表读事务内解析最多两个 futex 字；故障时不修改输出。
-bool mem_snapshot_futex_words(struct mem *mem,
-        const addr_t *addresses, size_t count,
+/*
+ * 在一次最终页表事务内解析最多两个 futex 字；故障时不修改输出。
+ * shared_key 为真时还会执行共享 futex 键所需的写固定与私有文件页 COW。
+ * 返回 0 或负的 guest errno。
+ */
+int mem_snapshot_futex_words(struct mem *mem,
+        const addr_t *addresses, size_t count, bool shared_key,
         struct mem_futex_word_snapshot *snapshots,
         dword_t *first_value);
+
+// 仅供隔离测试精确注入私有页 COW 的 ENOMEM；SIZE_MAX 恢复正常分配。
+void mem_test_fail_private_cow_at(size_t index);
 
 /*
  * 在同一最终页表事务中先解析全部稳定键，再按索引读取并比较值。

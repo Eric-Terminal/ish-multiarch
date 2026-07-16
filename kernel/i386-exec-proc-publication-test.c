@@ -537,6 +537,30 @@ static bool new_proc_view_is_complete(struct task *task) {
             proc_new_auxv_is_complete(&process);
 }
 
+static bool exec_special_mappings_have_permissions(struct task *task) {
+    bool vdso_valid = false;
+    bool vvar_valid = false;
+    read_wrlock(&task->mem->lock);
+    struct pt_entry *vdso = mem_pt(task->mem, PAGE(task->mm->vdso));
+    if (vdso != NULL && vdso->data->name != NULL &&
+            strcmp(vdso->data->name, "[vdso]") == 0) {
+        vdso_valid = (vdso->flags & P_RWX) == (P_READ | P_EXEC) &&
+                (vdso->flags & P_SPECIAL) != 0;
+    }
+    for (page_t page = 0; page < MEM_PAGES;
+            mem_next_page(task->mem, &page)) {
+        struct pt_entry *entry = mem_pt(task->mem, page);
+        if (entry == NULL || entry->data->name == NULL ||
+                strcmp(entry->data->name, "[vvar]") != 0)
+            continue;
+        vvar_valid = (entry->flags & P_RWX) == P_READ &&
+                (entry->flags & P_SPECIAL) != 0;
+        break;
+    }
+    read_wrunlock(&task->mem->lock);
+    return vdso_valid && vvar_valid;
+}
+
 static void *run_exec(void *opaque) {
     struct exec_request *request = opaque;
     current = request->task;
@@ -629,6 +653,8 @@ static int run_publication_scenario(void) {
             task->cpu.eip == NEW_ENTRY_ADDRESS &&
             task->cpu.esp == task->mm->stack_start && task->did_exec,
             "成功路径一次性发布完整新 mm 与 CPU 入口状态");
+    CHECK(exec_special_mappings_have_permissions(task),
+            "新映像的 vDSO 与 vvar 保留真实可读执行权限");
     CHECK(probe.cloexec_close_called &&
             probe.cloexec_close_state_valid &&
             probe.old_exec_close_called &&

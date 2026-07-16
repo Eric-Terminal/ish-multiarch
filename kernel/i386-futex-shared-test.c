@@ -6,11 +6,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "debug.h"
 #include "fs/fd.h"
+#include "fs/inode.h"
+#include "fs/proc.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/futex.h"
@@ -33,6 +37,7 @@
     if (!(condition)) { \
         fprintf(stderr, "i386 共享 futex 测试失败：%s（第 %d 行）\n", \
                 message, __LINE__); \
+        current = NULL; \
         return false; \
     } \
 } while (0)
@@ -68,6 +73,18 @@ struct futex_waiter {
 };
 
 static const struct fd_ops test_executable_fd_ops = {0};
+
+static int close_test_file(struct fd *file) {
+    free(file->inode);
+    file->inode = NULL;
+    return 0;
+}
+
+static const struct fd_ops test_file_fd_ops = {
+    .close = close_test_file,
+};
+
+extern void proc_maps_dump(struct task *task, struct proc_data *buf);
 
 static bool fixture_init(struct test_fixture *fixture, pid_t_ pid) {
     memset(fixture, 0, sizeof(*fixture));
@@ -111,6 +128,65 @@ static bool map_pages(struct task *task, addr_t address,
             task->mem, PAGE(address), count, flags);
     write_wrunlock(&task->mem->lock);
     return result == 0;
+}
+
+static bool map_private_file_pages(struct task *task,
+        addr_t address, pages_t count, unsigned flags) {
+    void *memory = mmap(NULL, count * PAGE_SIZE,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (memory == MAP_FAILED)
+        return false;
+    struct fd *file = fd_create(&test_file_fd_ops);
+    if (file == NULL) {
+        (void) munmap(memory, count * PAGE_SIZE);
+        return false;
+    }
+    file->inode = calloc(1, sizeof(*file->inode));
+    if (file->inode == NULL) {
+        fd_close(file);
+        (void) munmap(memory, count * PAGE_SIZE);
+        return false;
+    }
+    file->inode->futex_sequence = UINT64_C(0x510e527fade682d1);
+    file->type = S_IFREG;
+
+    write_wrlock(&task->mem->lock);
+    int result = pt_map(task->mem, PAGE(address), count,
+            memory, 0, flags | P_COW | P_FILE_BACKED);
+    if (result == 0) {
+        struct data *data = mem_pt(task->mem, PAGE(address))->data;
+        data->fd = file;
+        data->file_offset = 4 * PAGE_SIZE;
+        data->file_backing_offset = 4 * PAGE_SIZE;
+        data->name = "/private-cow-file";
+    }
+    write_wrunlock(&task->mem->lock);
+    if (result < 0) {
+        fd_close(file);
+        (void) munmap(memory, count * PAGE_SIZE);
+    }
+    return result == 0;
+}
+
+static bool maps_contains_file_page(const struct proc_data *maps,
+        addr_t address, qword_t offset) {
+    char prefix[96];
+    snprintf(prefix, sizeof(prefix),
+            "%08x-%08x r--p %08llx", address,
+            address + PAGE_SIZE, (unsigned long long) offset);
+    char *text = malloc(maps->size + 1);
+    if (text == NULL)
+        return false;
+    memcpy(text, maps->data, maps->size);
+    text[maps->size] = '\0';
+    char *line = strstr(text, prefix);
+    char *line_end = line == NULL ? NULL : strchr(line, '\n');
+    char *path = line == NULL ? NULL : strstr(line, "/private-cow-file");
+    bool found = line != NULL && path != NULL &&
+            (line_end == NULL || path < line_end);
+    free(text);
+    return found;
 }
 
 static bool replace_page(struct task *task,
@@ -256,11 +332,15 @@ static bool test_shared_wait_wake_and_isolation(void) {
     const addr_t second = TEST_BASE + PAGE_SIZE + UINT32_C(0x40);
     const addr_t generation =
             TEST_BASE + 2 * PAGE_SIZE + UINT32_C(0x40);
+    const addr_t domain = TEST_BASE + 3 * PAGE_SIZE + UINT32_C(0x40);
     const dword_t value = UINT32_C(7);
-    TEST_CHECK(write_u32(&parent.task, first, value) &&
+    TEST_CHECK(map_pages(&parent.task,
+                    TEST_BASE + 3 * PAGE_SIZE, 1, P_RWX) &&
+            write_u32(&parent.task, first, value) &&
             write_u32(&parent.task, second, value) &&
-            write_u32(&parent.task, generation, value),
-            "写入共享 futex 初值");
+            write_u32(&parent.task, generation, value) &&
+            write_u32(&parent.task, domain, value),
+            "写入共享 futex 初值并建立私有匿名键域控制页");
     TEST_CHECK(fixture_copy(&child, &parent, 3001),
             "复制独立 mm 并共享匿名后备");
 
@@ -273,6 +353,41 @@ static bool test_shared_wait_wake_and_isolation(void) {
                     TEST_FUTEX_WAKE, 1, 0, 0) == 1 &&
             waiter_join_and_destroy(&shared_waiter),
             "不同 mm 通过同一匿名共享后备互相唤醒");
+
+    struct futex_waiter mm_shared_waiter;
+    TEST_CHECK(waiter_start(&mm_shared_waiter, parent.task.mm,
+                    3014, domain, TEST_FUTEX_WAIT, value) &&
+            wait_until_queued(
+                    &parent.task, domain, TEST_FUTEX_WAIT, 1) &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 0 &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_REQUEUE | TEST_FUTEX_PRIVATE,
+                    0, 1, domain + sizeof(dword_t)) == 0 &&
+            waiter_stage(&mm_shared_waiter) == 1 &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 1 &&
+            waiter_join_and_destroy(&mm_shared_waiter),
+            "同一 mm 与 VA 的 mm-shared 等待不接受 PRIVATE 唤醒");
+
+    struct futex_waiter domain_private_waiter;
+    TEST_CHECK(waiter_start(&domain_private_waiter, parent.task.mm,
+                    3015, domain,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE, value) &&
+            wait_until_queued(&parent.task, domain,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE, 1) &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 0 &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_REQUEUE,
+                    0, 1, domain + sizeof(dword_t)) == 0 &&
+            waiter_stage(&domain_private_waiter) == 1 &&
+            call_futex(&parent.task, domain,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 1 &&
+            waiter_join_and_destroy(&domain_private_waiter),
+            "同一 mm 与 VA 的 PRIVATE 等待不接受 mm-shared 唤醒");
 
     struct futex_waiter private_waiter;
     TEST_CHECK(waiter_start(&private_waiter, child.task.mm,
@@ -405,6 +520,250 @@ static bool test_shared_requeue_and_errors(void) {
     return true;
 }
 
+static bool test_read_only_shared_key_permissions(void) {
+    struct test_fixture fixture;
+    TEST_CHECK(fixture_init(&fixture, 3150),
+            "建立只读 futex 键测试夹具");
+    const addr_t read_only_private = TEST_BASE;
+    const addr_t read_only_shared = TEST_BASE + PAGE_SIZE;
+    const addr_t inaccessible = TEST_BASE + 2 * PAGE_SIZE;
+    const addr_t special = TEST_BASE + 3 * PAGE_SIZE;
+    TEST_CHECK(map_pages(&fixture.task, read_only_private, 1, P_READ) &&
+            map_pages(&fixture.task, read_only_shared, 1,
+                    P_READ | P_SHARED) &&
+            map_pages(&fixture.task, inaccessible, 1, 0) &&
+            map_pages(&fixture.task, special, 1, P_RWX | P_SPECIAL),
+            "映射只读匿名页、PROT_NONE 与特殊控制页");
+
+    TEST_CHECK(call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_WAIT, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    read_only_shared) == _EFAULT,
+            "共享 WAIT、WAKE 与 REQUEUE 源键拒绝只读匿名私有页");
+    TEST_CHECK(call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    read_only_private) == _EFAULT,
+            "共享 REQUEUE 在队列副作用前校验只读私有目标键");
+
+    TEST_CHECK(call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == _EAGAIN &&
+            call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 0 &&
+            call_futex(&fixture.task, read_only_private,
+                    TEST_FUTEX_REQUEUE | TEST_FUTEX_PRIVATE,
+                    0, 1, read_only_shared) == 0,
+            "PRIVATE 操作保留只读页的虚拟键语义");
+    TEST_CHECK(call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_WAIT, 1, 0, 0) == _EAGAIN &&
+            call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 0 &&
+            call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    read_only_shared) == 0,
+            "只读匿名共享页仍可形成稳定物理键");
+    TEST_CHECK(call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_WAIT, 0, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    read_only_shared) == _EFAULT &&
+            call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    inaccessible) == _EFAULT,
+            "共享操作拒绝 PROT_NONE 源键与目标键");
+    TEST_CHECK(call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE,
+                    0, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 0 &&
+            call_futex(&fixture.task, inaccessible,
+                    TEST_FUTEX_REQUEUE | TEST_FUTEX_PRIVATE,
+                    0, 1, read_only_shared) == 0,
+            "PRIVATE WAIT 读取权限与无解引用操作保持分离");
+    TEST_CHECK(call_futex(&fixture.task, special,
+                    TEST_FUTEX_WAIT, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, special,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, special,
+                    TEST_FUTEX_REQUEUE, 0, 1,
+                    read_only_shared) == _EFAULT &&
+            call_futex(&fixture.task, read_only_shared,
+                    TEST_FUTEX_REQUEUE, 0, 1, special) == _EFAULT,
+            "共享操作拒绝没有普通后备对象的特殊映射");
+    TEST_CHECK(call_futex(&fixture.task, special,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == _EAGAIN &&
+            call_futex(&fixture.task, special,
+                    TEST_FUTEX_WAKE | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == 0 &&
+            call_futex(&fixture.task, special,
+                    TEST_FUTEX_REQUEUE | TEST_FUTEX_PRIVATE,
+                    0, 1, read_only_private) == 0,
+            "PRIVATE 操作仍按虚拟地址访问可读特殊页");
+
+    fixture_destroy(&fixture);
+    return true;
+}
+
+static bool test_private_file_cow_permissions(void) {
+    struct test_fixture fixture;
+    TEST_CHECK(fixture_init(&fixture, 3175),
+            "建立私有文件页 COW 测试夹具");
+    const addr_t clean = TEST_BASE;
+    const addr_t written = TEST_BASE + PAGE_SIZE;
+    const addr_t pinned = TEST_BASE + 2 * PAGE_SIZE;
+    const addr_t oom_wait = TEST_BASE + 8 * PAGE_SIZE;
+    const addr_t oom_wake = oom_wait + PAGE_SIZE;
+    const addr_t oom_requeue_source = oom_wait + 2 * PAGE_SIZE;
+    const addr_t oom_requeue_target = oom_wait + 3 * PAGE_SIZE;
+    const addr_t collision = TEST_BASE + 16 * PAGE_SIZE;
+    const addr_t alias = TEST_BASE + 17 * PAGE_SIZE;
+    TEST_CHECK(map_private_file_pages(
+                    &fixture.task, TEST_BASE, 3, P_RWX) &&
+            map_private_file_pages(
+                    &fixture.task, oom_wait, 4, P_RWX) &&
+            map_private_file_pages(
+                    &fixture.task, collision, 1, P_RWX) &&
+            map_private_file_pages(
+                    &fixture.task, alias, 1, P_RWX) &&
+            sys_mprotect(clean, PAGE_SIZE, P_READ) == 0 &&
+            sys_mprotect(collision, PAGE_SIZE, P_READ) == 0 &&
+            sys_mprotect(alias, PAGE_SIZE, P_READ) == 0,
+            "映射只读、guest 写入与 futex 固定三类私有文件页");
+
+    mem_test_fail_private_cow_at(0);
+    sdword_t oom_wait_result = call_futex(&fixture.task, oom_wait,
+            TEST_FUTEX_WAIT, 1, 0, 0);
+    mem_test_fail_private_cow_at(SIZE_MAX);
+    TEST_CHECK(oom_wait_result == _ENOMEM,
+            "共享 WAIT 原样传播文件页写固定的 ENOMEM");
+
+    mem_test_fail_private_cow_at(0);
+    sdword_t oom_wake_result = call_futex(&fixture.task, oom_wake,
+            TEST_FUTEX_WAKE, 1, 0, 0);
+    mem_test_fail_private_cow_at(SIZE_MAX);
+    TEST_CHECK(oom_wake_result == _ENOMEM,
+            "共享 WAKE 原样传播文件页写固定的 ENOMEM");
+
+    mem_test_fail_private_cow_at(1);
+    sdword_t oom_requeue_result = call_futex(
+            &fixture.task, oom_requeue_source,
+            TEST_FUTEX_REQUEUE, 0, 1, oom_requeue_target);
+    mem_test_fail_private_cow_at(SIZE_MAX);
+    TEST_CHECK(oom_requeue_result == _ENOMEM,
+            "共享 REQUEUE 原样传播目标页写固定的 ENOMEM");
+    read_wrlock(&fixture.task.mem->lock);
+    bool oom_origins =
+            (mem_pt(fixture.task.mem, PAGE(oom_wait))->flags &
+                    (P_FILE_BACKED | P_COW)) ==
+                            (P_FILE_BACKED | P_COW) &&
+            (mem_pt(fixture.task.mem, PAGE(oom_wake))->flags &
+                    (P_FILE_BACKED | P_COW)) ==
+                            (P_FILE_BACKED | P_COW) &&
+            (mem_pt(fixture.task.mem, PAGE(oom_requeue_source))->flags &
+                    (P_FILE_BACKED | P_COW)) == 0 &&
+            (mem_pt(fixture.task.mem, PAGE(oom_requeue_target))->flags &
+                    (P_FILE_BACKED | P_COW)) ==
+                            (P_FILE_BACKED | P_COW);
+    read_wrunlock(&fixture.task.mem->lock);
+    TEST_CHECK(oom_origins,
+            "失败页保持文件后备，REQUEUE 已完成的前项 COW 可以保留");
+
+    TEST_CHECK(call_futex(&fixture.task, clean,
+                    TEST_FUTEX_WAIT, 1, 0, 0) == _EAGAIN,
+            "未私有化的只读文件页可通过共享键权限阶段");
+
+    struct futex_waiter file_key_waiter;
+    TEST_CHECK(waiter_start(&file_key_waiter, fixture.task.mm,
+                    3180, collision, TEST_FUTEX_WAIT, 0),
+            "在第一份只读文件映射上登记等待者");
+    bool aliases_share_file_key = wait_until_queued(
+            &fixture.task, alias, TEST_FUTEX_WAIT, 1);
+    bool collision_writable = sys_mprotect(
+            collision, PAGE_SIZE, P_RWX) == 0;
+    sdword_t collision_wake = call_futex(&fixture.task, collision,
+            TEST_FUTEX_WAKE, 1, 0, 0);
+    unsigned stage_after_cow = waiter_stage(&file_key_waiter);
+    read_wrlock(&fixture.task.mem->lock);
+    bool collision_origins =
+            (mem_pt(fixture.task.mem, PAGE(collision))->flags &
+                    (P_FILE_BACKED | P_COW)) == 0 &&
+            (mem_pt(fixture.task.mem, PAGE(alias))->flags &
+                    (P_FILE_BACKED | P_COW)) ==
+                            (P_FILE_BACKED | P_COW);
+    read_wrunlock(&fixture.task.mem->lock);
+    sdword_t alias_wake = call_futex(&fixture.task, alias,
+            TEST_FUTEX_WAKE, 1, 0, 0);
+    bool file_key_waiter_joined =
+            waiter_join_and_destroy(&file_key_waiter);
+    TEST_CHECK(aliases_share_file_key && collision_writable &&
+                    collision_wake == 0 && stage_after_cow == 1 &&
+                    collision_origins && alias_wake == 1 &&
+                    file_key_waiter_joined,
+            "文件页 COW 后不得与旧文件键碰撞，独立别名仍可唤醒");
+
+    TEST_CHECK(write_u32(&fixture.task, written, 7) &&
+            sys_mprotect(written, PAGE_SIZE, P_READ) == 0 &&
+            call_futex(&fixture.task, written,
+                    TEST_FUTEX_WAIT, 7, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, written,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE,
+                    8, 0, 0) == _EAGAIN,
+            "guest 写入后的私有文件页降权后按匿名页拒绝共享键");
+
+    TEST_CHECK(call_futex(&fixture.task, pinned,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == 0 &&
+            sys_mprotect(pinned, PAGE_SIZE, P_READ) == 0 &&
+            call_futex(&fixture.task, pinned,
+                    TEST_FUTEX_WAKE, 1, 0, 0) == _EFAULT &&
+            call_futex(&fixture.task, pinned,
+                    TEST_FUTEX_WAIT | TEST_FUTEX_PRIVATE,
+                    1, 0, 0) == _EAGAIN,
+            "共享 futex 写固定本身触发私有文件页 COW");
+
+    read_wrlock(&fixture.task.mem->lock);
+    struct pt_entry *clean_entry =
+            mem_pt(fixture.task.mem, PAGE(clean));
+    struct pt_entry *written_entry =
+            mem_pt(fixture.task.mem, PAGE(written));
+    struct pt_entry *pinned_entry =
+            mem_pt(fixture.task.mem, PAGE(pinned));
+    bool origins =
+            (clean_entry->flags & (P_FILE_BACKED | P_COW)) ==
+                    (P_FILE_BACKED | P_COW) &&
+            (written_entry->flags & (P_FILE_BACKED | P_COW)) == 0 &&
+            (pinned_entry->flags & (P_FILE_BACKED | P_COW)) == 0 &&
+            clean_entry->data->fd != NULL &&
+            written_entry->data->fd != NULL &&
+            pinned_entry->data->fd != NULL;
+    read_wrunlock(&fixture.task.mem->lock);
+    TEST_CHECK(origins,
+            "两条 COW 路径只脱离物理文件后备并保留 VMA 文件元数据");
+
+    struct proc_data maps = {0};
+    proc_maps_dump(&fixture.task, &maps);
+    bool maps_preserved =
+            maps_contains_file_page(&maps, clean, 4 * PAGE_SIZE) &&
+            maps_contains_file_page(&maps, written, 5 * PAGE_SIZE) &&
+            maps_contains_file_page(&maps, pinned, 6 * PAGE_SIZE);
+    free(maps.data);
+    TEST_CHECK(maps_preserved,
+            "干净、guest 写入与 futex 固定页都保留路径和逐页文件偏移");
+    TEST_CHECK(sys_mremap(TEST_BASE, 3 * PAGE_SIZE,
+                    2 * PAGE_SIZE, 0) == (int_t) TEST_BASE,
+            "私有文件 VMA 混合后备状态不妨碍 mremap 缩小");
+
+    fixture_destroy(&fixture);
+    return true;
+}
+
 static bool test_mapping_metadata_and_mremap(void) {
     struct test_fixture parent;
     TEST_CHECK(fixture_init(&parent, 3200), "建立映射元数据夹具");
@@ -454,11 +813,40 @@ static bool test_mapping_metadata_and_mremap(void) {
             observed == value,
             "私有扩展段可以正常读写");
 
+    struct test_fixture fork_copy;
+    TEST_CHECK(fixture_copy(&fork_copy, &parent, 3201),
+            "复制带两页匿名映射的地址空间");
+    current = &fork_copy.task;
+    TEST_CHECK(sys_mremap(TEST_BASE, 2 * PAGE_SIZE,
+                    3 * PAGE_SIZE, 0) == (int_t) TEST_BASE,
+            "匿名 fork-COW 映射可忽略页状态位继续扩展");
+    read_wrlock(&fork_copy.task.mem->lock);
+    struct pt_entry *new_extension = mem_pt(
+            fork_copy.task.mem, PAGE(TEST_BASE) + 2);
+    bool extension_state_clean = new_extension != NULL &&
+            (new_extension->flags &
+                    (P_COW | P_FILE_BACKED)) == 0;
+    read_wrunlock(&fork_copy.task.mem->lock);
+    TEST_CHECK(extension_state_clean,
+            "mremap 新匿名页不继承既有页的物理后备状态");
+
+    current = &parent.task;
+    TEST_CHECK(write_u32(&parent.task,
+                    TEST_BASE + UINT32_C(0x80), 23),
+            "让多页 VMA 只有首页完成 fork COW");
+    read_wrlock(&parent.task.mem->lock);
+    bool mixed_cow =
+            (mem_pt(parent.task.mem, PAGE(TEST_BASE))->flags & P_COW) == 0 &&
+            (mem_pt(parent.task.mem, PAGE(TEST_BASE) + 1)->flags & P_COW) != 0;
+    read_wrunlock(&parent.task.mem->lock);
+    TEST_CHECK(mixed_cow,
+            "构造同一 VMA 内不同物理 COW 状态");
+
     TEST_CHECK(sys_mremap(TEST_BASE, 0, PAGE_SIZE, 0) == _EINVAL &&
             sys_mremap(TEST_BASE, PAGE_SIZE, 0, 0) == _EINVAL &&
             sys_mremap(TEST_BASE, PAGE_SIZE + 1, 1, 0) ==
                     (int_t) TEST_BASE,
-            "拒绝零长度并按向上取整缩小映射");
+            "拒绝零长度并忽略页后备状态缩小映射");
     read_wrlock(&parent.task.mem->lock);
     bool extension_removed = mem_pt(
             parent.task.mem, PAGE(TEST_BASE) + 1) == NULL;
@@ -478,6 +866,7 @@ static bool test_mapping_metadata_and_mremap(void) {
     TEST_CHECK(hint_mapped && hint_preserved,
             "冲突的非 FIXED hint 改找空洞且不覆盖原映射");
 
+    fixture_destroy(&fork_copy);
     fixture_destroy(&parent);
     return true;
 }
@@ -559,6 +948,7 @@ static bool run_isolated(
     if (child == 0) {
         alarm(30);
         bool passed = scenario();
+        mem_test_fail_private_cow_at(SIZE_MAX);
         if (passed && futex_test_live_count() != 0) {
             fprintf(stderr, "%s 遗留 futex 对象\n", name);
             passed = false;
@@ -599,6 +989,10 @@ int main(void) {
                 test_shared_wait_wake_and_isolation},
         {"i386 共享 REQUEUE、故障顺序与 OOM 原子性",
                 test_shared_requeue_and_errors},
+        {"i386 futex 只读共享键权限",
+                test_read_only_shared_key_permissions},
+        {"i386 私有文件页 COW 与共享键权限",
+                test_private_file_cow_permissions},
         {"i386 映射元数据与 mremap 边界",
                 test_mapping_metadata_and_mremap},
         {"i386 跨 mm robust 与 clear-child-tid",
