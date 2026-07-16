@@ -33,6 +33,7 @@
 #define AARCH64_LINUX_SYS_MEMBARRIER 283
 #define AARCH64_LINUX_SYS_PREADV2 286
 #define AARCH64_LINUX_SYS_PWRITEV2 287
+#define AARCH64_LINUX_SYS_FUTEX_WAITV 449
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
@@ -298,6 +299,7 @@ static bool syscall_may_restart(qword_t number) {
         case AARCH64_LINUX_SYS_PREADV:
         case AARCH64_LINUX_SYS_PWRITEV:
         case AARCH64_LINUX_SYS_FUTEX:
+        case AARCH64_LINUX_SYS_FUTEX_WAITV:
         case AARCH64_LINUX_SYS_CONNECT:
         case AARCH64_LINUX_SYS_WAIT4:
         case AARCH64_LINUX_SYS_PREADV2:

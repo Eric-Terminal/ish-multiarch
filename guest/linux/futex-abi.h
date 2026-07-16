@@ -9,6 +9,26 @@
 #define GUEST_LINUX_FUTEX_TID_MASK UINT32_C(0x3fffffff)
 #define GUEST_LINUX_ROBUST_LIST_LIMIT UINT32_C(2048)
 
+// futex_waitv 在 32/64 位 Linux guest 上共用同一固定宽度 wire ABI。
+#define GUEST_LINUX_FUTEX_WAITV_MAX UINT32_C(128)
+#define GUEST_LINUX_FUTEX2_SIZE_U32 UINT32_C(0x02)
+#define GUEST_LINUX_FUTEX_PRIVATE_FLAG UINT32_C(0x80)
+#define GUEST_LINUX_FUTEX_WAITV_SUPPORTED_FLAGS \
+    (GUEST_LINUX_FUTEX2_SIZE_U32 | GUEST_LINUX_FUTEX_PRIVATE_FLAG)
+
+struct guest_linux_futex_waitv {
+    qword_t value;
+    qword_t address;
+    dword_t flags;
+    dword_t reserved;
+} __attribute__((packed, aligned(8)));
+
+// i386 的 futex_waitv 也使用 time64 线协议，不能退回旧 32 位 timespec。
+struct guest_linux_kernel_timespec {
+    sqword_t sec;
+    sqword_t nsec;
+} __attribute__((packed, aligned(8)));
+
 // i386 robust list 指针的最低位标记 PI futex，其余 31 位是 guest 地址。
 #define I386_LINUX_ROBUST_LIST_PI UINT32_C(0x1)
 #define I386_LINUX_ROBUST_LIST_MODIFIER_MASK UINT32_C(0x1)
@@ -24,6 +44,23 @@ struct i386_linux_robust_list_head {
 _Static_assert(sizeof(struct i386_linux_robust_list_head) == 12 &&
         _Alignof(struct i386_linux_robust_list_head) == 4,
         "i386 Linux robust_list_head 必须保持 12 字节并按 4 字节对齐");
+_Static_assert(sizeof(struct guest_linux_futex_waitv) == 24 &&
+        _Alignof(struct guest_linux_futex_waitv) == 8 &&
+        __builtin_offsetof(struct guest_linux_futex_waitv, value) == 0 &&
+        __builtin_offsetof(struct guest_linux_futex_waitv, address) == 8 &&
+        __builtin_offsetof(struct guest_linux_futex_waitv, flags) == 16 &&
+        __builtin_offsetof(struct guest_linux_futex_waitv, reserved) == 20,
+        "Linux futex_waitv 元素必须保持 24 字节固定 wire 布局");
+_Static_assert(sizeof(struct guest_linux_kernel_timespec) == 16 &&
+        _Alignof(struct guest_linux_kernel_timespec) == 8 &&
+        __builtin_offsetof(struct guest_linux_kernel_timespec, sec) == 0 &&
+        __builtin_offsetof(struct guest_linux_kernel_timespec, nsec) == 8 &&
+        (sqword_t) -1 < 0,
+        "Linux __kernel_timespec 必须由两个连续的有符号 64 位字段组成");
+_Static_assert(GUEST_LINUX_FUTEX_WAITV_MAX == UINT32_C(128) &&
+        (GUEST_LINUX_FUTEX_WAITV_SUPPORTED_FLAGS &
+                ~UINT32_C(0x82)) == 0,
+        "futex_waitv 上限和当前支持标志必须落在 Linux UAPI 范围内");
 _Static_assert(__builtin_offsetof(
                 struct i386_linux_robust_list_head, next) == 0 &&
         __builtin_offsetof(

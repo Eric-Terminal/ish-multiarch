@@ -120,6 +120,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_PREADV2 = 286,
     AARCH64_LINUX_SYS_PWRITEV2 = 287,
     AARCH64_LINUX_SYS_CLONE3 = 435,
+    AARCH64_LINUX_SYS_FUTEX_WAITV = 449,
 };
 
 _Static_assert(sizeof(guest_addr_t) == 4,
@@ -2128,6 +2129,16 @@ static qword_t dispatch_syscall(
                     (dword_t) syscall->arguments[2],
                     syscall->arguments[3], syscall->arguments[4],
                     (dword_t) syscall->arguments[5], fault));
+        case AARCH64_LINUX_SYS_FUTEX_WAITV:
+            if (!task_has_aarch64_process(task))
+                return syscall_result(_EINVAL);
+            return syscall_result(sys_futex_waitv_aarch64(
+                    syscall->arguments[0],
+                    (dword_t) syscall->arguments[1],
+                    (dword_t) syscall->arguments[2],
+                    syscall->arguments[3],
+                    (sdword_t) (dword_t) syscall->arguments[4],
+                    &context->user, fault));
         case AARCH64_LINUX_SYS_SET_ROBUST_LIST:
             return syscall_result(sys_set_robust_list_aarch64(
                     syscall->arguments[0], syscall->arguments[1]));

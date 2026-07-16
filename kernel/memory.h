@@ -109,11 +109,28 @@ struct mem_futex_word_snapshot {
     qword_t offset;
 };
 
+enum mem_futex_waitv_prepare_result {
+    MEM_FUTEX_WAITV_READY,
+    MEM_FUTEX_WAITV_ALIGNMENT,
+    MEM_FUTEX_WAITV_FAULT,
+    MEM_FUTEX_WAITV_MISMATCH,
+};
+
 // 在一次最终页表读事务内解析最多两个 futex 字；故障时不修改输出。
 bool mem_snapshot_futex_words(struct mem *mem,
         const addr_t *addresses, size_t count,
         struct mem_futex_word_snapshot *snapshots,
         dword_t *first_value);
+
+/*
+ * 在同一最终页表事务中先解析全部稳定键，再按索引读取并比较值。
+ * PRIVATE 项只在值阶段要求存在映射，以保留 Linux 的错误先后顺序。
+ * 成功前不修改 snapshots；count 由调用方限制在 1～128。
+ */
+enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
+        struct mem *mem, const qword_t *addresses,
+        const bool *private_mappings, const dword_t *expected,
+        size_t count, struct mem_futex_word_snapshot *snapshots);
 
 enum mem_compare_exchange_result {
     MEM_COMPARE_EXCHANGE_SUCCESS,

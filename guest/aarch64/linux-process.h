@@ -3,6 +3,7 @@
 
 #include "guest/linux/signal-service.h"
 #include "guest/linux/syscall-service.h"
+#include "guest/linux/futex-abi.h"
 
 #define AARCH64_LINUX_PROCESS_RANDOM_SIZE 16
 
@@ -134,6 +135,13 @@ struct aarch64_linux_futex_word_snapshot {
     qword_t page_offset;
 };
 
+enum aarch64_linux_futex_waitv_prepare_result {
+    AARCH64_LINUX_FUTEX_WAITV_READY,
+    AARCH64_LINUX_FUTEX_WAITV_ALIGNMENT,
+    AARCH64_LINUX_FUTEX_WAITV_FAULT,
+    AARCH64_LINUX_FUTEX_WAITV_MISMATCH,
+};
+
 enum aarch64_linux_process_compare_exchange_result {
     AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_EXCHANGED,
     AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH,
@@ -200,6 +208,17 @@ bool aarch64_linux_process_snapshot_futex_words(
         const qword_t *addresses, size_t count,
         struct aarch64_linux_futex_word_snapshot *snapshots,
         dword_t *first_value,
+        struct guest_linux_user_fault *fault);
+/*
+ * 在同一地址空间事务中先解析全部稳定键，再按索引读取并比较值。
+ * PRIVATE 项只在值阶段解析页面；成功前不修改 snapshots。
+ */
+enum aarch64_linux_futex_waitv_prepare_result
+        aarch64_linux_process_prepare_futex_waitv(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, const bool *private_mappings,
+        const dword_t *expected, size_t count,
+        struct aarch64_linux_futex_word_snapshot *snapshots,
         struct guest_linux_user_fault *fault);
 // 仅由所属任务在退出或成功 exec 的安全点消费。
 qword_t aarch64_linux_process_take_clear_child_tid(

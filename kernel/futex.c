@@ -57,11 +57,25 @@ struct futex {
     struct list chain;
 };
 
-struct futex_wait {
+struct futex_wait_group {
     cond_t cond;
+    size_t woken_index;
+};
+
+struct futex_wait {
+    struct futex_wait_group *group;
+    size_t index;
     // REQUEUE 会在持有 futex_lock 时转移这份等待者引用。
     struct futex *futex;
     struct list queue;
+};
+
+struct futex_waitv_entry {
+    qword_t address;
+    dword_t expected;
+    bool private_mapping;
+    struct futex_key key;
+    struct futex_wait wait;
 };
 
 #define FUTEX_HASH_BITS 12
@@ -323,13 +337,17 @@ static int futex_wait_locked(const struct futex_key *key,
     if (futex == NULL)
         return _ENOMEM;
     int err = 0;
+    struct futex_wait_group group = {
+        .woken_index = SIZE_MAX,
+    };
     struct futex_wait wait = {
+        .group = &group,
         .futex = futex,
     };
-    cond_init(&wait.cond);
+    cond_init(&group.cond);
     list_add_tail(&futex->queue, &wait.queue);
     if (deadline == NULL) {
-        err = wait_for(&wait.cond, &futex_lock, timeout);
+        err = wait_for(&group.cond, &futex_lock, timeout);
     } else {
         do {
             struct timespec slice;
@@ -340,13 +358,15 @@ static int futex_wait_locked(const struct futex_key *key,
                 err = _ETIMEDOUT;
                 break;
             }
-            err = wait_for(&wait.cond, &futex_lock, &slice);
+            err = wait_for(&group.cond, &futex_lock, &slice);
         } while (err == _ETIMEDOUT);
     }
+    if (group.woken_index != SIZE_MAX)
+        err = 0;
     futex = wait.futex;
     list_remove_safe(&wait.queue);
     futex_put_unlocked(futex);
-    cond_destroy(&wait.cond);
+    cond_destroy(&group.cond);
     return err;
 }
 
@@ -358,7 +378,8 @@ static dword_t wake_waiters_locked(
             &futex->queue, wait, temporary, queue) {
         if (woken == wake_max)
             break;
-        notify(&wait->cond);
+        wait->group->woken_index = wait->index;
+        notify(&wait->group->cond);
         list_remove(&wait->queue);
         woken++;
     }
@@ -450,6 +471,103 @@ static int requeue_futex_locked(const struct futex_key *source_key,
     return (int) total;
 }
 
+struct futex_waitv_timeout {
+    bool enabled;
+    clockid_t clock;
+    struct timer_time deadline;
+};
+
+static bool futex_waitv_timeout_slice(
+        const struct futex_waitv_timeout *timeout,
+        struct timespec *slice) {
+    struct timer_time now = timer_time_from_timespec(
+            timespec_now(timeout->clock));
+    if (!timer_time_deadline_slice(timeout->deadline, now, slice))
+        return false;
+
+    // wait_for 只接收相对超时；REALTIME 需定期重看宿主时钟跳变。
+    if (timeout->clock == CLOCK_REALTIME &&
+            (slice->tv_sec > 1 ||
+            (slice->tv_sec == 1 && slice->tv_nsec != 0))) {
+        slice->tv_sec = 1;
+        slice->tv_nsec = 0;
+    }
+    return true;
+}
+
+// 调用和返回时均持有 futex_lock；所有对象准备成功后才统一入队。
+static int futex_waitv_locked(struct futex_waitv_entry *entries,
+        size_t count, const struct futex_waitv_timeout *timeout) {
+    size_t prepared = 0;
+    for (; prepared < count; prepared++) {
+        struct futex *futex = futex_get_or_create_unlocked(
+                &entries[prepared].key);
+        if (futex == NULL)
+            break;
+        entries[prepared].wait.futex = futex;
+        list_init(&entries[prepared].wait.queue);
+    }
+    if (prepared != count) {
+        while (prepared != 0) {
+            prepared--;
+            futex_put_unlocked(entries[prepared].wait.futex);
+            entries[prepared].wait.futex = NULL;
+        }
+        return _ENOMEM;
+    }
+
+    struct futex_wait_group group = {
+        .woken_index = SIZE_MAX,
+    };
+    cond_init(&group.cond);
+    for (size_t index = 0; index < count; index++) {
+        entries[index].wait.group = &group;
+        entries[index].wait.index = index;
+        list_add_tail(&entries[index].wait.futex->queue,
+                &entries[index].wait.queue);
+    }
+
+    int result;
+    for (;;) {
+        if (group.woken_index != SIZE_MAX) {
+            assert(group.woken_index < count &&
+                    group.woken_index <= INT_MAX);
+            result = (int) group.woken_index;
+            break;
+        }
+
+        struct timespec slice;
+        struct timespec *slice_pointer = NULL;
+        if (timeout->enabled) {
+            if (!futex_waitv_timeout_slice(timeout, &slice)) {
+                result = _ETIMEDOUT;
+                break;
+            }
+            slice_pointer = &slice;
+        }
+
+        int wait_result = wait_for(
+                &group.cond, &futex_lock, slice_pointer);
+        // Linux 在 wake、signal 或 timeout 竞争时优先返回已唤醒索引。
+        if (group.woken_index != SIZE_MAX)
+            continue;
+        if (wait_result == 0 ||
+                (wait_result == _ETIMEDOUT && timeout->enabled))
+            continue;
+        result = wait_result;
+        break;
+    }
+
+    for (size_t index = 0; index < count; index++) {
+        struct futex *futex = entries[index].wait.futex;
+        list_remove_safe(&entries[index].wait.queue);
+        futex_put_unlocked(futex);
+        entries[index].wait.futex = NULL;
+    }
+    cond_destroy(&group.cond);
+    return result;
+}
+
 static bool snapshot_aarch64_futex_keys_locked(
         struct aarch64_linux_process *process,
         const qword_t *addresses, size_t count,
@@ -475,6 +593,90 @@ static bool snapshot_aarch64_futex_keys_locked(
         }
     }
     return true;
+}
+
+static int prepare_i386_futex_waitv_locked(
+        struct mem *memory, struct futex_waitv_entry *entries,
+        size_t count) {
+    qword_t addresses[GUEST_LINUX_FUTEX_WAITV_MAX];
+    bool private_mappings[GUEST_LINUX_FUTEX_WAITV_MAX];
+    dword_t expected[GUEST_LINUX_FUTEX_WAITV_MAX];
+    struct mem_futex_word_snapshot snapshots
+            [GUEST_LINUX_FUTEX_WAITV_MAX];
+    for (size_t index = 0; index < count; index++) {
+        addresses[index] = entries[index].address;
+        private_mappings[index] = entries[index].private_mapping;
+        expected[index] = entries[index].expected;
+    }
+
+    enum mem_futex_waitv_prepare_result result =
+            mem_prepare_futex_waitv(memory, addresses,
+                    private_mappings, expected, count, snapshots);
+    switch (result) {
+        case MEM_FUTEX_WAITV_ALIGNMENT:
+            return _EINVAL;
+        case MEM_FUTEX_WAITV_FAULT:
+            return _EFAULT;
+        case MEM_FUTEX_WAITV_MISMATCH:
+            return _EAGAIN;
+        case MEM_FUTEX_WAITV_READY:
+            break;
+    }
+
+    for (size_t index = 0; index < count; index++) {
+        addr_t address = (addr_t) entries[index].address;
+        entries[index].key = entries[index].private_mapping ?
+                i386_virtual_futex_key(memory, address) :
+                i386_futex_key_from_snapshot(
+                        memory, address, &snapshots[index]);
+    }
+    return 0;
+}
+
+static int prepare_aarch64_futex_waitv_locked(
+        struct aarch64_linux_process *process,
+        struct futex_waitv_entry *entries, size_t count,
+        struct guest_linux_user_fault *fault) {
+    qword_t addresses[GUEST_LINUX_FUTEX_WAITV_MAX];
+    bool private_mappings[GUEST_LINUX_FUTEX_WAITV_MAX];
+    dword_t expected[GUEST_LINUX_FUTEX_WAITV_MAX];
+    struct aarch64_linux_futex_word_snapshot snapshots
+            [GUEST_LINUX_FUTEX_WAITV_MAX];
+    for (size_t index = 0; index < count; index++) {
+        addresses[index] = entries[index].address;
+        private_mappings[index] = entries[index].private_mapping;
+        expected[index] = entries[index].expected;
+    }
+
+    enum aarch64_linux_futex_waitv_prepare_result result =
+            aarch64_linux_process_prepare_futex_waitv(
+                    process, addresses, private_mappings,
+                    expected, count, snapshots, fault);
+    switch (result) {
+        case AARCH64_LINUX_FUTEX_WAITV_ALIGNMENT:
+            return _EINVAL;
+        case AARCH64_LINUX_FUTEX_WAITV_FAULT:
+            return _EFAULT;
+        case AARCH64_LINUX_FUTEX_WAITV_MISMATCH:
+            return _EAGAIN;
+        case AARCH64_LINUX_FUTEX_WAITV_READY:
+            break;
+    }
+
+    qword_t memory_identity =
+            aarch64_linux_process_memory_identity(process);
+    for (size_t index = 0; index < count; index++) {
+        if (entries[index].private_mapping ||
+                snapshots[index].shared_identity == 0) {
+            entries[index].key = aarch64_virtual_futex_key(
+                    memory_identity, entries[index].address);
+        } else {
+            entries[index].key = aarch64_physical_futex_key(
+                    snapshots[index].shared_identity,
+                    snapshots[index].page_offset);
+        }
+    }
+    return 0;
 }
 
 static struct futex_key aarch64_futex_key_from_snapshot(
@@ -772,6 +974,169 @@ dword_t sys_futex_aarch64(qword_t uaddr, dword_t op, dword_t val,
                     (dword_t) timeout_or_val2, fault);
     }
     return _ENOSYS;
+}
+
+static bool futex_waitv_host_clock(
+        sdword_t guest_clock, clockid_t *host_clock) {
+    switch (guest_clock) {
+        case CLOCK_REALTIME_:
+            *host_clock = CLOCK_REALTIME;
+            return true;
+        case CLOCK_MONOTONIC_:
+            *host_clock = CLOCK_MONOTONIC;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static int futex_waitv_set_timeout(
+        const struct guest_linux_kernel_timespec *wire,
+        clockid_t host_clock, struct futex_waitv_timeout *timeout) {
+    if (wire->sec < 0 || wire->nsec < 0 ||
+            wire->nsec >= INT64_C(1000000000))
+        return _EINVAL;
+    *timeout = (struct futex_waitv_timeout) {
+        .enabled = true,
+        .clock = host_clock,
+        .deadline = {
+            .sec = wire->sec,
+            .nsec = wire->nsec,
+        },
+    };
+    return 0;
+}
+
+static int futex_waitv_parse_entry(
+        const struct guest_linux_futex_waitv *wire,
+        struct futex_waitv_entry *entry) {
+    if ((wire->flags & ~GUEST_LINUX_FUTEX_WAITV_SUPPORTED_FLAGS) != 0 ||
+            wire->reserved != 0 ||
+            (wire->flags & GUEST_LINUX_FUTEX2_SIZE_U32) !=
+                    GUEST_LINUX_FUTEX2_SIZE_U32 ||
+            wire->value > UINT32_MAX)
+        return _EINVAL;
+    entry->address = wire->address;
+    entry->expected = (dword_t) wire->value;
+    entry->private_mapping =
+            (wire->flags & GUEST_LINUX_FUTEX_PRIVATE_FLAG) != 0;
+    return 0;
+}
+
+int_t sys_futex_waitv(addr_t waiters, dword_t count, dword_t flags,
+        addr_t timeout_address, sdword_t clock) {
+    if (flags != 0)
+        return _EINVAL;
+    if (count == 0 || count > GUEST_LINUX_FUTEX_WAITV_MAX ||
+            waiters == 0)
+        return _EINVAL;
+
+    struct futex_waitv_timeout timeout = {0};
+    if (timeout_address != 0) {
+        clockid_t host_clock;
+        if (!futex_waitv_host_clock(clock, &host_clock))
+            return _EINVAL;
+        struct guest_linux_kernel_timespec wire;
+        if (user_read(timeout_address, &wire, sizeof(wire)))
+            return _EFAULT;
+        int timeout_result = futex_waitv_set_timeout(
+                &wire, host_clock, &timeout);
+        if (timeout_result != 0)
+            return timeout_result;
+    }
+
+    struct futex_waitv_entry *entries = futex_malloc(
+            (size_t) count * sizeof(*entries));
+    if (entries == NULL)
+        return _ENOMEM;
+
+    int result = 0;
+    for (size_t index = 0; index < count; index++) {
+        qword_t address = (qword_t) waiters +
+                index * sizeof(struct guest_linux_futex_waitv);
+        if (address > UINT32_MAX) {
+            result = _EFAULT;
+            break;
+        }
+        struct guest_linux_futex_waitv wire;
+        if (user_read((addr_t) address, &wire, sizeof(wire))) {
+            result = _EFAULT;
+            break;
+        }
+        result = futex_waitv_parse_entry(&wire, &entries[index]);
+        if (result != 0)
+            break;
+    }
+
+    if (result == 0) {
+        lock(&futex_lock);
+        result = prepare_i386_futex_waitv_locked(
+                current->mem, entries, count);
+        if (result == 0)
+            result = futex_waitv_locked(entries, count, &timeout);
+        unlock(&futex_lock);
+    }
+    free(entries);
+    return result;
+}
+
+int_t sys_futex_waitv_aarch64(qword_t waiters, dword_t count,
+        dword_t flags, qword_t timeout_address, sdword_t clock,
+        const struct guest_linux_user_access *user,
+        struct guest_linux_user_fault *fault) {
+    if (flags != 0)
+        return _EINVAL;
+    if (count == 0 || count > GUEST_LINUX_FUTEX_WAITV_MAX ||
+            waiters == 0)
+        return _EINVAL;
+    assert(current != NULL && current->aarch64_process != NULL &&
+            user != NULL && user->read != NULL);
+
+    struct futex_waitv_timeout timeout = {0};
+    if (timeout_address != 0) {
+        clockid_t host_clock;
+        if (!futex_waitv_host_clock(clock, &host_clock))
+            return _EINVAL;
+        struct guest_linux_kernel_timespec wire;
+        if (!user->read(user->opaque, timeout_address,
+                &wire, sizeof(wire), fault))
+            return _EFAULT;
+        int timeout_result = futex_waitv_set_timeout(
+                &wire, host_clock, &timeout);
+        if (timeout_result != 0)
+            return timeout_result;
+    }
+
+    struct futex_waitv_entry *entries = futex_malloc(
+            (size_t) count * sizeof(*entries));
+    if (entries == NULL)
+        return _ENOMEM;
+
+    int result = 0;
+    for (size_t index = 0; index < count; index++) {
+        qword_t address = waiters +
+                index * sizeof(struct guest_linux_futex_waitv);
+        struct guest_linux_futex_waitv wire;
+        if (!user->read(user->opaque, address,
+                &wire, sizeof(wire), fault)) {
+            result = _EFAULT;
+            break;
+        }
+        result = futex_waitv_parse_entry(&wire, &entries[index]);
+        if (result != 0)
+            break;
+    }
+
+    if (result == 0) {
+        lock(&futex_lock);
+        result = prepare_aarch64_futex_waitv_locked(
+                current->aarch64_process, entries, count, fault);
+        if (result == 0)
+            result = futex_waitv_locked(entries, count, &timeout);
+        unlock(&futex_lock);
+    }
+    free(entries);
+    return result;
 }
 
 int_t sys_set_robust_list_aarch64(qword_t robust_list, qword_t len) {

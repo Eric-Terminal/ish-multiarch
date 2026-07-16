@@ -365,6 +365,14 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_futex', aarch64_futex_test)
 
+        aarch64_futex_waitv_test = executable(
+            'aarch64_futex_waitv_test',
+            'kernel/aarch64-futex-waitv-test.c',
+            dependencies: ish)
+        test('aarch64_futex_waitv',
+            aarch64_futex_waitv_test,
+            timeout: 60)
+
         aarch64_robust_futex_test = executable(
             'aarch64_robust_futex_test',
             'kernel/aarch64-robust-futex-test.c',
@@ -400,6 +408,14 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('i386_futex_shared',
             i386_futex_shared_test,
+            timeout: 60)
+
+        i386_futex_waitv_test = executable(
+            'i386_futex_waitv_test',
+            'kernel/i386-futex-waitv-test.c',
+            dependencies: ish)
+        test('i386_futex_waitv',
+            i386_futex_waitv_test,
             timeout: 60)
 
         i386_exec_thread_group_test = executable(
@@ -674,6 +690,12 @@ if not meson.is_cross_build()
         'guest/aarch64/linux-futex-abi-test.c',
         include_directories: includes)
     test('aarch64_linux_futex_abi', aarch64_linux_futex_abi_test)
+
+    linux_futex_waitv_abi_test = executable(
+        'linux_futex_waitv_abi_test',
+        'guest/linux/futex-waitv-abi-test.c',
+        include_directories: includes)
+    test('linux_futex_waitv_abi', linux_futex_waitv_abi_test)
 
     aarch64_linux_signal_abi_test = executable(
         'aarch64_linux_signal_abi_test',

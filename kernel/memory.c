@@ -17,6 +17,7 @@
 #include "kernel/task.h"
 #include "fs/fd.h"
 #include "fs/inode.h"
+#include "guest/linux/futex-abi.h"
 
 // increment the change count
 static void mem_changed(struct mem *mem);
@@ -388,6 +389,95 @@ bool mem_snapshot_futex_words(struct mem *mem,
     if (first_value != NULL)
         *first_value = local_first_value;
     return true;
+}
+
+enum mem_futex_waitv_prepare_result mem_prepare_futex_waitv(
+        struct mem *mem, const qword_t *addresses,
+        const bool *private_mappings, const dword_t *expected,
+        size_t count, struct mem_futex_word_snapshot *snapshots) {
+    assert(mem != NULL && addresses != NULL &&
+            private_mappings != NULL && expected != NULL &&
+            count != 0 && count <= GUEST_LINUX_FUTEX_WAITV_MAX &&
+            snapshots != NULL);
+
+    for (;;) {
+        struct mem_futex_word_snapshot resolved
+                [GUEST_LINUX_FUTEX_WAITV_MAX];
+        qword_t fault_address = 0;
+        bool retry_fault = false;
+
+        read_wrlock(&mem->lock);
+        for (size_t index = 0; index < count; index++) {
+            qword_t wide_address = addresses[index];
+            if ((wide_address & (sizeof(dword_t) - 1)) != 0) {
+                read_wrunlock(&mem->lock);
+                return MEM_FUTEX_WAITV_ALIGNMENT;
+            }
+            if (wide_address > UINT32_MAX) {
+                read_wrunlock(&mem->lock);
+                return MEM_FUTEX_WAITV_FAULT;
+            }
+
+            addr_t address = (addr_t) wide_address;
+            if (private_mappings[index]) {
+                resolved[index] = (struct mem_futex_word_snapshot) {
+                    .kind = MEM_FUTEX_BACKING_PRIVATE,
+                };
+                continue;
+            }
+
+            void *pointer = mem_ptr_nofault(mem, address, MEM_READ);
+            if (pointer == NULL) {
+                fault_address = wide_address;
+                retry_fault = true;
+                break;
+            }
+            struct pt_entry *entry = mem_pt(mem, PAGE(address));
+            assert(entry != NULL);
+            // 只读匿名私有页没有可供共享 futex 固定的跨进程后备键。
+            if ((entry->flags & P_ANONYMOUS) != 0 &&
+                    (entry->flags & (P_SHARED | P_WRITE)) == 0) {
+                read_wrunlock(&mem->lock);
+                return MEM_FUTEX_WAITV_FAULT;
+            }
+            resolved[index] = mem_futex_word_snapshot_locked(
+                    entry, address);
+        }
+
+        if (!retry_fault) {
+            for (size_t index = 0; index < count; index++) {
+                addr_t address = (addr_t) addresses[index];
+                dword_t *pointer = mem_ptr_nofault(
+                        mem, address, MEM_READ);
+                if (pointer == NULL) {
+                    fault_address = addresses[index];
+                    retry_fault = true;
+                    break;
+                }
+                dword_t observed = __atomic_load_n(
+                        pointer, __ATOMIC_SEQ_CST);
+                if (observed != expected[index]) {
+                    read_wrunlock(&mem->lock);
+                    return MEM_FUTEX_WAITV_MISMATCH;
+                }
+            }
+        }
+
+        read_wrunlock(&mem->lock);
+        if (!retry_fault) {
+            memcpy(snapshots, resolved,
+                    count * sizeof(*snapshots));
+            return MEM_FUTEX_WAITV_READY;
+        }
+
+        assert(fault_address <= UINT32_MAX);
+        read_wrlock(&mem->lock);
+        bool fault_resolved = mem_ptr(mem,
+                (addr_t) fault_address, MEM_READ) != NULL;
+        read_wrunlock(&mem->lock);
+        if (!fault_resolved)
+            return MEM_FUTEX_WAITV_FAULT;
+    }
 }
 
 static dword_t *mem_prepare_atomic_u32_write_locked(

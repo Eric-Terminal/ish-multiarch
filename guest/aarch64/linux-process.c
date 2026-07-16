@@ -732,6 +732,121 @@ bool aarch64_linux_process_snapshot_futex_words(
     return true;
 }
 
+enum aarch64_linux_futex_waitv_prepare_result
+aarch64_linux_process_prepare_futex_waitv(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, const bool *private_mappings,
+        const dword_t *expected, size_t count,
+        struct aarch64_linux_futex_word_snapshot *snapshots,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && addresses != NULL &&
+            private_mappings != NULL && expected != NULL &&
+            count != 0 && count <= GUEST_LINUX_FUTEX_WAITV_MAX &&
+            snapshots != NULL);
+
+    struct guest_address_space *space =
+            &process->memory->page_table.address_space;
+    struct guest_page_view views[GUEST_LINUX_FUTEX_WAITV_MAX];
+    struct aarch64_linux_futex_word_snapshot resolved
+            [GUEST_LINUX_FUTEX_WAITV_MAX];
+    enum aarch64_linux_futex_waitv_prepare_result result =
+            AARCH64_LINUX_FUTEX_WAITV_READY;
+    enum guest_memory_fault_kind fault_kind = GUEST_MEMORY_FAULT_NONE;
+    enum guest_memory_access fault_access = GUEST_MEMORY_READ;
+    guest_addr_t fault_address = 0;
+
+    bool locked = guest_address_space_read_lock(space);
+    for (size_t index = 0; index < count; index++) {
+        qword_t address = addresses[index];
+        if ((address & (sizeof(dword_t) - 1)) != 0) {
+            result = AARCH64_LINUX_FUTEX_WAITV_ALIGNMENT;
+            break;
+        }
+        if (!guest_address_space_contains(
+                space, (guest_addr_t) address, sizeof(dword_t))) {
+            qword_t limit = UINT64_C(1) << space->address_bits;
+            fault_address = (guest_addr_t) (address < limit ?
+                    limit : address);
+            fault_kind = GUEST_MEMORY_FAULT_ADDRESS_SIZE;
+            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            break;
+        }
+        if (private_mappings[index]) {
+            resolved[index] =
+                    (struct aarch64_linux_futex_word_snapshot) {0};
+            continue;
+        }
+
+        guest_addr_t page_base = (guest_addr_t)
+                (address & ~GUEST_MEMORY_PAGE_MASK);
+        fault_kind = guest_address_space_resolve_page(
+                space, page_base, GUEST_MEMORY_READ, &views[index]);
+        if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+            fault_address = (guest_addr_t) address;
+            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            break;
+        }
+        // 只读匿名私有页没有可供共享 futex 固定的跨进程后备键。
+        if (views[index].sync == NULL &&
+                (views[index].permissions & GUEST_MEMORY_WRITE) == 0) {
+            fault_address = (guest_addr_t) address;
+            fault_access = GUEST_MEMORY_WRITE;
+            fault_kind = GUEST_MEMORY_FAULT_PERMISSION;
+            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            break;
+        }
+        resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
+            .shared_identity = views[index].sync == NULL ? 0 :
+                    guest_page_sync_identity(views[index].sync),
+            .page_offset = address & GUEST_MEMORY_PAGE_MASK,
+        };
+    }
+
+    for (size_t index = 0;
+            result == AARCH64_LINUX_FUTEX_WAITV_READY && index < count;
+            index++) {
+        qword_t address = addresses[index];
+        if (private_mappings[index]) {
+            guest_addr_t page_base = (guest_addr_t)
+                    (address & ~GUEST_MEMORY_PAGE_MASK);
+            fault_kind = guest_address_space_resolve_page(
+                    space, page_base, GUEST_MEMORY_READ, &views[index]);
+            if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
+                fault_address = (guest_addr_t) address;
+                result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+                break;
+            }
+        }
+
+        const struct guest_page_view *view = &views[index];
+        size_t page_offset = (size_t)
+                (address & GUEST_MEMORY_PAGE_MASK);
+        dword_t observed;
+        if (view->sync != NULL)
+            guest_page_sync_read_lock(view->sync);
+        memcpy(&observed, view->host_page + page_offset,
+                sizeof(observed));
+        if (view->sync != NULL)
+            guest_page_sync_read_unlock(view->sync);
+        if (observed != expected[index])
+            result = AARCH64_LINUX_FUTEX_WAITV_MISMATCH;
+    }
+    guest_address_space_read_unlock(space, locked);
+
+    if (result == AARCH64_LINUX_FUTEX_WAITV_FAULT && fault != NULL) {
+        const struct guest_memory_fault memory_fault = {
+            .address = fault_address,
+            .access = fault_access,
+            .kind = fault_kind,
+        };
+        export_fault(fault, &memory_fault);
+    } else if (result == AARCH64_LINUX_FUTEX_WAITV_READY) {
+        memcpy(snapshots, resolved,
+                count * sizeof(*snapshots));
+    }
+    return result;
+}
+
 bool aarch64_linux_process_read_memory(
         struct aarch64_linux_process *process, qword_t address,
         void *destination, size_t size,

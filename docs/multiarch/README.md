@@ -234,9 +234,10 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 
 - AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；当前已实现 32/64 位 `CASP`、`CASPA`、`CASPL` 与 `CASPAL`，但尚未覆盖完整 `FEAT_LSE`，guest 的 `AT_HWCAP` 暂不宣告 `HWCAP_ATOMICS`。
 - 未支持的 AArch64 指令会安全投递 `SIGILL`，未知 Linux 系统调用会返回 `ENOSYS`。
-- AArch64 `futex` 已支持 `WAIT`、`WAKE`、`REQUEUE`、匿名共享后备的跨进程键、robust list 与 clear-child-tid 退出清理。i386 的非 PRIVATE `WAIT`/`WAKE`/`REQUEUE` 也会按稳定后备身份建键：匿名共享映射可跨 fork 后的不同 `mm` 协作，独立普通文件映射按 inode 代际与实际文件字节偏移匹配；robust list 和 clear-child-tid 的退出唤醒沿用相同共享键。`FUTEX_LOCK_PI`、`futex_waitv` 等操作仍未实现，`clone3` 仅接受当前任务模型可安全表达的受限标志集。
+- AArch64 `futex` 已支持 `WAIT`、`WAKE`、`REQUEUE`、匿名共享后备的跨进程键、robust list 与 clear-child-tid 退出清理。i386 的非 PRIVATE `WAIT`/`WAKE`/`REQUEUE` 也会按稳定后备身份建键：匿名共享映射可跨 fork 后的不同 `mm` 协作，独立普通文件映射按 inode 代际与实际文件字节偏移匹配；robust list 和 clear-child-tid 的退出唤醒沿用相同共享键。
+- i386 与 AArch64 均实现系统调用 449 的基础 `futex_waitv`：支持 1～128 个 U32 等待项、逐项 PRIVATE/共享稳定键、重复地址、与传统 `REQUEUE` 交互、MONOTONIC/REALTIME 绝对 time64 截止时间，以及 wake、信号、超时和分配失败竞争下的统一队列回收。AArch64 可按 `SA_RESTART` 恢复等待；i386 当前在信号中断后返回 `EINTR`，尚无完整的系统调用重启框架。`FUTEX2_NUMA`、`FUTEX2_MPOL`、`FUTEX_LOCK_PI` 等扩展仍未实现，`clone3` 仅接受当前任务模型可安全表达的受限标志集。
 - AArch64 `mmap` 当前支持匿名私有映射与严格的 `MAP_SHARED | MAP_ANONYMOUS`；共享后备在 fork 后双向可见，而权限、解除映射和固定替换仍归各地址空间独立管理。AArch64 文件映射与 `MAP_SHARED_VALIDATE` 尚未实现。i386 匿名共享映射的原位 `mremap` 扩展尚无可供多个既存 `mm` 共同引用的单一 shmem 后备，因此当前明确拒绝该操作，避免把彼此独立的 host 内存伪装成同一 futex 后备。`MADV_DONTNEED` 会清零匿名私有映射或已分配 brk 页；匿名共享页保留共同后备内容，但当前模型尚不表达可单独驱逐的 PTE/RSS 驻留状态。
-- `pidfd` 类接口尚缺少稳定的任务代际、引用和权限模型；`openat2` 尚未表达 `RESOLVE_*` 路径约束；`futex_waitv` 尚未建立原子多队列等待与共享后备对象身份模型，因此不做会弱化语义的伪实现。
+- `pidfd` 类接口尚缺少稳定的任务代际、引用和权限模型；`openat2` 尚未表达 `RESOLVE_*` 路径约束。
 - `pselect6`、`ppoll` 与 `epoll_create1/epoll_ctl/epoll_pwait` 已接入当前的文件事件和信号掩码模型，不代表所有 Linux I/O 复用语义均已实现。
 - `FPREM` 在单次模拟中完成完整余数，不暴露实现相关的 `C2=1` 中间化简步骤。
 - `FXTRACT` 已覆盖数值分类，但通用 x87 异常标志、控制字掩码与未掩码陷阱尚未完整模拟；依赖 `FNSTSW` 精确观察异常状态的程序仍可能存在差异。
