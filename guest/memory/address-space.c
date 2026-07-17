@@ -253,6 +253,26 @@ enum guest_memory_fault_kind guest_address_space_resolve_page(
     return GUEST_MEMORY_FAULT_NONE;
 }
 
+enum guest_memory_page_in_result guest_address_space_page_in(
+        struct guest_address_space *space, guest_addr_t page_base,
+        enum guest_memory_access access, struct guest_memory_fault *fault) {
+    assert(space != NULL && fault != NULL);
+    assert(access == GUEST_MEMORY_READ || access == GUEST_MEMORY_WRITE ||
+            access == GUEST_MEMORY_EXECUTE);
+    assert((page_base & GUEST_MEMORY_PAGE_MASK) == 0);
+    assert(fault->access == access &&
+            fault->kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    if (space->ops->page_in == NULL)
+        return GUEST_MEMORY_PAGE_IN_FAILED;
+    enum guest_memory_page_in_result result = space->ops->page_in(
+            space->opaque, page_base, access, fault);
+    assert(result == GUEST_MEMORY_PAGE_IN_RETRY ||
+            result == GUEST_MEMORY_PAGE_IN_FAILED);
+    assert(result != GUEST_MEMORY_PAGE_IN_FAILED ||
+            fault->kind != GUEST_MEMORY_FAULT_NONE);
+    return result;
+}
+
 static void validate_page_sync(const struct guest_page_sync *sync) {
     assert(sync != NULL && sync->ops != NULL);
     assert(sync->identity != 0);

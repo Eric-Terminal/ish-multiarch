@@ -53,6 +53,7 @@ aarch64_core_src = [
     'guest/memory/address-space.c',
     'guest/memory/tlb.c',
     'guest/memory/page-backing.c',
+    'guest/memory/file-pager.c',
     'guest/memory/page-table.c',
     'guest/linux/user-memory.c',
     'guest/aarch64/decode.c',
@@ -181,6 +182,7 @@ if get_option('kernel') == 'ish'
         'kernel/aarch64-exec.c',
         'kernel/aarch64-exec-image.c',
         'kernel/aarch64-fd-service.c',
+        'kernel/aarch64-file-mapping-service.c',
         'kernel/aarch64-resource-wire.c',
         'kernel/aarch64-task-runner.c',
         'kernel/aarch64-signal-service.c',
@@ -259,6 +261,10 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        tmpfs_pread_test = executable(
+            'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
+        test('tmpfs_pread', tmpfs_pread_test)
+
         inode_identity_test = executable(
             'inode_identity_test', 'fs/inode-test.c', dependencies: ish)
         test('inode_identity', inode_identity_test)
@@ -323,6 +329,13 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-file-syscall-test.c',
             dependencies: ish)
         test('aarch64_file_syscall', aarch64_file_syscall_test)
+
+        aarch64_file_mapping_service_test = executable(
+            'aarch64_file_mapping_service_test',
+            'kernel/aarch64-file-mapping-service-test.c',
+            dependencies: ish)
+        test('aarch64_file_mapping_service',
+            aarch64_file_mapping_service_test)
 
         aarch64_lseek_syscall_test = executable(
             'aarch64_lseek_syscall_test',
@@ -796,6 +809,7 @@ if not meson.is_cross_build()
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
             'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
             'guest/memory/page-table.c',
             'guest/linux/user-memory.c',
             'guest/linux/user-memory-test.c',
@@ -806,6 +820,7 @@ if not meson.is_cross_build()
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
             'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
             'guest/memory/page-table.c',
             'guest/linux/vma.c',
             'guest/linux/memory.c',
@@ -821,6 +836,7 @@ if not meson.is_cross_build()
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
             'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
             'guest/memory/page-table.c',
             'guest/linux/vma.c',
             'guest/linux/memory.c',
@@ -833,12 +849,36 @@ if not meson.is_cross_build()
         dependencies: threads)
     test('guest_linux_memory_shared', guest_linux_memory_shared_test)
 
+    guest_linux_memory_file_test = executable(
+        'guest_linux_memory_file_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
+            'guest/memory/page-table.c',
+            'guest/linux/vma.c',
+            'guest/linux/memory.c',
+            'guest/linux/memory-file-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1',
+            '-DGUEST_FILE_PAGER_TESTING=1'],
+        dependencies: threads)
+    test('guest_linux_memory_file', guest_linux_memory_file_test,
+        timeout: 120)
+
     guest_linux_vma_test = executable('guest_linux_vma_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
             'guest/linux/vma.c',
             'guest/linux/vma-test.c',
         ], include_directories: includes,
         c_args: ['-DISH_GUEST_AARCH64=1',
-            '-DGUEST_LINUX_VMA_TESTING=1'])
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_FILE_PAGER_TESTING=1'], dependencies: threads)
     test('guest_linux_vma', guest_linux_vma_test)
 
     aarch64_elf64_test = executable('aarch64_elf64_test', [
@@ -906,6 +946,17 @@ if not meson.is_cross_build()
         c_args: ['-DISH_GUEST_AARCH64=1',
             '-DGUEST_PAGE_BACKING_TESTING=1'], dependencies: threads)
     test('aarch64_page_backing', aarch64_page_backing_test)
+
+    aarch64_file_pager_test = executable('aarch64_file_pager_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
+            'guest/memory/file-pager-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_FILE_PAGER_TESTING=1'], dependencies: threads)
+    test('aarch64_file_pager', aarch64_file_pager_test)
 
     aarch64_page_table_test = executable('aarch64_page_table_test', [
             'guest/memory/address-space.c',

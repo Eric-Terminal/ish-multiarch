@@ -4,6 +4,7 @@
 #include "guest/aarch64/linux-signal-frame.h"
 #include "guest/aarch64/linux-signal-info.h"
 #include "guest/linux/errno.h"
+#include "guest/linux/mman.h"
 #include "guest/linux/user-memory.h"
 
 #define AARCH64_LINUX_SYS_FCNTL 25
@@ -206,6 +207,76 @@ static const struct guest_linux_signal_service *runtime_signal_service(
     return runtime->services == NULL ? NULL : runtime->services->signals;
 }
 
+static qword_t dispatch_mmap(
+        struct aarch64_linux_runtime *runtime,
+        const struct aarch64_linux_task *task,
+        const struct guest_linux_syscall *syscall) {
+    qword_t flags = syscall->arguments[3];
+    if ((flags & GUEST_LINUX_MAP_ANONYMOUS) != 0) {
+        return guest_linux_mmap(runtime->memory,
+                syscall->arguments[0], syscall->arguments[1],
+                syscall->arguments[2], flags,
+                syscall->arguments[4], syscall->arguments[5]);
+    }
+    // arm64 mmap 的 byte offset 对齐检查先于 fd 获取。
+    if ((syscall->arguments[5] & GUEST_MEMORY_PAGE_MASK) != 0)
+        return linux_error(GUEST_LINUX_EINVAL);
+    const struct guest_linux_file_mapping_service *service =
+            runtime->services == NULL ? NULL :
+                    runtime->services->file_mappings;
+    if (service == NULL || service->acquire == NULL ||
+            service->release == NULL || service->open == NULL)
+        return linux_error(GUEST_LINUX_ENOSYS);
+
+    const struct guest_linux_file_mapping_context context = {
+        .runtime_opaque = service->runtime_opaque,
+        .task_opaque = task->service_opaque,
+    };
+    const struct guest_linux_file_mapping_request request = {
+        .fd = syscall->arguments[4],
+        .offset = syscall->arguments[5],
+        .length = syscall->arguments[1],
+        .protection = syscall->arguments[2],
+        .flags = flags,
+    };
+    struct guest_linux_file_mapping_handle handle = {0};
+    sdword_t acquired = service->acquire(
+            &context, request.fd, &handle);
+    if (acquired != 0) {
+        assert(acquired < 0 && handle.opaque == NULL);
+        return (qword_t) (sqword_t) acquired;
+    }
+    assert(handle.opaque != NULL);
+
+    qword_t preflight = guest_linux_mmap_file_private_preflight(
+            runtime->memory, syscall->arguments[0], request.length,
+            request.protection, request.flags, request.offset);
+    if ((sqword_t) preflight < 0) {
+        service->release(&handle);
+        assert(handle.opaque == NULL);
+        return preflight;
+    }
+
+    struct guest_linux_file_mapping mapping = {0};
+    sdword_t opened = service->open(&handle, &request, &mapping);
+    if (opened != 0) {
+        assert(opened < 0 && mapping.pager == NULL);
+        service->release(&handle);
+        assert(handle.opaque == NULL);
+        return (qword_t) (sqword_t) opened;
+    }
+    assert(mapping.pager != NULL &&
+            (mapping.maximum_protection & ~GUEST_LINUX_PROT_MASK) == 0);
+    qword_t result = guest_linux_mmap_file_private(runtime->memory,
+            syscall->arguments[0], syscall->arguments[1],
+            syscall->arguments[2], mapping.maximum_protection,
+            flags, mapping.pager, syscall->arguments[5]);
+    guest_file_pager_release(mapping.pager);
+    service->release(&handle);
+    assert(handle.opaque == NULL);
+    return result;
+}
+
 static struct guest_linux_signal_context make_signal_context(
         const struct guest_linux_signal_service *service,
         const struct aarch64_linux_task *task) {
@@ -404,10 +475,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = guest_linux_munmap(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MMAP) {
-        result.return_value = guest_linux_mmap(runtime->memory,
-                syscall.arguments[0], syscall.arguments[1],
-                syscall.arguments[2], syscall.arguments[3],
-                syscall.arguments[4], syscall.arguments[5]);
+        result.return_value = dispatch_mmap(runtime, task, &syscall);
     } else if (syscall.number == AARCH64_LINUX_SYS_MPROTECT) {
         result.return_value = guest_linux_mprotect(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],

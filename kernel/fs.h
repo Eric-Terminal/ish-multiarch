@@ -47,6 +47,7 @@ sqword_t file_getdents_task(struct task *task, fd_t fd,
 int file_write_check_task(struct task *task, fd_t fd);
 int file_read_check_fd(struct fd *fd);
 int file_write_check_fd(struct fd *fd);
+int file_fstat_fd(struct fd *fd, struct statbuf *stat);
 int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
 int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);

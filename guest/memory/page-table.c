@@ -122,6 +122,16 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
     return GUEST_MEMORY_FAULT_NONE;
 }
 
+static enum guest_memory_page_in_result page_in(void *opaque,
+        guest_addr_t page_base, enum guest_memory_access access,
+        struct guest_memory_fault *fault) {
+    struct guest_page_table *table = opaque;
+    if (table->fault_ops == NULL || table->fault_ops->page_in == NULL)
+        return GUEST_MEMORY_PAGE_IN_FAILED;
+    return table->fault_ops->page_in(
+            table->fault_opaque, page_base, access, fault);
+}
+
 static bool address_space_read_lock(void *opaque) {
     return guest_page_table_read_lock(opaque);
 }
@@ -240,6 +250,7 @@ static const struct guest_address_space_ops page_table_ops = {
     .write_unlock = address_space_write_unlock,
     .prepare_write = prepare_private_file_write,
     .resolve_page = resolve_page,
+    .page_in = page_in,
 };
 
 #if defined(GUEST_PAGE_TABLE_TESTING)
@@ -466,6 +477,15 @@ bool guest_page_table_clone(struct guest_page_table *destination,
     return result;
 }
 
+void guest_page_table_set_fault_ops(struct guest_page_table *table,
+        const struct guest_page_table_fault_ops *ops, void *opaque) {
+    assert(table != NULL && table->root != NULL);
+    assert((ops == NULL) == (opaque == NULL));
+    assert(ops == NULL || ops->page_in != NULL);
+    table->fault_ops = ops;
+    table->fault_opaque = opaque;
+}
+
 static bool valid_page(const struct guest_page_table *table,
         guest_addr_t page_base) {
     return (page_base & GUEST_MEMORY_PAGE_MASK) == 0 &&
@@ -565,6 +585,32 @@ enum guest_page_table_result guest_page_table_map_file(
         qword_t file_offset, byte_t **host_page) {
     return map_page(table, page_base, permissions,
             GUEST_PAGE_ORIGIN_FILE, source, file_offset, host_page);
+}
+
+enum guest_page_table_result guest_page_table_map_private_file_backing(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, struct guest_file_source *source,
+        qword_t file_offset, struct guest_page_backing *backing) {
+    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    assert(source != NULL && backing != NULL);
+    assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
+    if (!valid_page(table, page_base))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    struct guest_page_mapping *mapping;
+    enum guest_page_table_result prepare = prepare_mapping_slot(
+            table, page_base, &mapping);
+    if (prepare != GUEST_PAGE_TABLE_OK)
+        return prepare;
+    if (mapping->backing != NULL)
+        return GUEST_PAGE_TABLE_ALREADY_MAPPED;
+
+    guest_page_backing_retain(backing);
+    mapping->backing = backing;
+    mapping->permissions = permissions;
+    (void) set_file_source(mapping, source, file_offset);
+    guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
 }
 
 enum guest_page_table_result guest_page_table_map_special(
@@ -850,6 +896,28 @@ enum guest_page_table_result guest_page_table_protect_range(
             return GUEST_PAGE_TABLE_NOT_MAPPED;
         }
         if (mapping->permissions != permissions) {
+            mapping->permissions = permissions;
+            changed = true;
+        }
+        page += GUEST_MEMORY_PAGE_SIZE;
+    }
+    if (changed)
+        guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_protect_present_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions) {
+    assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    if (!valid_range(table, range))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    bool changed = false;
+    guest_addr_t page = range.first;
+    for (qword_t index = 0; index < range.page_count; index++) {
+        struct guest_page_mapping *mapping = find_mapping(table, page);
+        if (mapping != NULL && mapping->permissions != permissions) {
             mapping->permissions = permissions;
             changed = true;
         }

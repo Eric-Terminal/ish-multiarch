@@ -35,6 +35,15 @@ enum guest_memory_fault_kind {
     GUEST_MEMORY_FAULT_PERMISSION,
     GUEST_MEMORY_FAULT_ALIGNMENT,
     GUEST_MEMORY_FAULT_OUT_OF_MEMORY,
+    // 有效文件 VMA 的 EOF 或后备 I/O 故障。
+    GUEST_MEMORY_FAULT_BUS_ADDRESS,
+};
+
+enum guest_memory_page_in_result {
+    // 映射状态可能已改变，调用方须重新取得锁并完整重试访问。
+    GUEST_MEMORY_PAGE_IN_RETRY,
+    // fault 已包含终态故障，不得继续使用旧解析结果。
+    GUEST_MEMORY_PAGE_IN_FAILED,
 };
 
 // 页面来源只描述 guest 可观察的后备类型，不暴露宿主对象或指针。
@@ -119,6 +128,13 @@ struct guest_address_space_ops {
     enum guest_memory_fault_kind (*resolve_page)(void *opaque,
             guest_addr_t page_base, enum guest_memory_access access,
             struct guest_page_view *view);
+    /*
+     * 只在未持有 address-space 锁时调用，用于把有效 lazy VMA 的后备
+     * 换入页表。阻塞等待与文件 I/O 必须全部留在该锁外边界。
+     */
+    enum guest_memory_page_in_result (*page_in)(void *opaque,
+            guest_addr_t page_base, enum guest_memory_access access,
+            struct guest_memory_fault *fault);
 };
 
 struct guest_exclusive_record {
@@ -166,6 +182,9 @@ bool guest_address_space_contains(const struct guest_address_space *space,
 enum guest_memory_fault_kind guest_address_space_resolve_page(
         struct guest_address_space *space, guest_addr_t page_base,
         enum guest_memory_access access, struct guest_page_view *view);
+enum guest_memory_page_in_result guest_address_space_page_in(
+        struct guest_address_space *space, guest_addr_t page_base,
+        enum guest_memory_access access, struct guest_memory_fault *fault);
 qword_t guest_page_sync_identity(const struct guest_page_sync *sync);
 // 调用者先持 address space 锁；多域访问须按 identity 升序加锁并逆序释放。
 void guest_page_sync_read_lock(const struct guest_page_sync *sync);

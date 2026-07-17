@@ -81,6 +81,10 @@ int aarch64_task_fault_signal(
             signal = SIGBUS_;
             code = BUS_ADRALN_;
             break;
+        case GUEST_MEMORY_FAULT_BUS_ADDRESS:
+            signal = SIGBUS_;
+            code = BUS_ADRERR_;
+            break;
         case GUEST_MEMORY_FAULT_NONE:
             assert(false &&
                     "AArch64 fault 事件必须携带有效故障类型");

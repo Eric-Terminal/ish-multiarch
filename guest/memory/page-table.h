@@ -15,10 +15,20 @@ enum guest_page_table_result {
 };
 
 struct guest_page_table_node;
+struct guest_page_backing;
+
+struct guest_page_table_fault_ops {
+    // 由 address-space 保证只在未持有页表锁时调用。
+    enum guest_memory_page_in_result (*page_in)(void *opaque,
+            guest_addr_t page_base, enum guest_memory_access access,
+            struct guest_memory_fault *fault);
+};
 
 struct guest_page_table {
     struct guest_address_space address_space;
     struct guest_page_table_node *root;
+    const struct guest_page_table_fault_ops *fault_ops;
+    void *fault_opaque;
     pthread_rwlock_t lock;
     atomic_bool concurrent;
 };
@@ -37,6 +47,9 @@ bool guest_page_table_clone(struct guest_page_table *destination,
 // 调用方已持有 source 的读事务时使用，避免复合快照重复加锁。
 bool guest_page_table_clone_locked(struct guest_page_table *destination,
         const struct guest_page_table *source);
+// 只能在页表尚未发布给并发访问者时设置或清除；clone 不复制 opaque。
+void guest_page_table_set_fault_ops(struct guest_page_table *table,
+        const struct guest_page_table_fault_ops *ops, void *opaque);
 #if defined(GUEST_PAGE_TABLE_TESTING)
 void guest_page_table_test_fail_clone_allocation_at(size_t index);
 size_t guest_page_table_test_clone_allocation_count(void);
@@ -61,6 +74,11 @@ enum guest_page_table_result guest_page_table_map_file(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, struct guest_file_source *source,
         qword_t file_offset, byte_t **host_page);
+// source/backing 均为借用；成功时页表各自取得一份强引用。
+enum guest_page_table_result guest_page_table_map_private_file_backing(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, struct guest_file_source *source,
+        qword_t file_offset, struct guest_page_backing *backing);
 enum guest_page_table_result guest_page_table_map_special(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, byte_t **host_page);
@@ -94,6 +112,10 @@ enum guest_page_table_result guest_page_table_unmap_range(
         struct guest_page_table *table, struct guest_page_range range,
         bool allow_holes);
 enum guest_page_table_result guest_page_table_protect_range(
+        struct guest_page_table *table, struct guest_page_range range,
+        unsigned permissions);
+// 只更新范围内已经驻留的页，lazy 页空洞不是错误。
+enum guest_page_table_result guest_page_table_protect_present_range(
         struct guest_page_table *table, struct guest_page_range range,
         unsigned permissions);
 

@@ -2,6 +2,7 @@
 #define GUEST_AARCH64_LINUX_RUNTIME_H
 
 #include "guest/aarch64/linux-syscall.h"
+#include "guest/linux/file-mapping-service.h"
 #include "guest/linux/memory.h"
 #include "guest/linux/signal-service.h"
 #include "guest/linux/syscall-service.h"
@@ -12,6 +13,7 @@
 struct aarch64_linux_services {
     const struct guest_linux_syscall_service *syscalls;
     const struct guest_linux_signal_service *signals;
+    const struct guest_linux_file_mapping_service *file_mappings;
     // 未设置 SA_RESTORER 时使用的 guest 可执行 rt_sigreturn 入口。
     guest_addr_t signal_trampoline;
 };

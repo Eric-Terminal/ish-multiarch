@@ -14,6 +14,7 @@
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
@@ -139,6 +140,8 @@ static struct aarch64_linux_process *make_process(
                 &ish_aarch64_linux_syscall_service : NULL,
         .signals = use_kernel_services ?
                 &ish_aarch64_linux_signal_service : NULL,
+        .file_mappings = use_kernel_services ?
+                &ish_aarch64_linux_file_mapping_service : NULL,
     };
     struct aarch64_linux_process *process =
             aarch64_linux_process_create(&config, NULL);
@@ -289,6 +292,14 @@ static int test_fault_mapping(void) {
             .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
             .address = UINT64_C(0x0000400033330001),
             .reported_address = UINT64_C(0x0000400033330001),
+        },
+        {
+            .message = "文件映射 EOF 映射 SIGBUS ADRERR",
+            .kind = GUEST_MEMORY_FAULT_BUS_ADDRESS,
+            .signal = SIGBUS_, .code = BUS_ADRERR_,
+            .payload_kind = SIGNAL_INFO_PAYLOAD_FAULT,
+            .address = UINT64_C(0x0000400033340017),
+            .reported_address = UINT64_C(0x0000400033340017),
         },
         {
             .message = "地址尺寸异常精确映射不可捕获 SIGKILL",

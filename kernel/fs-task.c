@@ -196,7 +196,7 @@ int file_write_check_task(struct task *task, fd_t fd_number) {
     return result;
 }
 
-static int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
+int file_fstat_fd(struct fd *fd, struct statbuf *stat) {
     memset(stat, 0, sizeof(*stat));
     if (fd == NULL)
         return _EBADF;

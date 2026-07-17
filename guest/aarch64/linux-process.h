@@ -1,6 +1,7 @@
 #ifndef GUEST_AARCH64_LINUX_PROCESS_H
 #define GUEST_AARCH64_LINUX_PROCESS_H
 
+#include "guest/linux/file-mapping-service.h"
 #include "guest/linux/signal-service.h"
 #include "guest/linux/syscall-service.h"
 #include "guest/linux/futex-abi.h"
@@ -85,6 +86,7 @@ struct aarch64_linux_process_config {
     void *task_opaque;
     const struct guest_linux_syscall_service *syscalls;
     const struct guest_linux_signal_service *signals;
+    const struct guest_linux_file_mapping_service *file_mappings;
 };
 
 struct aarch64_linux_process_fork_config {
@@ -209,6 +211,14 @@ bool aarch64_linux_process_contains_user_range(
         const struct aarch64_linux_process *process,
         qword_t address, size_t size);
 /*
+ * 触发 lazy 只读缺页时不得持有 kernel futex 全局锁。锁内键解析遇到
+ * UNMAPPED 后，调用方必须先解锁，再调用本入口并重试完整事务。
+ */
+bool aarch64_linux_process_prefault_futex_words(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, size_t count,
+        struct guest_linux_user_fault *fault);
+/*
  * addresses 仅接受一到两个对齐的 32 位 futex 字。全部地址会在同一
  * 地址空间事务内解析，失败时 snapshots 与 first_value 保持不变；
  * shared_key 为真时还会执行写固定、私有文件页 COW 与特殊页拒绝。
@@ -263,6 +273,9 @@ bool aarch64_linux_process_uses_services(
         pid_t_ tid, const void *task_opaque,
         const struct guest_linux_syscall_service *syscalls,
         const struct guest_linux_signal_service *signals);
+bool aarch64_linux_process_uses_file_mapping_service(
+        const struct aarch64_linux_process *process,
+        const struct guest_linux_file_mapping_service *file_mappings);
 #if defined(AARCH64_LINUX_PROCESS_TESTING)
 bool aarch64_linux_process_test_has_owned_state(
         const struct aarch64_linux_process *process,

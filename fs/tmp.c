@@ -387,20 +387,11 @@ static int tmpfs_fstat(struct fd *fd, struct statbuf *stat) {
     return 0;
 }
 
-static ssize_t tmpfs_read(struct fd *fd, void *buf, size_t bufsize) {
-    ssize_t res;
-    struct tmp_inode *inode = tmpfs_fd_inode(fd);
-    lock(&inode->lock);
-    res = _EISDIR;
+static ssize_t tmpfs_read_at_locked(struct tmp_inode *inode,
+        void *buf, size_t bufsize, qword_t offset) {
     if (S_ISDIR(inode->stat.mode))
-        goto out;
+        return _EISDIR;
     assert(S_ISREG(inode->stat.mode));
-
-    if (fd->offset < 0) {
-        res = _EINVAL;
-        goto out;
-    }
-    qword_t offset = (qword_t) fd->offset;
     if (offset >= inode->stat.size) {
         bufsize = 0;
     } else {
@@ -410,10 +401,30 @@ static ssize_t tmpfs_read(struct fd *fd, void *buf, size_t bufsize) {
     }
     if (bufsize != 0)
         memcpy(buf, inode->file_data + (size_t) offset, bufsize);
-    fd->offset += (off_t_) bufsize;
-    res = (ssize_t) bufsize;
+    return (ssize_t) bufsize;
+}
 
-out:
+static ssize_t tmpfs_read(struct fd *fd, void *buf, size_t bufsize) {
+    if (fd->offset < 0)
+        return _EINVAL;
+    struct tmp_inode *inode = tmpfs_fd_inode(fd);
+    lock(&inode->lock);
+    ssize_t res = tmpfs_read_at_locked(
+            inode, buf, bufsize, (qword_t) fd->offset);
+    if (res > 0)
+        fd->offset += (off_t_) res;
+    unlock(&inode->lock);
+    return res;
+}
+
+static ssize_t tmpfs_pread(struct fd *fd, void *buf,
+        size_t bufsize, off_t offset) {
+    if (offset < 0)
+        return _EINVAL;
+    struct tmp_inode *inode = tmpfs_fd_inode(fd);
+    lock(&inode->lock);
+    ssize_t res = tmpfs_read_at_locked(
+            inode, buf, bufsize, (qword_t) offset);
     unlock(&inode->lock);
     return res;
 }
@@ -535,7 +546,9 @@ const struct fs_ops tmpfs = {
 };
 
 const struct fd_ops tmpfs_fdops = {
+    .page_cacheable = true,
     .read = tmpfs_read,
+    .pread = tmpfs_pread,
     .write = tmpfs_write,
     .lseek = tmpfs_lseek,
     .readdir = tmpfs_readdir,

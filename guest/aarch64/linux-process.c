@@ -35,6 +35,7 @@ struct aarch64_linux_process {
     struct cpu_state cpu;
     struct guest_linux_syscall_service syscall_service;
     struct guest_linux_signal_service signal_service;
+    struct guest_linux_file_mapping_service file_mapping_service;
     struct aarch64_linux_services services;
     struct aarch64_linux_runtime runtime;
     struct aarch64_linux_task task;
@@ -276,6 +277,11 @@ static void copy_services(struct aarch64_linux_process *process,
         process->signal_service = *config->signals;
         process->services.signals = &process->signal_service;
     }
+    if (config->file_mappings != NULL) {
+        process->file_mapping_service = *config->file_mappings;
+        process->services.file_mappings =
+                &process->file_mapping_service;
+    }
     process->services.signal_trampoline = signal_trampoline;
 }
 
@@ -288,6 +294,12 @@ static void copy_fork_services(struct aarch64_linux_process *child,
     if (parent->services.signals != NULL) {
         child->signal_service = *parent->services.signals;
         child->services.signals = &child->signal_service;
+    }
+    if (parent->services.file_mappings != NULL) {
+        child->file_mapping_service =
+                *parent->services.file_mappings;
+        child->services.file_mappings =
+                &child->file_mapping_service;
     }
     child->services.signal_trampoline =
             parent->services.signal_trampoline;
@@ -594,6 +606,20 @@ bool aarch64_linux_process_uses_services(
             owned_signals->bad_frame == signals->bad_frame;
 }
 
+bool aarch64_linux_process_uses_file_mapping_service(
+        const struct aarch64_linux_process *process,
+        const struct guest_linux_file_mapping_service *file_mappings) {
+    if (process == NULL || file_mappings == NULL ||
+            process->services.file_mappings == NULL)
+        return false;
+    const struct guest_linux_file_mapping_service *owned =
+            process->services.file_mappings;
+    return owned->runtime_opaque == file_mappings->runtime_opaque &&
+            owned->acquire == file_mappings->acquire &&
+            owned->release == file_mappings->release &&
+            owned->open == file_mappings->open;
+}
+
 #if defined(AARCH64_LINUX_PROCESS_TESTING)
 bool aarch64_linux_process_test_has_owned_state(
         const struct aarch64_linux_process *process,
@@ -607,6 +633,9 @@ bool aarch64_linux_process_test_has_owned_state(
             process->services.syscalls == &process->syscall_service;
     bool owns_signals = process->services.signals == NULL ||
             process->services.signals == &process->signal_service;
+    bool owns_file_mappings = process->services.file_mappings == NULL ||
+            process->services.file_mappings ==
+                    &process->file_mapping_service;
     bool tlb_is_empty = true;
     for (unsigned i = 0; i < GUEST_TLB_SIZE; i++) {
         if (process->tlb.entries[i].valid) {
@@ -616,7 +645,7 @@ bool aarch64_linux_process_test_has_owned_state(
     }
     const struct guest_page_table *page_table =
             &process->memory->page_table;
-    return owns_syscalls && owns_signals &&
+    return owns_syscalls && owns_signals && owns_file_mappings &&
             page_table->address_space.opaque == page_table &&
             process->tlb.address_space ==
                     &page_table->address_space &&
@@ -700,6 +729,25 @@ static void futex_address_space_unlock(
         guest_address_space_write_unlock(space, locked);
     else
         guest_address_space_read_unlock(space, locked);
+}
+
+bool aarch64_linux_process_prefault_futex_words(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, size_t count,
+        struct guest_linux_user_fault *fault) {
+    assert(process != NULL && addresses != NULL && count != 0);
+    for (size_t index = 0; index < count; index++) {
+        assert((addresses[index] & (sizeof(dword_t) - 1)) == 0);
+        dword_t ignored;
+        struct guest_linux_user_fault local_fault;
+        if (!aarch64_linux_process_read_u32(process,
+                addresses[index], &ignored, &local_fault)) {
+            if (fault != NULL)
+                *fault = local_fault;
+            return false;
+        }
+    }
+    return true;
 }
 
 bool aarch64_linux_process_snapshot_futex_words(
@@ -985,7 +1033,8 @@ enum aarch64_linux_process_compare_exchange_result
     struct guest_memory_fault memory_fault;
     struct guest_tlb_mapping_snapshot resolved;
     enum guest_tlb_compare_exchange_result result =
-            guest_tlb_compare_exchange_u32_resolved(&process->tlb,
+            guest_tlb_compare_exchange_u32_resolved_no_page_in(
+                    &process->tlb,
                     (guest_addr_t) address, expected, replacement,
                     observed, &resolved, &memory_fault);
     if (result != GUEST_TLB_COMPARE_EXCHANGE_FAULT) {

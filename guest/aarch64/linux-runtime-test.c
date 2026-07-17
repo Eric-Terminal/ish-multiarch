@@ -26,6 +26,19 @@ struct exec_probe {
     unsigned calls;
 };
 
+struct file_mapping_probe {
+    void *expected_task;
+    struct guest_linux_file_mapping_request request;
+    qword_t last_page_offset;
+    unsigned acquire_calls;
+    unsigned handle_release_calls;
+    unsigned open_calls;
+    unsigned read_calls;
+    unsigned release_calls;
+    sdword_t acquire_error;
+    sdword_t open_error;
+};
+
 static qword_t encoded_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
 }
@@ -97,6 +110,71 @@ static qword_t dispatch_exec(
             GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
     probe->calls++;
     return UINT64_C(0xfeedfacecafebeef);
+}
+
+static enum guest_file_page_result read_mapping_page(void *opaque,
+        qword_t file_offset, byte_t *page, dword_t *valid_bytes) {
+    struct file_mapping_probe *probe = opaque;
+    probe->read_calls++;
+    probe->last_page_offset = file_offset;
+    memset(page, 0x6d, GUEST_MEMORY_PAGE_SIZE);
+    *valid_bytes = GUEST_MEMORY_PAGE_SIZE;
+    return GUEST_FILE_PAGE_OK;
+}
+
+static void release_mapping_pager(struct guest_file_pager *pager,
+        void *opaque) {
+    use(pager);
+    struct file_mapping_probe *probe = opaque;
+    probe->release_calls++;
+}
+
+static sdword_t acquire_file_mapping_probe(
+        const struct guest_linux_file_mapping_context *context,
+        qword_t fd, struct guest_linux_file_mapping_handle *handle) {
+    struct file_mapping_probe *probe = context->runtime_opaque;
+    assert(context->task_opaque == probe->expected_task &&
+            handle->opaque == NULL);
+    probe->acquire_calls++;
+    if (probe->acquire_error != 0)
+        return probe->acquire_error;
+    assert(fd == 7);
+    handle->opaque = probe;
+    return 0;
+}
+
+static void release_file_mapping_probe(
+        struct guest_linux_file_mapping_handle *handle) {
+    assert(handle != NULL && handle->opaque != NULL);
+    struct file_mapping_probe *probe = handle->opaque;
+    probe->handle_release_calls++;
+    handle->opaque = NULL;
+}
+
+static sdword_t open_file_mapping_probe(
+        const struct guest_linux_file_mapping_handle *handle,
+        const struct guest_linux_file_mapping_request *request,
+        struct guest_linux_file_mapping *mapping) {
+    struct file_mapping_probe *probe = handle->opaque;
+    assert(probe != NULL);
+    probe->request = *request;
+    probe->open_calls++;
+    if (probe->open_error != 0)
+        return probe->open_error;
+    struct guest_file_pager *pager = guest_file_pager_create(
+            UINT64_C(0xabcddcba),
+            (struct guest_file_pager_provider) {
+                .opaque = probe,
+                .read_page = read_mapping_page,
+                .release = release_mapping_pager,
+            });
+    assert(pager != NULL);
+    *mapping = (struct guest_linux_file_mapping) {
+        .pager = pager,
+        .maximum_protection = GUEST_LINUX_PROT_READ |
+                GUEST_LINUX_PROT_WRITE,
+    };
+    return 0;
 }
 
 static struct guest_linux_signal_poll_result count_signal_poll(
@@ -400,6 +478,158 @@ int main(void) {
             &cpu, &tlb, &runtime, &task);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
     assert(probe.calls == 1);
+
+    cpu.x[0] = 0;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_PROT_READ;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE;
+    cpu.x[4] = 7;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOSYS));
+
+    struct file_mapping_probe mapping_probe = {
+        .expected_task = &host_task,
+    };
+    const struct guest_linux_file_mapping_service mapping_service = {
+        .runtime_opaque = &mapping_probe,
+        .acquire = acquire_file_mapping_probe,
+        .release = release_file_mapping_probe,
+        .open = open_file_mapping_probe,
+    };
+    const struct aarch64_linux_services file_services = {
+        .syscalls = &syscall_service,
+        .file_mappings = &mapping_service,
+    };
+    runtime.services = &file_services;
+
+    cpu.x[5] = 1;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL) &&
+            mapping_probe.acquire_calls == 0 &&
+            mapping_probe.open_calls == 0 &&
+            mapping_probe.handle_release_calls == 0);
+
+    mapping_probe.acquire_error = -(sdword_t) GUEST_LINUX_EBADF;
+    cpu.x[1] = 0;
+    cpu.x[4] = 99;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EBADF) &&
+            mapping_probe.acquire_calls == 1 &&
+            mapping_probe.open_calls == 0 &&
+            mapping_probe.handle_release_calls == 0);
+
+    mapping_probe.acquire_error = 0;
+    cpu.x[4] = 7;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL) &&
+            mapping_probe.acquire_calls == 2 &&
+            mapping_probe.open_calls == 0 &&
+            mapping_probe.handle_release_calls == 1);
+
+    mapping_probe.open_error = -(sdword_t) GUEST_LINUX_EOVERFLOW;
+    cpu.x[0] = DATA_PAGE;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE |
+            GUEST_LINUX_MAP_FIXED_NOREPLACE;
+    cpu.x[5] = (qword_t) INT64_MAX & ~GUEST_MEMORY_PAGE_MASK;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EEXIST) &&
+            mapping_probe.acquire_calls == 3 &&
+            mapping_probe.open_calls == 0 &&
+            mapping_probe.handle_release_calls == 2);
+
+    unsigned acquire_calls = mapping_probe.acquire_calls;
+    unsigned handle_release_calls = mapping_probe.handle_release_calls;
+    unsigned open_calls = mapping_probe.open_calls;
+    cpu.x[0] = DATA_PAGE;
+    cpu.x[5] = UINT64_MAX & ~GUEST_MEMORY_PAGE_MASK;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EEXIST) &&
+            mapping_probe.acquire_calls == acquire_calls + 1 &&
+            mapping_probe.open_calls == open_calls &&
+            mapping_probe.handle_release_calls ==
+                    handle_release_calls + 1 &&
+            mapping_probe.release_calls == 0);
+
+    acquire_calls = mapping_probe.acquire_calls;
+    handle_release_calls = mapping_probe.handle_release_calls;
+    open_calls = mapping_probe.open_calls;
+    cpu.x[0] = 0;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EOVERFLOW) &&
+            mapping_probe.acquire_calls == acquire_calls + 1 &&
+            mapping_probe.open_calls == open_calls + 1 &&
+            mapping_probe.handle_release_calls ==
+                    handle_release_calls + 1 &&
+            mapping_probe.release_calls == 0);
+
+    mapping_probe.open_error = -(sdword_t) GUEST_LINUX_EACCES;
+    cpu.x[0] = UINT64_C(1) << 48;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED;
+    cpu.x[5] = GUEST_MEMORY_PAGE_SIZE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOMEM) &&
+            mapping_probe.acquire_calls == 6 &&
+            mapping_probe.open_calls == 1 &&
+            mapping_probe.handle_release_calls == 5);
+
+    cpu.x[0] = 0;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EACCES) &&
+            mapping_probe.open_calls == 2 &&
+            mapping_probe.acquire_calls == 7 &&
+            mapping_probe.handle_release_calls == 6 &&
+            mapping_probe.release_calls == 0);
+
+    mapping_probe.open_error = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    guest_addr_t file_mapped = (guest_addr_t) cpu.x[0];
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME &&
+            result.fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            mapping_probe.open_calls == 3 &&
+            mapping_probe.acquire_calls == 8 &&
+            mapping_probe.handle_release_calls == 7 &&
+            mapping_probe.request.fd == 7 &&
+            mapping_probe.request.offset == GUEST_MEMORY_PAGE_SIZE &&
+            mapping_probe.request.length == GUEST_MEMORY_PAGE_SIZE &&
+            mapping_probe.request.protection == GUEST_LINUX_PROT_READ &&
+            mapping_probe.request.flags == GUEST_LINUX_MAP_PRIVATE &&
+            mapping_probe.read_calls == 0 &&
+            mapping_probe.release_calls == 0);
+    assert(guest_page_table_lookup(&table, file_mapped,
+            &mapped_page, &mapped_permissions) ==
+            GUEST_PAGE_TABLE_NOT_MAPPED);
+
+    byte_t file_value = 0;
+    struct guest_memory_fault file_fault;
+    assert(guest_tlb_read(&tlb, file_mapped, &file_value,
+            sizeof(file_value), GUEST_MEMORY_READ, &file_fault) &&
+            file_value == 0x6d &&
+            file_fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            mapping_probe.read_calls == 1 &&
+            mapping_probe.last_page_offset == GUEST_MEMORY_PAGE_SIZE);
+
+    cpu.x[8] = 215;
+    cpu.x[0] = file_mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0 && mapping_probe.release_calls == 1 &&
+            mapping_probe.handle_release_calls == 7);
 
     memset(data_page + 12, 0x6b, sizeof(dword_t));
     cpu.x[8] = 96;

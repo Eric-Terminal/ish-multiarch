@@ -15,6 +15,8 @@ struct guest_linux_mm {
     guest_addr_t brk_limit;
     qword_t mmap_base;
     qword_t mmap_limit;
+    // VMA 语义每次成功替换后递增，用于拒绝锁外 page-in 的陈旧提交。
+    qword_t vma_sequence;
     dword_t membarrier_registrations;
     struct guest_linux_vma_set vmas;
 };
@@ -35,6 +37,15 @@ guest_addr_t guest_linux_brk(struct guest_linux_mm *memory,
 qword_t guest_linux_mmap(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t flags, qword_t fd, qword_t offset);
+// 仅执行 do_mmap 的通用参数与地址选择检查，不修改 VMA 或页表。
+qword_t guest_linux_mmap_file_private_preflight(
+        struct guest_linux_mm *memory, guest_addr_t address,
+        qword_t length, qword_t protection, qword_t flags,
+        qword_t offset);
+qword_t guest_linux_mmap_file_private(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, qword_t protection,
+        qword_t maximum_protection, qword_t flags,
+        struct guest_file_pager *pager, qword_t offset);
 qword_t guest_linux_munmap(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length);
 qword_t guest_linux_mprotect(struct guest_linux_mm *memory,

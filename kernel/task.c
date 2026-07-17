@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "guest/aarch64/linux-process.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
@@ -53,7 +54,9 @@ static bool task_accepts_aarch64_process(struct task *task,
             aarch64_linux_process_uses_services(process,
                     tid, task,
                     &ish_aarch64_linux_syscall_service,
-                    &ish_aarch64_linux_signal_service);
+                    &ish_aarch64_linux_signal_service) &&
+            aarch64_linux_process_uses_file_mapping_service(process,
+                    &ish_aarch64_linux_file_mapping_service);
 }
 
 static void task_exec_name_from_path(

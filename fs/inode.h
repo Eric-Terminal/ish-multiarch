@@ -6,6 +6,7 @@
 #include "util/sync.h"
 struct mount;
 struct fd;
+struct guest_file_pager;
 
 struct inode_data {
     unsigned refcount;
@@ -22,6 +23,8 @@ struct inode_data {
 
     uint32_t socket_id;
 
+    /* 受 lock 保护的弱引用；pager 归零后必须条件摘除。 */
+    struct guest_file_pager *file_pager;
     lock_t lock;
 };
 

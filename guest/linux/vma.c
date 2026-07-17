@@ -53,10 +53,71 @@ static void free_entries(struct guest_linux_vma *entries) {
     free(entries);
 }
 
-static bool same_attributes(const struct guest_linux_vma *left,
+static bool file_mapping(const struct guest_linux_vma *entry) {
+    return entry->source == GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE;
+}
+
+static void retain_entry(const struct guest_linux_vma *entry) {
+    if (file_mapping(entry))
+        guest_file_pager_retain(entry->file_pager);
+}
+
+static void release_entry(const struct guest_linux_vma *entry) {
+    if (file_mapping(entry))
+        guest_file_pager_release(entry->file_pager);
+}
+
+static void release_entries(
+        struct guest_linux_vma *entries, size_t count) {
+    for (size_t index = 0; index < count; index++)
+        release_entry(&entries[index]);
+    free_entries(entries);
+}
+
+static bool file_offsets_are_contiguous(
+        const struct guest_linux_vma *left,
+        const struct guest_linux_vma *right) {
+    if (!file_mapping(left))
+        return true;
+    qword_t length = left->last - left->first;
+    return left->file_offset <= UINT64_MAX - length &&
+            left->file_offset + length == right->file_offset;
+}
+
+static bool same_mapping_attributes(const struct guest_linux_vma *left,
         const struct guest_linux_vma *right) {
     return left->protection == right->protection &&
-            left->source == right->source;
+            left->maximum_protection == right->maximum_protection &&
+            left->source == right->source &&
+            left->file_pager == right->file_pager;
+}
+
+static bool same_adjacent_mapping(const struct guest_linux_vma *left,
+        const struct guest_linux_vma *right) {
+    return same_mapping_attributes(left, right) &&
+            file_offsets_are_contiguous(left, right);
+}
+
+static bool contains_same_mapping(const struct guest_linux_vma *existing,
+        const struct guest_linux_vma *mapping) {
+    if (!same_mapping_attributes(existing, mapping))
+        return false;
+    if (!file_mapping(existing))
+        return true;
+    qword_t delta = mapping->first - existing->first;
+    return existing->file_offset <= UINT64_MAX - delta &&
+            existing->file_offset + delta == mapping->file_offset;
+}
+
+static void set_first(struct guest_linux_vma *entry,
+        guest_addr_t first) {
+    assert(first >= entry->first && first < entry->last);
+    if (file_mapping(entry)) {
+        qword_t delta = first - entry->first;
+        assert(entry->file_offset <= UINT64_MAX - delta);
+        entry->file_offset += delta;
+    }
+    entry->first = first;
 }
 
 static void assert_valid(const struct guest_linux_vma_set *set) {
@@ -66,6 +127,13 @@ static void assert_valid(const struct guest_linux_vma_set *set) {
     for (size_t index = 0; index < set->count; index++) {
         const struct guest_linux_vma *entry = &set->entries[index];
         assert(entry->first < entry->last);
+        assert((entry->protection & ~entry->maximum_protection) == 0);
+        if (file_mapping(entry)) {
+            assert(entry->file_pager != NULL);
+            assert((entry->file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
+        } else {
+            assert(entry->file_pager == NULL && entry->file_offset == 0);
+        }
         if (index == 0)
             continue;
         const struct guest_linux_vma *previous =
@@ -73,7 +141,7 @@ static void assert_valid(const struct guest_linux_vma_set *set) {
         assert(previous->last <= entry->first);
         // 同属性邻接区间必须已经合并，避免后续查询依赖插入历史。
         assert(previous->last != entry->first ||
-                !same_attributes(previous, entry));
+                !same_adjacent_mapping(previous, entry));
     }
 }
 
@@ -91,12 +159,13 @@ static void append_entry(struct vma_builder *builder,
                 &builder->entries[builder->count - 1];
         assert(previous->last <= entry.first);
         if (previous->last == entry.first &&
-                same_attributes(previous, &entry)) {
+                same_adjacent_mapping(previous, &entry)) {
             previous->last = entry.last;
             return;
         }
     }
     assert(builder->count < builder->capacity);
+    retain_entry(&entry);
     builder->entries[builder->count++] = entry;
 }
 
@@ -106,7 +175,7 @@ static void commit_builder(struct guest_linux_vma_set *set,
         free_entries(builder->entries);
         builder->entries = NULL;
     }
-    free_entries(set->entries);
+    release_entries(set->entries, set->count);
     set->entries = builder->entries;
     set->count = builder->count;
     assert_valid(set);
@@ -128,8 +197,10 @@ bool guest_linux_vma_set_clone(struct guest_linux_vma_set *destination,
     destination->entries = allocate_entries(source->count);
     if (destination->entries == NULL)
         return false;
-    for (size_t index = 0; index < source->count; index++)
+    for (size_t index = 0; index < source->count; index++) {
         destination->entries[index] = source->entries[index];
+        retain_entry(&destination->entries[index]);
+    }
     destination->count = source->count;
     assert_valid(destination);
     return true;
@@ -137,7 +208,7 @@ bool guest_linux_vma_set_clone(struct guest_linux_vma_set *destination,
 
 void guest_linux_vma_set_destroy(struct guest_linux_vma_set *set) {
     assert_valid(set);
-    free_entries(set->entries);
+    release_entries(set->entries, set->count);
     *set = (struct guest_linux_vma_set) {0};
 }
 
@@ -171,7 +242,7 @@ bool guest_linux_vma_insert(struct guest_linux_vma_set *set,
     const struct guest_linux_vma *existing =
             guest_linux_vma_find(set, mapping.first);
     if (existing != NULL && existing->last >= mapping.last &&
-            same_attributes(existing, &mapping))
+            contains_same_mapping(existing, &mapping))
         return true;
     if (set->count > SIZE_MAX - 2)
         return false;
@@ -197,7 +268,7 @@ bool guest_linux_vma_insert(struct guest_linux_vma_set *set,
             set->entries[index].first < mapping.last) {
         if (set->entries[index].last > mapping.last) {
             struct guest_linux_vma right = set->entries[index];
-            right.first = mapping.last;
+            set_first(&right, mapping.last);
             append_entry(&builder, right);
         }
         index++;
@@ -244,7 +315,7 @@ bool guest_linux_vma_remove(struct guest_linux_vma_set *set,
             append_entry(&builder, left);
         }
         if (entry.last > last) {
-            entry.first = last;
+            set_first(&entry, last);
             append_entry(&builder, entry);
         }
     }
@@ -287,13 +358,13 @@ bool guest_linux_vma_protect_tracked(struct guest_linux_vma_set *set,
             struct guest_linux_vma left = entry;
             left.last = first;
             append_entry(&builder, left);
-            entry.first = first;
+            set_first(&entry, first);
         }
         bool has_right = entry.last > last;
         struct guest_linux_vma right = entry;
         if (has_right) {
             entry.last = last;
-            right.first = last;
+            set_first(&right, last);
         }
         entry.protection = protection;
         append_entry(&builder, entry);

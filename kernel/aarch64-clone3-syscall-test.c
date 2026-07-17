@@ -15,6 +15,7 @@
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
@@ -214,6 +215,7 @@ static struct aarch64_linux_process *make_process(struct task *task) {
         .task_opaque = task,
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
+        .file_mappings = &ish_aarch64_linux_file_mapping_service,
     };
     struct aarch64_linux_process *process =
             aarch64_linux_process_create(&config, NULL);

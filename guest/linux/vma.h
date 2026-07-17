@@ -1,12 +1,14 @@
 #ifndef GUEST_LINUX_VMA_H
 #define GUEST_LINUX_VMA_H
 
+#include "guest/memory/file-pager.h"
 #include "guest/memory/address-space.h"
 
 enum guest_linux_vma_source {
     GUEST_LINUX_VMA_SOURCE_BRK,
     GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
     GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED,
+    GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE,
 };
 
 struct guest_linux_vma {
@@ -14,6 +16,10 @@ struct guest_linux_vma {
     guest_addr_t last;
     qword_t protection;
     enum guest_linux_vma_source source;
+    qword_t maximum_protection;
+    // 仅 FILE_PRIVATE 拥有一份强引用；offset 对应 first 的文件字节。
+    struct guest_file_pager *file_pager;
+    qword_t file_offset;
 };
 
 struct guest_linux_vma_set {

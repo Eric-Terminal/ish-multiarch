@@ -7,6 +7,7 @@
 #include "guest/aarch64/linux-stack.h"
 #include "kernel/aarch64-exec-image.h"
 #include "kernel/aarch64-exec.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/errno.h"
@@ -166,6 +167,7 @@ int ish_aarch64_exec_stage(struct task *task, struct fd *main_fd,
         .task_opaque = task,
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
+        .file_mappings = &ish_aarch64_linux_file_mapping_service,
     };
     const struct aarch64_linux_interpreter_image interpreter = {
         .data = images.interpreter.data,

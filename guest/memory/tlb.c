@@ -163,6 +163,16 @@ static bool prepare_write_access(struct guest_tlb *tlb,
             chunks, chunk_count, fault);
 }
 
+static bool page_in_and_retry(struct guest_tlb *tlb,
+        struct guest_memory_fault *fault) {
+    if (fault->kind != GUEST_MEMORY_FAULT_UNMAPPED)
+        return false;
+    guest_addr_t page_base = fault->address & ~GUEST_MEMORY_PAGE_MASK;
+    return guest_address_space_page_in(tlb->address_space,
+            page_base, fault->access, fault) ==
+            GUEST_MEMORY_PAGE_IN_RETRY;
+}
+
 static void collect_syncs(const struct guest_tlb_access_chunk chunks[2],
         unsigned chunk_count, struct guest_tlb_sync_set *set) {
     // address space 锁始终在外层；同步域按稳定身份加锁，避免反向别名死锁。
@@ -226,13 +236,17 @@ bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         void *destination, size_t size, enum guest_memory_access access,
         struct guest_memory_fault *fault) {
     assert(access == GUEST_MEMORY_READ || access == GUEST_MEMORY_EXECUTE);
-    bool locked = guest_address_space_read_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_access(tlb, address, size,
-            access, chunks, &chunk_count, fault)) {
+    bool locked;
+    for (;;) {
+        locked = guest_address_space_read_lock(tlb->address_space);
+        if (prepare_access(tlb, address, size,
+                access, chunks, &chunk_count, fault))
+            break;
         guest_address_space_read_unlock(tlb->address_space, locked);
-        return false;
+        if (!page_in_and_retry(tlb, fault))
+            return false;
     }
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
@@ -264,13 +278,17 @@ bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
     assert(size <= GUEST_TLB_MAX_ACCESS_SIZE);
     assert(exclusive_access_fits_granule(address, size));
     *token = (struct guest_tlb_exclusive_token) {0};
-    bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_access(tlb, address, size, GUEST_MEMORY_READ,
-            chunks, &chunk_count, fault)) {
+    bool locked;
+    for (;;) {
+        locked = guest_address_space_write_lock(tlb->address_space);
+        if (prepare_access(tlb, address, size, GUEST_MEMORY_READ,
+                chunks, &chunk_count, fault))
+            break;
         guest_address_space_write_unlock(tlb->address_space, locked);
-        return false;
+        if (!page_in_and_retry(tlb, fault))
+            return false;
     }
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
@@ -299,13 +317,17 @@ bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
 
 bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
         const void *source, size_t size, struct guest_memory_fault *fault) {
-    bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_write_access(tlb, address, size,
-            chunks, &chunk_count, fault)) {
+    bool locked;
+    for (;;) {
+        locked = guest_address_space_write_lock(tlb->address_space);
+        if (prepare_write_access(tlb, address, size,
+                chunks, &chunk_count, fault))
+            break;
         guest_address_space_write_unlock(tlb->address_space, locked);
-        return false;
+        if (!page_in_and_retry(tlb, fault))
+            return false;
     }
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
@@ -406,7 +428,7 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
         struct guest_tlb *tlb, guest_addr_t address,
         const void *expected, const void *replacement, void *observed,
         size_t size, struct guest_tlb_mapping_snapshot *snapshot,
-        struct guest_memory_fault *fault) {
+        struct guest_memory_fault *fault, bool allow_page_in) {
     assert((size == 4 || size == 8 || size == 16) &&
             size <= GUEST_TLB_MAX_ACCESS_SIZE);
     byte_t expected_bytes[GUEST_TLB_MAX_ACCESS_SIZE];
@@ -414,13 +436,19 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
     // CAS 会把 observed 写回期望寄存器，先保留输入以允许两者共用缓冲区。
     memcpy(expected_bytes, expected, size);
     memcpy(replacement_bytes, replacement, size);
-    bool locked = guest_address_space_write_lock(tlb->address_space);
     struct guest_tlb_access_chunk chunks[2];
     unsigned chunk_count;
-    if (!prepare_write_access(tlb, address, size,
-            chunks, &chunk_count, fault)) {
+    bool locked;
+    for (;;) {
+        locked = guest_address_space_write_lock(tlb->address_space);
+        if (prepare_write_access(tlb, address, size,
+                chunks, &chunk_count, fault))
+            break;
         guest_address_space_write_unlock(tlb->address_space, locked);
-        return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
+        if (!allow_page_in)
+            return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
+        if (!page_in_and_retry(tlb, fault))
+            return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
     }
     struct guest_tlb_sync_set syncs;
     collect_syncs(chunks, chunk_count, &syncs);
@@ -478,7 +506,7 @@ enum guest_tlb_compare_exchange_result guest_tlb_compare_exchange(
         const void *expected, const void *replacement, void *observed,
         size_t size, struct guest_memory_fault *fault) {
     return compare_exchange(tlb, address, expected, replacement,
-            observed, size, NULL, fault);
+            observed, size, NULL, fault, true);
 }
 
 enum guest_tlb_compare_exchange_result
@@ -490,5 +518,17 @@ enum guest_tlb_compare_exchange_result
     assert((address & (sizeof(dword_t) - 1)) == 0 &&
             observed != NULL && snapshot != NULL);
     return compare_exchange(tlb, address, &expected, &replacement,
-            observed, sizeof(expected), snapshot, fault);
+            observed, sizeof(expected), snapshot, fault, true);
+}
+
+enum guest_tlb_compare_exchange_result
+        guest_tlb_compare_exchange_u32_resolved_no_page_in(
+        struct guest_tlb *tlb, guest_addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_tlb_mapping_snapshot *snapshot,
+        struct guest_memory_fault *fault) {
+    assert((address & (sizeof(dword_t) - 1)) == 0 &&
+            observed != NULL && snapshot != NULL);
+    return compare_exchange(tlb, address, &expected, &replacement,
+            observed, sizeof(expected), snapshot, fault, false);
 }

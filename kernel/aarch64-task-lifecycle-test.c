@@ -6,6 +6,7 @@
 #include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
@@ -120,6 +121,8 @@ static struct aarch64_linux_process *make_process(
                 &ish_aarch64_linux_syscall_service : NULL,
         .signals = use_kernel_services ?
                 &ish_aarch64_linux_signal_service : NULL,
+        .file_mappings = use_kernel_services ?
+                &ish_aarch64_linux_file_mapping_service : NULL,
     };
     struct aarch64_linux_process *process =
             aarch64_linux_process_create(&config, NULL);

@@ -763,6 +763,38 @@ static bool aarch64_futex_address_is_in_range(
     return false;
 }
 
+static int aarch64_futex_fault_error(
+        const struct guest_linux_user_fault *fault) {
+    return fault->kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY ?
+            _ENOMEM : _EFAULT;
+}
+
+static int prefault_aarch64_futex_words(
+        struct aarch64_linux_process *process,
+        const qword_t *addresses, size_t count,
+        struct guest_linux_user_fault *fault) {
+    struct guest_linux_user_fault local_fault = {0};
+    struct guest_linux_user_fault *reported =
+            fault == NULL ? &local_fault : fault;
+    if (aarch64_linux_process_prefault_futex_words(
+            process, addresses, count, reported))
+        return 0;
+    return aarch64_futex_fault_error(reported);
+}
+
+static bool aarch64_futex_fault_needs_prefault_retry(
+        const struct guest_linux_user_fault *fault) {
+    return fault->kind == GUEST_MEMORY_FAULT_UNMAPPED;
+}
+
+static int prefault_aarch64_futex_fault_address(
+        struct aarch64_linux_process *process,
+        struct guest_linux_user_fault *fault) {
+    qword_t address = fault->address;
+    return prefault_aarch64_futex_words(
+            process, &address, 1, fault);
+}
+
 static int wait_i386_futex(struct mem *memory, addr_t address,
         bool private_mapping, dword_t expected,
         struct timespec *timeout) {
@@ -838,25 +870,43 @@ static int wait_aarch64_futex(
         bool private_mapping, dword_t expected,
         const struct timer_time *deadline,
         struct guest_linux_user_fault *fault) {
-    lock(&futex_lock);
-    struct futex_key key;
-    dword_t observed;
-    int load_result;
-    if (private_mapping) {
-        key = aarch64_virtual_futex_key(
-                aarch64_linux_process_memory_identity(process), address);
-        load_result = aarch64_linux_process_read_u32(
-                process, address, &observed, fault) ? 0 : _EFAULT;
-    } else {
-        qword_t addresses[] = {address};
-        load_result = snapshot_aarch64_futex_keys_locked(
-                process, addresses, 1, &key, &observed, fault);
+    const qword_t addresses[] = {address};
+    struct guest_linux_user_fault local_fault = {0};
+    struct guest_linux_user_fault *reported =
+            fault == NULL ? &local_fault : fault;
+    for (;;) {
+        lock(&futex_lock);
+        struct futex_key key;
+        dword_t observed;
+        int load_result;
+        if (private_mapping) {
+            struct aarch64_linux_futex_word_snapshot ignored;
+            key = aarch64_virtual_futex_key(
+                    aarch64_linux_process_memory_identity(process),
+                    address);
+            load_result = aarch64_linux_process_snapshot_futex_words(
+                    process, addresses, 1, false,
+                    &ignored, &observed, reported) ? 0 :
+                    aarch64_futex_fault_error(reported);
+        } else {
+            load_result = snapshot_aarch64_futex_keys_locked(
+                    process, addresses, 1, &key, &observed, reported);
+        }
+        if (load_result != 0 &&
+                aarch64_futex_fault_needs_prefault_retry(reported)) {
+            unlock(&futex_lock);
+            int prefault = prefault_aarch64_futex_fault_address(
+                    process, reported);
+            if (prefault != 0)
+                return prefault;
+            continue;
+        }
+        int result = load_result == 0 ? futex_wait_locked(
+                &key, expected, observed, NULL, deadline) : load_result;
+        unlock(&futex_lock);
+        STRACE("%d end futex(FUTEX_WAIT)", current->pid);
+        return result;
     }
-    int result = load_result == 0 ? futex_wait_locked(
-            &key, expected, observed, NULL, deadline) : load_result;
-    unlock(&futex_lock);
-    STRACE("%d end futex(FUTEX_WAIT)", current->pid);
-    return result;
 }
 
 static int wake_aarch64_futex(
@@ -866,22 +916,38 @@ static int wake_aarch64_futex(
     if (private_mapping && !aarch64_futex_address_is_in_range(
             process, address, fault))
         return _EFAULT;
-    lock(&futex_lock);
-    struct futex_key key;
-    int result;
     if (private_mapping) {
-        key = aarch64_virtual_futex_key(
+        struct futex_key key = aarch64_virtual_futex_key(
                 aarch64_linux_process_memory_identity(process), address);
-        result = wake_futex_locked(&key, wake_max);
-    } else {
-        qword_t addresses[] = {address};
-        int snapshot_result = snapshot_aarch64_futex_keys_locked(
-                process, addresses, 1, &key, NULL, fault);
-        result = snapshot_result == 0 ?
-                wake_futex_locked(&key, wake_max) : snapshot_result;
+        lock(&futex_lock);
+        int result = wake_futex_locked(&key, wake_max);
+        unlock(&futex_lock);
+        return result;
     }
-    unlock(&futex_lock);
-    return result;
+
+    const qword_t addresses[] = {address};
+    struct guest_linux_user_fault local_fault = {0};
+    struct guest_linux_user_fault *reported =
+            fault == NULL ? &local_fault : fault;
+    for (;;) {
+        lock(&futex_lock);
+        struct futex_key key;
+        int snapshot_result = snapshot_aarch64_futex_keys_locked(
+                process, addresses, 1, &key, NULL, reported);
+        if (snapshot_result != 0 &&
+                aarch64_futex_fault_needs_prefault_retry(reported)) {
+            unlock(&futex_lock);
+            int prefault = prefault_aarch64_futex_fault_address(
+                    process, reported);
+            if (prefault != 0)
+                return prefault;
+            continue;
+        }
+        int result = snapshot_result == 0 ?
+                wake_futex_locked(&key, wake_max) : snapshot_result;
+        unlock(&futex_lock);
+        return result;
+    }
 }
 
 static int requeue_aarch64_futex(
@@ -895,31 +961,48 @@ static int requeue_aarch64_futex(
             !aarch64_futex_address_is_in_range(
                     process, target_address, fault)))
         return _EFAULT;
-    lock(&futex_lock);
-    struct futex_key keys[2];
-    int result;
     if (private_mapping) {
+        struct futex_key keys[2];
         qword_t memory_identity =
                 aarch64_linux_process_memory_identity(process);
         keys[0] = aarch64_virtual_futex_key(
                 memory_identity, source_address);
         keys[1] = aarch64_virtual_futex_key(
                 memory_identity, target_address);
-        result = requeue_futex_locked(
+        lock(&futex_lock);
+        int result = requeue_futex_locked(
                 &keys[0], wake_max, requeue_max, &keys[1]);
-    } else {
-        const qword_t addresses[] = {
-            source_address,
-            target_address,
-        };
+        unlock(&futex_lock);
+        return result;
+    }
+
+    const qword_t addresses[] = {
+        source_address,
+        target_address,
+    };
+    struct guest_linux_user_fault local_fault = {0};
+    struct guest_linux_user_fault *reported =
+            fault == NULL ? &local_fault : fault;
+    for (;;) {
+        lock(&futex_lock);
+        struct futex_key keys[2];
         int snapshot_result = snapshot_aarch64_futex_keys_locked(
-                process, addresses, 2, keys, NULL, fault);
-        result = snapshot_result == 0 ? requeue_futex_locked(
+                process, addresses, 2, keys, NULL, reported);
+        if (snapshot_result != 0 &&
+                aarch64_futex_fault_needs_prefault_retry(reported)) {
+            unlock(&futex_lock);
+            int prefault = prefault_aarch64_futex_fault_address(
+                    process, reported);
+            if (prefault != 0)
+                return prefault;
+            continue;
+        }
+        int result = snapshot_result == 0 ? requeue_futex_locked(
                 &keys[0], wake_max,
                 requeue_max, &keys[1]) : snapshot_result;
+        unlock(&futex_lock);
+        return result;
     }
-    unlock(&futex_lock);
-    return result;
 }
 
 int futex_wake(addr_t uaddr, dword_t wake_max) {
@@ -1189,12 +1272,24 @@ int_t sys_futex_waitv_aarch64(qword_t waiters, dword_t count,
     }
 
     if (result == 0) {
-        lock(&futex_lock);
-        result = prepare_aarch64_futex_waitv_locked(
-                current->aarch64_process, entries, count, fault);
-        if (result == 0)
-            result = futex_waitv_locked(entries, count, &timeout);
-        unlock(&futex_lock);
+        for (;;) {
+            lock(&futex_lock);
+            result = prepare_aarch64_futex_waitv_locked(
+                    current->aarch64_process, entries, count, fault);
+            if (result == _EFAULT &&
+                    aarch64_futex_fault_needs_prefault_retry(fault)) {
+                unlock(&futex_lock);
+                result = prefault_aarch64_futex_fault_address(
+                        current->aarch64_process, fault);
+                if (result != 0)
+                    break;
+                continue;
+            }
+            if (result == 0)
+                result = futex_waitv_locked(entries, count, &timeout);
+            unlock(&futex_lock);
+            break;
+        }
     }
     free(entries);
     return result;
@@ -1290,28 +1385,42 @@ static bool cleanup_robust_futex_aarch64(
                     process, address, sizeof(dword_t)))
         return false;
 
-    lock(&futex_lock);
     const qword_t addresses[] = {address};
-    struct aarch64_linux_futex_word_snapshot snapshot;
-    dword_t observed;
-    if (!aarch64_linux_process_snapshot_futex_words(
-            process, addresses, 1, false,
-            &snapshot, &observed, NULL)) {
-        unlock(&futex_lock);
-        return false;
-    }
-
     for (;;) {
+        struct guest_linux_user_fault fault = {0};
+        lock(&futex_lock);
+        struct aarch64_linux_futex_word_snapshot snapshot;
+        dword_t observed;
+        if (!aarch64_linux_process_snapshot_futex_words(
+                process, addresses, 1, false,
+                &snapshot, &observed, &fault)) {
+            unlock(&futex_lock);
+            if (aarch64_futex_fault_needs_prefault_retry(&fault)) {
+                if (prefault_aarch64_futex_fault_address(
+                        process, &fault) != 0)
+                    return false;
+                continue;
+            }
+            return false;
+        }
+
         dword_t owner = observed & AARCH64_LINUX_FUTEX_TID_MASK;
         if (pending && !pi && owner == 0) {
             struct aarch64_linux_futex_word_snapshot wake_snapshot;
             if (aarch64_linux_process_snapshot_futex_words(
                     process, addresses, 1, true,
-                    &wake_snapshot, NULL, NULL)) {
+                    &wake_snapshot, NULL, &fault)) {
                 struct futex_key key =
                         aarch64_shared_futex_key_from_snapshot(
                                 process, address, &wake_snapshot);
                 (void) wake_futex_locked(&key, 1);
+            } else if (aarch64_futex_fault_needs_prefault_retry(
+                    &fault)) {
+                unlock(&futex_lock);
+                if (prefault_aarch64_futex_fault_address(
+                        process, &fault) != 0)
+                    return false;
+                continue;
             }
             unlock(&futex_lock);
             return true;
@@ -1327,19 +1436,27 @@ static bool cleanup_robust_futex_aarch64(
         enum aarch64_linux_process_compare_exchange_result result =
                 aarch64_linux_process_compare_exchange_futex_u32(
                         process, address, observed, replacement,
-                        &observed, &snapshot, NULL);
+                        &observed, &snapshot, &fault);
         if (result == AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_FAULT) {
             unlock(&futex_lock);
+            if (aarch64_futex_fault_needs_prefault_retry(&fault)) {
+                if (prefault_aarch64_futex_fault_address(
+                        process, &fault) != 0)
+                    return false;
+                continue;
+            }
             return false;
         }
-        if (result == AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH)
+        if (result == AARCH64_LINUX_PROCESS_COMPARE_EXCHANGE_MISMATCH) {
+            unlock(&futex_lock);
             continue;
+        }
 
         if (!pi && (observed & AARCH64_LINUX_FUTEX_WAITERS) != 0) {
-            struct futex_key key;
-            if (snapshot_aarch64_futex_keys_locked(
-                    process, addresses, 1, &key, NULL, NULL) == 0)
-                (void) wake_futex_locked(&key, 1);
+            struct futex_key key =
+                    aarch64_shared_futex_key_from_snapshot(
+                            process, address, &snapshot);
+            (void) wake_futex_locked(&key, 1);
         }
         unlock(&futex_lock);
         return true;

@@ -6,14 +6,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "fs/fd.h"
+#include "fs/inode.h"
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
+#include "guest/linux/futex-abi.h"
 #include "guest/linux/mman.h"
+#include "guest/linux/syscall-service.h"
 #include "guest/memory/address-space.h"
+#include "kernel/aarch64-file-mapping-service.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
@@ -33,6 +38,9 @@
 #define PIN_COW_BASE UINT64_C(0x720000)
 #define CAS_COW_BASE UINT64_C(0x730000)
 #define FILE_ALIAS_BASE UINT64_C(0x740000)
+#define LAZY_FILE_BASE UINT64_C(0x750000)
+#define LAZY_WAITV_BASE UINT64_C(0x760000)
+#define LAZY_FILE_FD 1
 #define ENTRY_OFFSET UINT64_C(0x200)
 #define STACK_TOP UINT64_C(0x00007fff00000000)
 #define SIGNAL_TRAMPOLINE UINT64_C(0x00007ffe00000000)
@@ -45,6 +53,7 @@
 #define READ_ONLY_STACK_BASE (STACK_TOP - 2 * GUEST_MEMORY_PAGE_SIZE)
 #define LONG_TIMEOUT (PRIVATE_BASE + UINT64_C(0xf00))
 #define SHORT_TIMEOUT (PRIVATE_BASE + UINT64_C(0xf20))
+#define WAITV_WIRE (PRIVATE_BASE + UINT64_C(0x100))
 #define UNMAPPED_ADDRESS UINT64_C(0x20000000)
 #define INVALID_ADDRESS (UINT64_C(1) << 48)
 #define TEST_FILE_IDENTITY UINT64_C(0x7a64000000000001)
@@ -66,6 +75,17 @@
 struct futex_fixture {
     struct task *parent;
     struct tgroup group;
+    struct mount lazy_mount;
+    struct {
+        pthread_mutex_t mutex;
+        pthread_cond_t cond;
+        byte_t bytes[GUEST_MEMORY_PAGE_SIZE * 2];
+        bool block_read;
+        bool read_entered;
+        bool release_read;
+        unsigned pread_calls;
+        unsigned close_calls;
+    } lazy_file;
     size_t text_cow_steps;
     size_t cas_cow_protect_steps;
     size_t pin_cow_protect_steps;
@@ -82,7 +102,74 @@ struct waiter {
     dword_t result;
 };
 
+struct immediate_futex_call {
+    pthread_t thread;
+    struct task *task;
+    qword_t address;
+    dword_t operation;
+    atomic_bool completed;
+    dword_t result;
+};
+
+struct waitv_futex_call {
+    pthread_t thread;
+    struct task *task;
+    struct guest_linux_user_access user;
+    struct guest_linux_user_fault fault;
+    int_t result;
+};
+
 static const struct fd_ops metadata_fd_ops = {0};
+
+static ssize_t lazy_file_pread(struct fd *fd, void *buffer,
+        size_t size, off_t offset) {
+    struct futex_fixture *fixture = fd->data;
+    assert(pthread_mutex_lock(&fixture->lazy_file.mutex) == 0);
+    fixture->lazy_file.pread_calls++;
+    fixture->lazy_file.read_entered = true;
+    assert(pthread_cond_broadcast(&fixture->lazy_file.cond) == 0);
+    while (fixture->lazy_file.block_read &&
+            !fixture->lazy_file.release_read) {
+        assert(pthread_cond_wait(&fixture->lazy_file.cond,
+                &fixture->lazy_file.mutex) == 0);
+    }
+    assert(pthread_mutex_unlock(&fixture->lazy_file.mutex) == 0);
+
+    if (offset < 0 || (qword_t) offset >= sizeof(fixture->lazy_file.bytes))
+        return 0;
+    size_t available = sizeof(fixture->lazy_file.bytes) -
+            (size_t) offset;
+    if (size > available)
+        size = available;
+    memcpy(buffer, fixture->lazy_file.bytes + (size_t) offset, size);
+    return (ssize_t) size;
+}
+
+static int lazy_file_close(struct fd *fd) {
+    struct futex_fixture *fixture = fd->data;
+    fixture->lazy_file.close_calls++;
+    return 0;
+}
+
+static int lazy_file_fstat(struct fd *fd, struct statbuf *stat) {
+    *stat = (struct statbuf) {
+        .inode = fd->inode->number,
+        .mode = S_IFREG | 0444,
+        .size = sizeof(((struct futex_fixture *) 0)->lazy_file.bytes),
+        .inode_device = fd->inode->device,
+    };
+    return 0;
+}
+
+static const struct fd_ops lazy_file_fd_ops = {
+    .page_cacheable = true,
+    .pread = lazy_file_pread,
+    .close = lazy_file_close,
+};
+
+static const struct fs_ops lazy_file_fs = {
+    .fstat = lazy_file_fstat,
+};
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -137,6 +224,20 @@ static void append_mmap(dword_t *program, size_t *count,
     program[(*count)++] = UINT32_C(0xd4000001);
 }
 
+static void append_file_mmap(dword_t *program, size_t *count,
+        qword_t address, qword_t protection,
+        qword_t fd, qword_t offset) {
+    append_move(program, count, 0, address);
+    append_move(program, count, 1, GUEST_MEMORY_PAGE_SIZE);
+    append_move(program, count, 2, protection);
+    append_move(program, count, 3,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED);
+    append_move(program, count, 4, fd);
+    append_move(program, count, 5, offset);
+    append_move(program, count, 8, 222);
+    program[(*count)++] = UINT32_C(0xd4000001);
+}
+
 static void append_mprotect(dword_t *program, size_t *count,
         qword_t address, qword_t protection) {
     append_move(program, count, 0, address);
@@ -171,6 +272,11 @@ static size_t make_image(byte_t file[IMAGE_SIZE],
             GUEST_LINUX_PROT_READ,
             GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED |
             GUEST_LINUX_MAP_ANONYMOUS);
+    append_file_mmap(program, &instruction_count, LAZY_FILE_BASE,
+            GUEST_LINUX_PROT_READ, LAZY_FILE_FD, 0);
+    append_file_mmap(program, &instruction_count, LAZY_WAITV_BASE,
+            GUEST_LINUX_PROT_READ, LAZY_FILE_FD,
+            GUEST_MEMORY_PAGE_SIZE);
     append_mprotect(program, &instruction_count,
             READ_ONLY_STACK_BASE, GUEST_LINUX_PROT_READ);
     append_mprotect(program, &instruction_count,
@@ -321,6 +427,7 @@ static struct aarch64_linux_process *make_process(struct task *task,
         .task_opaque = task,
         .syscalls = &ish_aarch64_linux_syscall_service,
         .signals = &ish_aarch64_linux_signal_service,
+        .file_mappings = &ish_aarch64_linux_file_mapping_service,
     };
     struct aarch64_linux_process *process =
             aarch64_linux_process_create(&config, NULL);
@@ -328,10 +435,38 @@ static struct aarch64_linux_process *make_process(struct task *task,
     return process;
 }
 
+static bool install_lazy_file(struct futex_fixture *fixture) {
+    fixture->lazy_mount = (struct mount) {
+        .fs = &lazy_file_fs,
+    };
+    if (pthread_mutex_init(&fixture->lazy_file.mutex, NULL) != 0)
+        return false;
+    if (pthread_cond_init(&fixture->lazy_file.cond, NULL) != 0) {
+        pthread_mutex_destroy(&fixture->lazy_file.mutex);
+        return false;
+    }
+    put_u32(fixture->lazy_file.bytes, 7);
+    put_u32(fixture->lazy_file.bytes + GUEST_MEMORY_PAGE_SIZE, 9);
+
+    struct fd *fd = fd_create(&lazy_file_fd_ops);
+    if (fd == NULL)
+        return false;
+    fd->data = fixture;
+    fd->type = S_IFREG;
+    fd->flags = O_RDONLY_;
+    fd->mount = &fixture->lazy_mount;
+    mount_retain(&fixture->lazy_mount);
+    fd->inode = inode_get(&fixture->lazy_mount,
+            UINT64_C(0xfeed0001), 1);
+    return f_install_task(fixture->parent, fd, 0) == LAZY_FILE_FD;
+}
+
 static bool init_fixture(struct futex_fixture *fixture) {
     memset(fixture, 0, sizeof(*fixture));
     fixture->parent = make_parent(&fixture->group);
     if (fixture->parent == NULL)
+        return false;
+    if (!install_lazy_file(fixture))
         return false;
     size_t setup_steps;
     struct aarch64_linux_process *process =
@@ -380,6 +515,10 @@ static void destroy_fixture(struct futex_fixture *fixture) {
     parent->files = NULL;
     parent->fs = NULL;
     parent->sighand = NULL;
+    assert(fixture->lazy_file.close_calls == 1 &&
+            fixture->lazy_mount.refcount == 0);
+    assert(pthread_cond_destroy(&fixture->lazy_file.cond) == 0);
+    assert(pthread_mutex_destroy(&fixture->lazy_file.mutex) == 0);
     current = NULL;
 
     cond_destroy(&parent->pause);
@@ -477,6 +616,100 @@ static dword_t call_futex(struct task *task, qword_t address,
             timeout_or_value2, second_address, 0, fault);
     current = saved;
     return result;
+}
+
+static void *immediate_futex_main(void *opaque) {
+    struct immediate_futex_call *call = opaque;
+    current = call->task;
+    struct guest_linux_user_fault fault = {0};
+    call->result = sys_futex_aarch64(call->address,
+            call->operation, 1, 0, 0, 0, &fault);
+    atomic_store_explicit(
+            &call->completed, true, memory_order_release);
+    current = NULL;
+    return NULL;
+}
+
+static bool start_immediate_futex_call(
+        struct immediate_futex_call *call, struct task *task,
+        qword_t address, dword_t operation) {
+    *call = (struct immediate_futex_call) {
+        .task = task,
+        .address = address,
+        .operation = operation,
+    };
+    atomic_init(&call->completed, false);
+    return pthread_create(&call->thread, NULL,
+            immediate_futex_main, call) == 0;
+}
+
+static bool wait_for_immediate_futex_call(
+        struct immediate_futex_call *call) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        if (atomic_load_explicit(
+                &call->completed, memory_order_acquire))
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+static bool futex_test_read_user(void *opaque, qword_t address,
+        void *destination, dword_t size,
+        struct guest_linux_user_fault *fault) {
+    return aarch64_linux_process_read_memory(opaque,
+            address, destination, size, fault);
+}
+
+static void *waitv_futex_main(void *opaque) {
+    struct waitv_futex_call *call = opaque;
+    current = call->task;
+    task_thread_store(call->task, pthread_self());
+    call->result = sys_futex_waitv_aarch64(
+            WAITV_WIRE, 1, 0, 0, 0,
+            &call->user, &call->fault);
+    current = NULL;
+    return NULL;
+}
+
+static bool start_waitv_futex_call(
+        struct waitv_futex_call *call, struct task *task) {
+    *call = (struct waitv_futex_call) {
+        .task = task,
+        .user = {
+            .opaque = task->aarch64_process,
+            .read = futex_test_read_user,
+        },
+    };
+    return pthread_create(&call->thread, NULL,
+            waitv_futex_main, call) == 0;
+}
+
+static void block_lazy_file_read(struct futex_fixture *fixture) {
+    assert(pthread_mutex_lock(&fixture->lazy_file.mutex) == 0);
+    fixture->lazy_file.block_read = true;
+    fixture->lazy_file.read_entered = false;
+    fixture->lazy_file.release_read = false;
+    assert(pthread_mutex_unlock(&fixture->lazy_file.mutex) == 0);
+}
+
+static bool wait_for_lazy_file_read(struct futex_fixture *fixture) {
+    for (unsigned attempt = 0; attempt < 100000; attempt++) {
+        assert(pthread_mutex_lock(&fixture->lazy_file.mutex) == 0);
+        bool entered = fixture->lazy_file.read_entered;
+        assert(pthread_mutex_unlock(&fixture->lazy_file.mutex) == 0);
+        if (entered)
+            return true;
+        sched_yield();
+    }
+    return false;
+}
+
+static void release_lazy_file_read(struct futex_fixture *fixture) {
+    assert(pthread_mutex_lock(&fixture->lazy_file.mutex) == 0);
+    fixture->lazy_file.release_read = true;
+    assert(pthread_cond_broadcast(&fixture->lazy_file.cond) == 0);
+    assert(pthread_mutex_unlock(&fixture->lazy_file.mutex) == 0);
 }
 
 static void *waiter_main(void *opaque) {
@@ -654,6 +887,89 @@ static bool test_edges_and_thread_private(void) {
     send_signal(thread, SIGUSR1_, (struct siginfo_) {.code = SI_USER_});
     TEST_CHECK(join_waiter(&interrupted_waiter, (dword_t) _EINTR),
             "登记后的 guest 信号可靠中断 futex 等待");
+
+    destroy_related_task(fixture.parent, thread);
+    destroy_fixture(&fixture);
+    return true;
+}
+
+static bool test_lazy_file_prefault_outside_global_lock(void) {
+    struct futex_fixture fixture;
+    TEST_CHECK(init_fixture(&fixture), "建立 lazy 文件 futex 夹具");
+    TEST_CHECK(fixture.lazy_file.pread_calls == 0,
+            "文件 mmap 建立时不提前读取后备页");
+    struct task *thread = make_related_task(fixture.parent, true);
+    TEST_CHECK(thread != NULL, "建立共享 lazy VMA 的线程");
+
+    block_lazy_file_read(&fixture);
+    struct waiter lazy_waiter;
+    TEST_CHECK(start_waiter(&lazy_waiter, thread, LAZY_FILE_BASE,
+            FUTEX_WAIT_ | FUTEX_PRIVATE_FLAG_, 8, 0),
+            "启动会触发 lazy page-in 的 futex waiter");
+    TEST_CHECK(wait_for_lazy_file_read(&fixture),
+            "观察 provider 进入阻塞式 pread");
+
+    struct immediate_futex_call independent_wake;
+    TEST_CHECK(start_immediate_futex_call(&independent_wake,
+            fixture.parent, PRIVATE_BASE,
+            FUTEX_WAKE_ | FUTEX_PRIVATE_FLAG_),
+            "并发启动无关 futex wake");
+    bool completed_while_io_blocked =
+            wait_for_immediate_futex_call(&independent_wake);
+    release_lazy_file_read(&fixture);
+    TEST_CHECK(pthread_join(independent_wake.thread, NULL) == 0 &&
+            completed_while_io_blocked && independent_wake.result == 0,
+            "文件 I/O 阻塞期间 futex 全局锁仍可服务无关操作");
+    TEST_CHECK(join_waiter(&lazy_waiter, (dword_t) _EAGAIN) &&
+            fixture.lazy_file.pread_calls == 1,
+            "prefault 完成后锁内重新读取并比较 futex 值");
+
+    TEST_CHECK(write_word(fixture.parent, WAITV_WIRE, 10) &&
+            write_word(fixture.parent, WAITV_WIRE + 4, 0) &&
+            write_word(fixture.parent, WAITV_WIRE + 8,
+                    (dword_t) LAZY_WAITV_BASE) &&
+            write_word(fixture.parent, WAITV_WIRE + 12,
+                    (dword_t) (LAZY_WAITV_BASE >> 32)) &&
+            write_word(fixture.parent, WAITV_WIRE + 16,
+                    GUEST_LINUX_FUTEX2_SIZE_U32 |
+                    GUEST_LINUX_FUTEX_PRIVATE_FLAG) &&
+            write_word(fixture.parent, WAITV_WIRE + 20, 0),
+            "准备指向第二个 lazy 文件页的 waitv wire");
+    block_lazy_file_read(&fixture);
+    struct waitv_futex_call waitv_call;
+    TEST_CHECK(start_waitv_futex_call(&waitv_call, thread),
+            "启动会触发第二次 lazy page-in 的 futex_waitv");
+    TEST_CHECK(wait_for_lazy_file_read(&fixture),
+            "观察 waitv provider 进入阻塞式 pread");
+    TEST_CHECK(start_immediate_futex_call(&independent_wake,
+            fixture.parent, PRIVATE_BASE,
+            FUTEX_WAKE_ | FUTEX_PRIVATE_FLAG_),
+            "waitv I/O 期间并发启动无关 futex wake");
+    completed_while_io_blocked =
+            wait_for_immediate_futex_call(&independent_wake);
+    release_lazy_file_read(&fixture);
+    TEST_CHECK(pthread_join(independent_wake.thread, NULL) == 0 &&
+            pthread_join(waitv_call.thread, NULL) == 0 &&
+            completed_while_io_blocked && independent_wake.result == 0 &&
+            waitv_call.result == _EAGAIN &&
+            fixture.lazy_file.pread_calls == 2,
+            "waitv page-in 同样不持有 futex 全局锁并保留值比较语义");
+
+    struct guest_linux_user_fault fault = {0};
+    TEST_CHECK(call_futex(fixture.parent, LAZY_FILE_BASE,
+            FUTEX_WAIT_, 8, 0, 0, &fault) == (dword_t) _EAGAIN &&
+            fault.kind == GUEST_MEMORY_FAULT_NONE &&
+            fixture.lazy_file.pread_calls == 2,
+            "共享 futex 复用已载入文件页且不重复 I/O");
+    const qword_t addresses[] = {LAZY_FILE_BASE};
+    struct aarch64_linux_futex_word_snapshot snapshot;
+    dword_t value;
+    TEST_CHECK(aarch64_linux_process_snapshot_futex_words(
+            fixture.parent->aarch64_process,
+            addresses, 1, true, &snapshot, &value, &fault) &&
+            value == 7 && snapshot.file_identity != 0 &&
+            snapshot.file_offset == 0,
+            "只读 MAP_PRIVATE 文件页形成稳定 inode/offset futex 键");
 
     destroy_related_task(fixture.parent, thread);
     destroy_fixture(&fixture);
@@ -1300,6 +1616,8 @@ int main(void) {
     } scenarios[] = {
         {"AArch64 futex 边界与线程私有键",
                 test_edges_and_thread_private},
+        {"AArch64 futex lazy 文件锁外预取",
+                test_lazy_file_prefault_outside_global_lock},
         {"AArch64 futex 只读共享键权限",
                 test_read_only_shared_key_permissions},
         {"AArch64 futex 独立文件键域",

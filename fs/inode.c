@@ -58,6 +58,7 @@ struct inode_data *inode_get_unlocked(
         mount_retain(mount);
         inode->mount = mount;
         inode->socket_id = 0;
+        inode->file_pager = NULL;
         cond_init(&inode->posix_unlock);
         list_init(&inode->posix_locks);
         list_init(&inode->chain);
@@ -95,6 +96,7 @@ void inode_release(struct inode_data *inode) {
     lock(&inodes_lock);
     lock(&inode->lock);
     if (--inode->refcount == 0) {
+        assert(inode->file_pager == NULL);
         unlock(&inode->lock);
         list_remove(&inode->chain);
         if (inode->mount->fs->inode_orphaned &&

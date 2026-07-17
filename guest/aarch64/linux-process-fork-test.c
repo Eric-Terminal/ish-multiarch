@@ -5,6 +5,7 @@
 #include "guest/aarch64/elf64.h"
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-runtime.h"
+#include "guest/linux/errno.h"
 #include "guest/memory/address-space.h"
 #include "guest/memory/page-backing.h"
 #include "guest/memory/page-table.h"
@@ -30,6 +31,26 @@ static const byte_t process_random[AARCH64_LINUX_PROCESS_RANDOM_SIZE] = {
     0, 1, 2, 3, 4, 5, 6, 7,
     8, 9, 10, 11, 12, 13, 14, 15,
 };
+
+static sdword_t reject_file_mapping_acquire(
+        const struct guest_linux_file_mapping_context *context,
+        qword_t fd, struct guest_linux_file_mapping_handle *handle) {
+    use(context, fd, handle);
+    return -(sdword_t) GUEST_LINUX_ENOSYS;
+}
+
+static void reject_file_mapping_release(
+        struct guest_linux_file_mapping_handle *handle) {
+    use(handle);
+}
+
+static sdword_t reject_file_mapping_open(
+        const struct guest_linux_file_mapping_handle *handle,
+        const struct guest_linux_file_mapping_request *request,
+        struct guest_linux_file_mapping *mapping) {
+    use(handle, request, mapping);
+    return -(sdword_t) GUEST_LINUX_ENOSYS;
+}
 
 static void put_u16(byte_t *bytes, word_t value) {
     bytes[0] = (byte_t) value;
@@ -621,10 +642,23 @@ static void test_exclusive_monitor_reset(void) {
     struct aarch64_linux_process_config config = make_config(
             file, PARENT_TID, &fixture.parent_task,
             &configured_syscalls, NULL);
+    const struct guest_linux_file_mapping_service expected_file_mappings = {
+        .runtime_opaque = &fixture,
+        .acquire = reject_file_mapping_acquire,
+        .release = reject_file_mapping_release,
+        .open = reject_file_mapping_open,
+    };
+    struct guest_linux_file_mapping_service configured_file_mappings =
+            expected_file_mappings;
+    config.file_mappings = &configured_file_mappings;
     struct aarch64_linux_process *parent =
             create_process(&config);
     assert(parent != NULL);
     configured_syscalls = (struct guest_linux_syscall_service) {0};
+    configured_file_mappings =
+            (struct guest_linux_file_mapping_service) {0};
+    assert(aarch64_linux_process_uses_file_mapping_service(
+            parent, &expected_file_mappings));
 
     // 先完成可写文件段私有化，确保本用例只观察 fork 对独占监视器
     // 的影响。
@@ -649,6 +683,8 @@ static void test_exclusive_monitor_reset(void) {
             aarch64_linux_process_fork(parent, &fork_config, &error);
     assert(child != NULL &&
             error.stage == AARCH64_LINUX_PROCESS_ERROR_NONE);
+    assert(aarch64_linux_process_uses_file_mapping_service(
+            child, &expected_file_mappings));
     assert(aarch64_linux_process_test_has_owned_state(
             parent, PARENT_TID, &fixture.parent_task,
             0, SIGNAL_TRAMPOLINE, false));

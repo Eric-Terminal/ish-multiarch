@@ -140,6 +140,9 @@ struct dir_entry {
 #define LSEEK_END 2
 
 struct fd_ops {
+    /* 仅真实普通文件 provider 可声明，供 lazy 文件页缓存读取。 */
+    bool page_cacheable;
+
     // required for files
     // TODO make optional for non-files
     ssize_t (*read)(struct fd *fd, void *buf, size_t bufsize);

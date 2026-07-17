@@ -88,5 +88,12 @@ enum guest_tlb_compare_exchange_result
         dword_t expected, dword_t replacement, dword_t *observed,
         struct guest_tlb_mapping_snapshot *snapshot,
         struct guest_memory_fault *fault);
+/* 调用方持有外部全局锁时使用；lazy 缺页直接返回 fault，不执行 page-in。 */
+enum guest_tlb_compare_exchange_result
+        guest_tlb_compare_exchange_u32_resolved_no_page_in(
+        struct guest_tlb *tlb, guest_addr_t address,
+        dword_t expected, dword_t replacement, dword_t *observed,
+        struct guest_tlb_mapping_snapshot *snapshot,
+        struct guest_memory_fault *fault);
 
 #endif
