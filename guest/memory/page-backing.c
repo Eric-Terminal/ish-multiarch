@@ -27,6 +27,10 @@ struct guest_page_backing {
     struct guest_page_backing_exclusive_record exclusive_records
             [GUEST_PAGE_BACKING_EXCLUSIVE_RECORD_COUNT];
     unsigned exclusive_next_record;
+    /* 仅 pager 的文件缓存页启用；字段均由 lock 保护。 */
+    bool tracks_file_writes;
+    qword_t content_generation;
+    qword_t clean_generation;
     // 数据内嵌于对象，引用存续期间地址不会变化，并保留宿主自然对齐。
     alignas(max_align_t) byte_t bytes[GUEST_MEMORY_PAGE_SIZE];
 };
@@ -85,6 +89,14 @@ static qword_t next_exclusive_generation(
     return ++backing->exclusive_sequence;
 }
 
+static qword_t next_content_generation(
+        struct guest_page_backing *backing) {
+    assert(backing->tracks_file_writes);
+    if (backing->content_generation == UINT64_MAX)
+        abort();
+    return ++backing->content_generation;
+}
+
 static qword_t page_sync_track_exclusive(void *opaque, size_t page_offset) {
     assert(page_offset < GUEST_MEMORY_PAGE_SIZE);
     struct guest_page_backing *backing = sync_backing(opaque);
@@ -140,6 +152,8 @@ static void page_sync_written(void *opaque, size_t page_offset, size_t size) {
             record->generation = next_exclusive_generation(backing);
         }
     }
+    if (backing->tracks_file_writes)
+        (void) next_content_generation(backing);
 }
 
 static const struct guest_page_sync_ops page_sync_ops = {
@@ -259,4 +273,46 @@ const struct guest_page_sync *guest_page_backing_sync(
         const struct guest_page_backing *backing) {
     assert(backing != NULL);
     return &backing->sync;
+}
+
+void guest_page_backing_track_file_writes(
+        struct guest_page_backing *backing) {
+    assert(backing != NULL);
+    const struct guest_page_sync *sync = guest_page_backing_sync(backing);
+    sync->ops->write_lock(sync->opaque);
+    assert(!backing->tracks_file_writes &&
+            backing->content_generation == 0 &&
+            backing->clean_generation == 0);
+    backing->tracks_file_writes = true;
+    backing->content_generation = 1;
+    backing->clean_generation = 1;
+    sync->ops->write_unlock(sync->opaque);
+}
+
+bool guest_page_backing_copy_dirty(
+        struct guest_page_backing *backing, byte_t *page,
+        qword_t *content_generation) {
+    assert(backing != NULL && page != NULL && content_generation != NULL);
+    *content_generation = 0;
+    const struct guest_page_sync *sync = guest_page_backing_sync(backing);
+    sync->ops->read_lock(sync->opaque);
+    bool dirty = backing->tracks_file_writes &&
+            backing->content_generation != backing->clean_generation;
+    if (dirty) {
+        memcpy(page, backing->bytes, GUEST_MEMORY_PAGE_SIZE);
+        *content_generation = backing->content_generation;
+    }
+    sync->ops->read_unlock(sync->opaque);
+    return dirty;
+}
+
+void guest_page_backing_finish_writeback(
+        struct guest_page_backing *backing, qword_t content_generation) {
+    assert(backing != NULL && content_generation != 0);
+    const struct guest_page_sync *sync = guest_page_backing_sync(backing);
+    sync->ops->write_lock(sync->opaque);
+    assert(backing->tracks_file_writes);
+    if (backing->content_generation == content_generation)
+        backing->clean_generation = content_generation;
+    sync->ops->write_unlock(sync->opaque);
 }

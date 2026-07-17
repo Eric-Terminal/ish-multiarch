@@ -22,6 +22,18 @@ byte_t *guest_page_backing_bytes(struct guest_page_backing *backing);
 // track_exclusive、exclusive_matches 与 written 回调只能在持有写锁时调用。
 const struct guest_page_sync *guest_page_backing_sync(
         const struct guest_page_backing *backing);
+
+/*
+ * 文件 pager 在 backing 对外可见前启用脏世代。copy_dirty 在内部读锁下
+ * 复制完整稳定页；finish_writeback 只会清理由同一内容世代产生的快照。
+ */
+void guest_page_backing_track_file_writes(
+        struct guest_page_backing *backing);
+bool guest_page_backing_copy_dirty(
+        struct guest_page_backing *backing, byte_t *page,
+        qword_t *content_generation);
+void guest_page_backing_finish_writeback(
+        struct guest_page_backing *backing, qword_t content_generation);
 // 常驻生命周期计数仅供集成测试在静止点检查资源回收。
 unsigned guest_page_backing_test_live_count(void);
 

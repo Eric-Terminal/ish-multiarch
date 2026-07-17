@@ -22,6 +22,7 @@ struct cached_file_page {
     qword_t file_offset;
     enum cached_file_page_state state;
     struct guest_page_backing *backing;
+    bool writeback;
     struct cached_file_page *next;
 };
 
@@ -67,6 +68,16 @@ static void check_pthread(int result) {
         abort();
 }
 
+static void begin_provider_io(struct guest_file_pager *pager) {
+    if (pager->provider.begin_io != NULL)
+        pager->provider.begin_io(pager->provider.opaque);
+}
+
+static void end_provider_io(struct guest_file_pager *pager) {
+    if (pager->provider.end_io != NULL)
+        pager->provider.end_io(pager->provider.opaque);
+}
+
 static unsigned cache_bucket(qword_t file_offset) {
     qword_t page = file_offset >> GUEST_MEMORY_PAGE_BITS;
     page ^= page >> 17;
@@ -101,6 +112,8 @@ struct guest_file_pager *guest_file_pager_create(qword_t identity,
     assert(identity != 0);
     assert(provider.read_page != NULL);
     assert((provider.opaque == NULL) == (provider.release == NULL));
+    assert((provider.begin_io == NULL) == (provider.end_io == NULL));
+    assert(provider.sync_range == NULL || provider.write_page != NULL);
 
     struct guest_file_pager *pager = pager_calloc(1, sizeof(*pager));
     if (pager == NULL)
@@ -158,6 +171,7 @@ static void destroy_cache(struct guest_file_pager *pager) {
             struct cached_file_page *next = entry->next;
             assert(entry->state == CACHED_FILE_PAGE_READY);
             assert(entry->backing != NULL);
+            assert(!entry->writeback);
             guest_page_backing_release(entry->backing);
             free(entry);
             entry = next;
@@ -176,6 +190,8 @@ void guest_file_pager_release(struct guest_file_pager *pager) {
     if (previous != 1)
         return;
 
+    if (pager->provider.write_page != NULL)
+        (void) guest_file_pager_sync_range(pager, 0, UINT64_MAX);
     /* 对象在同步回调返回前保持完整，供 provider 条件摘除弱引用。 */
     if (pager->provider.release != NULL)
         pager->provider.release(pager, pager->provider.opaque);
@@ -191,6 +207,7 @@ enum guest_file_page_result guest_file_pager_get_page(
     assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
     *backing = NULL;
 
+    begin_provider_io(pager);
     check_pthread(pthread_mutex_lock(&pager->cache_lock));
     struct cached_file_page *entry;
     for (;;) {
@@ -202,6 +219,7 @@ enum guest_file_page_result guest_file_pager_get_page(
             guest_page_backing_retain(entry->backing);
             *backing = entry->backing;
             check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+            end_provider_io(pager);
             return GUEST_FILE_PAGE_OK;
         }
         assert(entry->state == CACHED_FILE_PAGE_LOADING &&
@@ -213,6 +231,7 @@ enum guest_file_page_result guest_file_pager_get_page(
     entry = pager_calloc(1, sizeof(*entry));
     if (entry == NULL) {
         check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+        end_provider_io(pager);
         return GUEST_FILE_PAGE_OUT_OF_MEMORY;
     }
     *entry = (struct cached_file_page) {
@@ -242,6 +261,8 @@ enum guest_file_page_result guest_file_pager_get_page(
             memset(bytes + valid_bytes, 0,
                     GUEST_MEMORY_PAGE_SIZE - valid_bytes);
         }
+        if (result == GUEST_FILE_PAGE_OK)
+            guest_page_backing_track_file_writes(loaded);
     }
 
     check_pthread(pthread_mutex_lock(&pager->cache_lock));
@@ -257,12 +278,112 @@ enum guest_file_page_result guest_file_pager_get_page(
     }
     check_pthread(pthread_cond_broadcast(&pager->cache_changed));
     check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    end_provider_io(pager);
 
     if (result != GUEST_FILE_PAGE_OK) {
         if (loaded != NULL)
             guest_page_backing_release(loaded);
         free(entry);
     }
+    return result;
+}
+
+static struct cached_file_page *next_cached_page_in_range(
+        struct guest_file_pager *pager, qword_t cursor,
+        qword_t end) {
+    struct cached_file_page *selected = NULL;
+    for (unsigned bucket = 0;
+            bucket < GUEST_FILE_PAGER_BUCKET_COUNT; bucket++) {
+        for (struct cached_file_page *entry = pager->buckets[bucket];
+                entry != NULL; entry = entry->next) {
+            if (entry->state != CACHED_FILE_PAGE_READY ||
+                    entry->file_offset < cursor ||
+                    entry->file_offset >= end)
+                continue;
+            if (selected == NULL ||
+                    entry->file_offset < selected->file_offset)
+                selected = entry;
+        }
+    }
+    return selected;
+}
+
+static enum guest_file_sync_result writeback_cached_page(
+        struct guest_file_pager *pager,
+        struct cached_file_page *entry) {
+    assert(entry != NULL && entry->state == CACHED_FILE_PAGE_READY &&
+            entry->backing != NULL && entry->writeback);
+    struct guest_page_backing *backing = entry->backing;
+    guest_page_backing_retain(backing);
+
+    byte_t page[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation;
+    enum guest_file_sync_result result = GUEST_FILE_SYNC_OK;
+    if (guest_page_backing_copy_dirty(backing, page, &generation)) {
+        result = pager->provider.write_page(
+                pager->provider.opaque, entry->file_offset, page);
+        if (result == GUEST_FILE_SYNC_OK)
+            guest_page_backing_finish_writeback(backing, generation);
+    }
+
+    check_pthread(pthread_mutex_lock(&pager->cache_lock));
+    assert(entry->writeback);
+    entry->writeback = false;
+    check_pthread(pthread_cond_broadcast(&pager->cache_changed));
+    check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    guest_page_backing_release(backing);
+    return result;
+}
+
+enum guest_file_sync_result guest_file_pager_sync_range(
+        struct guest_file_pager *pager,
+        qword_t file_offset, qword_t length) {
+    assert(pager != NULL);
+    assert(length <= UINT64_MAX - file_offset);
+    if (length == 0)
+        return GUEST_FILE_SYNC_OK;
+    if (pager->provider.write_page == NULL)
+        return GUEST_FILE_SYNC_UNSUPPORTED;
+
+    begin_provider_io(pager);
+    qword_t end = file_offset + length;
+    qword_t cursor = file_offset & ~GUEST_MEMORY_PAGE_MASK;
+    for (;;) {
+        check_pthread(pthread_mutex_lock(&pager->cache_lock));
+        struct cached_file_page *entry;
+        for (;;) {
+            entry = next_cached_page_in_range(pager, cursor, end);
+            if (entry == NULL || !entry->writeback)
+                break;
+            check_pthread(pthread_cond_wait(
+                    &pager->cache_changed, &pager->cache_lock));
+        }
+        if (entry == NULL) {
+            check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+            break;
+        }
+        entry->writeback = true;
+        qword_t current = entry->file_offset;
+        check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+
+        enum guest_file_sync_result result =
+                writeback_cached_page(pager, entry);
+        if (result != GUEST_FILE_SYNC_OK) {
+            end_provider_io(pager);
+            return result;
+        }
+        if (current > UINT64_MAX - GUEST_MEMORY_PAGE_SIZE)
+            break;
+        cursor = current + GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    if (pager->provider.sync_range == NULL) {
+        end_provider_io(pager);
+        return GUEST_FILE_SYNC_OK;
+    }
+    enum guest_file_sync_result result = pager->provider.sync_range(
+            pager->provider.opaque, file_offset, length);
+    end_provider_io(pager);
     return result;
 }
 

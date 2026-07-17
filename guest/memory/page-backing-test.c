@@ -214,12 +214,68 @@ static void test_sync_exclusive_granules(void) {
     assert(guest_page_backing_test_live_count() == 0);
 }
 
+static void test_file_dirty_generation(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_backing *backing = guest_page_backing_create();
+    assert(backing != NULL);
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation = UINT64_MAX;
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation) && generation == 0);
+
+    guest_page_backing_track_file_writes(backing);
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation) && generation == 0);
+
+    const struct guest_page_sync *sync =
+            guest_page_backing_sync(backing);
+    lock_sync_write(sync);
+    guest_page_backing_bytes(backing)[17] = UINT8_C(0xa5);
+    sync->ops->written(sync->opaque, 17, 1);
+    unlock_sync_write(sync);
+
+    qword_t first_generation;
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &first_generation));
+    assert(first_generation != 0 && snapshot[17] == UINT8_C(0xa5));
+
+    lock_sync_write(sync);
+    guest_page_backing_bytes(backing)[17] = UINT8_C(0x5a);
+    sync->ops->written(sync->opaque, 17, 1);
+    unlock_sync_write(sync);
+    guest_page_backing_finish_writeback(backing, first_generation);
+
+    qword_t second_generation;
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &second_generation));
+    assert(second_generation != first_generation &&
+            snapshot[17] == UINT8_C(0x5a));
+    guest_page_backing_finish_writeback(backing, second_generation);
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation) && generation == 0);
+
+    lock_sync_write(sync);
+    guest_page_backing_bytes(backing)[23] = UINT8_C(0x7c);
+    sync->ops->written(sync->opaque, 23, 1);
+    unlock_sync_write(sync);
+    struct guest_page_backing *copy = guest_page_backing_clone(backing);
+    assert(copy != NULL);
+    assert(guest_page_backing_bytes(copy)[23] == UINT8_C(0x7c));
+    assert(!guest_page_backing_copy_dirty(
+            copy, snapshot, &generation) && generation == 0);
+
+    guest_page_backing_release(copy);
+    guest_page_backing_release(backing);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
 int main(void) {
     test_zeroed_clone_and_lifecycle();
     test_concurrent_reference_updates();
     test_clone_consistent_during_shared_writes();
     test_sync_identity_lifecycle();
     test_sync_exclusive_granules();
+    test_file_dirty_generation();
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     return 0;
 }
