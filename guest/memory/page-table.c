@@ -76,20 +76,22 @@ static bool set_nonfile_origin(struct guest_page_mapping *mapping,
 }
 
 static bool set_file_source(struct guest_page_mapping *mapping,
-        struct guest_file_source *source, qword_t file_offset) {
+        struct guest_file_source *source, qword_t file_offset,
+        bool copy_on_write) {
     assert(source != NULL);
     assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
     bool changed = mapping->origin != GUEST_PAGE_ORIGIN_FILE ||
             mapping->file_source != source ||
             mapping->file_offset != file_offset ||
-            !mapping->shared_backing || !mapping->copy_on_write;
+            !mapping->shared_backing ||
+            mapping->copy_on_write != copy_on_write;
     guest_file_source_retain(source);
     struct guest_file_source *old_source = mapping->file_source;
     mapping->origin = GUEST_PAGE_ORIGIN_FILE;
     mapping->file_source = source;
     mapping->file_offset = file_offset;
     mapping->shared_backing = true;
-    mapping->copy_on_write = true;
+    mapping->copy_on_write = copy_on_write;
     guest_file_source_release(old_source);
     return changed;
 }
@@ -564,7 +566,7 @@ static enum guest_page_table_result map_page(
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     mapping->permissions = permissions;
     if (origin == GUEST_PAGE_ORIGIN_FILE)
-        (void) set_file_source(mapping, source, file_offset);
+        (void) set_file_source(mapping, source, file_offset, true);
     else
         (void) set_nonfile_origin(mapping, origin, false);
     *host_page = guest_page_backing_bytes(mapping->backing);
@@ -587,10 +589,11 @@ enum guest_page_table_result guest_page_table_map_file(
             GUEST_PAGE_ORIGIN_FILE, source, file_offset, host_page);
 }
 
-enum guest_page_table_result guest_page_table_map_private_file_backing(
+static enum guest_page_table_result map_file_backing(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, struct guest_file_source *source,
-        qword_t file_offset, struct guest_page_backing *backing) {
+        qword_t file_offset, struct guest_page_backing *backing,
+        bool copy_on_write) {
     assert((permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
     assert(source != NULL && backing != NULL);
     assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
@@ -608,9 +611,26 @@ enum guest_page_table_result guest_page_table_map_private_file_backing(
     guest_page_backing_retain(backing);
     mapping->backing = backing;
     mapping->permissions = permissions;
-    (void) set_file_source(mapping, source, file_offset);
+    (void) set_file_source(
+            mapping, source, file_offset, copy_on_write);
     guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_map_private_file_backing(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, struct guest_file_source *source,
+        qword_t file_offset, struct guest_page_backing *backing) {
+    return map_file_backing(table, page_base, permissions,
+            source, file_offset, backing, true);
+}
+
+enum guest_page_table_result guest_page_table_map_shared_file_backing(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, struct guest_file_source *source,
+        qword_t file_offset, struct guest_page_backing *backing) {
+    return map_file_backing(table, page_base, permissions,
+            source, file_offset, backing, false);
 }
 
 enum guest_page_table_result guest_page_table_map_special(
@@ -628,7 +648,7 @@ enum guest_page_table_result guest_page_table_set_file_source(
     struct guest_page_mapping *mapping = find_mapping(table, page_base);
     if (mapping == NULL)
         return GUEST_PAGE_TABLE_NOT_MAPPED;
-    if (set_file_source(mapping, source, file_offset))
+    if (set_file_source(mapping, source, file_offset, true))
         guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
 }

@@ -64,6 +64,17 @@ static struct guest_linux_vma file_mapping(
     };
 }
 
+static struct guest_linux_vma shared_file_mapping(
+        struct guest_file_pager *pager,
+        guest_addr_t first, guest_addr_t last,
+        qword_t file_offset, qword_t protection,
+        qword_t maximum_protection) {
+    struct guest_linux_vma result = file_mapping(pager,
+            first, last, file_offset, protection, maximum_protection);
+    result.source = GUEST_LINUX_VMA_SOURCE_FILE_SHARED;
+    return result;
+}
+
 static void assert_entry(const struct guest_linux_vma_set *set,
         size_t index, struct guest_linux_vma expected) {
     assert(index < set->count);
@@ -557,6 +568,99 @@ static void test_file_offsets_ownership_and_merge(void) {
     assert(first_probe.releases == 1 && second_probe.releases == 1);
 }
 
+static void test_shared_file_offsets_and_type_boundaries(void) {
+    const qword_t read = GUEST_LINUX_PROT_READ;
+    const qword_t all = GUEST_LINUX_PROT_MASK;
+    const qword_t base_offset = UINT64_C(0x20000);
+    struct pager_probe probe = {0};
+    struct guest_file_pager *pager = pager_create(3, &probe);
+    assert(pager != NULL);
+
+    struct guest_linux_vma_set set;
+    guest_linux_vma_set_init(&set);
+    assert(guest_linux_vma_insert(&set,
+            file_mapping(pager, PAGE(1), PAGE(3),
+                    base_offset, read, all)));
+    assert(guest_linux_vma_insert(&set,
+            shared_file_mapping(pager, PAGE(3), PAGE(5),
+                    base_offset + PAGE(2), read, all)));
+    assert(set.count == 2 &&
+            set.entries[0].source ==
+                    GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE &&
+            set.entries[1].source ==
+                    GUEST_LINUX_VMA_SOURCE_FILE_SHARED);
+
+    assert(guest_linux_vma_insert(&set,
+            shared_file_mapping(pager, PAGE(5), PAGE(7),
+                    base_offset + PAGE(4), read, all)));
+    assert(set.count == 2);
+    assert_entry(&set, 1,
+            shared_file_mapping(pager, PAGE(3), PAGE(7),
+                    base_offset + PAGE(2), read, all));
+    assert(guest_file_pager_test_reference_count(pager) == 3);
+
+    const struct guest_linux_vma before_protect[] = {
+        file_mapping(pager, PAGE(1), PAGE(3),
+                base_offset, read, all),
+        shared_file_mapping(pager, PAGE(3), PAGE(7),
+                base_offset + PAGE(2), read, all),
+    };
+    struct guest_linux_vma *entries = set.entries;
+    size_t live_allocations =
+            guest_linux_vma_test_live_allocation_count();
+    guest_linux_vma_test_fail_allocation_at(0);
+    assert(!guest_linux_vma_protect_tracked(
+            &set, PAGE(4), PAGE(6), GUEST_LINUX_PROT_WRITE));
+    assert(guest_linux_vma_test_allocation_count() == 1 &&
+            set.entries == entries &&
+            guest_linux_vma_test_live_allocation_count() ==
+                    live_allocations &&
+            guest_file_pager_test_reference_count(pager) == 3);
+    assert_same_set(&set, before_protect,
+            array_size(before_protect));
+    guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
+
+    assert(guest_linux_vma_protect_tracked(
+            &set, PAGE(4), PAGE(6), GUEST_LINUX_PROT_WRITE));
+    assert(set.count == 4);
+    assert_entry(&set, 1,
+            shared_file_mapping(pager, PAGE(3), PAGE(4),
+                    base_offset + PAGE(2), read, all));
+    assert_entry(&set, 2,
+            shared_file_mapping(pager, PAGE(4), PAGE(6),
+                    base_offset + PAGE(3),
+                    GUEST_LINUX_PROT_WRITE, all));
+    assert_entry(&set, 3,
+            shared_file_mapping(pager, PAGE(6), PAGE(7),
+                    base_offset + PAGE(5), read, all));
+    assert(guest_file_pager_test_reference_count(pager) == 5);
+
+    assert(guest_linux_vma_protect_tracked(
+            &set, PAGE(4), PAGE(6), read));
+    assert_same_set(&set, before_protect,
+            array_size(before_protect));
+    assert(guest_file_pager_test_reference_count(pager) == 3);
+
+    assert(guest_linux_vma_remove(&set, PAGE(4), PAGE(6)));
+    assert(set.count == 3);
+    assert_entry(&set, 1,
+            shared_file_mapping(pager, PAGE(3), PAGE(4),
+                    base_offset + PAGE(2), read, all));
+    assert_entry(&set, 2,
+            shared_file_mapping(pager, PAGE(6), PAGE(7),
+                    base_offset + PAGE(5), read, all));
+    assert(guest_file_pager_test_reference_count(pager) == 4);
+
+    struct guest_linux_vma_set copy;
+    assert(guest_linux_vma_set_clone(&copy, &set));
+    assert(guest_file_pager_test_reference_count(pager) == 7);
+    guest_linux_vma_set_destroy(&copy);
+    guest_linux_vma_set_destroy(&set);
+    assert(guest_file_pager_test_reference_count(pager) == 1);
+    guest_file_pager_release(pager);
+    assert(probe.releases == 1);
+}
+
 int main(void) {
     test_insert_override_merge_and_find();
     test_source_boundaries_and_clone_independence();
@@ -566,6 +670,7 @@ int main(void) {
     test_clone_boundaries_and_independence();
     test_allocation_failure_is_transactional();
     test_file_offsets_ownership_and_merge();
+    test_shared_file_offsets_and_type_boundaries();
     guest_linux_vma_test_fail_allocation_at(SIZE_MAX);
     assert(guest_linux_vma_test_live_allocation_count() == 0);
     return 0;

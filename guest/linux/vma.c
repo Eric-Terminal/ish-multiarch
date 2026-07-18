@@ -54,7 +54,8 @@ static void free_entries(struct guest_linux_vma *entries) {
 }
 
 static bool file_mapping(const struct guest_linux_vma *entry) {
-    return entry->source == GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE;
+    return entry->source == GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE ||
+            entry->source == GUEST_LINUX_VMA_SOURCE_FILE_SHARED;
 }
 
 static void retain_entry(const struct guest_linux_vma *entry) {

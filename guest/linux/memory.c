@@ -265,11 +265,15 @@ static bool vma_allows_access(const struct guest_linux_vma *mapping,
     return (*permissions & access) != 0;
 }
 
+static bool file_vma_source(enum guest_linux_vma_source source) {
+    return source == GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE ||
+            source == GUEST_LINUX_VMA_SOURCE_FILE_SHARED;
+}
+
 static bool same_file_page(const struct guest_linux_vma *mapping,
         guest_addr_t page_base, struct guest_file_pager *pager,
-        qword_t file_offset) {
-    if (mapping == NULL ||
-            mapping->source != GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE ||
+        qword_t file_offset, enum guest_linux_vma_source source) {
+    if (mapping == NULL || mapping->source != source ||
             mapping->file_pager != pager || page_base < mapping->first)
         return false;
     qword_t delta = page_base - mapping->first;
@@ -287,8 +291,7 @@ static enum guest_memory_page_in_result guest_linux_page_in(
     const struct guest_linux_vma *mapping = guest_linux_vma_find(
             &memory->vmas, page_base);
     unsigned permissions;
-    if (mapping == NULL || mapping->source !=
-            GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE) {
+    if (mapping == NULL || !file_vma_source(mapping->source)) {
         guest_page_table_read_unlock(table, locked);
         return GUEST_MEMORY_PAGE_IN_FAILED;
     }
@@ -308,6 +311,7 @@ static enum guest_memory_page_in_result guest_linux_page_in(
     }
 
     qword_t sequence = memory->vma_sequence;
+    enum guest_linux_vma_source source = mapping->source;
     struct guest_file_pager *pager = guest_file_pager_retain(
             mapping->file_pager);
     qword_t delta = page_base - mapping->first;
@@ -322,7 +326,8 @@ static enum guest_memory_page_in_result guest_linux_page_in(
     locked = guest_page_table_write_lock(table);
     mapping = guest_linux_vma_find(&memory->vmas, page_base);
     bool current = memory->vma_sequence == sequence &&
-            same_file_page(mapping, page_base, pager, file_offset);
+            same_file_page(
+                    mapping, page_base, pager, file_offset, source);
     enum guest_memory_page_in_result result =
             GUEST_MEMORY_PAGE_IN_RETRY;
     if (current && !vma_allows_access(mapping, access, &permissions)) {
@@ -335,7 +340,12 @@ static enum guest_memory_page_in_result guest_linux_page_in(
         result = GUEST_MEMORY_PAGE_IN_FAILED;
     } else if (current) {
         assert(backing != NULL);
-        enum guest_page_table_result installed =
+        enum guest_page_table_result installed = source ==
+                GUEST_LINUX_VMA_SOURCE_FILE_SHARED ?
+                guest_page_table_map_shared_file_backing(
+                        table, page_base, permissions,
+                        guest_file_pager_file_source(pager),
+                        file_offset, backing) :
                 guest_page_table_map_private_file_backing(
                         table, page_base, permissions,
                         guest_file_pager_file_source(pager),
@@ -709,13 +719,14 @@ qword_t guest_linux_mmap_file_private_preflight(
     return selected ? selection.first : error;
 }
 
-static qword_t guest_linux_mmap_file_private_unlocked(
+static qword_t guest_linux_mmap_file_unlocked(
         struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t maximum_protection, qword_t flags,
         struct guest_file_pager *pager, qword_t offset,
+        enum guest_linux_vma_source source,
         struct guest_linux_vma_set *retired) {
-    assert(pager != NULL);
+    assert(pager != NULL && file_vma_source(source));
     struct mmap_selection selection;
     unsigned permissions;
     qword_t mapped_size;
@@ -726,11 +737,15 @@ static qword_t guest_linux_mmap_file_private_unlocked(
         return error;
     if (offset > UINT64_MAX - mapped_size)
         return linux_error(GUEST_LINUX_EOVERFLOW);
-    qword_t allowed = GUEST_LINUX_MAP_PRIVATE |
+    qword_t required_type = source ==
+            GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE ?
+            GUEST_LINUX_MAP_PRIVATE : GUEST_LINUX_MAP_SHARED;
+    qword_t allowed = required_type |
             GUEST_LINUX_MAP_FIXED | GUEST_LINUX_MAP_FIXED_NOREPLACE;
     qword_t mapping_type = flags & GUEST_LINUX_MAP_TYPE;
-    if (mapping_type != GUEST_LINUX_MAP_PRIVATE)
-        return linux_error(mapping_type == GUEST_LINUX_MAP_SHARED ?
+    if (mapping_type != required_type)
+        return linux_error(mapping_type == GUEST_LINUX_MAP_SHARED ||
+                mapping_type == GUEST_LINUX_MAP_PRIVATE ?
                 GUEST_LINUX_EOPNOTSUPP : GUEST_LINUX_EINVAL);
     if ((flags & ~allowed) != 0)
         return linux_error(GUEST_LINUX_EINVAL);
@@ -744,7 +759,7 @@ static qword_t guest_linux_mmap_file_private_unlocked(
         .first = (guest_addr_t) selection.first,
         .last = (guest_addr_t) (selection.first + mapped_size),
         .protection = protection,
-        .source = GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE,
+        .source = source,
         .maximum_protection = maximum_protection,
         .file_pager = pager,
         .file_offset = offset,
@@ -775,9 +790,27 @@ qword_t guest_linux_mmap_file_private(struct guest_linux_mm *memory,
     struct guest_linux_vma_set retired;
     guest_linux_vma_set_init(&retired);
     bool locked = guest_page_table_write_lock(memory->page_table);
-    qword_t result = guest_linux_mmap_file_private_unlocked(
+    qword_t result = guest_linux_mmap_file_unlocked(
             memory, address, length, protection,
-            maximum_protection, flags, pager, offset, &retired);
+            maximum_protection, flags, pager, offset,
+            GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE, &retired);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    guest_linux_vma_set_destroy(&retired);
+    return result;
+}
+
+qword_t guest_linux_mmap_file_shared(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, qword_t protection,
+        qword_t maximum_protection, qword_t flags,
+        struct guest_file_pager *pager, qword_t offset) {
+    assert(memory != NULL && memory->page_table != NULL && pager != NULL);
+    struct guest_linux_vma_set retired;
+    guest_linux_vma_set_init(&retired);
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_mmap_file_unlocked(
+            memory, address, length, protection,
+            maximum_protection, flags, pager, offset,
+            GUEST_LINUX_VMA_SOURCE_FILE_SHARED, &retired);
     guest_page_table_write_unlock(memory->page_table, locked);
     guest_linux_vma_set_destroy(&retired);
     return result;

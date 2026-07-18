@@ -79,6 +79,11 @@ enum guest_page_table_result guest_page_table_map_private_file_backing(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, struct guest_file_source *source,
         qword_t file_offset, struct guest_page_backing *backing);
+// shared 文件页保留同一 backing，写入不会进入私有 COW。
+enum guest_page_table_result guest_page_table_map_shared_file_backing(
+        struct guest_page_table *table, guest_addr_t page_base,
+        unsigned permissions, struct guest_file_source *source,
+        qword_t file_offset, struct guest_page_backing *backing);
 enum guest_page_table_result guest_page_table_map_special(
         struct guest_page_table *table, guest_addr_t page_base,
         unsigned permissions, byte_t **host_page);

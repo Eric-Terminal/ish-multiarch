@@ -9,6 +9,7 @@ enum guest_linux_vma_source {
     GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE,
     GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED,
     GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE,
+    GUEST_LINUX_VMA_SOURCE_FILE_SHARED,
 };
 
 struct guest_linux_vma {
@@ -17,7 +18,7 @@ struct guest_linux_vma {
     qword_t protection;
     enum guest_linux_vma_source source;
     qword_t maximum_protection;
-    // 仅 FILE_PRIVATE 拥有一份强引用；offset 对应 first 的文件字节。
+    // 两类 FILE 映射各拥有一份强引用；offset 对应 first 的文件字节。
     struct guest_file_pager *file_pager;
     qword_t file_offset;
 };

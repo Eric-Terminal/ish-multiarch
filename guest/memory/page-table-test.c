@@ -807,6 +807,136 @@ static void test_private_file_cow_transactions(void) {
     assert(guest_page_backing_test_live_count() == 0);
 }
 
+static void test_shared_file_backing_lifecycle(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table parent;
+    assert(guest_page_table_init(&parent, 48));
+    struct file_source_probe source_probe = {0};
+    struct guest_file_source *source = guest_file_source_create(
+            UINT64_C(0x7482c5d6), &source_probe,
+            release_file_source_probe);
+    struct guest_page_backing *backing = guest_page_backing_create();
+    assert(source != NULL && backing != NULL);
+    const qword_t file_offset = GUEST_MEMORY_PAGE_SIZE * 2;
+    guest_page_backing_track_file_writes(backing);
+    dword_t initial = UINT32_C(0x11223344);
+    memcpy(guest_page_backing_bytes(backing), &initial, sizeof(initial));
+
+    unsigned permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
+    assert(guest_page_table_map_shared_file_backing(
+            &parent, HIGH_PAGE, permissions,
+            source, file_offset, backing) ==
+            GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map_shared_file_backing(
+            &parent, NEXT_PAGE, permissions,
+            source, file_offset, backing) ==
+            GUEST_PAGE_TABLE_OK);
+    guest_file_source_release(source);
+
+    struct guest_page_table child;
+    assert(guest_page_table_clone(&child, &parent));
+    struct guest_page_view parent_first = resolve_view(&parent, HIGH_PAGE);
+    struct guest_page_view parent_alias = resolve_view(&parent, NEXT_PAGE);
+    struct guest_page_view child_first = resolve_view(&child, HIGH_PAGE);
+    assert(parent_first.origin == GUEST_PAGE_ORIGIN_FILE &&
+            parent_alias.origin == GUEST_PAGE_ORIGIN_FILE &&
+            child_first.origin == GUEST_PAGE_ORIGIN_FILE &&
+            !parent_first.copy_on_write &&
+            !parent_alias.copy_on_write &&
+            !child_first.copy_on_write &&
+            parent_first.host_page == parent_alias.host_page &&
+            parent_first.host_page == child_first.host_page &&
+            parent_first.sync == parent_alias.sync &&
+            parent_first.sync == child_first.sync &&
+            parent_first.backing_identity ==
+                    parent_alias.backing_identity &&
+            parent_first.backing_identity ==
+                    child_first.backing_identity &&
+            parent_first.file_identity == UINT64_C(0x7482c5d6) &&
+            parent_alias.file_identity == UINT64_C(0x7482c5d6) &&
+            child_first.file_identity == UINT64_C(0x7482c5d6) &&
+            parent_first.file_offset == file_offset &&
+            parent_alias.file_offset == file_offset &&
+            child_first.file_offset == file_offset);
+
+    struct guest_tlb parent_tlb;
+    struct guest_tlb child_tlb;
+    guest_tlb_init(&parent_tlb, &parent.address_space);
+    guest_tlb_init(&child_tlb, &child.address_space);
+    qword_t parent_mapping_generation = parent.address_space.generation;
+    qword_t child_mapping_generation = child.address_space.generation;
+    tlb_write_byte(&parent_tlb, HIGH_PAGE, UINT8_C(0x71));
+    assert(tlb_read_byte(&child_tlb, NEXT_PAGE) == UINT8_C(0x71));
+    assert(parent.address_space.generation == parent_mapping_generation &&
+            child.address_space.generation == child_mapping_generation);
+
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation;
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(snapshot[0] == UINT8_C(0x71));
+    guest_page_backing_finish_writeback(backing, generation);
+
+    struct guest_memory_fault fault;
+    dword_t expected = UINT32_C(0xfeedface);
+    dword_t replacement = UINT32_C(0xaabbccdd);
+    dword_t observed = 0;
+    assert(guest_tlb_compare_exchange(&child_tlb, HIGH_PAGE,
+            &expected, &replacement, &observed, sizeof(observed),
+            &fault) == GUEST_TLB_COMPARE_EXCHANGE_MISMATCH);
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(parent.address_space.generation == parent_mapping_generation &&
+            child.address_space.generation == child_mapping_generation);
+
+    guest_addr_t futex_address = HIGH_PAGE + sizeof(dword_t);
+    assert(guest_tlb_read(&child_tlb, futex_address,
+            &expected, sizeof(expected), GUEST_MEMORY_READ, &fault));
+    struct guest_tlb_mapping_snapshot futex_snapshot = {0};
+    assert(guest_tlb_compare_exchange_u32_resolved_no_page_in(
+            &child_tlb, futex_address, expected, replacement,
+            &observed, &futex_snapshot, &fault) ==
+            GUEST_TLB_COMPARE_EXCHANGE_EXCHANGED);
+    assert(futex_snapshot.shared_identity ==
+                    guest_page_sync_identity(parent_first.sync) &&
+            futex_snapshot.file_identity == UINT64_C(0x7482c5d6) &&
+            futex_snapshot.page_offset == sizeof(dword_t) &&
+            futex_snapshot.file_offset ==
+                    file_offset + sizeof(dword_t));
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(memcmp(snapshot + sizeof(dword_t),
+            &replacement, sizeof(replacement)) == 0);
+    guest_page_backing_finish_writeback(backing, generation);
+    assert(parent.address_space.generation == parent_mapping_generation &&
+            child.address_space.generation == child_mapping_generation);
+
+    byte_t exclusive_value;
+    struct guest_tlb_exclusive_token token;
+    assert(guest_tlb_load_exclusive(&child_tlb, NEXT_PAGE,
+            &exclusive_value, sizeof(exclusive_value), &token, &fault));
+    byte_t exclusive_replacement = UINT8_C(0x93);
+    assert(guest_tlb_store_exclusive(&child_tlb, NEXT_PAGE,
+            &exclusive_value, &exclusive_replacement,
+            sizeof(exclusive_replacement), token, &fault) ==
+            GUEST_TLB_EXCLUSIVE_STORED);
+    assert(tlb_read_byte(&parent_tlb, HIGH_PAGE) ==
+            exclusive_replacement);
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(parent.address_space.generation == parent_mapping_generation &&
+            child.address_space.generation == child_mapping_generation);
+
+    guest_page_backing_release(backing);
+    guest_page_table_destroy(&parent);
+    assert(source_probe.releases == 0 &&
+            tlb_read_byte(&child_tlb, NEXT_PAGE) ==
+                    exclusive_replacement);
+    guest_page_table_destroy(&child);
+    assert(source_probe.releases == 1 &&
+            guest_page_backing_test_live_count() == 0);
+}
+
 static void test_conflicts_and_holes(void) {
     struct guest_page_table table;
     assert(guest_page_table_init(&table, 48));
@@ -1464,6 +1594,7 @@ int main(void) {
     test_page_origins();
     test_set_origin_preserves_backing_semantics();
     test_private_file_cow_transactions();
+    test_shared_file_backing_lifecycle();
     test_supported_address_widths();
     test_backing_allocation_failures();
     test_shared_map_rollback();
