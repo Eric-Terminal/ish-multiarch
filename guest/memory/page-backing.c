@@ -316,3 +316,22 @@ void guest_page_backing_finish_writeback(
         backing->clean_generation = content_generation;
     sync->ops->write_unlock(sync->opaque);
 }
+
+void guest_page_backing_commit_file_write(
+        struct guest_page_backing *backing, size_t page_offset,
+        const byte_t *data, size_t size) {
+    assert(backing != NULL && data != NULL && size != 0);
+    assert(page_offset < GUEST_MEMORY_PAGE_SIZE &&
+            size <= GUEST_MEMORY_PAGE_SIZE - page_offset);
+    const struct guest_page_sync *sync = guest_page_backing_sync(backing);
+    sync->ops->write_lock(sync->opaque);
+    assert(backing->tracks_file_writes);
+    bool was_clean = backing->content_generation ==
+            backing->clean_generation;
+    memcpy(backing->bytes + page_offset, data, size);
+    sync->ops->written(sync->opaque, page_offset, size);
+    if (was_clean || (page_offset == 0 &&
+            size == GUEST_MEMORY_PAGE_SIZE))
+        backing->clean_generation = backing->content_generation;
+    sync->ops->write_unlock(sync->opaque);
+}

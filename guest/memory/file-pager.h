@@ -74,6 +74,15 @@ enum guest_file_page_result guest_file_pager_get_page(
 enum guest_file_sync_result guest_file_pager_sync_range(
         struct guest_file_pager *pager,
         qword_t file_offset, qword_t length);
+/*
+ * 普通文件 I/O 在持有 provider I/O 串行域时调用；两者都只访问已驻留
+ * cache，不触发 page-in 或 provider I/O。read_resident 用缓存覆盖底层
+ * read 的结果；commit_file_write 合并底层已经成功写入的前缀。
+ */
+void guest_file_pager_read_resident(struct guest_file_pager *pager,
+        qword_t file_offset, byte_t *data, size_t size);
+void guest_file_pager_commit_file_write(struct guest_file_pager *pager,
+        qword_t file_offset, const byte_t *data, size_t size);
 /* 返回值在调用方持有 pager 强引用期间有效，调用方不拥有额外引用。 */
 struct guest_file_source *guest_file_pager_file_source(
         struct guest_file_pager *pager);

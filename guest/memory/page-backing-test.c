@@ -269,6 +269,61 @@ static void test_file_dirty_generation(void) {
     assert(guest_page_backing_test_live_count() == 0);
 }
 
+static void test_committed_file_write_merge(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_page_backing *backing = guest_page_backing_create();
+    assert(backing != NULL);
+    guest_page_backing_track_file_writes(backing);
+
+    const struct guest_page_sync *sync =
+            guest_page_backing_sync(backing);
+    lock_sync_write(sync);
+    qword_t reservation = sync->ops->track_exclusive(
+            sync->opaque, 32);
+    unlock_sync_write(sync);
+
+    const byte_t clean_write[] = {UINT8_C(0x11), UINT8_C(0x22)};
+    guest_page_backing_commit_file_write(
+            backing, 32, clean_write, sizeof(clean_write));
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation;
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(guest_page_backing_bytes(backing)[32] == UINT8_C(0x11) &&
+            guest_page_backing_bytes(backing)[33] == UINT8_C(0x22));
+    lock_sync_write(sync);
+    assert(!sync->ops->exclusive_matches(
+            sync->opaque, 32, reservation));
+    guest_page_backing_bytes(backing)[47] = UINT8_C(0x44);
+    sync->ops->written(sync->opaque, 47, 1);
+    unlock_sync_write(sync);
+
+    const byte_t overlapping_write[] = {
+        UINT8_C(0x55), UINT8_C(0x66), UINT8_C(0x77),
+    };
+    guest_page_backing_commit_file_write(
+            backing, 33, overlapping_write, sizeof(overlapping_write));
+    assert(guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(snapshot[32] == UINT8_C(0x11) &&
+            snapshot[33] == UINT8_C(0x55) &&
+            snapshot[35] == UINT8_C(0x77) &&
+            snapshot[47] == UINT8_C(0x44));
+
+    byte_t complete_page[GUEST_MEMORY_PAGE_SIZE];
+    memset(complete_page, UINT8_C(0x9a), sizeof(complete_page));
+    guest_page_backing_commit_file_write(
+            backing, 0, complete_page, sizeof(complete_page));
+    assert(!guest_page_backing_copy_dirty(
+            backing, snapshot, &generation));
+    assert(guest_page_backing_bytes(backing)[0] == UINT8_C(0x9a) &&
+            guest_page_backing_bytes(backing)
+                    [GUEST_MEMORY_PAGE_SIZE - 1] == UINT8_C(0x9a));
+
+    guest_page_backing_release(backing);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
 int main(void) {
     test_zeroed_clone_and_lifecycle();
     test_concurrent_reference_updates();
@@ -276,6 +331,7 @@ int main(void) {
     test_sync_identity_lifecycle();
     test_sync_exclusive_granules();
     test_file_dirty_generation();
+    test_committed_file_write_merge();
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     return 0;
 }

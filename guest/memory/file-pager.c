@@ -387,6 +387,73 @@ enum guest_file_sync_result guest_file_pager_sync_range(
     return result;
 }
 
+static struct guest_page_backing *retain_resident_page(
+        struct guest_file_pager *pager, qword_t file_offset) {
+    check_pthread(pthread_mutex_lock(&pager->cache_lock));
+    struct cached_file_page *entry = find_cached_page(
+            pager, file_offset);
+    struct guest_page_backing *backing = NULL;
+    if (entry != NULL && entry->state == CACHED_FILE_PAGE_READY) {
+        assert(entry->backing != NULL);
+        backing = entry->backing;
+        guest_page_backing_retain(backing);
+    }
+    check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    return backing;
+}
+
+void guest_file_pager_read_resident(struct guest_file_pager *pager,
+        qword_t file_offset, byte_t *data, size_t size) {
+    assert(pager != NULL && (data != NULL || size == 0));
+    assert(size <= UINT64_MAX - file_offset);
+    while (size != 0) {
+        qword_t page_offset = file_offset & ~GUEST_MEMORY_PAGE_MASK;
+        size_t within_page = (size_t)
+                (file_offset & GUEST_MEMORY_PAGE_MASK);
+        size_t chunk = GUEST_MEMORY_PAGE_SIZE - within_page;
+        if (chunk > size)
+            chunk = size;
+        struct guest_page_backing *backing = retain_resident_page(
+                pager, page_offset);
+        if (backing != NULL) {
+            const struct guest_page_sync *sync =
+                    guest_page_backing_sync(backing);
+            sync->ops->read_lock(sync->opaque);
+            memcpy(data, guest_page_backing_bytes(backing) + within_page,
+                    chunk);
+            sync->ops->read_unlock(sync->opaque);
+            guest_page_backing_release(backing);
+        }
+        file_offset += chunk;
+        data += chunk;
+        size -= chunk;
+    }
+}
+
+void guest_file_pager_commit_file_write(struct guest_file_pager *pager,
+        qword_t file_offset, const byte_t *data, size_t size) {
+    assert(pager != NULL && (data != NULL || size == 0));
+    assert(size <= UINT64_MAX - file_offset);
+    while (size != 0) {
+        qword_t page_offset = file_offset & ~GUEST_MEMORY_PAGE_MASK;
+        size_t within_page = (size_t)
+                (file_offset & GUEST_MEMORY_PAGE_MASK);
+        size_t chunk = GUEST_MEMORY_PAGE_SIZE - within_page;
+        if (chunk > size)
+            chunk = size;
+        struct guest_page_backing *backing = retain_resident_page(
+                pager, page_offset);
+        if (backing != NULL) {
+            guest_page_backing_commit_file_write(
+                    backing, within_page, data, chunk);
+            guest_page_backing_release(backing);
+        }
+        file_offset += chunk;
+        data += chunk;
+        size -= chunk;
+    }
+}
+
 struct guest_file_source *guest_file_pager_file_source(
         struct guest_file_pager *pager) {
     assert(pager != NULL && pager->file_source != NULL);

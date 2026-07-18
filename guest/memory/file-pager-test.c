@@ -717,6 +717,92 @@ static void test_release_drains_dirty_pages(void) {
     assert(guest_page_backing_test_live_count() == baseline);
 }
 
+static void test_resident_file_io_merge(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    struct provider_probe probe;
+    probe_init(&probe);
+    struct guest_file_pager *pager = create_writable_pager(
+            UINT64_C(0x8234), &probe, true);
+    assert(pager != NULL);
+    struct guest_page_backing *first = load_page(pager, 0);
+    struct guest_page_backing *third = load_page(
+            pager, 2 * GUEST_MEMORY_PAGE_SIZE);
+
+    byte_t read_buffer[GUEST_MEMORY_PAGE_SIZE + 4];
+    memset(read_buffer, UINT8_C(0xee), sizeof(read_buffer));
+    probe_begin_io(&probe);
+    guest_file_pager_read_resident(pager,
+            GUEST_MEMORY_PAGE_SIZE - 2,
+            read_buffer, sizeof(read_buffer));
+    probe_end_io(&probe);
+    assert(read_buffer[0] == UINT8_C(0xff) &&
+            read_buffer[1] == UINT8_C(0x00));
+    assert(read_buffer[2] == UINT8_C(0xee) &&
+            read_buffer[GUEST_MEMORY_PAGE_SIZE + 1] == UINT8_C(0xee));
+    assert(read_buffer[GUEST_MEMORY_PAGE_SIZE + 2] == UINT8_C(0x01) &&
+            read_buffer[GUEST_MEMORY_PAGE_SIZE + 3] == UINT8_C(0x02));
+
+    byte_t spanning_write[GUEST_MEMORY_PAGE_SIZE + 4];
+    memset(spanning_write, UINT8_C(0x8c), sizeof(spanning_write));
+    probe_begin_io(&probe);
+    guest_file_pager_commit_file_write(pager,
+            GUEST_MEMORY_PAGE_SIZE - 2,
+            spanning_write, sizeof(spanning_write));
+    guest_file_pager_read_resident(
+            pager, UINT64_MAX, NULL, 0);
+    guest_file_pager_commit_file_write(
+            pager, UINT64_MAX, NULL, 0);
+    probe_end_io(&probe);
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    assert(!backing_is_dirty(first, snapshot) &&
+            !backing_is_dirty(third, snapshot));
+    assert(guest_page_backing_bytes(first)
+                    [GUEST_MEMORY_PAGE_SIZE - 2] == UINT8_C(0x8c) &&
+            guest_page_backing_bytes(third)[0] == UINT8_C(0x8c) &&
+            guest_page_backing_bytes(third)[1] == UINT8_C(0x8c) &&
+            probe.reads == 2);
+
+    const byte_t clean_write[] = {
+        UINT8_C(0xa1), UINT8_C(0xa2), UINT8_C(0xa3),
+    };
+    probe_begin_io(&probe);
+    guest_file_pager_commit_file_write(
+            pager, 20, clean_write, sizeof(clean_write));
+    probe_end_io(&probe);
+    assert(!backing_is_dirty(first, snapshot));
+    assert(guest_page_backing_bytes(first)[20] == UINT8_C(0xa1) &&
+            guest_page_backing_bytes(first)[22] == UINT8_C(0xa3));
+
+    write_backing_byte(first, 41, UINT8_C(0xb1));
+    const byte_t concurrent_write[] = {UINT8_C(0xc1), UINT8_C(0xc2)};
+    probe_begin_io(&probe);
+    guest_file_pager_commit_file_write(
+            pager, 21, concurrent_write, sizeof(concurrent_write));
+    probe_end_io(&probe);
+    assert(backing_is_dirty(first, snapshot));
+    assert(snapshot[20] == UINT8_C(0xa1) &&
+            snapshot[21] == UINT8_C(0xc1) &&
+            snapshot[22] == UINT8_C(0xc2) &&
+            snapshot[41] == UINT8_C(0xb1));
+
+    byte_t complete_page[GUEST_MEMORY_PAGE_SIZE];
+    memset(complete_page, UINT8_C(0xd4), sizeof(complete_page));
+    probe_begin_io(&probe);
+    guest_file_pager_commit_file_write(
+            pager, 0, complete_page, sizeof(complete_page));
+    probe_end_io(&probe);
+    assert(!backing_is_dirty(first, snapshot));
+    assert(guest_page_backing_bytes(first)[41] == UINT8_C(0xd4));
+
+    guest_page_backing_release(third);
+    guest_page_backing_release(first);
+    guest_file_pager_release(pager);
+    assert(probe.writes == 0 && probe.syncs == 1 &&
+            probe.releases == 1);
+    probe_destroy(&probe);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
 int main(void) {
     test_cache_and_tail_zero();
     test_failures_are_not_cached();
@@ -726,6 +812,7 @@ int main(void) {
     test_writeback_single_flight();
     test_writeback_generation_and_isolation();
     test_release_drains_dirty_pages();
+    test_resident_file_io_merge();
     assert(guest_page_backing_test_live_count() == 0);
     return 0;
 }

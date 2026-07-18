@@ -34,6 +34,14 @@ bool guest_page_backing_copy_dirty(
         qword_t *content_generation);
 void guest_page_backing_finish_writeback(
         struct guest_page_backing *backing, qword_t content_generation);
+/*
+ * 文件系统已经提交 data 后，用同一份结果合并驻留页。若页面原本 clean，
+ * 合并后仍 clean；若映射写与文件 I/O 并发发生，则保留 dirty，避免后续
+ * writeback 用旧页内容覆盖任一方的修改。
+ */
+void guest_page_backing_commit_file_write(
+        struct guest_page_backing *backing, size_t page_offset,
+        const byte_t *data, size_t size);
 // 常驻生命周期计数仅供集成测试在静止点检查资源回收。
 unsigned guest_page_backing_test_live_count(void);
 
