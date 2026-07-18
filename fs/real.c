@@ -72,12 +72,44 @@ qword_t realfs_inode_device(dev_t device) {
 
 struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mode) {
     int real_flags = open_flags_real_from_fake(flags);
-    int fd_no = openat(mount->root_fd, fix_path(path), real_flags, mode);
+    const char *host_path = fix_path(path);
+    bool opened_created = false;
+    int fd_no;
+    if ((real_flags & O_CREAT) != 0 && (real_flags & O_EXCL) == 0) {
+        for (;;) {
+            fd_no = openat(mount->root_fd, host_path,
+                    real_flags | O_EXCL, mode);
+            if (fd_no >= 0) {
+                opened_created = true;
+                break;
+            }
+            if (errno != EEXIST)
+                return ERR_PTR(errno_map());
+
+            fd_no = openat(mount->root_fd, host_path,
+                    real_flags & ~O_CREAT, mode);
+            if (fd_no >= 0)
+                break;
+            if (errno != ENOENT)
+                return ERR_PTR(errno_map());
+            // 目标在两次 open 之间消失，重新竞争一次原子创建。
+        }
+    } else {
+        fd_no = openat(mount->root_fd, host_path, real_flags, mode);
+        opened_created = fd_no >= 0 &&
+                (real_flags & (O_CREAT | O_EXCL)) ==
+                        (O_CREAT | O_EXCL);
+    }
     if (fd_no < 0)
         return ERR_PTR(errno_map());
     struct fd *fd = fd_create(&realfs_fdops);
+    if (fd == NULL) {
+        close(fd_no);
+        return ERR_PTR(_ENOMEM);
+    }
     fd->real_fd = fd_no;
     fd->dir = NULL;
+    fd->opened_created = opened_created;
     return fd;
 }
 
@@ -549,7 +581,10 @@ int realfs_getflags(struct fd *fd) {
     int flags = fcntl(fd->real_fd, F_GETFL);
     if (flags < 0)
         return errno_map();
-    return open_flags_fake_from_real(flags);
+    int guest_flags = open_flags_fake_from_real(flags);
+    if (!fd->logical_access_mode)
+        return guest_flags;
+    return (guest_flags & ~O_ACCMODE_) | (fd->flags & O_ACCMODE_);
 }
 
 int realfs_setflags(struct fd *fd, dword_t flags) {

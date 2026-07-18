@@ -986,6 +986,101 @@ static void test_resident_file_io_merge(void) {
     assert(guest_page_backing_test_live_count() == baseline);
 }
 
+static void assert_backing_range(struct guest_page_backing *backing,
+        size_t first, size_t last, byte_t value) {
+    const byte_t *bytes = guest_page_backing_bytes(backing);
+    for (size_t index = first; index < last; index++)
+        assert(bytes[index] == value);
+}
+
+static void test_resident_resize_invalidation(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    struct provider_probe probe;
+    probe_init(&probe);
+    struct guest_file_pager *pager = create_writable_pager(
+            UINT64_C(0x9234), &probe, true);
+    assert(pager != NULL);
+    struct guest_page_backing *first = load_page(pager, 0);
+    struct guest_page_backing *second = load_page(
+            pager, GUEST_MEMORY_PAGE_SIZE);
+    struct guest_page_backing *third = load_page(
+            pager, 2 * GUEST_MEMORY_PAGE_SIZE);
+    struct guest_page_backing *first_cow =
+            guest_page_backing_clone(first);
+    struct guest_page_backing *second_cow =
+            guest_page_backing_clone(second);
+    assert(first_cow != NULL && second_cow != NULL);
+    write_backing_byte(first, 17, UINT8_C(0xd1));
+    write_backing_byte(second, 23, UINT8_C(0xd2));
+
+    probe_begin_io(&probe);
+    guest_file_pager_resize_resident(
+            pager, 3 * GUEST_MEMORY_PAGE_SIZE, 123);
+    probe_end_io(&probe);
+    assert(guest_page_backing_file_accessible(first));
+    assert(guest_page_backing_file_accessible(first_cow));
+    assert(!guest_page_backing_file_accessible(second));
+    assert(!guest_page_backing_file_accessible(second_cow));
+    assert(!guest_page_backing_file_accessible(third));
+    assert(guest_page_backing_bytes(first)[17] == UINT8_C(0xd1));
+    assert_backing_range(first, 123, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert(guest_page_backing_bytes(first_cow)[123] == UINT8_C(0x7c));
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    assert(backing_is_dirty(first, snapshot));
+    assert(!backing_is_dirty(second, snapshot));
+
+    unsigned reads_after_shrink = probe.reads;
+    probe.result = GUEST_FILE_PAGE_END_OF_FILE;
+    struct guest_page_backing *reloaded = (void *) (uintptr_t) 1;
+    assert(guest_file_pager_get_page(
+            pager, GUEST_MEMORY_PAGE_SIZE, &reloaded) ==
+            GUEST_FILE_PAGE_END_OF_FILE && reloaded == NULL);
+    assert(probe.reads == reads_after_shrink + 1);
+
+    probe.result = GUEST_FILE_PAGE_OK;
+    probe.valid_bytes = (dword_t) GUEST_MEMORY_PAGE_SIZE;
+    probe_begin_io(&probe);
+    guest_file_pager_resize_resident(
+            pager, 123, GUEST_MEMORY_PAGE_SIZE + 17);
+    probe_end_io(&probe);
+    struct guest_page_backing *grown = load_page(
+            pager, GUEST_MEMORY_PAGE_SIZE);
+    assert(grown != second &&
+            guest_page_backing_file_accessible(grown));
+    assert(!guest_page_backing_file_accessible(second));
+    assert(!guest_page_backing_file_accessible(second_cow));
+
+    byte_t stale_tail[GUEST_MEMORY_PAGE_SIZE - 17];
+    memset(stale_tail, UINT8_C(0xee), sizeof(stale_tail));
+    guest_page_backing_commit_file_write(
+            grown, 17, stale_tail, sizeof(stale_tail));
+    struct guest_page_backing *grown_cow =
+            guest_page_backing_clone(grown);
+    assert(grown_cow != NULL);
+    probe_begin_io(&probe);
+    guest_file_pager_resize_resident(pager,
+            GUEST_MEMORY_PAGE_SIZE + 17,
+            GUEST_MEMORY_PAGE_SIZE + 17);
+    probe_end_io(&probe);
+    assert_backing_range(grown, 17, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert_backing_range(
+            grown_cow, 17, GUEST_MEMORY_PAGE_SIZE, UINT8_C(0xee));
+    assert(!backing_is_dirty(grown, snapshot));
+
+    guest_page_backing_release(grown_cow);
+    guest_page_backing_release(grown);
+    guest_page_backing_release(second_cow);
+    guest_page_backing_release(first_cow);
+    guest_page_backing_release(third);
+    guest_page_backing_release(second);
+    guest_page_backing_release(first);
+    guest_file_pager_release(pager);
+    assert(probe.releases == 1 &&
+            guest_file_pager_orphan_count() == 0);
+    probe_destroy(&probe);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
 int main(void) {
     test_cache_and_tail_zero();
     test_failures_are_not_cached();
@@ -998,6 +1093,7 @@ int main(void) {
     test_failed_drain_retain_reclaims_orphan();
     test_orphan_retry_callers_are_serialized();
     test_resident_file_io_merge();
+    test_resident_resize_invalidation();
     assert(guest_file_pager_orphan_count() == 0);
     assert(guest_page_backing_test_live_count() == 0);
     return 0;

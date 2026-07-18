@@ -51,7 +51,15 @@ static struct fd *generic_openat_task_access(struct task *task,
     if (err < 0)
         return ERR_PTR(err);
     struct mount *mount = find_mount_and_trim_path(path);
-    struct fd *fd = mount->fs->open(mount, path, flags, mode);
+    int provider_flags = flags & ~O_TRUNC_;
+    bool upgraded_truncate = (flags & O_TRUNC_) != 0 &&
+            (flags & O_ACCMODE_) == O_RDONLY_;
+    if (upgraded_truncate) {
+        /* 用户态 provider 需要一份可截断且仍可读的稳定句柄。 */
+        provider_flags = (provider_flags & ~O_ACCMODE_) | O_RDWR_;
+    }
+    struct fd *fd = mount->fs->open(
+            mount, path, provider_flags, mode);
     if (IS_ERR(fd)) {
         // if an error happens after this point, fd_close will release the
         // mount, but right now we need to do it manually
@@ -67,21 +75,52 @@ static struct fd *generic_openat_task_access(struct task *task,
         unlock(&inodes_lock);
         goto error;
     }
+    if (upgraded_truncate && !S_ISREG(stat.mode)) {
+        /* 非普通文件不发生截断，重新按 guest 访问模式打开。 */
+        unlock(&inodes_lock);
+        mount_retain(mount);
+        fd_close(fd);
+        provider_flags = flags & ~O_TRUNC_;
+        fd = mount->fs->open(mount, path, provider_flags, mode);
+        if (IS_ERR(fd)) {
+            mount_release(mount);
+            return fd;
+        }
+        fd->mount = mount;
+        lock(&inodes_lock);
+        memset(&stat, 0, sizeof(stat));
+        err = fd->mount->fs->fstat(fd, &stat);
+        if (err < 0) {
+            unlock(&inodes_lock);
+            goto error;
+        }
+    }
     fd->inode = inode_get_unlocked(
             mount, stat.inode_device, stat.inode);
     unlock(&inodes_lock);
     fd->type = stat.mode & S_IFMT;
-    fd->flags = flags;
+    fd->flags = flags & ~(O_CREAT_ | O_EXCL_ | O_NOCTTY_ |
+            O_TRUNC_ | O_CLOEXEC_);
+    fd->logical_access_mode = true;
 
     // 目录查找先锁定对象类型，避免把普通文件的权限错误误报给调用方。
     err = _ENOTDIR;
     if (!S_ISDIR(fd->type) && flags & O_DIRECTORY_)
         goto error;
+    err = _EISDIR;
+    if (S_ISDIR(fd->type) &&
+            (flags & (O_RDWR_ | O_WRONLY_ | O_TRUNC_)))
+        goto error;
 
-    if (accmode == AC_X && !(flags & O_DIRECTORY_) && !(stat.mode & 0111))
+    if (fd->opened_created) {
+        err = 0;
+    } else if (accmode == AC_X && !(flags & O_DIRECTORY_) &&
+            !(stat.mode & 0111)) {
         err = _EACCES;
-    else
-        err = access_check_identity(&identity, &stat, accmode);
+    } else {
+        err = access_check_identity(&identity, &stat,
+                accmode | ((flags & O_TRUNC_) ? AC_W : 0));
+    }
     if (err < 0)
         goto error;
 
@@ -99,9 +138,12 @@ static struct fd *generic_openat_task_access(struct task *task,
     err = _ENXIO;
     if (S_ISSOCK(fd->type))
         goto error;
-    err = _EISDIR;
-    if (S_ISDIR(fd->type) && flags & (O_RDWR_ | O_WRONLY_))
-        goto error;
+    if (!fd->opened_created && S_ISREG(fd->type) &&
+            (flags & O_TRUNC_) != 0) {
+        err = file_truncate_open_fd(fd);
+        if (err < 0)
+            goto error;
+    }
     return fd;
 
 error:

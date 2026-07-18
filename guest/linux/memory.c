@@ -287,26 +287,29 @@ static enum guest_memory_page_in_result guest_linux_page_in(
         struct guest_memory_fault *fault) {
     struct guest_linux_mm *memory = opaque;
     struct guest_page_table *table = memory->page_table;
-    bool locked = guest_page_table_read_lock(table);
+    bool locked = guest_page_table_write_lock(table);
     const struct guest_linux_vma *mapping = guest_linux_vma_find(
             &memory->vmas, page_base);
     unsigned permissions;
     if (mapping == NULL || !file_vma_source(mapping->source)) {
-        guest_page_table_read_unlock(table, locked);
+        guest_page_table_write_unlock(table, locked);
         return GUEST_MEMORY_PAGE_IN_FAILED;
     }
     if (!vma_allows_access(mapping, access, &permissions)) {
         fault->kind = GUEST_MEMORY_FAULT_PERMISSION;
-        guest_page_table_read_unlock(table, locked);
+        guest_page_table_write_unlock(table, locked);
         return GUEST_MEMORY_PAGE_IN_FAILED;
     }
+    // resize 只把跨地址空间 backing 标成不可访问；在当前 fault 事务中
+    // 撤销旧 PTE，随后按 provider 的新 EOF 重新换页或返回 SIGBUS。
+    (void) guest_page_table_remove_inaccessible(table, page_base);
     byte_t *resident_page;
     unsigned resident_permissions;
     if (guest_page_table_lookup(table, page_base,
             &resident_page, &resident_permissions) == GUEST_PAGE_TABLE_OK) {
         use(resident_page);
         use(resident_permissions);
-        guest_page_table_read_unlock(table, locked);
+        guest_page_table_write_unlock(table, locked);
         return GUEST_MEMORY_PAGE_IN_RETRY;
     }
 
@@ -317,7 +320,7 @@ static enum guest_memory_page_in_result guest_linux_page_in(
     qword_t delta = page_base - mapping->first;
     assert(mapping->file_offset <= UINT64_MAX - delta);
     qword_t file_offset = mapping->file_offset + delta;
-    guest_page_table_read_unlock(table, locked);
+    guest_page_table_write_unlock(table, locked);
 
     struct guest_page_backing *backing = NULL;
     enum guest_file_page_result page_result = guest_file_pager_get_page(

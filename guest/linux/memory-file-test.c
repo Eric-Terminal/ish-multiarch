@@ -184,6 +184,16 @@ static struct guest_file_pager *probe_writable_pager(
             });
 }
 
+static void probe_resize_file(struct file_probe *probe,
+        struct guest_file_pager *pager, qword_t new_size) {
+    assert(new_size <= sizeof(probe->data));
+    check_pthread(pthread_mutex_lock(&probe->lock));
+    qword_t old_size = probe->size;
+    probe->size = new_size;
+    guest_file_pager_resize_resident(pager, old_size, new_size);
+    check_pthread(pthread_mutex_unlock(&probe->lock));
+}
+
 struct memory_fixture {
     struct guest_page_table table;
     struct guest_linux_mm memory;
@@ -833,6 +843,154 @@ static void test_fork_before_fault_and_exclusive_cow(void) {
     probe_destroy(&probe);
 }
 
+static void test_resize_fork_aliases_and_regrow(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    struct memory_fixture parent;
+    fixture_init(&parent);
+    struct file_probe probe;
+    probe_init(&probe, &parent.table, 3 * GUEST_MEMORY_PAGE_SIZE);
+    struct guest_file_pager *pager =
+            probe_writable_pager(&probe, UINT64_C(0x6f44b312));
+    assert(pager != NULL);
+    qword_t protection = GUEST_LINUX_PROT_READ |
+            GUEST_LINUX_PROT_WRITE;
+    qword_t shared_result = map_shared(&parent, pager, 0,
+            3 * GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_SHARED, 0);
+    assert((sqword_t) shared_result >= 0);
+    guest_addr_t shared = (guest_addr_t) shared_result;
+    qword_t alias_result = map_shared(&parent, pager,
+            shared + 5 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_SHARED,
+            2 * GUEST_MEMORY_PAGE_SIZE);
+    qword_t private_tail_result = map_private(&parent, pager,
+            shared + 7 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_PRIVATE,
+            GUEST_MEMORY_PAGE_SIZE);
+    qword_t private_full_result = map_private(&parent, pager,
+            shared + 9 * GUEST_MEMORY_PAGE_SIZE,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_PRIVATE,
+            2 * GUEST_MEMORY_PAGE_SIZE);
+    assert(alias_result == shared + 5 * GUEST_MEMORY_PAGE_SIZE &&
+            private_tail_result == shared + 7 * GUEST_MEMORY_PAGE_SIZE &&
+            private_full_result == shared + 9 * GUEST_MEMORY_PAGE_SIZE);
+    guest_addr_t alias = (guest_addr_t) alias_result;
+    guest_addr_t private_tail = (guest_addr_t) private_tail_result;
+    guest_addr_t private_full = (guest_addr_t) private_full_result;
+    guest_addr_t shared_tail = shared + GUEST_MEMORY_PAGE_SIZE;
+    guest_addr_t shared_full = shared + 2 * GUEST_MEMORY_PAGE_SIZE;
+
+    struct guest_memory_fault fault;
+    byte_t value;
+    assert(guest_tlb_read(&parent.tlb, shared_tail + 200,
+            &value, 1, GUEST_MEMORY_READ, &fault));
+    assert(guest_tlb_read(&parent.tlb, shared_full + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault));
+    byte_t private_tail_value = UINT8_C(0xa7);
+    byte_t private_full_value = UINT8_C(0xb8);
+    assert(guest_tlb_write(&parent.tlb, private_tail + 200,
+            &private_tail_value, 1, &fault));
+    assert(guest_tlb_write(&parent.tlb, private_full + 17,
+            &private_full_value, 1, &fault));
+    struct guest_page_view old_shared = resolve_view(
+            &parent.table, shared_full, GUEST_MEMORY_READ);
+    struct guest_page_view old_private = resolve_view(
+            &parent.table, private_full, GUEST_MEMORY_READ);
+    assert(old_shared.sync != NULL && old_private.sync == NULL &&
+            old_private.access_sync != NULL);
+
+    struct guest_page_table child_table;
+    struct guest_linux_mm child_memory;
+    assert(guest_linux_mm_clone(
+            &child_memory, &child_table, &parent.memory));
+    guest_page_table_enable_concurrency(&child_table);
+    struct guest_tlb child_tlb;
+    guest_tlb_init(&child_tlb, &child_table.address_space);
+    assert(guest_tlb_read(&child_tlb, alias + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault));
+    assert(guest_tlb_read(&child_tlb, private_full + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == private_full_value);
+
+    struct guest_tlb_exclusive_token token;
+    byte_t exclusive_value;
+    assert(guest_tlb_load_exclusive(&parent.tlb, shared_full + 17,
+            &exclusive_value, 1, &token, &fault));
+    probe_resize_file(&probe, pager, GUEST_MEMORY_PAGE_SIZE + 123);
+
+    byte_t replacement = UINT8_C(0xcc);
+    assert(guest_tlb_store_exclusive(&parent.tlb, shared_full + 17,
+            &exclusive_value, &replacement, 1, token, &fault) ==
+            GUEST_TLB_EXCLUSIVE_FAULT);
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(guest_tlb_read(&parent.tlb, shared_tail + 122,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == probe.data[GUEST_MEMORY_PAGE_SIZE + 122]);
+    assert(guest_tlb_read(&parent.tlb, shared_tail + 123,
+            &value, 1, GUEST_MEMORY_READ, &fault) && value == 0);
+    assert(guest_tlb_read(&parent.tlb, private_tail + 200,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == private_tail_value);
+    assert(guest_tlb_read(&child_tlb, private_tail + 200,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == private_tail_value);
+
+    const guest_addr_t invalid_addresses[] = {
+        shared_full,
+        alias,
+        private_full,
+    };
+    for (size_t index = 0;
+            index < array_size(invalid_addresses); index++) {
+        value = UINT8_C(0xee);
+        assert(!guest_tlb_read(&parent.tlb,
+                invalid_addresses[index] + 17,
+                &value, 1, GUEST_MEMORY_READ, &fault));
+        assert(value == UINT8_C(0xee) &&
+                fault.kind == GUEST_MEMORY_FAULT_BUS_ADDRESS);
+        assert_not_resident(&parent.table, invalid_addresses[index]);
+    }
+    value = UINT8_C(0xee);
+    assert(!guest_tlb_read(&child_tlb, alias + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault));
+    assert(value == UINT8_C(0xee) &&
+            fault.kind == GUEST_MEMORY_FAULT_BUS_ADDRESS);
+    assert(!guest_tlb_read(&child_tlb, private_full + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault));
+    assert(value == UINT8_C(0xee) &&
+            fault.kind == GUEST_MEMORY_FAULT_BUS_ADDRESS);
+
+    probe_resize_file(&probe, pager, 3 * GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_tlb_read(&parent.tlb, shared_full + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == probe.data[2 * GUEST_MEMORY_PAGE_SIZE + 17]);
+    struct guest_page_view new_shared = resolve_view(
+            &parent.table, shared_full, GUEST_MEMORY_READ);
+    assert(new_shared.backing_identity != old_shared.backing_identity);
+    assert(guest_tlb_read(&child_tlb, alias + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == probe.data[2 * GUEST_MEMORY_PAGE_SIZE + 17]);
+    assert(guest_tlb_read(&parent.tlb, private_full + 17,
+            &value, 1, GUEST_MEMORY_READ, &fault) &&
+            value == probe.data[2 * GUEST_MEMORY_PAGE_SIZE + 17] &&
+            value != private_full_value);
+    struct guest_page_view new_private = resolve_view(
+            &parent.table, private_full, GUEST_MEMORY_READ);
+    assert(new_private.backing_identity != old_private.backing_identity &&
+            new_private.copy_on_write);
+
+    guest_file_pager_release(pager);
+    guest_linux_mm_destroy(&child_memory);
+    guest_page_table_destroy(&child_table);
+    fixture_destroy(&parent);
+    assert(probe.releases == 1 &&
+            guest_page_backing_test_live_count() == baseline);
+    probe_destroy(&probe);
+}
+
 struct blocked_read {
     struct guest_tlb tlb;
     guest_addr_t address;
@@ -1265,6 +1423,7 @@ int main(void) {
     test_lazy_mprotect_holes_and_fixed_replace();
     test_fixed_file_mapping_replaces_offset();
     test_fork_before_fault_and_exclusive_cow();
+    test_resize_fork_aliases_and_regrow();
     test_msync_ranges_errors_and_concurrency();
     test_fault_racing_munmap_drops_stale_page();
     test_fault_racing_file_source_replace();

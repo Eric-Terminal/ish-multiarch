@@ -58,6 +58,11 @@ struct open_probe {
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
+    qword_t file_size;
+    off_t_ requested_size;
+    unsigned resize_calls;
+    int resize_error;
+    bool report_created;
     struct access_identity_gate *access_gate;
 };
 
@@ -136,6 +141,7 @@ static struct fd *probe_open(struct mount *mount,
         .owned_path = true,
     };
     fd->data = state;
+    fd->opened_created = probe->report_created;
     return fd;
 }
 
@@ -173,7 +179,21 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
         .mode = state->probe->file_mode,
         .uid = state->probe->owner,
         .gid = state->probe->group,
+        .size = state->probe->file_size,
     };
+    return 0;
+}
+
+static int probe_fsetattr(struct fd *fd, struct attr attr) {
+    struct file_state *state = fd->data;
+    struct open_probe *probe = state->probe;
+    assert(lock_owned_by_current(&fd->lock));
+    assert(attr.type == attr_size);
+    probe->resize_calls++;
+    probe->requested_size = attr.size;
+    if (probe->resize_error != 0)
+        return probe->resize_error;
+    probe->file_size = (qword_t) attr.size;
     return 0;
 }
 
@@ -246,6 +266,7 @@ static const struct fs_ops probe_fs = {
     .rename = probe_rename,
     .stat = probe_stat,
     .fstat = probe_fstat,
+    .fsetattr = probe_fsetattr,
     .getpath = probe_getpath,
 };
 
@@ -646,6 +667,89 @@ int main(void) {
             "guest O_SYNC 位不改变只读打开的权限类别");
     fd_close(sync_read);
 
+    probe.file_mode = S_IFREG | 0600;
+    probe.file_size = 99;
+    unsigned resize_calls_before = probe.resize_calls;
+    struct fd *truncated_read = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
+    CHECK(!IS_ERR(truncated_read) && probe.last_flags == O_RDWR_ &&
+            probe.file_size == 0 &&
+            probe.resize_calls == resize_calls_before + 1,
+            "O_RDONLY|O_TRUNC 以可读写 provider 延迟提交截断");
+    CHECK((fd_getflags(truncated_read) & O_ACCMODE_) == O_RDONLY_ &&
+            (truncated_read->flags & O_TRUNC_) == 0,
+            "延迟截断不泄漏 provider 能力或一次性 O_TRUNC 状态");
+    fd_close(truncated_read);
+
+    probe.file_mode = S_IFREG;
+    probe.file_size = 0;
+    probe.report_created = true;
+    unsigned created_resize_calls = probe.resize_calls;
+    struct fd *created_truncate = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_CREAT_ | O_TRUNC_, 0);
+    CHECK(!IS_ERR(created_truncate) && created_truncate->opened_created &&
+            probe.last_flags == (O_RDWR_ | O_CREAT_) &&
+            probe.resize_calls == created_resize_calls,
+            "新创建文件跳过 inode 权限复核和冗余 O_TRUNC");
+    fd_close(created_truncate);
+    probe.report_created = false;
+
+    probe.file_mode = S_IFREG | 0400;
+    probe.file_size = 17;
+    struct fd *denied_truncate = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
+    CHECK(IS_ERR(denied_truncate) && PTR_ERR(denied_truncate) == _EACCES &&
+            probe.file_size == 17 &&
+            probe.resize_calls == resize_calls_before + 1,
+            "O_TRUNC 增加写权限检查且拒绝后不修改文件");
+    probe.file_mode = S_IFREG | 0200;
+    denied_truncate = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
+    CHECK(IS_ERR(denied_truncate) && PTR_ERR(denied_truncate) == _EACCES &&
+            probe.file_size == 17 &&
+            probe.resize_calls == resize_calls_before + 1,
+            "O_RDONLY|O_TRUNC 同时要求读取和写入权限");
+
+    probe.file_mode = S_IFIFO | 0666;
+    struct fd *fifo = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
+    CHECK(!IS_ERR(fifo) && S_ISFIFO(fifo->type) &&
+            probe.last_flags == O_RDONLY_ &&
+            probe.resize_calls == resize_calls_before + 1,
+            "非普通文件按原访问模式重开且不执行 O_TRUNC");
+    fd_close(fifo);
+
+    probe.file_mode = S_IFDIR | 0777;
+    struct fd *truncate_directory = generic_openat_task(&target.task,
+            AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
+    CHECK(IS_ERR(truncate_directory) &&
+            PTR_ERR(truncate_directory) == _EISDIR &&
+            probe.last_flags == O_RDONLY_ &&
+            probe.resize_calls == resize_calls_before + 1,
+            "O_TRUNC 对目录在权限检查前返回 EISDIR");
+
+    unsigned opens_before_truncate = probe.opens;
+    probe.file_mode = S_IFREG | 0600;
+    CHECK(file_truncate_task(&target.task, "created", 7) == 0 &&
+            probe.last_flags == (O_WRONLY_ | O_NONBLOCK_) &&
+            probe.file_size == 7 &&
+            probe.requested_size == 7 &&
+            probe.resize_calls == resize_calls_before + 2,
+            "path truncate 通过稳定可写对象提交尺寸变更");
+    probe.resize_error = _EIO;
+    CHECK(file_truncate_task(&target.task, "created", 3) == _EIO &&
+            probe.file_size == 7 &&
+            probe.resize_calls == resize_calls_before + 3,
+            "path truncate 传播底层失败且保持原大小");
+    probe.resize_error = 0;
+    CHECK(file_truncate_task(&target.task, "created", -1) == _EINVAL &&
+            probe.opens == opens_before_truncate + 2,
+            "path truncate 的负长度在路径查找前返回 EINVAL");
+    CHECK(file_truncate_task(&target.task, "child", 0) == _EISDIR &&
+            probe.opens == opens_before_truncate + 2,
+            "path truncate 对目录返回 EISDIR 且不打开对象");
+    probe.file_mode = S_IFREG | 0400;
+
     struct statbuf target_stat;
     memset(&target_stat, 0xff, sizeof(target_stat));
     CHECK(generic_statat(AT_PWD, "child", &target_stat, true) == 0 &&
@@ -944,7 +1048,7 @@ int main(void) {
     fd_close(decoy.root);
     fd_close(target.pwd);
     fd_close(target.root);
-    CHECK(probe.opens == 11 && probe.closes == 11,
+    CHECK(probe.opens == 21 && probe.closes == 21,
             "所有成功、拒绝和超限打开都恰好关闭一次");
     CHECK(mount->refcount == 1, "清理阶段仅保留测试持有的 mount 引用");
     mount_release(mount);

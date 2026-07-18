@@ -32,7 +32,8 @@ int access_check_identity(const struct fs_access_identity *identity,
     } else if (identity->gid == stat->gid) {
         check <<= 3;
     }
-    if (!(stat->mode & check))
+    mode_t_ requested = (mode_t_) check;
+    if ((stat->mode & requested) != requested)
         return _EACCES;
     return 0;
 }
@@ -805,35 +806,62 @@ dword_t sys_lchown(addr_t path_addr, uid_t_ owner, uid_t_ group) {
     return sys_fchownat(AT_FDCWD_, path_addr, owner, group, AT_SYMLINK_NOFOLLOW_);
 }
 
-dword_t sys_truncate64(addr_t path_addr, dword_t size_low, dword_t size_high) {
-    off_t_ size = ((qword_t) size_high << 32) | size_low;
+static off_t_ truncate_size64(
+        dword_t size_low, dword_t size_high) {
+    qword_t bits = ((qword_t) size_high << 32) | size_low;
+    off_t_ size;
+    _Static_assert(sizeof(size) == sizeof(bits),
+            "i386 truncate64 长度必须保持 64 位 wire 宽度");
+    memcpy(&size, &bits, sizeof(size));
+    return size;
+}
+
+dword_t sys_truncate(addr_t path_addr, dword_t raw_size) {
+    off_t_ size = (off_t_) (sdword_t) raw_size;
+    if (size < 0)
+        return _EINVAL;
     char path[MAX_PATH];
     if (user_read_string(path_addr, path, sizeof(path)))
         return _EFAULT;
-    return generic_setattrat(NULL, path, make_attr(size, size), true);
+    return file_truncate_task(current, path, size);
+}
+
+dword_t sys_ftruncate(fd_t f, dword_t raw_size) {
+    off_t_ size = (off_t_) (sdword_t) raw_size;
+    return file_ftruncate_task(current, f, size);
+}
+
+dword_t sys_truncate64(addr_t path_addr, dword_t size_low, dword_t size_high) {
+    off_t_ size = truncate_size64(size_low, size_high);
+    if (size < 0)
+        return _EINVAL;
+    char path[MAX_PATH];
+    if (user_read_string(path_addr, path, sizeof(path)))
+        return _EFAULT;
+    return file_truncate_task(current, path, size);
 }
 
 dword_t sys_ftruncate64(fd_t f, dword_t size_low, dword_t size_high) {
-    off_t_ size = ((qword_t) size_high << 32) | size_low;
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    return generic_fsetattr(fd, make_attr(size, size));
+    off_t_ size = truncate_size64(size_low, size_high);
+    return file_ftruncate_task(current, f, size);
 }
 
 dword_t sys_fallocate(fd_t f, dword_t UNUSED(mode), dword_t offset_low, dword_t offset_high, dword_t len_low, dword_t len_high) {
     off_t_ offset = ((qword_t) offset_high << 32) | offset_low;
     off_t_ len = ((qword_t) len_high << 32) | len_low;
-    struct fd *fd = f_get(f);
+    struct fd *fd = f_get_task_retain(current, f);
     if (fd == NULL)
         return _EBADF;
-    struct statbuf statbuf;
-    int err = fd->mount->fs->fstat(fd, &statbuf);
-    if (err < 0)
-        return err;
-    if ((uint64_t) offset + (uint64_t) len > statbuf.size)
-        return generic_fsetattr(fd, make_attr(size, offset + len));
-    return 0;
+    int result;
+    if (offset < 0 || len <= 0)
+        result = _EINVAL;
+    else if ((qword_t) offset >
+            (qword_t) INT64_MAX - (qword_t) len)
+        result = _EFBIG;
+    else
+        result = file_grow_fd(fd, offset + len);
+    fd_close(fd);
+    return result;
 }
 
 dword_t sys_mkdirat(fd_t at_f, addr_t path_addr, mode_t_ mode) {

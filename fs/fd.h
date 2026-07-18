@@ -16,6 +16,10 @@ struct task;
 struct fd {
     atomic_uint refcount;
     unsigned flags;
+    // provider 原子 open 的结果；只描述该打开是否创建了最终对象。
+    bool opened_created;
+    // generic open 已记录 guest 访问模式时，provider 不得泄漏提升能力。
+    bool logical_access_mode;
     mode_t_ type; // just the S_IFMT part, it can't change
     const struct fd_ops *ops;
     struct list poll_fds;

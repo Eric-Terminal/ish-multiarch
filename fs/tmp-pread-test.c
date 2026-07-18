@@ -39,6 +39,12 @@ int main(void) {
     mount = NULL;
     fd->type = S_IFREG;
     fd->flags = O_RDWR_;
+    CHECK(fd->opened_created, "tmpfs 原子报告新建文件");
+    struct fd *existing = fd->mount->fs->open(
+            fd->mount, "/positioned", O_CREAT_ | O_RDWR_, 0644);
+    CHECK(!IS_ERR(existing) && !existing->opened_created,
+            "tmpfs 原子区分既存文件");
+    fd_close(existing);
     CHECK(fd->ops->page_cacheable && fd->ops->pread != NULL &&
             fd->ops->pwrite != NULL && fd->ops->page_pwrite != NULL,
             "tmpfs 普通文件必须提供可分页的精确定位读写");
@@ -93,6 +99,51 @@ int main(void) {
     CHECK(file_sync_fd(fd, true) == 0 &&
             file_sync_fd(fd, false) == 0,
             "tmpfs 的 fdatasync 与 fsync 均为空操作成功");
+
+    CHECK(fd->mount->fs->fsetattr(fd, make_attr(size, 3)) == 0,
+            "fd 属性入口可缩短 tmpfs 普通文件");
+    memset(final, 0x7f, sizeof(final));
+    CHECK(file_fstat_fd(fd, &stat) == 0 && stat.size == 3 &&
+            file_pread_fd(fd, final, sizeof(final), 0) == 3 &&
+            memcmp(final, "ZXY", 3) == 0,
+            "缩短后只保留新 EOF 之前的数据");
+
+    CHECK(fd->mount->fs->fsetattr(fd, make_attr(size, 7)) == 0,
+            "fd 属性入口可增长 tmpfs 普通文件");
+    memset(final, 0x7f, sizeof(final));
+    CHECK(file_pread_fd(fd, final, 7, 0) == 7 &&
+            memcmp(final, "ZXY\0\0\0\0", 7) == 0,
+            "重新增长的区间全部零填充而不泄漏截断内容");
+
+    CHECK(fd->mount->fs->fsetattr(fd, make_attr(size, -1)) == _EINVAL,
+            "负文件大小被拒绝");
+    memset(final, 0x7f, sizeof(final));
+    CHECK(file_fstat_fd(fd, &stat) == 0 && stat.size == 7 &&
+            file_pread_fd(fd, final, 7, 0) == 7 &&
+            memcmp(final, "ZXY\0\0\0\0", 7) == 0,
+            "尺寸变更失败不修改原大小或内容");
+
+#if SIZE_MAX < INT64_MAX
+    CHECK(fd->mount->fs->fsetattr(
+            fd, make_attr(size, INT64_MAX)) == _EFBIG,
+            "超过宿主 size_t 的文件大小返回 EFBIG");
+    CHECK(file_fstat_fd(fd, &stat) == 0 && stat.size == 7,
+            "超出宿主范围失败后文件大小保持不变");
+#endif
+
+    CHECK(fd->mount->fs->setattr(
+            fd->mount, "/positioned", make_attr(size, 0)) == 0,
+            "路径属性入口可将 tmpfs 普通文件截断为零");
+    CHECK(file_fstat_fd(fd, &stat) == 0 && stat.size == 0 &&
+            file_pread_fd(fd, final, sizeof(final), 0) == 0,
+            "零长度截断释放内容并发布空文件大小");
+    CHECK(fd->mount->fs->setattr(
+            fd->mount, "/positioned", make_attr(size, 4)) == 0,
+            "路径属性入口可从零增长 tmpfs 普通文件");
+    memset(final, 0x7f, sizeof(final));
+    CHECK(file_pread_fd(fd, final, 4, 0) == 4 &&
+            memcmp(final, "\0\0\0\0", 4) == 0,
+            "从零增长的文件内容全部零填充");
 
     int close_error = fd_close(fd);
     fd = NULL;

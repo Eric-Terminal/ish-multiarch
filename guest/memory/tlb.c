@@ -6,9 +6,11 @@
 
 struct guest_tlb_access_chunk {
     byte_t *host;
+    guest_addr_t guest;
     size_t size;
     size_t page_offset;
     const struct guest_page_sync *sync;
+    const struct guest_page_sync *access_sync;
     bool copy_on_write;
 };
 
@@ -54,6 +56,20 @@ static unsigned guest_tlb_index(guest_addr_t page_base) {
             (GUEST_TLB_SIZE - 1));
 }
 
+static const struct guest_page_sync *chunk_access_sync(
+        const struct guest_tlb_access_chunk *chunk) {
+    return chunk->sync != NULL ? chunk->sync : chunk->access_sync;
+}
+
+static bool sync_is_accessible(const struct guest_page_sync *sync) {
+    if (sync == NULL)
+        return true;
+    guest_page_sync_read_lock(sync);
+    bool accessible = guest_page_sync_accessible(sync);
+    guest_page_sync_read_unlock(sync);
+    return accessible;
+}
+
 static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         guest_addr_t address, enum guest_memory_access access,
         struct guest_tlb_access_chunk *chunk) {
@@ -64,9 +80,15 @@ static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
     struct guest_tlb_entry *entry = &tlb->entries[guest_tlb_index(page_base)];
     if (entry->valid && entry->guest_page == page_base &&
             (entry->permissions & access) != 0) {
+        const struct guest_page_sync *access_sync = entry->sync != NULL ?
+                entry->sync : entry->access_sync;
+        if (!sync_is_accessible(access_sync))
+            return GUEST_MEMORY_FAULT_UNMAPPED;
+        chunk->guest = address;
         chunk->page_offset = (size_t) (address & GUEST_MEMORY_PAGE_MASK);
         chunk->host = entry->host_page + chunk->page_offset;
         chunk->sync = entry->sync;
+        chunk->access_sync = entry->access_sync;
         chunk->copy_on_write = entry->copy_on_write;
         return GUEST_MEMORY_FAULT_NONE;
     }
@@ -84,13 +106,20 @@ static enum guest_memory_fault_kind resolve_host_pointer(struct guest_tlb *tlb,
         .guest_page = page_base,
         .host_page = view.host_page,
         .sync = view.sync,
+        .access_sync = view.access_sync,
         .permissions = view.permissions,
         .copy_on_write = view.copy_on_write,
         .valid = true,
     };
+    const struct guest_page_sync *access_sync = entry->sync != NULL ?
+            entry->sync : entry->access_sync;
+    if (!sync_is_accessible(access_sync))
+        return GUEST_MEMORY_FAULT_UNMAPPED;
+    chunk->guest = address;
     chunk->page_offset = (size_t) (address & GUEST_MEMORY_PAGE_MASK);
     chunk->host = entry->host_page + chunk->page_offset;
     chunk->sync = entry->sync;
+    chunk->access_sync = entry->access_sync;
     chunk->copy_on_write = entry->copy_on_write;
     return GUEST_MEMORY_FAULT_NONE;
 }
@@ -178,7 +207,8 @@ static void collect_syncs(const struct guest_tlb_access_chunk chunks[2],
     // address space 锁始终在外层；同步域按稳定身份加锁，避免反向别名死锁。
     *set = (struct guest_tlb_sync_set) {0};
     for (unsigned chunk = 0; chunk < chunk_count; chunk++) {
-        const struct guest_page_sync *sync = chunks[chunk].sync;
+        const struct guest_page_sync *sync =
+                chunk_access_sync(&chunks[chunk]);
         if (sync == NULL)
             continue;
         qword_t identity = guest_page_sync_identity(sync);
@@ -201,6 +231,36 @@ static void collect_syncs(const struct guest_tlb_access_chunk chunks[2],
         set->items[index] = sync;
         set->count++;
     }
+}
+
+static void lock_syncs(const struct guest_tlb_sync_set *set, bool write);
+static void unlock_syncs(const struct guest_tlb_sync_set *set, bool write);
+
+static bool chunks_are_accessible(
+        const struct guest_tlb_access_chunk chunks[2],
+        unsigned chunk_count, struct guest_memory_fault *fault) {
+    for (unsigned index = 0; index < chunk_count; index++) {
+        const struct guest_page_sync *sync =
+                chunk_access_sync(&chunks[index]);
+        if (sync != NULL && !guest_page_sync_accessible(sync)) {
+            fault->address = chunks[index].guest;
+            fault->kind = GUEST_MEMORY_FAULT_UNMAPPED;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool lock_access_syncs(
+        const struct guest_tlb_access_chunk chunks[2],
+        unsigned chunk_count, struct guest_tlb_sync_set *syncs,
+        bool write, struct guest_memory_fault *fault) {
+    collect_syncs(chunks, chunk_count, syncs);
+    lock_syncs(syncs, write);
+    if (chunks_are_accessible(chunks, chunk_count, fault))
+        return true;
+    unlock_syncs(syncs, write);
+    return false;
 }
 
 static void lock_syncs(const struct guest_tlb_sync_set *set, bool write) {
@@ -237,20 +297,20 @@ bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         struct guest_memory_fault *fault) {
     assert(access == GUEST_MEMORY_READ || access == GUEST_MEMORY_EXECUTE);
     struct guest_tlb_access_chunk chunks[2];
+    struct guest_tlb_sync_set syncs;
     unsigned chunk_count;
     bool locked;
     for (;;) {
         locked = guest_address_space_read_lock(tlb->address_space);
         if (prepare_access(tlb, address, size,
-                access, chunks, &chunk_count, fault))
+                access, chunks, &chunk_count, fault) &&
+                lock_access_syncs(chunks, chunk_count,
+                        &syncs, false, fault))
             break;
         guest_address_space_read_unlock(tlb->address_space, locked);
         if (!page_in_and_retry(tlb, fault))
             return false;
     }
-    struct guest_tlb_sync_set syncs;
-    collect_syncs(chunks, chunk_count, &syncs);
-    lock_syncs(&syncs, false);
 
     byte_t *output = destination;
     for (unsigned i = 0; i < chunk_count; i++) {
@@ -279,20 +339,20 @@ bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
     assert(exclusive_access_fits_granule(address, size));
     *token = (struct guest_tlb_exclusive_token) {0};
     struct guest_tlb_access_chunk chunks[2];
+    struct guest_tlb_sync_set syncs;
     unsigned chunk_count;
     bool locked;
     for (;;) {
         locked = guest_address_space_write_lock(tlb->address_space);
         if (prepare_access(tlb, address, size, GUEST_MEMORY_READ,
-                chunks, &chunk_count, fault))
+                chunks, &chunk_count, fault) &&
+                lock_access_syncs(chunks, chunk_count,
+                        &syncs, true, fault))
             break;
         guest_address_space_write_unlock(tlb->address_space, locked);
         if (!page_in_and_retry(tlb, fault))
             return false;
     }
-    struct guest_tlb_sync_set syncs;
-    collect_syncs(chunks, chunk_count, &syncs);
-    lock_syncs(&syncs, true);
 
     byte_t *output = destination;
     for (unsigned i = 0; i < chunk_count; i++) {
@@ -318,20 +378,20 @@ bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
 bool guest_tlb_write(struct guest_tlb *tlb, guest_addr_t address,
         const void *source, size_t size, struct guest_memory_fault *fault) {
     struct guest_tlb_access_chunk chunks[2];
+    struct guest_tlb_sync_set syncs;
     unsigned chunk_count;
     bool locked;
     for (;;) {
         locked = guest_address_space_write_lock(tlb->address_space);
         if (prepare_write_access(tlb, address, size,
-                chunks, &chunk_count, fault))
+                chunks, &chunk_count, fault) &&
+                lock_access_syncs(chunks, chunk_count,
+                        &syncs, true, fault))
             break;
         guest_address_space_write_unlock(tlb->address_space, locked);
         if (!page_in_and_retry(tlb, fault))
             return false;
     }
-    struct guest_tlb_sync_set syncs;
-    collect_syncs(chunks, chunk_count, &syncs);
-    lock_syncs(&syncs, true);
 
     const byte_t *input = source;
     for (unsigned i = 0; i < chunk_count; i++) {
@@ -376,8 +436,11 @@ enum guest_tlb_store_exclusive_result guest_tlb_store_exclusive(
         return GUEST_TLB_EXCLUSIVE_FAILED;
     }
     struct guest_tlb_sync_set syncs;
-    collect_syncs(chunks, chunk_count, &syncs);
-    lock_syncs(&syncs, true);
+    if (!lock_access_syncs(chunks, chunk_count,
+            &syncs, true, fault)) {
+        guest_address_space_write_unlock(tlb->address_space, locked);
+        return GUEST_TLB_EXCLUSIVE_FAULT;
+    }
     bool reservation_matches = chunks[0].sync == NULL ?
             guest_address_space_exclusive_matches(tlb->address_space,
                     address, token.write_generation) :
@@ -437,12 +500,15 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
     memcpy(expected_bytes, expected, size);
     memcpy(replacement_bytes, replacement, size);
     struct guest_tlb_access_chunk chunks[2];
+    struct guest_tlb_sync_set syncs;
     unsigned chunk_count;
     bool locked;
     for (;;) {
         locked = guest_address_space_write_lock(tlb->address_space);
         if (prepare_write_access(tlb, address, size,
-                chunks, &chunk_count, fault))
+                chunks, &chunk_count, fault) &&
+                lock_access_syncs(chunks, chunk_count,
+                        &syncs, true, fault))
             break;
         guest_address_space_write_unlock(tlb->address_space, locked);
         if (!allow_page_in)
@@ -450,10 +516,6 @@ static enum guest_tlb_compare_exchange_result compare_exchange(
         if (!page_in_and_retry(tlb, fault))
             return GUEST_TLB_COMPARE_EXCHANGE_FAULT;
     }
-    struct guest_tlb_sync_set syncs;
-    collect_syncs(chunks, chunk_count, &syncs);
-    lock_syncs(&syncs, true);
-
     struct guest_tlb_mapping_snapshot resolved_snapshot;
     if (snapshot != NULL) {
         assert(chunk_count == 1);

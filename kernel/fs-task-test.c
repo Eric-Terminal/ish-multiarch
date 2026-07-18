@@ -47,8 +47,12 @@ struct io_probe {
     int fsync_error;
     int fdatasync_error;
     int stat_error;
+    int resize_error;
     int path_error;
     qword_t inode;
+    qword_t size;
+    off_t_ requested_size;
+    unsigned resize_calls;
     const char *path;
     struct close_gate *close_gate;
     unsigned close_calls;
@@ -134,6 +138,20 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
         return probe->stat_error;
     stat->inode = probe->inode;
     stat->mode = S_IFREG | 0644;
+    stat->size = probe->size;
+    return 0;
+}
+
+static int probe_fsetattr(struct fd *fd, struct attr attr) {
+    struct io_probe *probe = fd->data;
+    assert(lock_owned_by_current(&fd->lock));
+    assert(attr.type == attr_size);
+    wait_for_concurrent_close(fd);
+    probe->resize_calls++;
+    probe->requested_size = attr.size;
+    if (probe->resize_error != 0)
+        return probe->resize_error;
+    probe->size = (qword_t) attr.size;
     return 0;
 }
 
@@ -200,6 +218,7 @@ static const struct fd_ops empty_ops = {};
 
 static const struct fs_ops probe_fs = {
     .fstat = probe_fstat,
+    .fsetattr = probe_fsetattr,
     .getpath = probe_getpath,
 };
 
@@ -232,6 +251,7 @@ enum close_race_operation {
     CLOSE_RACE_WRITE,
     CLOSE_RACE_WRITE_CHECK,
     CLOSE_RACE_FSTAT,
+    CLOSE_RACE_FTRUNCATE,
 };
 
 struct close_race_context {
@@ -261,6 +281,10 @@ static void *run_close_race_operation(void *opaque) {
         case CLOSE_RACE_FSTAT:
             context->result = file_fstat_task(
                     context->task, context->fd_number, &stat);
+            break;
+        case CLOSE_RACE_FTRUNCATE:
+            context->result = file_ftruncate_task(
+                    context->task, context->fd_number, 7);
             break;
     }
     return NULL;
@@ -410,6 +434,7 @@ int main(void) {
         CLOSE_RACE_WRITE,
         CLOSE_RACE_WRITE_CHECK,
         CLOSE_RACE_FSTAT,
+        CLOSE_RACE_FTRUNCATE,
     };
     for (size_t index = 0; index < array_size(close_races); index++) {
         CHECK(test_close_during_operation(&target, close_races[index]),
@@ -454,22 +479,75 @@ int main(void) {
             "缺少 fdatasync 时数据同步回退到更强的 fsync");
     CHECK(file_sync_task(&target.task, 99, false) == _EBADF,
             "文件同步先拒绝无效 fd");
+
+    target_io.size = 8192;
+    target_fd->offset = 37;
+    CHECK(file_ftruncate_task(&target.task, 0, 4097) == 0 &&
+            target_io.size == 4097 && target_io.requested_size == 4097 &&
+            target_io.resize_calls == 1 && target_fd->offset == 37,
+            "ftruncate 修改文件大小且保持共享顺序位置");
+    CHECK(file_ftruncate_task(&target.task, 0, 4097) == 0 &&
+            target_io.resize_calls == 2,
+            "等长 ftruncate 仍提交底层尺寸操作");
+    target_io.resize_error = _ENOSPC;
+    CHECK(file_ftruncate_task(&target.task, 0, 3) == _ENOSPC &&
+            target_io.size == 4097 && target_io.resize_calls == 3,
+            "底层截断失败保持原大小并传播错误");
+    target_io.resize_error = 0;
+    CHECK(file_grow_fd(target_fd, 1024) == 0 &&
+            target_io.resize_calls == 3 && target_io.size == 4097,
+            "仅增长入口不得缩短现有文件");
+    CHECK(file_grow_fd(target_fd, 8193) == 0 &&
+            target_io.resize_calls == 4 && target_io.size == 8193,
+            "仅增长入口在目标超过 EOF 时提交尺寸变更");
+    target.mount.flags = MS_READONLY_;
+    CHECK(file_ftruncate_task(&target.task, 0, 0) == _EROFS &&
+            target_io.resize_calls == 4,
+            "只读挂载在底层调用前拒绝截断");
+    target.mount.flags = 0;
+    CHECK(file_ftruncate_task(&target.task, 99, -1) == _EINVAL &&
+            file_ftruncate_task(&target.task, 99, 0) == _EBADF,
+            "负长度优先于 fd 查表，无效非负 fd 返回 EBADF");
+    CHECK(file_ftruncate_task(&target.task, 2, 0) == _EINVAL,
+            "ftruncate 对目录返回 EINVAL");
     current = &target.task;
     CHECK(sys_fsync(0) == 0 && sys_fdatasync(0) == 0 &&
             target_io.fsync_calls == 3 &&
             target_io.fdatasync_calls == 3,
             "i386 fsync 与 fdatasync 系统调用选择独立同步模式");
+    CHECK(sys_ftruncate(0, 123) == 0 && target_io.size == 123 &&
+            target_io.resize_calls == 5,
+            "i386 93 按有符号 32 位长度调用公共 ftruncate 服务");
+    CHECK(sys_ftruncate64(0, 1, 1) == 0 &&
+            target_io.size == UINT64_C(0x100000001) &&
+            target_io.resize_calls == 6,
+            "i386 194 按 low/high 顺序保留完整 64 位长度");
+    CHECK(sys_ftruncate(99, UINT32_MAX) == (dword_t) _EINVAL &&
+            sys_ftruncate64(99, 0, UINT32_MAX) ==
+                    (dword_t) _EINVAL &&
+            sys_truncate(0, UINT32_MAX) == (dword_t) _EINVAL &&
+            sys_truncate64(0, 0, UINT32_MAX) ==
+                    (dword_t) _EINVAL &&
+            target_io.resize_calls == 6,
+            "i386 两套 truncate 的负长度均优先于路径或 fd 访问");
+    CHECK(sys_ftruncate(99, 0) == (dword_t) _EBADF &&
+            sys_ftruncate64(99, 0, 0) == (dword_t) _EBADF,
+            "i386 两套 ftruncate 对非负长度的无效 fd 返回 EBADF");
     current = &decoy.task;
     target_fd->flags = O_RDONLY_;
     CHECK(file_write_check_task(&target.task, 0) == _EBADF,
             "写入预检拒绝只读 fd");
+    CHECK(file_ftruncate_task(&target.task, 0, 0) == _EINVAL &&
+            target_io.resize_calls == 6,
+            "ftruncate 对只读 fd 返回 EINVAL 且不触碰底层");
     target_fd->flags = O_RDWR_;
 
     struct statbuf stat;
     memset(&stat, 0xff, sizeof(stat));
     CHECK(file_fstat_task(&target.task, 0, &stat) == 0,
             "host-buffer fstat 使用显式目标任务");
-    CHECK(stat.inode == target_io.inode && stat.dev == 0 && stat.size == 0,
+    CHECK(stat.inode == target_io.inode && stat.dev == 0 &&
+            stat.size == target_io.size,
             "fstat 先清零架构中立结果再填充字段");
 
     char exact_cwd[8];

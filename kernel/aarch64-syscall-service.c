@@ -68,6 +68,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_RENAMEAT = 38,
+    AARCH64_LINUX_SYS_TRUNCATE = 45,
+    AARCH64_LINUX_SYS_FTRUNCATE = 46,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
     AARCH64_LINUX_SYS_OPENAT = 56,
@@ -737,6 +739,21 @@ static qword_t dispatch_renameat(
     return syscall_result(file_renameat_task(task,
             syscall_fd(syscall->arguments[0]), source,
             syscall_fd(syscall->arguments[2]), destination));
+}
+
+static qword_t dispatch_truncate(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    off_t_ size = (off_t_) (sqword_t) syscall->arguments[1];
+    if (size < 0)
+        return syscall_result(_EINVAL);
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[0], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_truncate_task(task, path, size));
 }
 
 static qword_t dispatch_connect(
@@ -2072,6 +2089,13 @@ static qword_t dispatch_syscall(
         case AARCH64_LINUX_SYS_RENAMEAT:
             return dispatch_renameat(
                     context, syscall, task, fault, false);
+        case AARCH64_LINUX_SYS_TRUNCATE:
+            return dispatch_truncate(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FTRUNCATE:
+            return syscall_result(file_ftruncate_task(task,
+                    syscall_fd(syscall->arguments[0]),
+                    (off_t_) (sqword_t) syscall->arguments[1]));
         case AARCH64_LINUX_SYS_CHDIR:
             return dispatch_chdir(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FCHDIR:

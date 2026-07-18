@@ -39,6 +39,10 @@ static void attach_mapping_fd(
 int main(void) {
     int status = 1;
     struct fd *fd = NULL;
+    struct fd *creation_fd = NULL;
+    int creation_root = -1;
+    bool creation_directory_exists = false;
+    char creation_directory[] = "/tmp/ish-real-open-XXXXXX";
     char path[] = "/tmp/ish-real-pwrite-XXXXXX";
     int host_fd = mkstemp(path);
     CHECK(host_fd >= 0, "创建临时文件");
@@ -51,6 +55,8 @@ int main(void) {
     CHECK(fd != NULL, "创建 realfs 文件对象");
     fd->real_fd = host_fd;
     fd->type = S_IFREG;
+    fd->flags = O_RDWR_;
+    fd->logical_access_mode = true;
     struct stat host_stat;
     CHECK(fstat(host_fd, &host_stat) == 0, "读取 host 文件身份");
     struct mount mount = {.fs = &realfs};
@@ -81,6 +87,27 @@ int main(void) {
     CHECK(file_sync_fd(fd, true) == 0 &&
             file_sync_fd(fd, false) == 0,
             "realfs 同时提供 data-only 与完整同步入口");
+
+    fd->flags = O_RDONLY_;
+    CHECK((fd_getflags(fd) & O_ACCMODE_) == O_RDONLY_ &&
+            (fcntl(host_fd, F_GETFL) & O_ACCMODE) == O_RDWR,
+            "realfs 对 guest 隐藏延迟截断所需的 provider 能力");
+    CHECK(file_ftruncate_fd(fd, 0) == _EINVAL,
+            "普通 ftruncate 仍拒绝逻辑只读 fd");
+    CHECK(file_truncate_open_fd(fd) == 0 &&
+            fstat(host_fd, &host_stat) == 0 && host_stat.st_size == 0 &&
+            lseek(host_fd, 0, SEEK_CUR) == 2,
+            "权限检查完成的 O_TRUNC 可用稳定 provider fd 截断");
+    fd->flags = O_RDWR_;
+    CHECK(file_ftruncate_fd(fd, 8) == 0 &&
+            fstat(host_fd, &host_stat) == 0 && host_stat.st_size == 8 &&
+            lseek(host_fd, 0, SEEK_CUR) == 2,
+            "realfs ftruncate 增长文件且不改变顺序 offset");
+    byte_t zeroes[8];
+    memset(zeroes, 0xff, sizeof(zeroes));
+    CHECK(file_pread_fd(fd, zeroes, sizeof(zeroes), 0) == 8 &&
+            memcmp(zeroes, (byte_t[8]) {0}, sizeof(zeroes)) == 0,
+            "realfs shrink 后 grow 的新文件区间全部为零");
 
     struct mem parent;
     struct mem child;
@@ -144,6 +171,35 @@ int main(void) {
     CHECK(host_shared_mapping_count(fd->inode) == 0,
             "释放第二个独立后备后 token 清零");
 
+    CHECK(mkdtemp(creation_directory) != NULL,
+            "创建 realfs 原子打开测试目录");
+    creation_directory_exists = true;
+    creation_root = open(creation_directory, O_RDONLY | O_DIRECTORY);
+    CHECK(creation_root >= 0, "打开 realfs 原子打开测试目录");
+    struct mount creation_mount = {
+        .fs = &realfs,
+        .root_fd = creation_root,
+    };
+    creation_fd = realfs_open(&creation_mount, "/tracked",
+            O_CREAT_ | O_RDWR_, 0600);
+    CHECK(!IS_ERR(creation_fd) && creation_fd->opened_created,
+            "realfs 原子报告本次 open 创建了文件");
+    fd_close(creation_fd);
+    creation_fd = realfs_open(&creation_mount, "/tracked",
+            O_CREAT_ | O_RDWR_, 0600);
+    CHECK(!IS_ERR(creation_fd) && !creation_fd->opened_created,
+            "realfs 原子报告本次 open 打开既存文件");
+    fd_close(creation_fd);
+    creation_fd = NULL;
+    CHECK(unlinkat(creation_root, "tracked", 0) == 0,
+            "删除 realfs 原子打开测试文件");
+    CHECK(close(creation_root) == 0,
+            "关闭 realfs 原子打开测试目录");
+    creation_root = -1;
+    CHECK(rmdir(creation_directory) == 0,
+            "删除 realfs 原子打开测试目录");
+    creation_directory_exists = false;
+
     int close_error = fd_close(fd);
     fd = NULL;
     CHECK(close_error == 0 && mount.refcount == 0,
@@ -151,6 +207,14 @@ int main(void) {
     status = 0;
 
 out:
+    if (creation_fd != NULL && !IS_ERR(creation_fd))
+        fd_close(creation_fd);
+    if (creation_root >= 0) {
+        unlinkat(creation_root, "tracked", 0);
+        close(creation_root);
+    }
+    if (creation_directory_exists)
+        rmdir(creation_directory);
     if (fd != NULL)
         fd_close(fd);
     else if (status != 0 && host_fd >= 0)

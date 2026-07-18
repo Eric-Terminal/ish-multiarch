@@ -9,11 +9,26 @@
 #define RETAIN_THREAD_COUNT 4
 #define RETAIN_ITERATIONS 20000
 #define CLONE_SNAPSHOT_ITERATIONS 256
+#define FILE_RESIZE_RACE_ITERATIONS 64
+#define FILE_UNREGISTER_RACE_ITERATIONS 2000
 
 struct clone_writer_context {
     struct guest_page_backing *source;
     atomic_bool stop;
     atomic_uint writes;
+};
+
+struct resize_clone_context {
+    struct guest_file_page_domain *domain;
+    struct guest_page_backing *source;
+    struct guest_page_backing *copy;
+    atomic_bool start;
+};
+
+struct unregister_resize_context {
+    struct guest_file_page_domain *domain;
+    struct guest_page_backing *source;
+    atomic_bool start;
 };
 
 static void lock_sync_write(const struct guest_page_sync *sync) {
@@ -51,6 +66,51 @@ static void *write_clone_source(void *opaque) {
                 memory_order_release);
         pattern ^= UINT8_C(0xff);
         sched_yield();
+    }
+    return NULL;
+}
+
+static void *clone_file_backing(void *opaque) {
+    struct resize_clone_context *context = opaque;
+    while (!atomic_load_explicit(&context->start, memory_order_acquire))
+        sched_yield();
+    context->copy = guest_page_backing_clone(context->source);
+    return NULL;
+}
+
+static void *resize_file_domain(void *opaque) {
+    struct resize_clone_context *context = opaque;
+    while (!atomic_load_explicit(&context->start, memory_order_acquire))
+        sched_yield();
+    guest_file_page_domain_resize(
+            context->domain, GUEST_MEMORY_PAGE_SIZE, 0);
+    return NULL;
+}
+
+static void *clone_and_release_file_backings(void *opaque) {
+    struct unregister_resize_context *context = opaque;
+    while (!atomic_load_explicit(&context->start, memory_order_acquire))
+        sched_yield();
+    for (unsigned iteration = 0;
+            iteration < FILE_UNREGISTER_RACE_ITERATIONS; iteration++) {
+        struct guest_page_backing *copy =
+                guest_page_backing_clone(context->source);
+        assert(copy != NULL);
+        guest_page_backing_release(copy);
+    }
+    return NULL;
+}
+
+static void *resize_partial_file_domain(void *opaque) {
+    struct unregister_resize_context *context = opaque;
+    while (!atomic_load_explicit(&context->start, memory_order_acquire))
+        sched_yield();
+    for (unsigned iteration = 0;
+            iteration < FILE_UNREGISTER_RACE_ITERATIONS; iteration++) {
+        qword_t old_size = (iteration & 1U) == 0 ? 127 : 257;
+        qword_t new_size = (iteration & 1U) == 0 ? 257 : 127;
+        guest_file_page_domain_resize(
+                context->domain, old_size, new_size);
     }
     return NULL;
 }
@@ -217,13 +277,15 @@ static void test_sync_exclusive_granules(void) {
 static void test_file_dirty_generation(void) {
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     struct guest_page_backing *backing = guest_page_backing_create();
-    assert(backing != NULL);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    assert(backing != NULL && domain != NULL);
     byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
     qword_t generation = UINT64_MAX;
     assert(!guest_page_backing_copy_dirty(
             backing, snapshot, &generation) && generation == 0);
 
-    guest_page_backing_track_file_writes(backing);
+    guest_page_backing_track_file_writes(backing, domain, 0);
     assert(!guest_page_backing_copy_dirty(
             backing, snapshot, &generation) && generation == 0);
 
@@ -266,14 +328,17 @@ static void test_file_dirty_generation(void) {
 
     guest_page_backing_release(copy);
     guest_page_backing_release(backing);
+    guest_file_page_domain_release(domain);
     assert(guest_page_backing_test_live_count() == 0);
 }
 
 static void test_committed_file_write_merge(void) {
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     struct guest_page_backing *backing = guest_page_backing_create();
-    assert(backing != NULL);
-    guest_page_backing_track_file_writes(backing);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    assert(backing != NULL && domain != NULL);
+    guest_page_backing_track_file_writes(backing, domain, 0);
 
     const struct guest_page_sync *sync =
             guest_page_backing_sync(backing);
@@ -321,6 +386,204 @@ static void test_committed_file_write_merge(void) {
                     [GUEST_MEMORY_PAGE_SIZE - 1] == UINT8_C(0x9a));
 
     guest_page_backing_release(backing);
+    guest_file_page_domain_release(domain);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void fill_backing(
+        struct guest_page_backing *backing, byte_t value) {
+    const struct guest_page_sync *sync =
+            guest_page_backing_sync(backing);
+    lock_sync_write(sync);
+    memset(guest_page_backing_bytes(backing),
+            value, GUEST_MEMORY_PAGE_SIZE);
+    sync->ops->written(sync->opaque, 0, GUEST_MEMORY_PAGE_SIZE);
+    unlock_sync_write(sync);
+}
+
+static void assert_byte_range(const struct guest_page_backing *backing,
+        size_t first, size_t last, byte_t value) {
+    const byte_t *bytes = guest_page_backing_bytes(
+            (struct guest_page_backing *) backing);
+    for (size_t index = first; index < last; index++)
+        assert(bytes[index] == value);
+}
+
+static void test_file_resize_tail_and_invalidation(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    struct guest_page_backing *tail = guest_page_backing_create();
+    struct guest_page_backing *full = guest_page_backing_create();
+    assert(domain != NULL && tail != NULL && full != NULL);
+    guest_page_backing_track_file_writes(tail, domain, 0);
+    guest_page_backing_track_file_writes(
+            full, domain, GUEST_MEMORY_PAGE_SIZE);
+    fill_backing(tail, UINT8_C(0xa5));
+    fill_backing(full, UINT8_C(0x5a));
+    struct guest_page_backing *tail_cow =
+            guest_page_backing_clone(tail);
+    struct guest_page_backing *full_cow =
+            guest_page_backing_clone(full);
+    assert(tail_cow != NULL && full_cow != NULL);
+
+    const struct guest_page_sync *tail_sync =
+            guest_page_backing_sync(tail);
+    lock_sync_write(tail_sync);
+    qword_t tail_reservation = tail_sync->ops->track_exclusive(
+            tail_sync->opaque, 256);
+    unlock_sync_write(tail_sync);
+
+    guest_file_page_domain_resize(domain,
+            2 * GUEST_MEMORY_PAGE_SIZE, 123);
+    assert(guest_page_backing_file_accessible(tail));
+    assert(guest_page_backing_file_accessible(tail_cow));
+    assert(!guest_page_backing_file_accessible(full));
+    assert(!guest_page_backing_file_accessible(full_cow));
+    assert_byte_range(tail, 0, 123, UINT8_C(0xa5));
+    assert_byte_range(tail, 123, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert_byte_range(tail_cow, 0,
+            GUEST_MEMORY_PAGE_SIZE, UINT8_C(0xa5));
+    assert_byte_range(full, 0, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert_byte_range(full_cow, 0, GUEST_MEMORY_PAGE_SIZE, 0);
+
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation;
+    assert(guest_page_backing_copy_dirty(
+            tail, snapshot, &generation));
+    assert(!guest_page_backing_copy_dirty(
+            full, snapshot, &generation));
+    lock_sync_write(tail_sync);
+    assert(!tail_sync->ops->exclusive_matches(
+            tail_sync->opaque, 256, tail_reservation));
+    unlock_sync_write(tail_sync);
+
+    guest_file_page_domain_resize(domain, 123,
+            GUEST_MEMORY_PAGE_SIZE + 17);
+    assert(!guest_page_backing_file_accessible(full));
+    assert(!guest_page_backing_file_accessible(full_cow));
+
+    guest_page_backing_release(full_cow);
+    guest_page_backing_release(tail_cow);
+    guest_page_backing_release(full);
+    guest_page_backing_release(tail);
+    guest_file_page_domain_release(domain);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void test_file_resize_grow_and_equal_cleanup(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    struct guest_page_backing *cache = guest_page_backing_create();
+    assert(domain != NULL && cache != NULL);
+    guest_page_backing_track_file_writes(cache, domain, 0);
+    byte_t page[GUEST_MEMORY_PAGE_SIZE];
+    memset(page, UINT8_C(0x7b), sizeof(page));
+    guest_page_backing_commit_file_write(
+            cache, 0, page, sizeof(page));
+    struct guest_page_backing *private_cow =
+            guest_page_backing_clone(cache);
+    assert(private_cow != NULL);
+
+    guest_file_page_domain_resize(domain, 97, 257);
+    assert_byte_range(cache, 0, 97, UINT8_C(0x7b));
+    assert_byte_range(cache, 97, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert_byte_range(private_cow, 0,
+            GUEST_MEMORY_PAGE_SIZE, UINT8_C(0x7b));
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    qword_t generation;
+    assert(!guest_page_backing_copy_dirty(
+            cache, snapshot, &generation));
+
+    memset(page + 257, UINT8_C(0x3c), sizeof(page) - 257);
+    guest_page_backing_commit_file_write(
+            cache, 257, page + 257, sizeof(page) - 257);
+    guest_file_page_domain_resize(domain, 257, 257);
+    assert_byte_range(cache, 257, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert(!guest_page_backing_copy_dirty(
+            cache, snapshot, &generation));
+
+    guest_page_backing_release(private_cow);
+    guest_page_backing_release(cache);
+    guest_file_page_domain_release(domain);
+    assert(guest_page_backing_test_live_count() == 0);
+}
+
+static void test_concurrent_file_clone_and_resize(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    for (unsigned iteration = 0;
+            iteration < FILE_RESIZE_RACE_ITERATIONS; iteration++) {
+        struct guest_file_page_domain *domain =
+                guest_file_page_domain_create();
+        struct guest_page_backing *source =
+                guest_page_backing_create();
+        assert(domain != NULL && source != NULL);
+        guest_page_backing_track_file_writes(source, domain, 0);
+        fill_backing(source, (byte_t) iteration);
+        struct resize_clone_context context = {
+            .domain = domain,
+            .source = source,
+            .start = ATOMIC_VAR_INIT(false),
+        };
+        pthread_t clone_thread;
+        pthread_t resize_thread;
+        assert(pthread_create(&clone_thread, NULL,
+                clone_file_backing, &context) == 0);
+        assert(pthread_create(&resize_thread, NULL,
+                resize_file_domain, &context) == 0);
+        atomic_store_explicit(&context.start, true, memory_order_release);
+        assert(pthread_join(clone_thread, NULL) == 0);
+        assert(pthread_join(resize_thread, NULL) == 0);
+        assert(context.copy != NULL);
+        assert(!guest_page_backing_file_accessible(source));
+        assert(!guest_page_backing_file_accessible(context.copy));
+        guest_page_backing_release(context.copy);
+        guest_page_backing_release(source);
+        guest_file_page_domain_release(domain);
+        assert(guest_page_backing_test_live_count() == 0);
+    }
+}
+
+static void test_file_domain_lifecycle_and_unregister_race(void) {
+    guest_page_backing_test_fail_allocation_at(SIZE_MAX);
+    struct guest_file_page_domain *owned_domain =
+            guest_file_page_domain_create();
+    struct guest_page_backing *owned_source =
+            guest_page_backing_create();
+    assert(owned_domain != NULL && owned_source != NULL);
+    guest_page_backing_track_file_writes(
+            owned_source, owned_domain, 0);
+    guest_file_page_domain_release(owned_domain);
+    struct guest_page_backing *owned_copy =
+            guest_page_backing_clone(owned_source);
+    assert(owned_copy != NULL);
+    guest_page_backing_release(owned_copy);
+    guest_page_backing_release(owned_source);
+    assert(guest_page_backing_test_live_count() == 0);
+
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    struct guest_page_backing *source = guest_page_backing_create();
+    assert(domain != NULL && source != NULL);
+    guest_page_backing_track_file_writes(source, domain, 0);
+    struct unregister_resize_context context = {
+        .domain = domain,
+        .source = source,
+        .start = ATOMIC_VAR_INIT(false),
+    };
+    pthread_t clone_thread;
+    pthread_t resize_thread;
+    assert(pthread_create(&clone_thread, NULL,
+            clone_and_release_file_backings, &context) == 0);
+    assert(pthread_create(&resize_thread, NULL,
+            resize_partial_file_domain, &context) == 0);
+    atomic_store_explicit(&context.start, true, memory_order_release);
+    assert(pthread_join(clone_thread, NULL) == 0);
+    assert(pthread_join(resize_thread, NULL) == 0);
+    assert(guest_page_backing_file_accessible(source));
+    guest_page_backing_release(source);
+    guest_file_page_domain_release(domain);
     assert(guest_page_backing_test_live_count() == 0);
 }
 
@@ -332,6 +595,10 @@ int main(void) {
     test_sync_exclusive_granules();
     test_file_dirty_generation();
     test_committed_file_write_merge();
+    test_file_resize_tail_and_invalidation();
+    test_file_resize_grow_and_equal_cleanup();
+    test_concurrent_file_clone_and_resize();
+    test_file_domain_lifecycle_and_unregister_race();
     guest_page_backing_test_fail_allocation_at(SIZE_MAX);
     return 0;
 }

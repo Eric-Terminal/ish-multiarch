@@ -84,6 +84,8 @@ struct guest_page_sync_ops {
     bool (*exclusive_matches)(void *opaque, size_t page_offset,
             qword_t generation);
     void (*written)(void *opaque, size_t page_offset, size_t size);
+    // 可选；调用方已持有本同步域的读锁或写锁。
+    bool (*accessible)(void *opaque);
 };
 
 // identity 保留 0；同一进程内所有当前及历史同步域身份均唯一且不复用。
@@ -110,6 +112,9 @@ struct guest_page_view {
     // NULL 表示页面只受所属 address space 的事务锁保护。非空借用指针
     // 可以缓存，但只能在持有 address space 锁且映射世代仍匹配时使用。
     const struct guest_page_sync *sync;
+    // 私有 backing 仍可能被文件 resize 域撤销；它只参与访问加锁和
+    // accessible 复核，不改变私有页的 futex/独占身份。
+    const struct guest_page_sync *access_sync;
 };
 
 struct guest_address_space_ops {
@@ -198,5 +203,6 @@ bool guest_page_sync_exclusive_matches(
         qword_t generation);
 void guest_page_sync_written(const struct guest_page_sync *sync,
         size_t page_offset, size_t size);
+bool guest_page_sync_accessible(const struct guest_page_sync *sync);
 
 #endif

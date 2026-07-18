@@ -18,6 +18,14 @@ struct guest_page_backing_exclusive_record {
     qword_t generation;
 };
 
+struct guest_file_page_domain {
+    atomic_uint references;
+    pthread_mutex_t lock;
+    struct guest_page_backing *head;
+};
+
+// 全局顺序是外层 address-space/inode I/O → domain → backing；cache 锁
+// 不与 domain 同时持有，避免 resize、COW 和缓存摘链形成反向边。
 struct guest_page_backing {
     atomic_uint references;
     pthread_rwlock_t lock;
@@ -27,10 +35,16 @@ struct guest_page_backing {
     struct guest_page_backing_exclusive_record exclusive_records
             [GUEST_PAGE_BACKING_EXCLUSIVE_RECORD_COUNT];
     unsigned exclusive_next_record;
-    /* 仅 pager 的文件缓存页启用；字段均由 lock 保护。 */
+    // 脏世代和永久访问状态由 backing lock 保护。
     bool tracks_file_writes;
+    bool file_accessible;
     qword_t content_generation;
     qword_t clean_generation;
+    // 域归属在 backing 存活期间不迁移；链表和文件偏移由 domain lock 保护。
+    struct guest_file_page_domain *file_domain;
+    struct guest_page_backing *file_previous;
+    struct guest_page_backing *file_next;
+    qword_t file_offset;
     // 数据内嵌于对象，引用存续期间地址不会变化，并保留宿主自然对齐。
     alignas(max_align_t) byte_t bytes[GUEST_MEMORY_PAGE_SIZE];
 };
@@ -156,6 +170,11 @@ static void page_sync_written(void *opaque, size_t page_offset, size_t size) {
         (void) next_content_generation(backing);
 }
 
+static bool page_sync_accessible(void *opaque) {
+    struct guest_page_backing *backing = sync_backing(opaque);
+    return backing->file_accessible;
+}
+
 static const struct guest_page_sync_ops page_sync_ops = {
     .read_lock = page_sync_read_lock,
     .read_unlock = page_sync_read_unlock,
@@ -164,6 +183,7 @@ static const struct guest_page_sync_ops page_sync_ops = {
     .track_exclusive = page_sync_track_exclusive,
     .exclusive_matches = page_sync_exclusive_matches,
     .written = page_sync_written,
+    .accessible = page_sync_accessible,
 };
 
 static qword_t allocate_identity(void) {
@@ -216,6 +236,7 @@ static struct guest_page_backing *allocate_backing(void) {
         return NULL;
     }
     atomic_init(&backing->references, 1);
+    backing->file_accessible = true;
     backing->sync = (struct guest_page_sync) {
         .ops = &page_sync_ops,
         .opaque = backing,
@@ -227,6 +248,73 @@ static struct guest_page_backing *allocate_backing(void) {
     return backing;
 }
 
+struct guest_file_page_domain *guest_file_page_domain_create(void) {
+    struct guest_file_page_domain *domain = calloc(1, sizeof(*domain));
+    if (domain == NULL)
+        return NULL;
+    if (pthread_mutex_init(&domain->lock, NULL) != 0) {
+        free(domain);
+        return NULL;
+    }
+    atomic_init(&domain->references, 1);
+    return domain;
+}
+
+static void retain_file_page_domain(struct guest_file_page_domain *domain) {
+    unsigned previous = atomic_fetch_add_explicit(
+            &domain->references, 1, memory_order_relaxed);
+    assert(previous != 0 && previous != UINT_MAX);
+}
+
+void guest_file_page_domain_release(struct guest_file_page_domain *domain) {
+    if (domain == NULL)
+        return;
+    unsigned previous = atomic_fetch_sub_explicit(
+            &domain->references, 1, memory_order_acq_rel);
+    assert(previous != 0);
+    if (previous != 1)
+        return;
+    assert(domain->head == NULL);
+    check_pthread(pthread_mutex_destroy(&domain->lock));
+    free(domain);
+}
+
+static void register_file_backing_locked(
+        struct guest_file_page_domain *domain,
+        struct guest_page_backing *backing, qword_t file_offset) {
+    assert(domain != NULL && backing != NULL);
+    assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
+    assert(backing->file_domain == NULL && backing->file_previous == NULL &&
+            backing->file_next == NULL);
+    retain_file_page_domain(domain);
+    backing->file_domain = domain;
+    backing->file_offset = file_offset;
+    backing->file_next = domain->head;
+    if (domain->head != NULL)
+        domain->head->file_previous = backing;
+    domain->head = backing;
+}
+
+static void unregister_file_backing(struct guest_page_backing *backing) {
+    struct guest_file_page_domain *domain = backing->file_domain;
+    if (domain == NULL)
+        return;
+    check_pthread(pthread_mutex_lock(&domain->lock));
+    if (backing->file_previous == NULL) {
+        assert(domain->head == backing);
+        domain->head = backing->file_next;
+    } else {
+        backing->file_previous->file_next = backing->file_next;
+    }
+    if (backing->file_next != NULL)
+        backing->file_next->file_previous = backing->file_previous;
+    backing->file_domain = NULL;
+    backing->file_previous = NULL;
+    backing->file_next = NULL;
+    check_pthread(pthread_mutex_unlock(&domain->lock));
+    guest_file_page_domain_release(domain);
+}
+
 struct guest_page_backing *guest_page_backing_create(void) {
     return allocate_backing();
 }
@@ -235,11 +323,20 @@ struct guest_page_backing *guest_page_backing_clone(
         const struct guest_page_backing *source) {
     assert(source != NULL);
     struct guest_page_backing *copy = allocate_backing();
-    if (copy != NULL) {
-        source->sync.ops->read_lock(source->sync.opaque);
-        memcpy(copy->bytes, source->bytes, sizeof(copy->bytes));
-        source->sync.ops->read_unlock(source->sync.opaque);
-    }
+    if (copy == NULL)
+        return NULL;
+
+    struct guest_file_page_domain *domain = source->file_domain;
+    if (domain != NULL)
+        check_pthread(pthread_mutex_lock(&domain->lock));
+    source->sync.ops->read_lock(source->sync.opaque);
+    memcpy(copy->bytes, source->bytes, sizeof(copy->bytes));
+    copy->file_accessible = source->file_accessible;
+    if (domain != NULL)
+        register_file_backing_locked(domain, copy, source->file_offset);
+    source->sync.ops->read_unlock(source->sync.opaque);
+    if (domain != NULL)
+        check_pthread(pthread_mutex_unlock(&domain->lock));
     return copy;
 }
 
@@ -257,6 +354,7 @@ void guest_page_backing_release(struct guest_page_backing *backing) {
     assert(previous != 0);
     if (previous != 1)
         return;
+    unregister_file_backing(backing);
     unsigned live_previous = atomic_fetch_sub_explicit(
             &live_count, 1, memory_order_relaxed);
     assert(live_previous != 0);
@@ -275,18 +373,105 @@ const struct guest_page_sync *guest_page_backing_sync(
     return &backing->sync;
 }
 
-void guest_page_backing_track_file_writes(
-        struct guest_page_backing *backing) {
+const struct guest_page_sync *guest_page_backing_file_access_sync(
+        const struct guest_page_backing *backing) {
     assert(backing != NULL);
+    // 域归属在 backing 对外可见前建立，且在最后一份强引用释放前不变。
+    return backing->file_domain == NULL ? NULL : &backing->sync;
+}
+
+bool guest_page_backing_file_accessible(
+        const struct guest_page_backing *backing) {
+    assert(backing != NULL);
+    const struct guest_page_sync *sync = guest_page_backing_sync(backing);
+    sync->ops->read_lock(sync->opaque);
+    bool accessible = page_sync_accessible(sync->opaque);
+    sync->ops->read_unlock(sync->opaque);
+    return accessible;
+}
+
+void guest_page_backing_track_file_writes(
+        struct guest_page_backing *backing,
+        struct guest_file_page_domain *domain, qword_t file_offset) {
+    assert(backing != NULL && domain != NULL);
+    assert((file_offset & GUEST_MEMORY_PAGE_MASK) == 0);
+    check_pthread(pthread_mutex_lock(&domain->lock));
     const struct guest_page_sync *sync = guest_page_backing_sync(backing);
     sync->ops->write_lock(sync->opaque);
     assert(!backing->tracks_file_writes &&
             backing->content_generation == 0 &&
-            backing->clean_generation == 0);
+            backing->clean_generation == 0 &&
+            backing->file_domain == NULL);
     backing->tracks_file_writes = true;
     backing->content_generation = 1;
     backing->clean_generation = 1;
+    register_file_backing_locked(domain, backing, file_offset);
     sync->ops->write_unlock(sync->opaque);
+    check_pthread(pthread_mutex_unlock(&domain->lock));
+}
+
+static void zero_file_range_locked(struct guest_page_backing *backing,
+        size_t first, size_t last, bool discard_dirty) {
+    assert(backing->tracks_file_writes);
+    assert(first < last && last <= GUEST_MEMORY_PAGE_SIZE);
+    bool was_clean = backing->content_generation ==
+            backing->clean_generation;
+    memset(backing->bytes + first, 0, last - first);
+    page_sync_written(backing, first, last - first);
+    if (discard_dirty || was_clean)
+        backing->clean_generation = backing->content_generation;
+}
+
+void guest_file_page_domain_resize(struct guest_file_page_domain *domain,
+        qword_t old_size, qword_t new_size) {
+    assert(domain != NULL);
+    assert(old_size <= INT64_MAX && new_size <= INT64_MAX);
+
+    qword_t full_page_boundary =
+            (new_size + GUEST_MEMORY_PAGE_MASK) & ~GUEST_MEMORY_PAGE_MASK;
+    check_pthread(pthread_mutex_lock(&domain->lock));
+    for (struct guest_page_backing *backing = domain->head;
+            backing != NULL; backing = backing->file_next) {
+        const struct guest_page_sync *sync =
+                guest_page_backing_sync(backing);
+        sync->ops->write_lock(sync->opaque);
+        if (!backing->file_accessible) {
+            sync->ops->write_unlock(sync->opaque);
+            continue;
+        }
+
+        if (backing->file_offset >= full_page_boundary) {
+            memset(backing->bytes, 0, GUEST_MEMORY_PAGE_SIZE);
+            page_sync_written(backing, 0, GUEST_MEMORY_PAGE_SIZE);
+            if (backing->tracks_file_writes)
+                backing->clean_generation = backing->content_generation;
+            backing->file_accessible = false;
+        } else if (backing->tracks_file_writes) {
+            if (new_size > old_size &&
+                    (old_size & GUEST_MEMORY_PAGE_MASK) != 0 &&
+                    backing->file_offset ==
+                            (old_size & ~GUEST_MEMORY_PAGE_MASK)) {
+                size_t first =
+                        (size_t) (old_size & GUEST_MEMORY_PAGE_MASK);
+                qword_t relative_end = new_size - backing->file_offset;
+                size_t last = relative_end < GUEST_MEMORY_PAGE_SIZE ?
+                        (size_t) relative_end : GUEST_MEMORY_PAGE_SIZE;
+                if (first < last)
+                    zero_file_range_locked(
+                            backing, first, last, false);
+            }
+            if ((new_size & GUEST_MEMORY_PAGE_MASK) != 0 &&
+                    backing->file_offset ==
+                            (new_size & ~GUEST_MEMORY_PAGE_MASK)) {
+                size_t first =
+                        (size_t) (new_size & GUEST_MEMORY_PAGE_MASK);
+                zero_file_range_locked(
+                        backing, first, GUEST_MEMORY_PAGE_SIZE, false);
+            }
+        }
+        sync->ops->write_unlock(sync->opaque);
+    }
+    check_pthread(pthread_mutex_unlock(&domain->lock));
 }
 
 bool guest_page_backing_copy_dirty(

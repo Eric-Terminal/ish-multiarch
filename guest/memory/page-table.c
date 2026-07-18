@@ -116,6 +116,8 @@ static enum guest_memory_fault_kind resolve_page(void *opaque,
         .file_offset = mapping->file_offset,
         .copy_on_write = mapping->copy_on_write,
         .sync = mapping->shared_backing ? sync : NULL,
+        .access_sync = mapping->shared_backing ? NULL :
+                guest_page_backing_file_access_sync(mapping->backing),
     };
     assert((view->origin == GUEST_PAGE_ORIGIN_FILE) ==
             (view->file_identity != 0));
@@ -512,6 +514,9 @@ static bool valid_range(const struct guest_page_table *table,
     return range.page_count <= available_pages;
 }
 
+static enum guest_page_table_result unmap_page(
+        struct guest_page_table *table, guest_addr_t page_base);
+
 static void *allocate_slot(void **slot, size_t size) {
     if (*slot == NULL)
         *slot = calloc(1, size);
@@ -783,6 +788,20 @@ enum guest_page_table_result guest_page_table_lookup(
     *host_page = guest_page_backing_bytes(mapping->backing);
     *permissions = mapping->permissions;
     return GUEST_PAGE_TABLE_OK;
+}
+
+bool guest_page_table_remove_inaccessible(
+        struct guest_page_table *table, guest_addr_t page_base) {
+    if (!valid_page(table, page_base))
+        return false;
+    struct guest_page_mapping *mapping = find_mapping(table, page_base);
+    if (mapping == NULL ||
+            guest_page_backing_file_accessible(mapping->backing))
+        return false;
+    enum guest_page_table_result result = unmap_page(table, page_base);
+    assert(result == GUEST_PAGE_TABLE_OK);
+    guest_address_space_changed(&table->address_space);
+    return true;
 }
 
 static bool node_is_empty(const struct guest_page_table_node *node) {

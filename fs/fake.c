@@ -28,6 +28,7 @@ static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, 
         return fd;
     db_begin_write(fs);
     fd->fake_inode = path_get_inode(fs, path);
+    fd->opened_created = false;
     if (flags & O_CREAT_) {
         struct ish_stat ishstat;
         ishstat.mode = mode | S_IFREG;
@@ -37,6 +38,7 @@ static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, 
         if (fd->fake_inode == 0) {
             path_create(fs, path, &ishstat);
             fd->fake_inode = path_get_inode(fs, path);
+            fd->opened_created = fd->fake_inode != 0;
         }
     }
     db_commit(fs);

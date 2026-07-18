@@ -41,6 +41,7 @@ struct guest_file_pager {
     atomic_bool orphaned;
     struct guest_file_pager *orphan_next;
     struct guest_file_source *file_source;
+    struct guest_file_page_domain *file_pages;
     struct guest_file_pager_provider provider;
     pthread_mutex_t cache_lock;
     pthread_cond_t cache_changed;
@@ -157,6 +158,14 @@ struct guest_file_pager *guest_file_pager_create(qword_t identity,
         free(pager);
         return NULL;
     }
+    pager->file_pages = guest_file_page_domain_create();
+    if (pager->file_pages == NULL) {
+        guest_file_source_release(pager->file_source);
+        check_pthread(pthread_cond_destroy(&pager->cache_changed));
+        check_pthread(pthread_mutex_destroy(&pager->cache_lock));
+        free(pager);
+        return NULL;
+    }
     atomic_init(&pager->lifecycle, GUEST_FILE_PAGER_LIVE | 1U);
     atomic_init(&pager->orphaned, false);
     pager->provider = provider;
@@ -247,6 +256,7 @@ static void destroy_pager(struct guest_file_pager *pager) {
     if (pager->provider.release != NULL)
         pager->provider.release(pager, pager->provider.opaque);
     destroy_cache(pager);
+    guest_file_page_domain_release(pager->file_pages);
     guest_file_source_release(pager->file_source);
     free(pager);
 }
@@ -414,7 +424,8 @@ enum guest_file_page_result guest_file_pager_get_page(
                     GUEST_MEMORY_PAGE_SIZE - valid_bytes);
         }
         if (result == GUEST_FILE_PAGE_OK)
-            guest_page_backing_track_file_writes(loaded);
+            guest_page_backing_track_file_writes(
+                    loaded, pager->file_pages, file_offset);
     }
 
     check_pthread(pthread_mutex_lock(&pager->cache_lock));
@@ -647,6 +658,43 @@ void guest_file_pager_commit_file_write(struct guest_file_pager *pager,
         file_offset += chunk;
         data += chunk;
         size -= chunk;
+    }
+}
+
+void guest_file_pager_resize_resident(struct guest_file_pager *pager,
+        qword_t old_size, qword_t new_size) {
+    assert(pager != NULL);
+    assert(old_size <= INT64_MAX && new_size <= INT64_MAX);
+
+    guest_file_page_domain_resize(pager->file_pages, old_size, new_size);
+
+    qword_t first_removed =
+            (new_size + GUEST_MEMORY_PAGE_MASK) & ~GUEST_MEMORY_PAGE_MASK;
+    struct cached_file_page *removed = NULL;
+    check_pthread(pthread_mutex_lock(&pager->cache_lock));
+    for (unsigned bucket = 0;
+            bucket < GUEST_FILE_PAGER_BUCKET_COUNT; bucket++) {
+        struct cached_file_page **link = &pager->buckets[bucket];
+        while (*link != NULL) {
+            struct cached_file_page *entry = *link;
+            assert(entry->state == CACHED_FILE_PAGE_READY &&
+                    entry->backing != NULL && !entry->writeback);
+            if (entry->file_offset < first_removed) {
+                link = &entry->next;
+                continue;
+            }
+            *link = entry->next;
+            entry->next = removed;
+            removed = entry;
+        }
+    }
+    check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+
+    while (removed != NULL) {
+        struct cached_file_page *next = removed->next;
+        guest_page_backing_release(removed->backing);
+        free(removed);
+        removed = next;
     }
 }
 

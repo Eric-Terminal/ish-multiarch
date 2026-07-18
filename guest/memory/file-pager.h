@@ -97,6 +97,13 @@ void guest_file_pager_read_resident(struct guest_file_pager *pager,
         qword_t file_offset, byte_t *data, size_t size);
 void guest_file_pager_commit_file_write(struct guest_file_pager *pager,
         qword_t file_offset, const byte_t *data, size_t size);
+/*
+ * 调用方已持有 provider 的同文件 I/O 串行域；本入口不执行 I/O，且
+ * resize 提交不分配内存。完整 EOF 后 backing 会永久失效，增长不会
+ * 复活此前被收缩撤销的页。
+ */
+void guest_file_pager_resize_resident(struct guest_file_pager *pager,
+        qword_t old_size, qword_t new_size);
 /* 返回值在调用方持有 pager 强引用期间有效，调用方不拥有额外引用。 */
 struct guest_file_source *guest_file_pager_file_source(
         struct guest_file_pager *pager);

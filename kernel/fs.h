@@ -50,6 +50,12 @@ ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
 int file_sync_fd_uncoordinated(struct fd *fd, bool data_only);
 int file_sync_fd(struct fd *fd, bool data_only);
 int file_sync_task(struct task *task, fd_t fd_number, bool data_only);
+int file_ftruncate_fd(struct fd *fd, off_t_ size);
+int file_ftruncate_task(struct task *task, fd_t fd_number, off_t_ size);
+int file_truncate_task(struct task *task, const char *path, off_t_ size);
+int file_grow_fd(struct fd *fd, off_t_ size);
+/* generic open 已完成 O_TRUNC 的写权限检查时使用。 */
+int file_truncate_open_fd(struct fd *fd);
 sqword_t file_lseek_task(
         struct task *task, fd_t fd, sqword_t offset, int whence);
 sqword_t file_getdents_task(struct task *task, fd_t fd,

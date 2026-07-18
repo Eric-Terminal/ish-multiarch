@@ -96,6 +96,7 @@ struct kernel_probe {
     unsigned opened_closes;
     unsigned stat_calls;
     unsigned fstat_calls;
+    unsigned fsetattr_calls;
     unsigned readlink_calls;
     unsigned unlink_calls;
     unsigned rmdir_calls;
@@ -105,6 +106,8 @@ struct kernel_probe {
     unsigned fdatasync_calls;
     int fsync_error;
     int fdatasync_error;
+    int fsetattr_error;
+    off_t_ requested_size;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
     dword_t ioctl_input;
@@ -454,6 +457,21 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     return 0;
 }
 
+static int probe_fsetattr(struct fd *fd, struct attr attr) {
+    struct fd_state *state = fd->data;
+    struct kernel_probe *kernel = state->kernel;
+    CHECK(lock_owned_by_current(&fd->lock),
+            "truncate provider 回调必须持有 fd 锁");
+    CHECK(attr.type == attr_size && attr.size >= 0,
+            "truncate provider 只接收非负尺寸属性");
+    kernel->fsetattr_calls++;
+    kernel->requested_size = attr.size;
+    if (kernel->fsetattr_error != 0)
+        return kernel->fsetattr_error;
+    kernel->stat.size = (qword_t) attr.size;
+    return 0;
+}
+
 static ssize_t probe_readlink(struct mount *mount,
         const char *path, char *buffer, size_t size) {
     struct kernel_probe *probe = mount->data;
@@ -516,6 +534,7 @@ static const struct fs_ops probe_fs = {
     .rename = probe_rename,
     .stat = probe_stat,
     .fstat = probe_fstat,
+    .fsetattr = probe_fsetattr,
     .getpath = probe_getpath,
 };
 
@@ -1030,6 +1049,64 @@ int main(void) {
             UINT64_C(0xffffffff00000007), 0, 0, 0) ==
             encoded_error(_EBADF),
             "AArch64 fsync 无效低 32 位 fd 返回 EBADF");
+
+    qword_t original_stat_size = kernel.stat.size;
+    struct fd *truncate_fd = f_get_task(&fixture.task, 0);
+    truncate_fd->offset = 41;
+    reset_user_access(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 46,
+            UINT64_C(0xabcdef0100000000),
+            UINT64_C(0x100000001), 0, 0) == 0 &&
+            kernel.stat.size == UINT64_C(0x100000001) &&
+            kernel.requested_size == INT64_C(0x100000001) &&
+            kernel.fsetattr_calls == 1 && truncate_fd->offset == 41 &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "AArch64 46 保留 64 位长度、低 32 位 fd 与顺序 offset");
+    kernel.fsetattr_error = _ENOSPC;
+    CHECK(invoke(&fixture, &memory, &fault, 46, 0, 7, 0, 0) ==
+                    encoded_error(_ENOSPC) &&
+            kernel.stat.size == UINT64_C(0x100000001) &&
+            kernel.fsetattr_calls == 2,
+            "AArch64 ftruncate 原样传播 provider 失败且不发布大小");
+    kernel.fsetattr_error = 0;
+    CHECK(invoke(&fixture, &memory, &fault, 46, 99,
+            UINT64_MAX, 0, 0) == encoded_error(_EINVAL) &&
+            kernel.fsetattr_calls == 2,
+            "AArch64 ftruncate 负长度优先于 fd 查表");
+    CHECK(invoke(&fixture, &memory, &fault, 46, 99,
+            0, 0, 0) == encoded_error(_EBADF),
+            "AArch64 ftruncate 对非负长度的无效 fd 返回 EBADF");
+
+    const size_t truncate_path_offset = 0x300;
+    reset_user_access(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 45, 0,
+            UINT64_MAX, 0, 0) == encoded_error(_EINVAL) &&
+            memory.read_calls == 0 && kernel.fsetattr_calls == 2,
+            "AArch64 truncate 负长度不访问 pathname");
+    memory.fail_read_at = USER_BASE + truncate_path_offset;
+    CHECK(invoke(&fixture, &memory, &fault, 45,
+            USER_BASE + truncate_path_offset, 7, 0, 0) ==
+                    encoded_error(_EFAULT) &&
+            memory.read_calls == 1 && kernel.fsetattr_calls == 2,
+            "AArch64 truncate 保持 pathname 的精确 guest fault");
+    static const char truncate_path[] = "metadata";
+    memcpy(memory.bytes + truncate_path_offset,
+            truncate_path, sizeof(truncate_path));
+    reset_user_access(&memory);
+    unsigned opens_before_truncate = kernel.opens;
+    unsigned closes_before_truncate = kernel.opened_closes;
+    CHECK(invoke(&fixture, &memory, &fault, 45,
+            USER_BASE + truncate_path_offset, 7, 0, 0) == 0 &&
+            kernel.stat.size == 7 && kernel.requested_size == 7 &&
+            kernel.fsetattr_calls == 3 &&
+            kernel.opens == opens_before_truncate + 1 &&
+            kernel.opened_closes == closes_before_truncate + 1 &&
+            kernel.last_flags == (O_WRONLY_ | O_NONBLOCK_) &&
+            memory.read_calls == sizeof(truncate_path),
+            "AArch64 45 复制路径并通过稳定非阻塞 fd 截断");
+    kernel.stat.size = original_stat_size;
+    truncate_fd->offset = 0;
+    reset_user_access(&memory);
 
     CHECK(invoke(&fixture, &memory, &fault, 129,
             UINT64_C(0x123456787fffffff), 65, 0, 0) ==

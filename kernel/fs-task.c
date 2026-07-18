@@ -5,6 +5,7 @@
 #include "fs/inode.h"
 #include "fs/path.h"
 #include "guest/memory/file-pager.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/task.h"
@@ -447,6 +448,97 @@ int file_sync_task(
     if (fd == NULL)
         return _EBADF;
     int result = file_sync_fd(fd, data_only);
+    fd_close(fd);
+    return result;
+}
+
+static int file_resize_fd(struct fd *fd, off_t_ size,
+        bool require_writable, bool grow_only) {
+    if (size < 0)
+        return _EINVAL;
+    if (fd == NULL)
+        return _EBADF;
+    if (!S_ISREG(fd->type))
+        return _EINVAL;
+    if (require_writable) {
+        int flags = fd_getflags(fd);
+        if (flags < 0)
+            return flags;
+        int access_mode = flags & O_ACCMODE_;
+        if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
+            return _EINVAL;
+    }
+    if (fd->mount == NULL || fd->mount->fs->fsetattr == NULL)
+        return _EPERM;
+    if ((fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
+
+    struct file_io_guard guard;
+    begin_file_io(fd, &guard);
+    lock(&fd->lock);
+    struct statbuf stat;
+    int result = file_fstat_fd(fd, &stat);
+    bool resized = result == 0 &&
+            (!grow_only || stat.size < (qword_t) size);
+    if (resized)
+        result = fd->mount->fs->fsetattr(
+                fd, make_attr(size, size));
+    unlock(&fd->lock);
+    if (result == 0 && resized && guard.pager != NULL)
+        guest_file_pager_resize_resident(
+                guard.pager, stat.size, (qword_t) size);
+    end_file_io(&guard);
+    return result;
+}
+
+int file_ftruncate_fd(struct fd *fd, off_t_ size) {
+    return file_resize_fd(fd, size, true, false);
+}
+
+int file_ftruncate_task(
+        struct task *task, fd_t fd_number, off_t_ size) {
+    if (size < 0)
+        return _EINVAL;
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    int result = file_ftruncate_fd(fd, size);
+    if (fd != NULL)
+        fd_close(fd);
+    return result;
+}
+
+int file_grow_fd(struct fd *fd, off_t_ size) {
+    return file_resize_fd(fd, size, true, true);
+}
+
+int file_truncate_open_fd(struct fd *fd) {
+    return file_resize_fd(fd, 0, false, false);
+}
+
+int file_truncate_task(
+        struct task *task, const char *path, off_t_ size) {
+    if (size < 0)
+        return _EINVAL;
+
+    struct statbuf stat;
+    int result = file_statat_task(
+            task, AT_FDCWD_, path, 0, &stat);
+    if (result < 0)
+        return result;
+    if (S_ISDIR(stat.mode))
+        return _EISDIR;
+    if (!S_ISREG(stat.mode))
+        return _EINVAL;
+
+    struct fd *fd = generic_openat_task(
+            task, AT_PWD, path, O_WRONLY_ | O_NONBLOCK_, 0);
+    if (IS_ERR(fd))
+        return PTR_ERR(fd);
+    if (S_ISDIR(fd->type))
+        result = _EISDIR;
+    else if (!S_ISREG(fd->type))
+        result = _EINVAL;
+    else
+        result = file_ftruncate_fd(fd, size);
     fd_close(fd);
     return result;
 }

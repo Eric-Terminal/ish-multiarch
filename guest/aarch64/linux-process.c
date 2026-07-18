@@ -711,6 +711,11 @@ static enum guest_memory_fault_kind futex_apply_private_file_cow(
     if (!view->copy_on_write)
         return GUEST_MEMORY_FAULT_NONE;
     assert(view->origin == GUEST_PAGE_ORIGIN_FILE && view->sync != NULL);
+    guest_page_sync_read_lock(view->sync);
+    bool accessible = guest_page_sync_accessible(view->sync);
+    guest_page_sync_read_unlock(view->sync);
+    if (!accessible)
+        return GUEST_MEMORY_FAULT_UNMAPPED;
     // FUTEX_READ 在 FOLL_WRITE 失败后会回退只读固定；文件页仍使用 inode 键。
     if ((view->permissions & GUEST_MEMORY_WRITE) == 0)
         return GUEST_MEMORY_FAULT_NONE;
@@ -729,6 +734,73 @@ static void futex_address_space_unlock(
         guest_address_space_write_unlock(space, locked);
     else
         guest_address_space_read_unlock(space, locked);
+}
+
+struct futex_page_sync_set {
+    const struct guest_page_sync *items[GUEST_LINUX_FUTEX_WAITV_MAX];
+    size_t count;
+};
+
+static const struct guest_page_sync *futex_view_access_sync(
+        const struct guest_page_view *view) {
+    return view->sync != NULL ? view->sync : view->access_sync;
+}
+
+static void futex_collect_page_syncs(
+        const struct guest_page_view *views, size_t count,
+        struct futex_page_sync_set *set) {
+    *set = (struct futex_page_sync_set) {0};
+    for (size_t view_index = 0; view_index < count; view_index++) {
+        const struct guest_page_sync *sync =
+                futex_view_access_sync(&views[view_index]);
+        if (sync == NULL)
+            continue;
+        qword_t identity = guest_page_sync_identity(sync);
+        size_t index = 0;
+        while (index < set->count) {
+            if (set->items[index] == sync)
+                break;
+            qword_t existing =
+                    guest_page_sync_identity(set->items[index]);
+            if (existing == identity)
+                abort();
+            if (existing > identity)
+                break;
+            index++;
+        }
+        if (index < set->count && set->items[index] == sync)
+            continue;
+        assert(set->count < GUEST_LINUX_FUTEX_WAITV_MAX);
+        for (size_t move = set->count; move > index; move--)
+            set->items[move] = set->items[move - 1];
+        set->items[index] = sync;
+        set->count++;
+    }
+}
+
+static void futex_unlock_page_syncs(
+        const struct futex_page_sync_set *set) {
+    for (size_t index = set->count; index != 0; index--)
+        guest_page_sync_read_unlock(set->items[index - 1]);
+}
+
+static bool futex_lock_accessible_views(
+        const struct guest_page_view *views, const qword_t *addresses,
+        size_t count, struct futex_page_sync_set *set,
+        guest_addr_t *fault_address) {
+    futex_collect_page_syncs(views, count, set);
+    for (size_t index = 0; index < set->count; index++)
+        guest_page_sync_read_lock(set->items[index]);
+    for (size_t index = 0; index < count; index++) {
+        const struct guest_page_sync *sync =
+                futex_view_access_sync(&views[index]);
+        if (sync != NULL && !guest_page_sync_accessible(sync)) {
+            *fault_address = (guest_addr_t) addresses[index];
+            futex_unlock_page_syncs(set);
+            return false;
+        }
+    }
+    return true;
 }
 
 bool aarch64_linux_process_prefault_futex_words(
@@ -820,16 +892,22 @@ bool aarch64_linux_process_snapshot_futex_words(
     }
 
     dword_t resolved_first_value = 0;
+    struct futex_page_sync_set syncs;
+    bool syncs_locked = false;
+    if (fault_kind == GUEST_MEMORY_FAULT_NONE) {
+        syncs_locked = futex_lock_accessible_views(
+                views, addresses, count, &syncs, &fault_address);
+        if (!syncs_locked)
+            fault_kind = GUEST_MEMORY_FAULT_UNMAPPED;
+    }
     if (fault_kind == GUEST_MEMORY_FAULT_NONE && first_value != NULL) {
         const struct guest_page_view *first = &views[0];
-        if (first->sync != NULL)
-            guest_page_sync_read_lock(first->sync);
         memcpy(&resolved_first_value,
                 first->host_page + (size_t) resolved[0].page_offset,
                 sizeof(resolved_first_value));
-        if (first->sync != NULL)
-            guest_page_sync_read_unlock(first->sync);
     }
+    if (syncs_locked)
+        futex_unlock_page_syncs(&syncs);
     futex_address_space_unlock(space, shared_key, locked);
 
     if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
@@ -910,7 +988,8 @@ aarch64_linux_process_prepare_futex_waitv(
             break;
         }
         fault_kind = futex_apply_private_file_cow(
-                &process->memory->page_table, page_base, &views[index]);
+                &process->memory->page_table,
+                page_base, &views[index]);
         if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
             fault_address = (guest_addr_t) address;
             fault_access = GUEST_MEMORY_WRITE;
@@ -928,7 +1007,8 @@ aarch64_linux_process_prepare_futex_waitv(
         }
         resolved[index] = (struct aarch64_linux_futex_word_snapshot) {
             .shared_identity = views[index].origin ==
-                    GUEST_PAGE_ORIGIN_FILE || views[index].sync == NULL ? 0 :
+                    GUEST_PAGE_ORIGIN_FILE ||
+                    views[index].sync == NULL ? 0 :
                     guest_page_sync_identity(views[index].sync),
             .file_identity = views[index].origin ==
                     GUEST_PAGE_ORIGIN_FILE ?
@@ -952,24 +1032,59 @@ aarch64_linux_process_prepare_futex_waitv(
                     space, page_base, GUEST_MEMORY_READ, &views[index]);
             if (fault_kind != GUEST_MEMORY_FAULT_NONE) {
                 fault_address = (guest_addr_t) address;
-                result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+                result = fault_kind == GUEST_MEMORY_FAULT_OUT_OF_MEMORY ?
+                        AARCH64_LINUX_FUTEX_WAITV_NO_MEMORY :
+                        AARCH64_LINUX_FUTEX_WAITV_FAULT;
                 break;
             }
         }
 
-        const struct guest_page_view *view = &views[index];
-        size_t page_offset = (size_t)
-                (address & GUEST_MEMORY_PAGE_MASK);
+        const struct guest_page_sync *sync =
+                futex_view_access_sync(&views[index]);
+        if (sync != NULL)
+            guest_page_sync_read_lock(sync);
+        if (sync != NULL && !guest_page_sync_accessible(sync)) {
+            guest_page_sync_read_unlock(sync);
+            fault_address = (guest_addr_t) address;
+            fault_kind = GUEST_MEMORY_FAULT_UNMAPPED;
+            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+            break;
+        }
         dword_t observed;
-        if (view->sync != NULL)
-            guest_page_sync_read_lock(view->sync);
-        memcpy(&observed, view->host_page + page_offset,
+        memcpy(&observed, views[index].host_page +
+                (size_t) (address & GUEST_MEMORY_PAGE_MASK),
                 sizeof(observed));
-        if (view->sync != NULL)
-            guest_page_sync_read_unlock(view->sync);
+        if (sync != NULL)
+            guest_page_sync_read_unlock(sync);
+        if (observed != expected[index]) {
+            result = AARCH64_LINUX_FUTEX_WAITV_MISMATCH;
+            break;
+        }
+    }
+
+    struct futex_page_sync_set syncs;
+    bool syncs_locked = false;
+    if (result == AARCH64_LINUX_FUTEX_WAITV_READY) {
+        syncs_locked = futex_lock_accessible_views(
+                views, addresses, count, &syncs, &fault_address);
+        if (!syncs_locked) {
+            fault_kind = GUEST_MEMORY_FAULT_UNMAPPED;
+            result = AARCH64_LINUX_FUTEX_WAITV_FAULT;
+        }
+    }
+    for (size_t index = 0;
+            result == AARCH64_LINUX_FUTEX_WAITV_READY && index < count;
+            index++) {
+        size_t page_offset = (size_t)
+                (addresses[index] & GUEST_MEMORY_PAGE_MASK);
+        dword_t observed;
+        memcpy(&observed, views[index].host_page + page_offset,
+                sizeof(observed));
         if (observed != expected[index])
             result = AARCH64_LINUX_FUTEX_WAITV_MISMATCH;
     }
+    if (syncs_locked)
+        futex_unlock_page_syncs(&syncs);
     futex_address_space_unlock(space, has_shared_key, locked);
 
     if ((result == AARCH64_LINUX_FUTEX_WAITV_FAULT ||

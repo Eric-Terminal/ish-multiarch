@@ -331,3 +331,9 @@ void guest_page_sync_written(const struct guest_page_sync *sync,
     assert(size != 0 && size <= GUEST_MEMORY_PAGE_SIZE - page_offset);
     sync->ops->written(sync->opaque, page_offset, size);
 }
+
+bool guest_page_sync_accessible(const struct guest_page_sync *sync) {
+    validate_page_sync(sync);
+    return sync->ops->accessible == NULL ||
+            sync->ops->accessible(sync->opaque);
+}

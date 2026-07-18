@@ -101,6 +101,9 @@ enum guest_page_table_result guest_page_table_set_origin(
 enum guest_page_table_result guest_page_table_lookup(
         struct guest_page_table *table, guest_addr_t page_base,
         byte_t **host_page, unsigned *permissions);
+// 调用方持有页表写锁；只撤销已被 backing 失效域标记的驻留页。
+bool guest_page_table_remove_inaccessible(
+        struct guest_page_table *table, guest_addr_t page_base);
 enum guest_page_table_result guest_page_table_unmap(
         struct guest_page_table *table, guest_addr_t page_base);
 enum guest_page_table_result guest_page_table_protect(

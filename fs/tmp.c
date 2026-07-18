@@ -36,13 +36,8 @@ static struct tmp_inode *tmp_inode_new(mode_t_ mode) {
     node->stat.mode = mode;
     node->stat.uid = current->euid;
     node->stat.gid = current->egid;
-    if (S_ISREG(mode)) {
-        node->file_data = malloc(0);
-        if (node->file_data == NULL) {
-            free(node);
-            return NULL;
-        }
-    }
+    if (S_ISREG(mode))
+        node->file_data = NULL;
     return node;
 }
 
@@ -190,16 +185,38 @@ static struct tmp_dirent *tmpfs_lookup_parent(struct mount *mount, const char *p
     return __tmpfs_lookup(mount, path, true, filename_out);
 }
 
-static int tmpfs_file_resize(struct tmp_inode *file, size_t size) {
+/* 调用者持有 inode 锁；失败时文件内容和逻辑大小必须保持不变。 */
+static int tmpfs_file_resize(struct tmp_inode *file, qword_t requested_size) {
     assert(S_ISREG(file->stat.mode));
     assert(file->stat.size <= SIZE_MAX);
+    if (requested_size > SIZE_MAX)
+        return _EFBIG;
+
+    size_t size = (size_t) requested_size;
     size_t old_size = (size_t) file->stat.size;
+    if (size == old_size)
+        return 0;
+    if (size == 0) {
+        free(file->file_data);
+        file->file_data = NULL;
+        file->stat.size = 0;
+        return 0;
+    }
+    if (size < old_size) {
+        void *new_data = realloc(file->file_data, size);
+        if (new_data != NULL)
+            file->file_data = new_data;
+        file->stat.size = size;
+        return 0;
+    }
+
     void *new_data = realloc(file->file_data, size);
     if (new_data == NULL)
         return _ENOMEM;
+    if (size > old_size)
+        memset((char *) new_data + old_size, 0, size - old_size);
     file->file_data = new_data;
     file->stat.size = size;
-    memset((char *) file->file_data + old_size, 0, file->stat.size - old_size);
     return 0;
 }
 
@@ -255,6 +272,7 @@ static int tmpfs_umount(struct mount *UNUSED(mount)) {
 
 static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, int mode) {
     struct tmp_dirent *dirent;
+    bool opened_created = false;
     if (flags & O_CREAT_) {
         // FIXME: will create a file when given a path that ends with a slash
         const char *filename;
@@ -281,6 +299,7 @@ static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, i
             if (err < 0) {
                 goto out_creat;
             }
+            opened_created = true;
         }
 
 out_creat:
@@ -302,6 +321,7 @@ out_creat:
         return ERR_PTR(_ENOMEM);
     }
     fd->tmpfs.dirent = dirent;
+    fd->opened_created = opened_created;
 
     fd->tmpfs.dir_pos = NULL;
     lock(&dirent->lock);
@@ -322,6 +342,26 @@ static int tmpfs_stat(struct mount *mount, const char *path, struct statbuf *sta
     unlock(&inode->lock);
     tmp_dirent_release(dirent);
     return 0;
+}
+
+static int tmpfs_setattr(struct mount *mount,
+        const char *path, struct attr attr) {
+    if (attr.type != attr_size)
+        return _EPERM;
+    if (attr.size < 0)
+        return _EINVAL;
+
+    struct tmp_dirent *dirent = tmpfs_lookup(mount, path);
+    if (IS_ERR(dirent))
+        return PTR_ERR(dirent);
+    struct tmp_inode *inode = dirent->inode;
+    lock(&inode->lock);
+    int error = S_ISREG(inode->stat.mode) ?
+            tmpfs_file_resize(inode, (qword_t) attr.size) :
+            (S_ISDIR(inode->stat.mode) ? _EISDIR : _EINVAL);
+    unlock(&inode->lock);
+    tmp_dirent_release(dirent);
+    return error;
 }
 
 static int tmpfs_close(struct fd *fd) {
@@ -385,6 +425,20 @@ static int tmpfs_fstat(struct fd *fd, struct statbuf *stat) {
     *stat = inode->stat;
     unlock(&inode->lock);
     return 0;
+}
+
+static int tmpfs_fsetattr(struct fd *fd, struct attr attr) {
+    if (attr.type != attr_size)
+        return _EPERM;
+    if (attr.size < 0)
+        return _EINVAL;
+
+    struct tmp_inode *inode = tmpfs_fd_inode(fd);
+    lock(&inode->lock);
+    int error = S_ISREG(inode->stat.mode) ?
+            tmpfs_file_resize(inode, (qword_t) attr.size) : _EINVAL;
+    unlock(&inode->lock);
+    return error;
 }
 
 static ssize_t tmpfs_read_at_locked(struct tmp_inode *inode,
@@ -586,6 +640,8 @@ const struct fs_ops tmpfs = {
     .close = tmpfs_close,
     .stat = tmpfs_stat,
     .fstat = tmpfs_fstat,
+    .setattr = tmpfs_setattr,
+    .fsetattr = tmpfs_fsetattr,
     .getpath = tmpfs_getpath,
     .mkdir = tmpfs_mkdir,
 };

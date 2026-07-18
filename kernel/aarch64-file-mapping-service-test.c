@@ -44,6 +44,7 @@ struct file_probe {
     unsigned fsync_calls;
     unsigned fdatasync_calls;
     unsigned fstat_calls;
+    unsigned fsetattr_calls;
     unsigned close_calls;
     qword_t last_write_offset;
     size_t last_write_size;
@@ -56,6 +57,8 @@ struct file_probe {
     int fsync_error;
     int fdatasync_error;
     int fstat_error;
+    int fsetattr_error;
+    off_t_ requested_size;
     struct page_write_gate *page_write_gate;
 };
 
@@ -203,6 +206,25 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     return 0;
 }
 
+static int probe_fsetattr(struct fd *fd, struct attr attr) {
+    struct file_probe *probe = fd->data;
+    assert(fd->inode != NULL &&
+            lock_owned_by_current(&fd->inode->file_io_lock));
+    assert(lock_owned_by_current(&fd->lock));
+    assert(attr.type == attr_size && attr.size >= 0);
+    probe->fsetattr_calls++;
+    probe->requested_size = attr.size;
+    if (probe->fsetattr_error != 0)
+        return probe->fsetattr_error;
+    if ((qword_t) attr.size > sizeof(probe->bytes))
+        return _EFBIG;
+    if ((qword_t) attr.size > probe->size)
+        memset(probe->bytes + (size_t) probe->size, 0,
+                (size_t) ((qword_t) attr.size - probe->size));
+    probe->size = (qword_t) attr.size;
+    return 0;
+}
+
 static const struct fd_ops cacheable_ops = {
     .page_cacheable = true,
     .pread = probe_pread,
@@ -245,6 +267,7 @@ static const struct fd_ops fallback_only_ops = {
 
 static const struct fs_ops probe_fs = {
     .fstat = probe_fstat,
+    .fsetattr = probe_fsetattr,
 };
 
 static bool fixture_init(struct mapping_fixture *fixture, int mount_flags) {
@@ -825,6 +848,111 @@ static int check_inode_cache_and_lifetime(void) {
     return 0;
 }
 
+static int check_truncate_coordination(void) {
+    struct mapping_fixture fixture;
+    CHECK(fixture_init(&fixture, 0), "初始化 truncate 协调夹具");
+    struct file_probe probe = {
+        .size = 2 * GUEST_MEMORY_PAGE_SIZE,
+    };
+    memset(probe.bytes, 0x6a, sizeof(probe.bytes));
+    fd_t fd = install_probe_fd(&fixture, &probe,
+            &cacheable_ops, S_IFREG, O_RDWR_, 9, 90);
+    CHECK(fd >= 0, "安装可截断的 cacheable 普通文件");
+    struct fd *installed = f_get_task(&fixture.task, fd);
+    installed->offset = 73;
+
+    struct guest_linux_file_mapping mapping = {0};
+    CHECK(open_mapping(&fixture, (qword_t) fd,
+            2 * GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ,
+            GUEST_LINUX_MAP_SHARED, 0, &mapping) == 0 &&
+            mapping.pager != NULL,
+            "建立参与 truncate 的生产 pager");
+    struct guest_page_backing *first = NULL;
+    struct guest_page_backing *second = NULL;
+    CHECK(guest_file_pager_get_page(mapping.pager, 0, &first) ==
+                    GUEST_FILE_PAGE_OK && first != NULL &&
+            guest_file_pager_get_page(mapping.pager,
+                    GUEST_MEMORY_PAGE_SIZE, &second) ==
+                    GUEST_FILE_PAGE_OK && second != NULL,
+            "预载 truncate 两侧的 resident 页");
+    struct guest_page_backing *first_cow =
+            guest_page_backing_clone(first);
+    struct guest_page_backing *second_cow =
+            guest_page_backing_clone(second);
+    CHECK(first_cow != NULL && second_cow != NULL,
+            "建立部分页与整页的私有 COW 对照");
+
+    probe.fsetattr_error = _ENOSPC;
+    CHECK(file_ftruncate_task(&fixture.task, fd, 123) == _ENOSPC &&
+            probe.size == 2 * GUEST_MEMORY_PAGE_SIZE &&
+            probe.fsetattr_calls == 1 &&
+            guest_page_backing_file_accessible(second) &&
+            guest_page_backing_file_accessible(second_cow),
+            "provider 失败不发布大小或失效 resident backing");
+    probe.fsetattr_error = 0;
+
+    CHECK(file_ftruncate_task(&fixture.task, fd, 123) == 0 &&
+            probe.size == 123 && probe.requested_size == 123 &&
+            probe.fsetattr_calls == 2 && installed->offset == 73,
+            "成功 shrink 在 inode I/O 域提交且保持 fd offset");
+    CHECK(guest_page_backing_file_accessible(first) &&
+            guest_page_backing_file_accessible(first_cow) &&
+            !guest_page_backing_file_accessible(second) &&
+            !guest_page_backing_file_accessible(second_cow) &&
+            guest_page_backing_bytes(first)[122] == 0x6a &&
+            guest_page_backing_bytes(first)[123] == 0 &&
+            guest_page_backing_bytes(first_cow)[123] == 0x6a,
+            "shrink 清文件缓存尾部并永久失效 EOF 后 cache/COW 整页");
+    struct guest_page_backing *missing = (void *) (uintptr_t) 1;
+    CHECK(guest_file_pager_get_page(mapping.pager,
+            GUEST_MEMORY_PAGE_SIZE, &missing) ==
+                    GUEST_FILE_PAGE_END_OF_FILE && missing == NULL,
+            "shrink 后已摘除 cache 条目并按当前 EOF 重新判定");
+
+    CHECK(file_ftruncate_task(&fixture.task, fd,
+            GUEST_MEMORY_PAGE_SIZE + 17) == 0 &&
+            probe.fsetattr_calls == 3 &&
+            probe.size == GUEST_MEMORY_PAGE_SIZE + 17,
+            "grow 通过同一服务发布新 EOF");
+    struct guest_page_backing *grown = NULL;
+    CHECK(guest_file_pager_get_page(mapping.pager,
+            GUEST_MEMORY_PAGE_SIZE, &grown) == GUEST_FILE_PAGE_OK &&
+            grown != NULL && grown != second &&
+            guest_page_backing_file_accessible(grown) &&
+            !guest_page_backing_file_accessible(second) &&
+            !guest_page_backing_file_accessible(second_cow),
+            "grow 载入全新 backing 且不复活 shrink 前对象");
+    for (size_t index = 0; index < 17; index++)
+        CHECK(guest_page_backing_bytes(grown)[index] == 0,
+                "grow 的新文件区间必须零填充");
+    CHECK(guest_page_backing_bytes(first_cow)[123] == 0x6a,
+            "部分页私有 COW 内容不随文件 grow 被改写");
+
+    write_backing_byte(grown, 18, 0xee);
+    struct guest_page_backing *grown_cow =
+            guest_page_backing_clone(grown);
+    CHECK(grown_cow != NULL,
+            "建立等长 truncate 的尾页私有 COW 对照");
+    CHECK(file_ftruncate_task(&fixture.task, fd,
+            GUEST_MEMORY_PAGE_SIZE + 17) == 0 &&
+            probe.fsetattr_calls == 4 && installed->offset == 73 &&
+            guest_page_backing_bytes(grown)[18] == 0 &&
+            guest_page_backing_bytes(grown_cow)[18] == 0xee,
+            "等长 truncate 仍清文件缓存尾部并保留私有 COW 尾部");
+
+    guest_page_backing_release(grown_cow);
+    guest_page_backing_release(grown);
+    guest_page_backing_release(second_cow);
+    guest_page_backing_release(first_cow);
+    guest_page_backing_release(second);
+    guest_page_backing_release(first);
+    guest_file_pager_release(mapping.pager);
+    fixture_destroy(&fixture);
+    CHECK(probe.close_calls == 1,
+            "truncate 协调夹具平衡 pager 与 fd 生命周期");
+    return 0;
+}
+
 static int check_fault_translation_source(void) {
     struct mapping_fixture fixture;
     CHECK(fixture_init(&fixture, 0), "初始化读取故障夹具");
@@ -1262,6 +1390,8 @@ int main(void) {
     if (check_host_shared_mapping_exclusion() != 0)
         return 1;
     if (check_inode_cache_and_lifetime() != 0)
+        return 1;
+    if (check_truncate_coordination() != 0)
         return 1;
     if (check_fault_translation_source() != 0)
         return 1;

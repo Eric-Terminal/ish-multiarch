@@ -483,6 +483,7 @@ static void test_page_origins(void) {
     assert(view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
             view.file_identity == 0 && view.file_offset == 0 &&
             !view.copy_on_write && view.sync == NULL &&
+            view.access_sync == NULL &&
             view.host_page != resolve_view(&copy, NEXT_PAGE).host_page);
     view = resolve_view(&copy, NEXT_PAGE);
     assert(view.origin == GUEST_PAGE_ORIGIN_FILE && view.copy_on_write &&
@@ -816,9 +817,11 @@ static void test_shared_file_backing_lifecycle(void) {
             UINT64_C(0x7482c5d6), &source_probe,
             release_file_source_probe);
     struct guest_page_backing *backing = guest_page_backing_create();
-    assert(source != NULL && backing != NULL);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    assert(source != NULL && backing != NULL && domain != NULL);
     const qword_t file_offset = GUEST_MEMORY_PAGE_SIZE * 2;
-    guest_page_backing_track_file_writes(backing);
+    guest_page_backing_track_file_writes(backing, domain, file_offset);
     dword_t initial = UINT32_C(0x11223344);
     memcpy(guest_page_backing_bytes(backing), &initial, sizeof(initial));
 
@@ -933,6 +936,104 @@ static void test_shared_file_backing_lifecycle(void) {
             tlb_read_byte(&child_tlb, NEXT_PAGE) ==
                     exclusive_replacement);
     guest_page_table_destroy(&child);
+    guest_file_page_domain_release(domain);
+    assert(source_probe.releases == 1 &&
+            guest_page_backing_test_live_count() == 0);
+}
+
+static void test_file_resize_access_guards(void) {
+    assert(guest_page_backing_test_live_count() == 0);
+    struct guest_page_table table;
+    assert(guest_page_table_init(&table, 48));
+    struct file_source_probe source_probe = {0};
+    struct guest_file_source *source = guest_file_source_create(
+            UINT64_C(0x7593d6e7), &source_probe,
+            release_file_source_probe);
+    struct guest_file_page_domain *domain =
+            guest_file_page_domain_create();
+    struct guest_page_backing *backing = guest_page_backing_create();
+    assert(source != NULL && domain != NULL && backing != NULL);
+    guest_page_backing_track_file_writes(
+            backing, domain, GUEST_MEMORY_PAGE_SIZE);
+    dword_t initial = UINT32_C(0x11223344);
+    memcpy(guest_page_backing_bytes(backing), &initial, sizeof(initial));
+
+    unsigned permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
+    assert(guest_page_table_map_shared_file_backing(
+            &table, HIGH_PAGE, permissions, source,
+            GUEST_MEMORY_PAGE_SIZE, backing) == GUEST_PAGE_TABLE_OK);
+    assert(guest_page_table_map_private_file_backing(
+            &table, NEXT_PAGE, permissions, source,
+            GUEST_MEMORY_PAGE_SIZE, backing) == GUEST_PAGE_TABLE_OK);
+    guest_file_source_release(source);
+
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &table.address_space);
+    struct guest_memory_fault fault;
+    dword_t observed;
+    assert(guest_tlb_read(&tlb, HIGH_PAGE, &observed, sizeof(observed),
+            GUEST_MEMORY_READ, &fault) && observed == initial);
+    assert(guest_tlb_read(&tlb, NEXT_PAGE, &observed, sizeof(observed),
+            GUEST_MEMORY_READ, &fault) && observed == initial);
+    dword_t private_value = UINT32_C(0x55667788);
+    assert(guest_tlb_write(&tlb, NEXT_PAGE,
+            &private_value, sizeof(private_value), &fault));
+    struct guest_page_view private_view = resolve_view(&table, NEXT_PAGE);
+    assert(private_view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            private_view.sync == NULL && private_view.access_sync != NULL &&
+            !private_view.copy_on_write);
+
+    struct guest_tlb_exclusive_token token;
+    assert(guest_tlb_load_exclusive(&tlb, HIGH_PAGE,
+            &observed, sizeof(observed), &token, &fault));
+    assert(observed == initial);
+    guest_file_page_domain_resize(
+            domain, 2 * GUEST_MEMORY_PAGE_SIZE, 0);
+
+    observed = UINT32_C(0xdecafbad);
+    assert(!guest_tlb_read(&tlb, HIGH_PAGE,
+            &observed, sizeof(observed), GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED &&
+            fault.address == HIGH_PAGE &&
+            observed == UINT32_C(0xdecafbad));
+    assert(!guest_tlb_read(&tlb, NEXT_PAGE,
+            &observed, sizeof(observed), GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED &&
+            fault.address == NEXT_PAGE &&
+            observed == UINT32_C(0xdecafbad));
+
+    struct guest_tlb_mapping_snapshot snapshot = {
+        .shared_identity = UINT64_MAX,
+        .file_identity = UINT64_MAX,
+        .page_offset = UINT64_MAX,
+        .file_offset = UINT64_MAX,
+    };
+    dword_t replacement = UINT32_C(0xaabbccdd);
+    assert(guest_tlb_compare_exchange_u32_resolved_no_page_in(
+            &tlb, NEXT_PAGE, private_value, replacement,
+            &observed, &snapshot, &fault) ==
+            GUEST_TLB_COMPARE_EXCHANGE_FAULT);
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED &&
+            observed == UINT32_C(0xdecafbad) &&
+            snapshot.shared_identity == UINT64_MAX &&
+            snapshot.file_identity == UINT64_MAX &&
+            snapshot.page_offset == UINT64_MAX &&
+            snapshot.file_offset == UINT64_MAX);
+    assert(guest_tlb_store_exclusive(&tlb, HIGH_PAGE,
+            &initial, &replacement, sizeof(replacement),
+            token, &fault) == GUEST_TLB_EXCLUSIVE_FAULT);
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+
+    bool locked = guest_page_table_write_lock(&table);
+    assert(guest_page_table_remove_inaccessible(&table, HIGH_PAGE));
+    assert(guest_page_table_remove_inaccessible(&table, NEXT_PAGE));
+    guest_page_table_write_unlock(&table, locked);
+    assert_not_mapped(&table, HIGH_PAGE);
+    assert_not_mapped(&table, NEXT_PAGE);
+
+    guest_page_backing_release(backing);
+    guest_page_table_destroy(&table);
+    guest_file_page_domain_release(domain);
     assert(source_probe.releases == 1 &&
             guest_page_backing_test_live_count() == 0);
 }
@@ -1595,6 +1696,7 @@ int main(void) {
     test_set_origin_preserves_backing_semantics();
     test_private_file_cow_transactions();
     test_shared_file_backing_lifecycle();
+    test_file_resize_access_guards();
     test_supported_address_widths();
     test_backing_allocation_failures();
     test_shared_map_rollback();
