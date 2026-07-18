@@ -78,6 +78,9 @@ int main(void) {
             file_pread_fd(fd, contents, 8, 0) == 8 &&
             strcmp(contents, "Zbcdefgh") == 0,
             "精确写回不破坏后续普通追加语义");
+    CHECK(file_sync_fd(fd, true) == 0 &&
+            file_sync_fd(fd, false) == 0,
+            "realfs 同时提供 data-only 与完整同步入口");
 
     struct mem parent;
     struct mem child;

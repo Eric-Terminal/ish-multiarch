@@ -437,6 +437,12 @@ if get_option('kernel') == 'ish'
             i386_futex_shared_test,
             timeout: 60)
 
+        i386_msync_test = executable(
+            'i386_msync_test',
+            'kernel/i386-msync-test.c',
+            dependencies: ish)
+        test('i386_msync', i386_msync_test, timeout: 60)
+
         i386_futex_waitv_test = executable(
             'i386_futex_waitv_test',
             'kernel/i386-futex-waitv-test.c',

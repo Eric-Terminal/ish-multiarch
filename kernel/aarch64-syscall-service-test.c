@@ -101,6 +101,10 @@ struct kernel_probe {
     unsigned rmdir_calls;
     unsigned mkdir_calls;
     unsigned rename_calls;
+    unsigned fsync_calls;
+    unsigned fdatasync_calls;
+    int fsync_error;
+    int fdatasync_error;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
     dword_t ioctl_input;
@@ -330,6 +334,22 @@ static int probe_close(struct fd *fd) {
     return 0;
 }
 
+static int probe_fsync(struct fd *fd) {
+    struct fd_state *state = fd->data;
+    CHECK(lock_owned_by_current(&fd->lock),
+            "fsync 回调必须持有 fd 锁");
+    state->kernel->fsync_calls++;
+    return state->kernel->fsync_error;
+}
+
+static int probe_fdatasync(struct fd *fd) {
+    struct fd_state *state = fd->data;
+    CHECK(lock_owned_by_current(&fd->lock),
+            "fdatasync 回调必须持有 fd 锁");
+    state->kernel->fdatasync_calls++;
+    return state->kernel->fdatasync_error;
+}
+
 static ssize_t probe_ioctl_size(int command) {
     switch ((dword_t) command) {
         case FIONREAD_:
@@ -370,6 +390,8 @@ static const struct fd_ops probe_fd_ops = {
     .poll = probe_poll,
     .ioctl_size = probe_ioctl_size,
     .ioctl = probe_ioctl,
+    .fsync = probe_fsync,
+    .fdatasync = probe_fdatasync,
     .close = probe_close,
 };
 
@@ -984,6 +1006,30 @@ int main(void) {
         return 1;
     }
     reset_user_access(&memory);
+
+    CHECK(invoke(&fixture, &memory, &fault, 82,
+            UINT64_C(0xabcdef0100000000), 0, 0, 0) == 0 &&
+            kernel.fsync_calls == 1 && kernel.fdatasync_calls == 0 &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "AArch64 fsync 按低 32 位 fd 执行完整同步");
+    CHECK(invoke(&fixture, &memory, &fault, 83,
+            UINT64_C(0x1234567800000000), 0, 0, 0) == 0 &&
+            kernel.fsync_calls == 1 && kernel.fdatasync_calls == 1,
+            "AArch64 fdatasync 选择 data-only 回调");
+    kernel.fsync_error = _EIO;
+    CHECK(invoke(&fixture, &memory, &fault, 82, 0, 0, 0, 0) ==
+            encoded_error(_EIO) && kernel.fsync_calls == 2,
+            "AArch64 fsync 原样传播 provider 错误");
+    kernel.fsync_error = 0;
+    kernel.fdatasync_error = _ENOSPC;
+    CHECK(invoke(&fixture, &memory, &fault, 83, 0, 0, 0, 0) ==
+            encoded_error(_ENOSPC) && kernel.fdatasync_calls == 2,
+            "AArch64 fdatasync 原样传播 provider 错误");
+    kernel.fdatasync_error = 0;
+    CHECK(invoke(&fixture, &memory, &fault, 82,
+            UINT64_C(0xffffffff00000007), 0, 0, 0) ==
+            encoded_error(_EBADF),
+            "AArch64 fsync 无效低 32 位 fd 返回 EBADF");
 
     CHECK(invoke(&fixture, &memory, &fault, 129,
             UINT64_C(0x123456787fffffff), 65, 0, 0) ==

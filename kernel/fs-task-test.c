@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "kernel/calls.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/resource.h"
@@ -39,8 +40,12 @@ struct io_probe {
     off_t_ sequential_read_offset;
     off_t_ sequential_write_offset;
     unsigned seek_calls;
+    unsigned fsync_calls;
+    unsigned fdatasync_calls;
     int read_error;
     int write_error;
+    int fsync_error;
+    int fdatasync_error;
     int stat_error;
     int path_error;
     qword_t inode;
@@ -143,6 +148,20 @@ static int probe_close(struct fd *fd) {
     return 0;
 }
 
+static int probe_fsync(struct fd *fd) {
+    struct io_probe *probe = fd->data;
+    assert(lock_owned_by_current(&fd->lock));
+    probe->fsync_calls++;
+    return probe->fsync_error;
+}
+
+static int probe_fdatasync(struct fd *fd) {
+    struct io_probe *probe = fd->data;
+    assert(lock_owned_by_current(&fd->lock));
+    probe->fdatasync_calls++;
+    return probe->fdatasync_error;
+}
+
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct io_probe *probe = fd->data;
     if (probe->path_error != 0)
@@ -154,8 +173,15 @@ static int probe_getpath(struct fd *fd, char *buffer) {
 static const struct fd_ops direct_ops = {
     .read = probe_read,
     .write = probe_write,
+    .fsync = probe_fsync,
+    .fdatasync = probe_fdatasync,
     .close = probe_close,
     .getflags = probe_getflags,
+};
+
+static const struct fd_ops fsync_only_ops = {
+    .fsync = probe_fsync,
+    .close = probe_close,
 };
 
 static const struct fd_ops positioned_ops = {
@@ -344,6 +370,7 @@ int main(void) {
     };
     struct io_probe directory_io = {.path = "/directory"};
     struct io_probe empty_io = {.path = "/empty"};
+    struct io_probe fsync_only_io = {.path = "/fsync-only"};
 
     struct fd *decoy_fd = make_fd(&decoy, &decoy_io, &direct_ops, S_IFREG);
     struct fd *target_fd = make_fd(&target, &target_io, &direct_ops, S_IFREG);
@@ -351,16 +378,20 @@ int main(void) {
     struct fd *seekable_fd = make_fd(&target, &seekable_io, &seekable_ops, S_IFREG);
     struct fd *directory_fd = make_fd(&target, &directory_io, &direct_ops, S_IFDIR);
     struct fd *empty_fd = make_fd(&target, &empty_io, &empty_ops, S_IFREG);
+    struct fd *fsync_only_fd = make_fd(
+            &target, &fsync_only_io, &fsync_only_ops, S_IFREG);
     struct fd *decoy_pwd = make_fd(&decoy, &decoy_io, &empty_ops, S_IFDIR);
     struct fd *target_pwd = make_fd(&target, &target_io, &empty_ops, S_IFDIR);
     CHECK(decoy_fd != NULL && target_fd != NULL && positioned_fd != NULL &&
             seekable_fd != NULL &&
             directory_fd != NULL && empty_fd != NULL && decoy_pwd != NULL &&
-            target_pwd != NULL, "测试 fd 创建成功");
+            target_pwd != NULL && fsync_only_fd != NULL,
+            "测试 fd 创建成功");
     target_fd->flags = O_RDWR_;
     positioned_fd->flags = O_RDWR_;
     seekable_fd->flags = O_RDWR_;
     empty_fd->flags = O_RDWR_;
+    fsync_only_fd->flags = O_RDWR_;
     decoy.fs.pwd = decoy_pwd;
     target.fs.pwd = target_pwd;
     CHECK(f_install_task(&decoy.task, decoy_fd, 0) == 0, "诱饵 fd 安装成功");
@@ -370,6 +401,8 @@ int main(void) {
     CHECK(f_install_task(&target.task, empty_fd, 0) == 3, "空操作 fd 安装成功");
     CHECK(f_install_task(&target.task, seekable_fd, 0) == 4,
             "可定位顺序 fd 安装成功");
+    CHECK(f_install_task(&target.task, fsync_only_fd, 0) == 5,
+            "完整同步回退 fd 安装成功");
     current = &decoy.task;
 
     const enum close_race_operation close_races[] = {
@@ -398,6 +431,35 @@ int main(void) {
     CHECK(file_write_check_task(&target.task, 3) == _EBADF &&
             file_write_check_task(&target.task, 99) == _EBADF,
             "写入预检拒绝无写操作与无效 fd");
+    CHECK(file_sync_task(&target.task, 0, false) == 0 &&
+            target_io.fsync_calls == 1 &&
+            target_io.fdatasync_calls == 0,
+            "完整同步使用目标任务 fd 的 fsync 回调");
+    CHECK(file_sync_task(&target.task, 0, true) == 0 &&
+            target_io.fsync_calls == 1 &&
+            target_io.fdatasync_calls == 1,
+            "数据同步优先使用 fdatasync 回调");
+    target_io.fsync_error = _EIO;
+    target_io.fdatasync_error = _ENOSPC;
+    CHECK(file_sync_task(&target.task, 0, false) == _EIO &&
+            file_sync_task(&target.task, 0, true) == _ENOSPC,
+            "文件同步原样传播底层错误");
+    target_io.fsync_error = 0;
+    target_io.fdatasync_error = 0;
+    CHECK(file_sync_task(&target.task, 1, false) == _EINVAL &&
+            file_sync_task(&target.task, 1, true) == _EINVAL,
+            "缺少同步操作的有效 fd 返回 EINVAL");
+    CHECK(file_sync_task(&target.task, 5, true) == 0 &&
+            fsync_only_io.fsync_calls == 1,
+            "缺少 fdatasync 时数据同步回退到更强的 fsync");
+    CHECK(file_sync_task(&target.task, 99, false) == _EBADF,
+            "文件同步先拒绝无效 fd");
+    current = &target.task;
+    CHECK(sys_fsync(0) == 0 && sys_fdatasync(0) == 0 &&
+            target_io.fsync_calls == 3 &&
+            target_io.fdatasync_calls == 3,
+            "i386 fsync 与 fdatasync 系统调用选择独立同步模式");
+    current = &decoy.task;
     target_fd->flags = O_RDONLY_;
     CHECK(file_write_check_task(&target.task, 0) == _EBADF,
             "写入预检拒绝只读 fd");

@@ -176,7 +176,9 @@ struct fd_ops {
     // if ioctl_size returns non-zero, arg must point to ioctl_size valid bytes
     int (*ioctl)(struct fd *fd, int cmd, void *arg);
 
+    /* 调用者持有 fd->lock；fdatasync 缺失时上层可退化为更强的 fsync。 */
     int (*fsync)(struct fd *fd);
+    int (*fdatasync)(struct fd *fd);
     int (*close)(struct fd *fd);
 
     // handle F_GETFL, i.e. return open flags for this fd

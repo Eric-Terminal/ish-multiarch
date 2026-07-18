@@ -90,6 +90,9 @@ int main(void) {
     struct statbuf stat;
     CHECK(file_fstat_fd(fd, &stat) == 0 && stat.size == 7,
             "零长定位写后文件大小保持不变");
+    CHECK(file_sync_fd(fd, true) == 0 &&
+            file_sync_fd(fd, false) == 0,
+            "tmpfs 的 fdatasync 与 fsync 均为空操作成功");
 
     int close_error = fd_close(fd);
     fd = NULL;

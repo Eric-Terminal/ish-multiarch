@@ -23,7 +23,11 @@ struct file_probe {
     byte_t data[GUEST_MEMORY_PAGE_SIZE * 3];
     qword_t size;
     enum guest_file_page_result forced_result;
+    enum guest_file_sync_result forced_write_result;
+    enum guest_file_sync_result forced_sync_result;
     qword_t last_write_offset;
+    qword_t last_sync_offset;
+    qword_t last_sync_length;
     unsigned reads;
     unsigned writes;
     unsigned syncs;
@@ -31,6 +35,9 @@ struct file_probe {
     bool block;
     bool entered;
     bool allow_read;
+    bool block_sync;
+    bool sync_entered;
+    bool allow_sync;
     bool read_outside_page_table_lock;
     bool write_outside_page_table_lock;
     bool sync_outside_page_table_lock;
@@ -110,6 +117,12 @@ static enum guest_file_sync_result probe_write_page(void *opaque,
     probe->write_outside_page_table_lock &= outside_lock;
     probe->writes++;
     probe->last_write_offset = file_offset;
+    enum guest_file_sync_result result =
+            probe->forced_write_result;
+    if (result != GUEST_FILE_SYNC_OK) {
+        check_pthread(pthread_mutex_unlock(&probe->lock));
+        return result;
+    }
     assert(file_offset < probe->size);
     qword_t remaining = probe->size - file_offset;
     qword_t count = remaining < GUEST_MEMORY_PAGE_SIZE ?
@@ -128,8 +141,16 @@ static enum guest_file_sync_result probe_sync_range(void *opaque,
     check_pthread(pthread_mutex_lock(&probe->lock));
     probe->sync_outside_page_table_lock &= outside_lock;
     probe->syncs++;
+    probe->last_sync_offset = file_offset;
+    probe->last_sync_length = length;
+    probe->sync_entered = true;
+    check_pthread(pthread_cond_broadcast(&probe->changed));
+    while (probe->block_sync && !probe->allow_sync)
+        check_pthread(pthread_cond_wait(&probe->changed, &probe->lock));
+    enum guest_file_sync_result result =
+            probe->forced_sync_result;
     check_pthread(pthread_mutex_unlock(&probe->lock));
-    return GUEST_FILE_SYNC_OK;
+    return result;
 }
 
 static void probe_release(
@@ -828,6 +849,223 @@ static void *blocked_read_thread(void *opaque) {
     return NULL;
 }
 
+struct blocked_msync {
+    struct guest_linux_mm *memory;
+    guest_addr_t address;
+    qword_t length;
+    dword_t flags;
+    qword_t result;
+};
+
+static void *blocked_msync_thread(void *opaque) {
+    struct blocked_msync *sync = opaque;
+    sync->result = guest_linux_msync(sync->memory,
+            sync->address, sync->length, sync->flags);
+    return NULL;
+}
+
+static void test_msync_ranges_errors_and_concurrency(void) {
+    struct memory_fixture fixture;
+    fixture_init(&fixture);
+    struct file_probe probe;
+    probe_init(&probe, &fixture.table, GUEST_MEMORY_PAGE_SIZE * 3);
+    struct guest_file_pager *pager =
+            probe_writable_pager(&probe, 107);
+    assert(pager != NULL);
+
+    qword_t protection = GUEST_LINUX_PROT_READ |
+            GUEST_LINUX_PROT_WRITE;
+    qword_t first_result = map_shared(&fixture, pager, 0,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_SHARED, 0);
+    assert((sqword_t) first_result >= 0);
+    guest_addr_t first = (guest_addr_t) first_result;
+    guest_addr_t private_page = first + GUEST_MEMORY_PAGE_SIZE;
+    guest_addr_t hole = private_page + GUEST_MEMORY_PAGE_SIZE;
+    guest_addr_t second = hole + GUEST_MEMORY_PAGE_SIZE;
+    assert(map_private(&fixture, pager, private_page,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED,
+            GUEST_MEMORY_PAGE_SIZE) == private_page);
+    assert(map_shared(&fixture, pager, second,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED,
+            GUEST_MEMORY_PAGE_SIZE * 2) == second);
+
+    struct guest_memory_fault fault;
+    byte_t value;
+    assert(guest_tlb_read(&fixture.tlb, first, &value, 1,
+            GUEST_MEMORY_READ, &fault));
+    byte_t replacement = UINT8_C(0xc7);
+    assert(guest_tlb_write(&fixture.tlb, first,
+            &replacement, 1, &fault));
+    assert(probe.reads == 1 && probe.writes == 0 && probe.syncs == 0);
+
+    qword_t four_pages = GUEST_MEMORY_PAGE_SIZE * 4;
+    assert(guest_linux_msync(&fixture.memory, first, four_pages,
+            GUEST_LINUX_MS_ASYNC) ==
+            linux_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_msync(&fixture.memory, first, four_pages, 0) ==
+            linux_error(GUEST_LINUX_ENOMEM));
+    assert(guest_linux_msync(&fixture.memory, first, four_pages,
+            GUEST_LINUX_MS_INVALIDATE) ==
+            linux_error(GUEST_LINUX_ENOMEM));
+    assert(probe.writes == 0 && probe.syncs == 0 && probe.reads == 1);
+
+    assert(guest_linux_msync(&fixture.memory, first, four_pages,
+            GUEST_LINUX_MS_SYNC) == linux_error(GUEST_LINUX_ENOMEM));
+    assert(probe.writes == 1 && probe.syncs == 2 &&
+            probe.last_write_offset == 0 &&
+            probe.last_sync_offset == GUEST_MEMORY_PAGE_SIZE * 2 &&
+            probe.last_sync_length == GUEST_MEMORY_PAGE_SIZE &&
+            probe.data[0] == replacement && probe.reads == 1);
+    assert(guest_linux_msync(&fixture.memory, second, 1,
+            GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.writes == 1 && probe.syncs == 3 &&
+            probe.last_sync_offset == GUEST_MEMORY_PAGE_SIZE * 2 &&
+            probe.last_sync_length == GUEST_MEMORY_PAGE_SIZE);
+    assert(guest_linux_msync(&fixture.memory, private_page,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.syncs == 3);
+
+    guest_addr_t readonly_shared = second + GUEST_MEMORY_PAGE_SIZE;
+    assert(map_shared(&fixture, pager, readonly_shared,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ,
+            GUEST_LINUX_PROT_READ,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED, 0) ==
+            readonly_shared);
+    assert(guest_linux_msync(&fixture.memory, readonly_shared,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.syncs == 3);
+
+    guest_addr_t raw_page = second + GUEST_MEMORY_PAGE_SIZE * 2;
+    bool locked = guest_page_table_write_lock(&fixture.table);
+    assert(guest_page_table_map_zero_range(&fixture.table,
+            (struct guest_page_range) {
+                .first = raw_page,
+                .page_count = 1,
+            }, GUEST_MEMORY_READ | GUEST_MEMORY_WRITE, false) ==
+            GUEST_PAGE_TABLE_OK);
+    guest_page_table_write_unlock(&fixture.table, locked);
+    assert(guest_linux_msync(&fixture.memory, raw_page,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.syncs == 3);
+
+    assert(guest_tlb_read(&fixture.tlb, second, &value, 1,
+            GUEST_MEMORY_READ, &fault) && probe.reads == 2);
+    replacement = UINT8_C(0x4e);
+    assert(guest_tlb_write(&fixture.tlb, second,
+            &replacement, 1, &fault));
+    probe.forced_write_result = GUEST_FILE_SYNC_IO_ERROR;
+    assert(guest_linux_msync(&fixture.memory, second,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) ==
+            linux_error(GUEST_LINUX_EIO));
+    assert(probe.writes == 2 && probe.syncs == 3);
+    probe.forced_write_result = GUEST_FILE_SYNC_OK;
+    assert(guest_linux_msync(&fixture.memory, second,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.writes == 3 && probe.syncs == 4 &&
+            probe.data[GUEST_MEMORY_PAGE_SIZE * 2] == replacement);
+
+    probe.forced_sync_result = GUEST_FILE_SYNC_IO_ERROR;
+    assert(guest_linux_msync(&fixture.memory, second,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) ==
+            linux_error(GUEST_LINUX_EIO));
+    assert(probe.writes == 3 && probe.syncs == 5);
+    probe.forced_sync_result = GUEST_FILE_SYNC_OK;
+    assert(guest_linux_msync(&fixture.memory, second,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.writes == 3 && probe.syncs == 6);
+
+    assert(guest_linux_msync(&fixture.memory, first + 1, 0, 0) ==
+            linux_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_msync(&fixture.memory, first, 0,
+            GUEST_LINUX_MS_ASYNC | GUEST_LINUX_MS_SYNC) ==
+            linux_error(GUEST_LINUX_EINVAL));
+    assert(guest_linux_msync(&fixture.memory, first, 0,
+            UINT32_C(0x80000000)) == linux_error(GUEST_LINUX_EINVAL));
+    guest_addr_t last_page =
+            (guest_addr_t) (UINT64_MAX & ~GUEST_MEMORY_PAGE_MASK);
+    assert(guest_linux_msync(&fixture.memory, last_page,
+            UINT64_MAX, 0) == 0);
+    assert(guest_linux_msync(&fixture.memory, last_page,
+            GUEST_MEMORY_PAGE_SIZE, 0) ==
+            linux_error(GUEST_LINUX_ENOMEM));
+
+    struct file_probe replacement_probe;
+    probe_init(&replacement_probe, &fixture.table,
+            GUEST_MEMORY_PAGE_SIZE * 2);
+    struct guest_file_pager *replacement_pager =
+            probe_writable_pager(&replacement_probe, 108);
+    assert(replacement_pager != NULL);
+
+    probe.block_sync = true;
+    probe.sync_entered = false;
+    probe.allow_sync = false;
+    struct blocked_msync blocked = {
+        .memory = &fixture.memory,
+        .address = second,
+        .length = GUEST_MEMORY_PAGE_SIZE * 2,
+        .flags = GUEST_LINUX_MS_SYNC,
+    };
+    pthread_t thread;
+    check_pthread(pthread_create(
+            &thread, NULL, blocked_msync_thread, &blocked));
+    check_pthread(pthread_mutex_lock(&probe.lock));
+    while (!probe.sync_entered)
+        check_pthread(pthread_cond_wait(&probe.changed, &probe.lock));
+    check_pthread(pthread_mutex_unlock(&probe.lock));
+
+    struct guest_page_table child_table;
+    struct guest_linux_mm child_memory;
+    assert(guest_linux_mm_clone(
+            &child_memory, &child_table, &fixture.memory));
+    guest_page_table_enable_concurrency(&child_table);
+
+    // 已处理的旧段不回访，下一游标必须观察 MAP_FIXED 后的新 pager。
+    assert(map_shared(&fixture, replacement_pager, second,
+            GUEST_MEMORY_PAGE_SIZE * 2, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED, 0) ==
+            second);
+    check_pthread(pthread_mutex_lock(&probe.lock));
+    probe.allow_sync = true;
+    check_pthread(pthread_cond_broadcast(&probe.changed));
+    check_pthread(pthread_mutex_unlock(&probe.lock));
+    check_pthread(pthread_join(thread, NULL));
+    assert(blocked.result == 0 && probe.syncs == 7 &&
+            replacement_probe.syncs == 1 &&
+            replacement_probe.last_sync_offset ==
+                    GUEST_MEMORY_PAGE_SIZE &&
+            replacement_probe.last_sync_length ==
+                    GUEST_MEMORY_PAGE_SIZE &&
+            probe.sync_outside_page_table_lock &&
+            replacement_probe.sync_outside_page_table_lock);
+
+    // clone 必须能在父进程同步 I/O 阻塞时完成，子进程仍共享旧 pager。
+    assert(guest_linux_msync(&child_memory, second,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0 &&
+            probe.syncs == 8 && replacement_probe.syncs == 1);
+
+    guest_file_pager_release(pager);
+    guest_file_pager_release(replacement_pager);
+    guest_linux_mm_destroy(&child_memory);
+    guest_page_table_destroy(&child_table);
+    fixture_destroy(&fixture);
+    assert(probe.syncs == 9 && probe.releases == 1 &&
+            probe.write_outside_page_table_lock &&
+            probe.sync_outside_page_table_lock &&
+            probe.release_outside_page_table_lock);
+    assert(replacement_probe.syncs == 2 &&
+            replacement_probe.releases == 1 &&
+            replacement_probe.sync_outside_page_table_lock &&
+            replacement_probe.release_outside_page_table_lock);
+    probe_destroy(&replacement_probe);
+    probe_destroy(&probe);
+}
+
 static void test_fault_racing_munmap_drops_stale_page(void) {
     struct memory_fixture fixture;
     fixture_init(&fixture);
@@ -1027,6 +1265,7 @@ int main(void) {
     test_lazy_mprotect_holes_and_fixed_replace();
     test_fixed_file_mapping_replaces_offset();
     test_fork_before_fault_and_exclusive_cow();
+    test_msync_ranges_errors_and_concurrency();
     test_fault_racing_munmap_drops_stale_page();
     test_fault_racing_file_source_replace();
     test_argument_and_cache_oom_errors();

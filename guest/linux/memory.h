@@ -54,6 +54,8 @@ qword_t guest_linux_munmap(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length);
 qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection);
+qword_t guest_linux_msync(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, dword_t flags);
 qword_t guest_linux_madvise(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, dword_t advice);
 

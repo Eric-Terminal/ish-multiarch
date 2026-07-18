@@ -98,6 +98,30 @@ static void end_file_io(struct file_io_guard *guard) {
     *guard = (struct file_io_guard) {0};
 }
 
+static struct guest_file_pager *retain_file_pager(struct fd *fd) {
+    if (!fd_has_coherent_page_cache(fd))
+        return NULL;
+    struct inode_data *inode = fd->inode;
+    for (;;) {
+        lock(&inode->lock);
+        struct guest_file_pager *pager = inode->file_pager;
+        assert((pager == NULL) ==
+                (inode->file_pager_context == NULL));
+        if (pager == NULL) {
+            unlock(&inode->lock);
+            return NULL;
+        }
+        if (guest_file_pager_try_retain(pager)) {
+            unlock(&inode->lock);
+            return pager;
+        }
+        int waited = wait_for_ignore_signals(
+                &inode->file_pager_changed, &inode->lock, NULL);
+        assert(waited == 0);
+        unlock(&inode->lock);
+    }
+}
+
 static ssize_t read_locked(struct fd *fd, void *buffer, size_t size,
         bool track_offset, qword_t *file_offset, bool *offset_known) {
     *offset_known = false;
@@ -354,6 +378,76 @@ ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
     ssize_t result = fd->ops->page_pwrite(
             fd, buffer, size, (off_t) offset);
     unlock(&fd->lock);
+    return result;
+}
+
+static bool fd_supports_sync(const struct fd *fd, bool data_only) {
+    return fd != NULL && (fd->ops->fsync != NULL ||
+            (data_only && fd->ops->fdatasync != NULL));
+}
+
+int file_sync_fd_uncoordinated(struct fd *fd, bool data_only) {
+    if (fd == NULL)
+        return _EBADF;
+    int (*operation)(struct fd *) = data_only &&
+            fd->ops->fdatasync != NULL ?
+            fd->ops->fdatasync : fd->ops->fsync;
+    if (operation == NULL)
+        return _EINVAL;
+    lock(&fd->lock);
+    int result = operation(fd);
+    unlock(&fd->lock);
+    return result;
+}
+
+static int pager_sync_error(enum guest_file_sync_result result) {
+    switch (result) {
+        case GUEST_FILE_SYNC_OK:
+            return 0;
+        case GUEST_FILE_SYNC_IO_ERROR:
+            return _EIO;
+        case GUEST_FILE_SYNC_UNSUPPORTED:
+            return _EINVAL;
+    }
+    assert(false);
+    return _EIO;
+}
+
+int file_sync_fd(struct fd *fd, bool data_only) {
+    if (fd == NULL)
+        return _EBADF;
+    if (!fd_supports_sync(fd, data_only))
+        return _EINVAL;
+
+    struct guest_file_pager *pager = retain_file_pager(fd);
+    if (pager != NULL) {
+        int error = pager_sync_error(guest_file_pager_sync_range(
+                pager, 0, UINT64_MAX));
+        guest_file_pager_release(pager);
+        if (error < 0)
+            return error;
+        /* 生产 pager 的 range sync 已完成 data-only durability。 */
+        if (data_only)
+            return 0;
+    }
+
+    struct inode_data *inode = fd_has_coherent_page_cache(fd) ?
+            fd->inode : NULL;
+    if (inode != NULL)
+        lock(&inode->file_io_lock);
+    int result = file_sync_fd_uncoordinated(fd, data_only);
+    if (inode != NULL)
+        unlock(&inode->file_io_lock);
+    return result;
+}
+
+int file_sync_task(
+        struct task *task, fd_t fd_number, bool data_only) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    int result = file_sync_fd(fd, data_only);
+    fd_close(fd);
     return result;
 }
 

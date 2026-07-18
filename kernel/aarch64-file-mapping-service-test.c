@@ -41,6 +41,8 @@ struct file_probe {
     unsigned pread_calls;
     unsigned pwrite_calls;
     unsigned page_pwrite_calls;
+    unsigned fsync_calls;
+    unsigned fdatasync_calls;
     unsigned fstat_calls;
     unsigned close_calls;
     qword_t last_write_offset;
@@ -51,6 +53,8 @@ struct file_probe {
     int pread_error;
     int pwrite_error;
     int page_pwrite_error;
+    int fsync_error;
+    int fdatasync_error;
     int fstat_error;
     struct page_write_gate *page_write_gate;
 };
@@ -169,6 +173,24 @@ static int probe_close(struct fd *fd) {
     return 0;
 }
 
+static int probe_fsync(struct fd *fd) {
+    struct file_probe *probe = fd->data;
+    assert(lock_owned_by_current(&fd->lock));
+    if (fd->inode != NULL && fd->ops->page_cacheable)
+        assert(lock_owned_by_current(&fd->inode->file_io_lock));
+    probe->fsync_calls++;
+    return probe->fsync_error;
+}
+
+static int probe_fdatasync(struct fd *fd) {
+    struct file_probe *probe = fd->data;
+    assert(lock_owned_by_current(&fd->lock));
+    if (fd->inode != NULL && fd->ops->page_cacheable)
+        assert(lock_owned_by_current(&fd->inode->file_io_lock));
+    probe->fdatasync_calls++;
+    return probe->fdatasync_error;
+}
+
 static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     struct file_probe *probe = fd->data;
     probe->fstat_calls++;
@@ -186,6 +208,8 @@ static const struct fd_ops cacheable_ops = {
     .pread = probe_pread,
     .pwrite = probe_pwrite,
     .page_pwrite = probe_page_pwrite,
+    .fsync = probe_fsync,
+    .fdatasync = probe_fdatasync,
     .close = probe_close,
 };
 
@@ -193,6 +217,8 @@ static const struct fd_ops cacheable_without_page_write_ops = {
     .page_cacheable = true,
     .pread = probe_pread,
     .pwrite = probe_pwrite,
+    .fsync = probe_fsync,
+    .fdatasync = probe_fdatasync,
     .close = probe_close,
 };
 
@@ -200,6 +226,8 @@ static const struct fd_ops cacheable_page_write_only_ops = {
     .page_cacheable = true,
     .pread = probe_pread,
     .page_pwrite = probe_page_pwrite,
+    .fsync = probe_fsync,
+    .fdatasync = probe_fdatasync,
     .close = probe_close,
 };
 
@@ -500,8 +528,9 @@ static int check_error_contract(void) {
     CHECK(guest_file_pager_sync_range(mapping.pager, 0,
             GUEST_MEMORY_PAGE_SIZE) == GUEST_FILE_SYNC_OK &&
             page_write_only.page_pwrite_calls == 1 &&
+            page_write_only.fdatasync_calls == 1 &&
             page_write_only.bytes[17] == 0xd4,
-            "只有 page_pwrite 的 provider 可完成脏页写回");
+            "只有 page_pwrite 的 provider 可完成脏页写回和 data sync");
     guest_page_backing_release(page_write_only_page);
     guest_file_pager_release(mapping.pager);
     CHECK(open_mapping(&fixture, (qword_t) readwrite_fd,
@@ -845,6 +874,11 @@ static int check_writeback_errors_and_retry(void) {
     fd_t fd = install_probe_fd(&fixture, &probe,
             &cacheable_ops, S_IFREG, O_RDWR_, 6, 60);
     CHECK(fd >= 0, "安装写回故障描述符");
+    CHECK(file_sync_task(&fixture.task, 99, false) == _EBADF,
+            "文件同步先拒绝无效描述符");
+    CHECK(file_sync_task(&fixture.task, fd, true) == 0 &&
+            probe.fdatasync_calls == 1 && probe.fsync_calls == 0,
+            "无 pager 时 fdatasync 直接进入 data-only provider");
 
     struct guest_linux_file_mapping mapping = {0};
     CHECK(open_mapping(&fixture, (qword_t) fd,
@@ -881,9 +915,23 @@ static int check_writeback_errors_and_retry(void) {
             GUEST_MEMORY_PAGE_SIZE) == GUEST_FILE_SYNC_OK &&
             probe.page_pwrite_calls == 6 &&
             probe.page_pwrite_bytes == GUEST_MEMORY_PAGE_SIZE &&
+            probe.fdatasync_calls == 2 &&
             probe.bytes[9] == 0xf1 &&
             !guest_page_backing_copy_dirty(page, snapshot, &generation),
-            "短写循环完成后提交整页并清除同世代脏状态");
+            "短写循环后提交整页、data sync 并清除同世代脏状态");
+
+    probe.fdatasync_error = _ENOSPC;
+    CHECK(guest_file_pager_sync_range(mapping.pager, 0,
+            GUEST_MEMORY_PAGE_SIZE) == GUEST_FILE_SYNC_IO_ERROR &&
+            probe.page_pwrite_calls == 6 &&
+            probe.fdatasync_calls == 3,
+            "底层 data sync 错误从显式 range sync 返回");
+    probe.fdatasync_error = 0;
+    CHECK(guest_file_pager_sync_range(mapping.pager, 0,
+            GUEST_MEMORY_PAGE_SIZE) == GUEST_FILE_SYNC_OK &&
+            probe.page_pwrite_calls == 6 &&
+            probe.fdatasync_calls == 4,
+            "data sync 错误可在不重复写页时重试");
 
     write_backing_byte(page, 10, 0xf2);
     probe.fstat_error = _EIO;
@@ -898,8 +946,29 @@ static int check_writeback_errors_and_retry(void) {
     CHECK(guest_file_pager_sync_range(mapping.pager, 0,
             GUEST_MEMORY_PAGE_SIZE) == GUEST_FILE_SYNC_OK &&
             probe.page_pwrite_calls == 6 && probe.size == 0 &&
+            probe.fdatasync_calls == 5 &&
             !guest_page_backing_copy_dirty(page, snapshot, &generation),
             "页面起点已越过当前 EOF 时成功丢弃脏页且不扩展文件");
+
+    probe.size = GUEST_MEMORY_PAGE_SIZE;
+    write_backing_byte(page, 11, 0xa3);
+    CHECK(file_sync_task(&fixture.task, fd, true) == 0 &&
+            probe.page_pwrite_calls == 10 &&
+            probe.fdatasync_calls == 6 && probe.fsync_calls == 0 &&
+            probe.bytes[11] == 0xa3,
+            "fdatasync 先写回 inode pager 再完成 data durability");
+    write_backing_byte(page, 12, 0xb4);
+    CHECK(file_sync_task(&fixture.task, fd, false) == 0 &&
+            probe.page_pwrite_calls == 14 &&
+            probe.fdatasync_calls == 7 && probe.fsync_calls == 1 &&
+            probe.bytes[12] == 0xb4,
+            "fsync 先完成 pager data sync 再执行完整元数据同步");
+
+    probe.fsync_error = _EROFS;
+    CHECK(file_sync_task(&fixture.task, fd, false) == _EROFS &&
+            probe.fdatasync_calls == 8 && probe.fsync_calls == 2,
+            "完整 fsync 原样传播当前 fd 的 provider 错误");
+    probe.fsync_error = 0;
 
     guest_page_backing_release(page);
     guest_file_pager_release(mapping.pager);

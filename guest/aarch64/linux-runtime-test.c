@@ -456,6 +456,33 @@ int main(void) {
             &mapped_page, &mapped_permissions) == GUEST_PAGE_TABLE_OK);
     assert(mapped_permissions == 0);
 
+    cpu.x[8] = 227;
+    cpu.x[0] = mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_MS_SYNC;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0 && probe.calls == 1);
+
+    cpu.x[0] = UINT64_C(0xab00000000000000) | mapped;
+    cpu.x[2] = UINT64_C(0xfeedface00000000) |
+            GUEST_LINUX_MS_SYNC;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0 && probe.calls == 1);
+
+    cpu.x[0] = UINT64_C(0xcd00000000000000) | (mapped + 1);
+    cpu.x[2] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+
+    cpu.x[0] = mapped;
+    cpu.x[2] = GUEST_LINUX_MS_ASYNC | GUEST_LINUX_MS_SYNC;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+
     cpu.x[8] = 215;
     cpu.x[0] = mapped;
     cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
@@ -466,6 +493,14 @@ int main(void) {
             &mapped_page, &mapped_permissions) ==
             GUEST_PAGE_TABLE_NOT_MAPPED);
     assert(probe.calls == 1);
+
+    cpu.x[8] = 227;
+    cpu.x[0] = mapped;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOMEM));
 
     cpu.x[8] = 222;
     cpu.x[0] = 0;

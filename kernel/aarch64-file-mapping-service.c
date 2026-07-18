@@ -102,6 +102,21 @@ static enum guest_file_sync_result write_file_page(void *opaque,
     return GUEST_FILE_SYNC_OK;
 }
 
+static enum guest_file_sync_result sync_file_range(void *opaque,
+        qword_t file_offset, qword_t length) {
+    struct kernel_file_pager *provider = opaque;
+    assert(provider != NULL && provider->reader_fd != NULL &&
+            lock_owned_by_current(&provider->inode->file_io_lock));
+    use(file_offset, length);
+    struct fd *fd = provider->writer_fd != NULL ?
+            provider->writer_fd : provider->reader_fd;
+    int error = file_sync_fd_uncoordinated(fd, true);
+    if (error == 0)
+        return GUEST_FILE_SYNC_OK;
+    return error == _EINVAL ? GUEST_FILE_SYNC_UNSUPPORTED :
+            GUEST_FILE_SYNC_IO_ERROR;
+}
+
 static void release_file_pager(struct guest_file_pager *pager,
         void *opaque) {
     struct kernel_file_pager *provider = opaque;
@@ -202,6 +217,7 @@ static struct guest_file_pager *acquire_inode_pager(
                 .end_io = end_pager_io,
                 .read_page = read_file_page,
                 .write_page = write_file_page,
+                .sync_range = sync_file_range,
                 .release = release_file_pager,
             });
     if (candidate == NULL) {

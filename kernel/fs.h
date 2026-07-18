@@ -46,6 +46,10 @@ ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
 /* pager 精确写回入口；调用方已持 inode I/O 域，且 O_APPEND 不生效。 */
 ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
         const void *buffer, size_t size, off_t_ offset);
+/* 调用方已持 inode I/O 域；本入口只短暂取得 fd 锁。 */
+int file_sync_fd_uncoordinated(struct fd *fd, bool data_only);
+int file_sync_fd(struct fd *fd, bool data_only);
+int file_sync_task(struct task *task, fd_t fd_number, bool data_only);
 sqword_t file_lseek_task(
         struct task *task, fd_t fd, sqword_t offset, int whence);
 sqword_t file_getdents_task(struct task *task, fd_t fd,

@@ -533,6 +533,18 @@ int realfs_fsync(struct fd *fd) {
     return 0;
 }
 
+int realfs_fdatasync(struct fd *fd) {
+#if defined(__APPLE__)
+    /* Apple SDK 不公开 fdatasync；完整 fsync 提供更强保证。 */
+    int err = fsync(fd->real_fd);
+#else
+    int err = fdatasync(fd->real_fd);
+#endif
+    if (err < 0)
+        return errno_map();
+    return 0;
+}
+
 int realfs_getflags(struct fd *fd) {
     int flags = fcntl(fd->real_fd, F_GETFL);
     if (flags < 0)
@@ -609,6 +621,7 @@ const struct fd_ops realfs_fdops = {
     .ioctl_size = realfs_ioctl_size,
     .ioctl = realfs_ioctl,
     .fsync = realfs_fsync,
+    .fdatasync = realfs_fdatasync,
     .close = realfs_close,
     .getflags = realfs_getflags,
     .setflags = realfs_setflags,

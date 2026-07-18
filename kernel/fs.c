@@ -862,13 +862,11 @@ dword_t sys_rmdir(addr_t path_addr) {
 }
 
 dword_t sys_fsync(fd_t f) {
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    int err = 0;
-    if (fd->ops->fsync)
-        err = fd->ops->fsync(fd);
-    return err;
+    return file_sync_task(current, f, false);
+}
+
+dword_t sys_fdatasync(fd_t f) {
+    return file_sync_task(current, f, true);
 }
 
 // a few stubs

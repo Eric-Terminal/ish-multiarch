@@ -2,6 +2,7 @@
 #include "debug.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
+#include "kernel/fs.h"
 #include "kernel/task.h"
 #include "fs/fd.h"
 #include "kernel/memory.h"
@@ -242,8 +243,86 @@ int_t sys_mlock(addr_t UNUSED(addr), dword_t UNUSED(len)) {
     return 0;
 }
 
-int_t sys_msync(addr_t UNUSED(addr), dword_t UNUSED(len), int_t UNUSED(flags)) {
-    return 0;
+#define MS_ASYNC_ 1
+#define MS_INVALIDATE_ 2
+#define MS_SYNC_ 4
+
+static bool msync_shared_file_entry(const struct pt_entry *entry) {
+    return entry != NULL &&
+            (entry->flags & (P_SHARED | P_FILE_BACKED)) ==
+                    (P_SHARED | P_FILE_BACKED) &&
+            entry->data->fd != NULL;
+}
+
+static bool msync_fd_is_writable(struct fd *fd) {
+    lock(&fd->lock);
+    bool writable = (fd->flags & O_ACCMODE_) == O_RDWR_;
+    unlock(&fd->lock);
+    return writable;
+}
+
+int_t sys_msync(addr_t addr, dword_t len, int_t flags) {
+    STRACE("msync(%#x, %#x, %#x)", addr, len, flags);
+    dword_t sync_flags = (dword_t) flags;
+    const dword_t allowed = MS_ASYNC_ | MS_INVALIDATE_ | MS_SYNC_;
+    if ((sync_flags & ~allowed) != 0)
+        return _EINVAL;
+    if (PGOFFSET(addr) != 0)
+        return _EINVAL;
+    if ((sync_flags & MS_ASYNC_) != 0 &&
+            (sync_flags & MS_SYNC_) != 0)
+        return _EINVAL;
+
+    // i386 size_t 的页对齐加法按 32 位无符号规则环绕。
+    const dword_t page_mask = (dword_t) PAGE_SIZE - 1;
+    dword_t rounded_len = (len + page_mask) & ~page_mask;
+    addr_t end = addr + rounded_len;
+    if (end < addr)
+        return _ENOMEM;
+    if (end == addr)
+        return 0;
+
+    bool unmapped = false;
+    addr_t cursor = addr;
+    while (cursor < end) {
+        addr_t next = cursor + PAGE_SIZE;
+        struct fd *sync_fd = NULL;
+
+        read_wrlock(&current->mem->lock);
+        struct pt_entry *entry = mem_pt(current->mem, PAGE(cursor));
+        if (entry == NULL) {
+            unmapped = true;
+        } else if ((sync_flags & MS_SYNC_) != 0 &&
+                msync_shared_file_entry(entry)) {
+            struct data *data = entry->data;
+            page_t next_page = PAGE(cursor) + 1;
+            page_t limit = PAGE(end);
+            while (next_page < limit) {
+                struct pt_entry *following =
+                        mem_pt(current->mem, next_page);
+                if (!msync_shared_file_entry(following) ||
+                        following->data != data)
+                    break;
+                next_page++;
+            }
+            next = (addr_t) (next_page << PAGE_BITS);
+            sync_fd = fd_retain(data->fd);
+        }
+        read_wrunlock(&current->mem->lock);
+
+        if (sync_fd != NULL) {
+            int error = 0;
+            if (msync_fd_is_writable(sync_fd))
+                error = file_sync_fd(sync_fd, true);
+            fd_close(sync_fd);
+            if (error < 0)
+                return error;
+        }
+        if (unmapped && sync_flags == MS_ASYNC_)
+            return _ENOMEM;
+        cursor = next;
+    }
+    return unmapped ? _ENOMEM : 0;
 }
 
 addr_t sys_brk(addr_t new_brk) {

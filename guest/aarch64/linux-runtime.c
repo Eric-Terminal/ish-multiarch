@@ -29,6 +29,7 @@
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
+#define AARCH64_LINUX_SYS_MSYNC 227
 #define AARCH64_LINUX_SYS_MADVISE 233
 #define AARCH64_LINUX_SYS_WAIT4 260
 #define AARCH64_LINUX_SYS_MEMBARRIER 283
@@ -37,6 +38,12 @@
 #define AARCH64_LINUX_SYS_FUTEX_WAITV 449
 static qword_t linux_error(unsigned error) {
     return (qword_t) -(sqword_t) error;
+}
+
+static qword_t untag_user_address(qword_t address) {
+    // AArch64 Linux 在 msync 参数校验前移除用户指针的顶字节标签。
+    return (address & (UINT64_C(1) << 55)) != 0 ? address :
+            address & UINT64_C(0x00ffffffffffffff);
 }
 
 static void export_user_fault(struct guest_linux_user_fault *destination,
@@ -502,6 +509,11 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         result.return_value = guest_linux_mprotect(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],
                 syscall.arguments[2]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MSYNC) {
+        result.return_value = guest_linux_msync(runtime->memory,
+                untag_user_address(syscall.arguments[0]),
+                syscall.arguments[1],
+                (dword_t) syscall.arguments[2]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MADVISE) {
         result.return_value = guest_linux_madvise(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1],

@@ -99,6 +99,7 @@ dword_t sys_dup2(fd_t fd, fd_t new_fd);
 dword_t sys_dup3(fd_t f, fd_t new_f, int_t flags);
 dword_t sys_close(fd_t fd);
 dword_t sys_fsync(fd_t f);
+dword_t sys_fdatasync(fd_t f);
 dword_t sys_flock(fd_t fd, dword_t operation);
 int_t sys_pipe(addr_t pipe_addr);
 int_t sys_pipe2(addr_t pipe_addr, int_t flags);

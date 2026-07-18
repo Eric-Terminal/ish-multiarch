@@ -526,6 +526,11 @@ static off_t_ tmpfs_lseek(struct fd *fd, off_t_ off, int whence) {
     return fd->offset;
 }
 
+static int tmpfs_fsync(struct fd *fd) {
+    use(fd);
+    return 0;
+}
+
 static int tmpfs_readdir(struct fd *fd, struct dir_entry *entry) {
     struct tmp_dirent *parent = fd->tmpfs.dirent;
     if (!S_ISDIR(parent->inode->stat.mode))
@@ -593,6 +598,8 @@ const struct fd_ops tmpfs_fdops = {
     .pwrite = tmpfs_pwrite,
     .page_pwrite = tmpfs_page_pwrite,
     .lseek = tmpfs_lseek,
+    .fsync = tmpfs_fsync,
+    .fdatasync = tmpfs_fsync,
     .readdir = tmpfs_readdir,
     .telldir = tmpfs_telldir,
     .seekdir = tmpfs_seekdir,

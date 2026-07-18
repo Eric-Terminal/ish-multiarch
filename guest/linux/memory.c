@@ -912,6 +912,109 @@ qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
     return result;
 }
 
+static qword_t file_sync_error(enum guest_file_sync_result result) {
+    switch (result) {
+        case GUEST_FILE_SYNC_OK:
+            return 0;
+        case GUEST_FILE_SYNC_IO_ERROR:
+            return linux_error(GUEST_LINUX_EIO);
+        case GUEST_FILE_SYNC_UNSUPPORTED:
+            return linux_error(GUEST_LINUX_EINVAL);
+    }
+    assert(false);
+    return linux_error(GUEST_LINUX_EIO);
+}
+
+static const struct guest_linux_vma *vma_at_or_after(
+        const struct guest_linux_vma_set *set, guest_addr_t address) {
+    size_t first = 0;
+    size_t count = set->count;
+    while (count != 0) {
+        size_t step = count / 2;
+        size_t index = first + step;
+        if (set->entries[index].last <= address) {
+            first = index + 1;
+            count -= step + 1;
+        } else {
+            count = step;
+        }
+    }
+    return first < set->count ? &set->entries[first] : NULL;
+}
+
+qword_t guest_linux_msync(struct guest_linux_mm *memory,
+        guest_addr_t address, qword_t length, dword_t flags) {
+    const dword_t allowed = GUEST_LINUX_MS_ASYNC |
+            GUEST_LINUX_MS_INVALIDATE | GUEST_LINUX_MS_SYNC;
+    if ((flags & ~allowed) != 0 ||
+            ((qword_t) address & GUEST_MEMORY_PAGE_MASK) != 0 ||
+            ((flags & GUEST_LINUX_MS_ASYNC) != 0 &&
+                    (flags & GUEST_LINUX_MS_SYNC) != 0))
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    qword_t rounded_length = (length + GUEST_MEMORY_PAGE_MASK) &
+            ~GUEST_MEMORY_PAGE_MASK;
+    qword_t end = (qword_t) address + rounded_length;
+    if (end < (qword_t) address)
+        return linux_error(GUEST_LINUX_ENOMEM);
+    if (end == (qword_t) address)
+        return 0;
+
+    bool unmapped = false;
+    qword_t cursor = address;
+    qword_t limit = address_limit(memory);
+    while (cursor < end) {
+        if (cursor >= limit)
+            return linux_error(GUEST_LINUX_ENOMEM);
+
+        struct guest_file_pager *pager = NULL;
+        qword_t file_offset = 0;
+        qword_t sync_length = 0;
+        qword_t next = cursor + GUEST_MEMORY_PAGE_SIZE;
+        bool locked = guest_page_table_read_lock(memory->page_table);
+        const struct guest_linux_vma *mapping = guest_linux_vma_find(
+                &memory->vmas, (guest_addr_t) cursor);
+        if (mapping != NULL) {
+            next = mapping->last < end ? mapping->last : end;
+            /* Linux 会为不可写 fd 清除 VM_SHARED，仅保留 MAYSHARE。 */
+            if ((flags & GUEST_LINUX_MS_SYNC) != 0 &&
+                    mapping->source ==
+                            GUEST_LINUX_VMA_SOURCE_FILE_SHARED &&
+                    (mapping->maximum_protection &
+                            GUEST_LINUX_PROT_WRITE) != 0) {
+                qword_t delta = cursor - mapping->first;
+                assert(mapping->file_offset <= UINT64_MAX - delta);
+                file_offset = mapping->file_offset + delta;
+                sync_length = next - cursor;
+                pager = guest_file_pager_retain(
+                        mapping->file_pager);
+            }
+        } else if (!page_is_mapped(memory, cursor)) {
+            unmapped = true;
+            const struct guest_linux_vma *following =
+                    vma_at_or_after(&memory->vmas,
+                            (guest_addr_t) cursor);
+            next = following == NULL || following->first >= end ?
+                    end : following->first;
+        }
+        guest_page_table_read_unlock(memory->page_table, locked);
+
+        if (pager != NULL) {
+            enum guest_file_sync_result sync =
+                    guest_file_pager_sync_range(
+                            pager, file_offset, sync_length);
+            guest_file_pager_release(pager);
+            qword_t error = file_sync_error(sync);
+            if (error != 0)
+                return error;
+        }
+        if (unmapped && flags == GUEST_LINUX_MS_ASYNC)
+            return linux_error(GUEST_LINUX_ENOMEM);
+        cursor = next;
+    }
+    return unmapped ? linux_error(GUEST_LINUX_ENOMEM) : 0;
+}
+
 static bool madvise_supported(dword_t advice) {
     return advice == GUEST_LINUX_MADV_NORMAL ||
             advice == GUEST_LINUX_MADV_RANDOM ||

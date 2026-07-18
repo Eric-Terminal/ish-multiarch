@@ -43,6 +43,7 @@ off_t realfs_lseek(struct fd *fd, off_t offset, int whence);
 int realfs_poll(struct fd *fd);
 int realfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off_t offset, int prot, int flags);
 int realfs_fsync(struct fd *fd);
+int realfs_fdatasync(struct fd *fd);
 int realfs_getflags(struct fd *fd);
 int realfs_setflags(struct fd *fd, dword_t arg);
 ssize_t realfs_ioctl_size(int cmd);
