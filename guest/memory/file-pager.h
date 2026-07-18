@@ -45,8 +45,14 @@ struct guest_file_pager_provider {
     enum guest_file_sync_result (*sync_range)(void *opaque,
             qword_t file_offset, qword_t length);
     /*
-     * 最后一份强引用归零后同步调用；pager 在回调返回前仍可用于
-     * 条件清理外部弱引用，但不得尝试复活。
+     * 含脏页或待确认 durability 的最终 drain 失败，且注册表已取得强
+     * 引用后调用。外部弱槽若会等待 DRAINING 结束，必须在这里唤醒并
+     * 继续指向同一个 pager；不得执行 provider I/O。
+     */
+    void (*drain_failed)(struct guest_file_pager *pager, void *opaque);
+    /*
+     * 生命周期进入 DEAD 后同步调用；pager 在回调返回前仍可用于条件
+     * 清理外部弱引用，但 try_retain 必须失败。
      */
     void (*release)(struct guest_file_pager *pager, void *opaque);
 };
@@ -57,15 +63,23 @@ struct guest_file_pager *guest_file_pager_create(qword_t identity,
 /* retain 只接受调用方已持有强引用的对象。 */
 struct guest_file_pager *guest_file_pager_retain(
         struct guest_file_pager *pager);
-/* 供受外部锁保护的弱槽使用；引用归零后绝不复活。 */
+/* 供受外部锁保护的弱槽使用；DRAINING/DEAD 状态不可 retain。 */
 bool guest_file_pager_try_retain(struct guest_file_pager *pager);
 void guest_file_pager_release(struct guest_file_pager *pager);
+/*
+ * 重试调用开始时登记的 orphan 快照，返回本次尝试数；失败对象进入下一
+ * 批，不在同一次调用内忙循环。正常 retain 会自动接管登记中的 pager；
+ * 任一 provider 回调均不得重入此函数。
+ */
+size_t guest_file_pager_retry_orphans(void);
+size_t guest_file_pager_orphan_count(void);
 
 /*
  * 成功时返回一份由调用方拥有的 backing 强引用。backing 引用只保护
  * 页内存；只要它仍可能接受文件语义写入，调用方就必须另持 pager 强
  * 引用。释放 pager 最后一份引用前必须令写者静止；可写 provider 的
- * 析构写回仅是无法报告错误的 best-effort drain。
+ * 最终 drain 无法向 guest 报错；只有含脏页或待确认 durability 的失败
+ * 才由 orphan registry 保留 pager，纯净 pager 直接结束生命周期。
  */
 enum guest_file_page_result guest_file_pager_get_page(
         struct guest_file_pager *pager, qword_t file_offset,

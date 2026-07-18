@@ -28,6 +28,7 @@ struct provider_probe {
     unsigned releases;
     unsigned writes_at_release;
     unsigned syncs_at_release;
+    unsigned drain_failures;
     bool block;
     bool entered;
     bool allow_read;
@@ -131,6 +132,15 @@ static void probe_release(struct guest_file_pager *pager, void *opaque) {
     probe->releases++;
 }
 
+static void probe_drain_failed(
+        struct guest_file_pager *pager, void *opaque) {
+    struct provider_probe *probe = opaque;
+    assert(pager != NULL);
+    check_pthread(pthread_mutex_lock(&probe->lock));
+    probe->drain_failures++;
+    check_pthread(pthread_mutex_unlock(&probe->lock));
+}
+
 static struct guest_file_pager *create_pager(
         qword_t identity, struct provider_probe *probe) {
     return guest_file_pager_create(identity,
@@ -152,6 +162,7 @@ static struct guest_file_pager *create_writable_pager(
                 .read_page = probe_read_page,
                 .write_page = probe_write_page,
                 .sync_range = probe_sync_range,
+                .drain_failed = probe_drain_failed,
                 .release = probe_release,
             });
 }
@@ -655,12 +666,30 @@ static void test_writeback_generation_and_isolation(void) {
 
 static void test_release_drains_dirty_pages(void) {
     unsigned baseline = guest_page_backing_test_live_count();
-    struct provider_probe probe;
-    probe_init(&probe);
+    assert(guest_file_pager_orphan_count() == 0);
+
+    struct provider_probe clean_failure;
+    probe_init(&clean_failure);
+    clean_failure.sync_result = GUEST_FILE_SYNC_IO_ERROR;
     struct guest_file_pager *pager = create_writable_pager(
-            UINT64_C(0x7234), &probe, true);
+            UINT64_C(0x7233), &clean_failure, true);
     assert(pager != NULL);
     struct guest_page_backing *first = load_page(pager, 0);
+    guest_page_backing_release(first);
+    guest_file_pager_release(pager);
+    assert(clean_failure.writes == 0 && clean_failure.syncs == 0 &&
+            clean_failure.drain_failures == 0 &&
+            clean_failure.releases == 1 &&
+            guest_file_pager_orphan_count() == 0);
+    probe_destroy(&clean_failure);
+    assert(guest_page_backing_test_live_count() == baseline);
+
+    struct provider_probe probe;
+    probe_init(&probe);
+    pager = create_writable_pager(
+            UINT64_C(0x7234), &probe, true);
+    assert(pager != NULL);
+    first = load_page(pager, 0);
     struct guest_page_backing *second = load_page(
             pager, 2 * GUEST_MEMORY_PAGE_SIZE);
     write_backing_byte(first, 53, UINT8_C(0xd7));
@@ -691,9 +720,22 @@ static void test_release_drains_dirty_pages(void) {
     guest_page_backing_release(first);
     guest_file_pager_release(pager);
     assert(write_failure.writes == 1 && write_failure.syncs == 0 &&
+            write_failure.releases == 0 &&
+            write_failure.drain_failures == 1 &&
+            guest_file_pager_orphan_count() == 1 &&
+            guest_page_backing_test_live_count() == baseline + 1);
+    assert(guest_file_pager_retry_orphans() == 1 &&
+            guest_file_pager_orphan_count() == 1 &&
+            write_failure.writes == 2 &&
+            write_failure.drain_failures == 2 &&
+            write_failure.releases == 0);
+    write_failure.write_result = GUEST_FILE_SYNC_OK;
+    assert(guest_file_pager_retry_orphans() == 1 &&
+            guest_file_pager_orphan_count() == 0);
+    assert(write_failure.writes == 3 && write_failure.syncs == 1 &&
             write_failure.releases == 1 &&
-            write_failure.writes_at_release == 1 &&
-            write_failure.syncs_at_release == 0 &&
+            write_failure.writes_at_release == 3 &&
+            write_failure.syncs_at_release == 1 &&
             write_failure.retain_failed_during_release);
     probe_destroy(&write_failure);
     assert(guest_page_backing_test_live_count() == baseline);
@@ -709,11 +751,152 @@ static void test_release_drains_dirty_pages(void) {
     guest_page_backing_release(first);
     guest_file_pager_release(pager);
     assert(sync_failure.writes == 1 && sync_failure.syncs == 1 &&
+            sync_failure.releases == 0 &&
+            sync_failure.drain_failures == 1 &&
+            guest_file_pager_orphan_count() == 1);
+    sync_failure.sync_result = GUEST_FILE_SYNC_OK;
+    assert(guest_file_pager_retry_orphans() == 1 &&
+            guest_file_pager_orphan_count() == 0);
+    assert(sync_failure.writes == 1 && sync_failure.syncs == 2 &&
             sync_failure.releases == 1 &&
             sync_failure.writes_at_release == 1 &&
-            sync_failure.syncs_at_release == 1 &&
+            sync_failure.syncs_at_release == 2 &&
             sync_failure.retain_failed_during_release);
     probe_destroy(&sync_failure);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
+struct release_thread {
+    struct guest_file_pager *pager;
+    atomic_bool finished;
+};
+
+static void *release_pager_thread(void *opaque) {
+    struct release_thread *thread = opaque;
+    guest_file_pager_release(thread->pager);
+    atomic_store_explicit(&thread->finished, true, memory_order_release);
+    return NULL;
+}
+
+static void test_failed_drain_retain_reclaims_orphan(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    assert(guest_file_pager_orphan_count() == 0);
+    struct provider_probe probe;
+    probe_init(&probe);
+    probe.block_write = true;
+    probe.write_result = GUEST_FILE_SYNC_IO_ERROR;
+    struct guest_file_pager *pager = create_writable_pager(
+            UINT64_C(0x7237), &probe, true);
+    assert(pager != NULL);
+    struct guest_page_backing *backing = load_page(pager, 0);
+    write_backing_byte(backing, 71, UINT8_C(0xf5));
+    guest_page_backing_release(backing);
+
+    struct release_thread release = {
+        .pager = pager,
+        .finished = ATOMIC_VAR_INIT(false),
+    };
+    pthread_t thread;
+    check_pthread(pthread_create(
+            &thread, NULL, release_pager_thread, &release));
+    wait_for_write(&probe);
+    assert(!guest_file_pager_try_retain(pager));
+
+    check_pthread(pthread_mutex_lock(&probe.lock));
+    probe.allow_write = true;
+    check_pthread(pthread_cond_broadcast(&probe.changed));
+    check_pthread(pthread_mutex_unlock(&probe.lock));
+    check_pthread(pthread_join(thread, NULL));
+    assert(atomic_load_explicit(
+            &release.finished, memory_order_acquire));
+    assert(probe.writes == 1 && probe.syncs == 0 &&
+            probe.releases == 0 && probe.drain_failures == 1 &&
+            guest_file_pager_orphan_count() == 1 &&
+            guest_file_pager_test_reference_count(pager) == 1);
+
+    assert(guest_file_pager_try_retain(pager));
+    assert(guest_file_pager_orphan_count() == 0 &&
+            guest_file_pager_test_reference_count(pager) == 1);
+    probe.write_result = GUEST_FILE_SYNC_OK;
+    guest_file_pager_release(pager);
+    assert(probe.writes == 2 && probe.syncs == 1 &&
+            probe.releases == 1 && probe.drain_failures == 1 &&
+            probe.retain_failed_during_release &&
+            guest_file_pager_orphan_count() == 0);
+    probe_destroy(&probe);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
+struct retry_thread {
+    size_t attempted;
+    atomic_bool started;
+    atomic_bool finished;
+};
+
+static void *retry_orphans_thread(void *opaque) {
+    struct retry_thread *thread = opaque;
+    atomic_store_explicit(&thread->started, true, memory_order_release);
+    thread->attempted = guest_file_pager_retry_orphans();
+    atomic_store_explicit(&thread->finished, true, memory_order_release);
+    return NULL;
+}
+
+static void test_orphan_retry_callers_are_serialized(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    assert(guest_file_pager_orphan_count() == 0);
+    struct provider_probe probe;
+    probe_init(&probe);
+    probe.write_result = GUEST_FILE_SYNC_IO_ERROR;
+    struct guest_file_pager *pager = create_writable_pager(
+            UINT64_C(0x7238), &probe, true);
+    assert(pager != NULL);
+    struct guest_page_backing *backing = load_page(pager, 0);
+    write_backing_byte(backing, 73, UINT8_C(0xf7));
+    guest_page_backing_release(backing);
+    guest_file_pager_release(pager);
+    assert(guest_file_pager_orphan_count() == 1 &&
+            probe.writes == 1 && probe.drain_failures == 1);
+
+    check_pthread(pthread_mutex_lock(&probe.lock));
+    probe.write_result = GUEST_FILE_SYNC_OK;
+    probe.block_write = true;
+    probe.write_entered = false;
+    probe.allow_write = false;
+    check_pthread(pthread_mutex_unlock(&probe.lock));
+
+    struct retry_thread first = {
+        .started = ATOMIC_VAR_INIT(false),
+        .finished = ATOMIC_VAR_INIT(false),
+    };
+    pthread_t first_thread;
+    check_pthread(pthread_create(
+            &first_thread, NULL, retry_orphans_thread, &first));
+    wait_for_write(&probe);
+
+    struct retry_thread second = {
+        .started = ATOMIC_VAR_INIT(false),
+        .finished = ATOMIC_VAR_INIT(false),
+    };
+    pthread_t second_thread;
+    check_pthread(pthread_create(
+            &second_thread, NULL, retry_orphans_thread, &second));
+    while (!atomic_load_explicit(&second.started, memory_order_acquire))
+        sched_yield();
+    assert(!atomic_load_explicit(&second.finished, memory_order_acquire));
+
+    check_pthread(pthread_mutex_lock(&probe.lock));
+    probe.allow_write = true;
+    check_pthread(pthread_cond_broadcast(&probe.changed));
+    check_pthread(pthread_mutex_unlock(&probe.lock));
+    check_pthread(pthread_join(first_thread, NULL));
+    check_pthread(pthread_join(second_thread, NULL));
+    assert(first.attempted == 1 && second.attempted == 0 &&
+            atomic_load_explicit(&first.finished, memory_order_acquire) &&
+            atomic_load_explicit(&second.finished, memory_order_acquire));
+    assert(probe.writes == 2 && probe.syncs == 1 &&
+            probe.releases == 1 && probe.drain_failures == 1 &&
+            guest_file_pager_orphan_count() == 0);
+    probe_destroy(&probe);
     assert(guest_page_backing_test_live_count() == baseline);
 }
 
@@ -797,7 +980,7 @@ static void test_resident_file_io_merge(void) {
     guest_page_backing_release(third);
     guest_page_backing_release(first);
     guest_file_pager_release(pager);
-    assert(probe.writes == 0 && probe.syncs == 1 &&
+    assert(probe.writes == 0 && probe.syncs == 0 &&
             probe.releases == 1);
     probe_destroy(&probe);
     assert(guest_page_backing_test_live_count() == baseline);
@@ -812,7 +995,10 @@ int main(void) {
     test_writeback_single_flight();
     test_writeback_generation_and_isolation();
     test_release_drains_dirty_pages();
+    test_failed_drain_retain_reclaims_orphan();
+    test_orphan_retry_callers_are_serialized();
     test_resident_file_io_merge();
+    assert(guest_file_pager_orphan_count() == 0);
     assert(guest_page_backing_test_live_count() == 0);
     return 0;
 }

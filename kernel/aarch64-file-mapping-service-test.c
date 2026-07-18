@@ -97,6 +97,15 @@ static ssize_t probe_write_at(struct fd *fd, const void *buffer,
         probe->page_pwrite_calls++;
     else
         probe->pwrite_calls++;
+    if (page_write && probe->page_write_gate != NULL) {
+        struct page_write_gate *gate = probe->page_write_gate;
+        assert(pthread_mutex_lock(&gate->lock) == 0);
+        gate->entered = true;
+        assert(pthread_cond_broadcast(&gate->changed) == 0);
+        while (!gate->allow)
+            assert(pthread_cond_wait(&gate->changed, &gate->lock) == 0);
+        assert(pthread_mutex_unlock(&gate->lock) == 0);
+    }
     int error = page_write ?
             probe->page_pwrite_error : probe->pwrite_error;
     if (error != 0)
@@ -114,15 +123,6 @@ static ssize_t probe_write_at(struct fd *fd, const void *buffer,
     if (positioned > sizeof(probe->bytes) ||
             size > sizeof(probe->bytes) - (size_t) positioned)
         return _EFBIG;
-    if (page_write && probe->page_write_gate != NULL) {
-        struct page_write_gate *gate = probe->page_write_gate;
-        assert(pthread_mutex_lock(&gate->lock) == 0);
-        gate->entered = true;
-        assert(pthread_cond_broadcast(&gate->changed) == 0);
-        while (!gate->allow)
-            assert(pthread_cond_wait(&gate->changed, &gate->lock) == 0);
-        assert(pthread_mutex_unlock(&gate->lock) == 0);
-    }
     memcpy(probe->bytes + (size_t) positioned, buffer, size);
     qword_t end = positioned + size;
     if (end > probe->size)
@@ -1127,6 +1127,133 @@ static int check_draining_weak_slot_and_inode_isolation(void) {
     return 0;
 }
 
+static int check_failed_drain_orphan_reuse(void) {
+    CHECK(guest_file_pager_orphan_count() == 0,
+            "生产 orphan 注册表初始为空");
+    struct page_write_gate gate;
+    CHECK(pthread_mutex_init(&gate.lock, NULL) == 0 &&
+            pthread_cond_init(&gate.changed, NULL) == 0,
+            "初始化失败 drain 写回门禁");
+    gate.entered = false;
+    gate.allow = false;
+
+    struct mapping_fixture fixture;
+    CHECK(fixture_init(&fixture, 0),
+            "初始化失败 drain 复用夹具");
+
+    struct file_probe original = {
+        .size = GUEST_MEMORY_PAGE_SIZE,
+        .page_write_gate = &gate,
+    };
+    struct file_probe successor = {.size = GUEST_MEMORY_PAGE_SIZE};
+    memset(original.bytes, 0x27, sizeof(original.bytes));
+    memset(successor.bytes, 0x63, sizeof(successor.bytes));
+    fd_t original_fd = install_probe_fd(&fixture, &original,
+            &cacheable_ops, S_IFREG, O_RDWR_, 8, 80);
+    fd_t successor_fd = install_probe_fd(&fixture, &successor,
+            &cacheable_ops, S_IFREG, O_RDWR_, 8, 80);
+    CHECK(original_fd >= 0 && successor_fd >= 0,
+            "安装同 inode 的 orphan 前后描述符");
+
+    struct guest_linux_file_mapping mapping = {0};
+    CHECK(open_mapping(&fixture, (qword_t) original_fd,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_WRITE,
+            GUEST_LINUX_MAP_SHARED, 0, &mapping) == 0 &&
+            mapping.pager != NULL,
+            "建立待失败写回的共享映射");
+    struct guest_file_pager *old_pager = mapping.pager;
+    struct fd *installed = f_get_task(&fixture.task, original_fd);
+    struct inode_data *inode = installed->inode;
+    struct guest_page_backing *page = NULL;
+    CHECK(guest_file_pager_get_page(old_pager, 0, &page) ==
+            GUEST_FILE_PAGE_OK && page != NULL,
+            "载入待 orphan 的生产文件页");
+    write_backing_byte(page, 37, 0xb7);
+    guest_page_backing_release(page);
+
+    original.page_pwrite_error = _ENOSPC;
+    struct pager_release_thread release = {
+        .pager = mapping.pager,
+        .finished = ATOMIC_VAR_INIT(false),
+    };
+    pthread_t release_thread;
+    CHECK(pthread_create(&release_thread, NULL,
+            release_pager_thread, &release) == 0 &&
+            wait_for_page_write(&gate, 3000),
+            "最后引用进入将失败的受控 drain");
+    mapping.pager = NULL;
+
+    struct mapping_open_thread reopen = {
+        .fd = (qword_t) successor_fd,
+        .started = ATOMIC_VAR_INIT(false),
+        .finished = ATOMIC_VAR_INIT(false),
+    };
+    reopen.task.group = &fixture.group;
+    reopen.task.files = fixture.task.files;
+    lock_init(&reopen.task.waiting_cond_lock);
+    pthread_t reopen_thread;
+    CHECK(pthread_create(&reopen_thread, NULL,
+            open_mapping_thread, &reopen) == 0,
+            "并发启动失败 drain 的同 inode 等待者");
+    while (!atomic_load_explicit(&reopen.started, memory_order_acquire))
+        sched_yield();
+    CHECK(task_waits_on_condition(&reopen.task,
+            &inode->file_pager_changed, &inode->lock, 3000),
+            "同 inode 等待者在失败结果发布前阻塞于 DRAINING");
+    lock(&inode->lock);
+    CHECK(inode->file_pager == old_pager &&
+            inode->file_pager_context != NULL &&
+            !guest_file_pager_try_retain(old_pager),
+            "DRAINING 期间旧弱槽不可 retain 或替换");
+    unlock(&inode->lock);
+    CHECK(!inode_try_begin_host_shared_mapping(inode),
+            "失败 drain 未决时拒绝第二套 host 共享 cache");
+
+    CHECK(pthread_mutex_lock(&gate.lock) == 0,
+            "取得失败 drain 写回门禁");
+    gate.allow = true;
+    CHECK(pthread_cond_broadcast(&gate.changed) == 0 &&
+            pthread_mutex_unlock(&gate.lock) == 0,
+            "放行返回 ENOSPC 的最终写回");
+    CHECK(pthread_join(release_thread, NULL) == 0 &&
+            pthread_join(reopen_thread, NULL) == 0,
+            "等待失败 drain 注册与旧 pager 接管完成");
+    CHECK(atomic_load_explicit(&release.finished, memory_order_acquire) &&
+            atomic_load_explicit(&reopen.finished, memory_order_acquire) &&
+            reopen.result == 0 && reopen.mapping.pager == old_pager &&
+            original.page_pwrite_calls == 1 &&
+            original.fdatasync_calls == 0 &&
+            guest_file_pager_orphan_count() == 0,
+            "失败回调唤醒等待者并由同一 pager 接管注册表引用");
+    CHECK(reopen.task.waiting_cond == NULL &&
+            reopen.task.waiting_lock == NULL,
+            "失败 drain 等待者醒来后清除条件登记");
+
+    original.page_pwrite_error = 0;
+    original.page_write_gate = NULL;
+    guest_file_pager_release(reopen.mapping.pager);
+    reopen.mapping.pager = NULL;
+    CHECK(original.page_pwrite_calls == 2 &&
+            original.fdatasync_calls == 1 &&
+            original.bytes[37] == 0xb7 &&
+            guest_file_pager_orphan_count() == 0,
+            "接管后的最终释放重试旧 dirty 页并完成 data sync");
+    lock(&inode->lock);
+    CHECK(inode->file_pager == NULL &&
+            inode->file_pager_context == NULL,
+            "成功重试后原子摘除 pager 与 provider 弱槽");
+    unlock(&inode->lock);
+
+    fixture_destroy(&fixture);
+    CHECK(original.close_calls == 1 && successor.close_calls == 1,
+            "orphan 复用夹具平衡 provider 与文件表引用");
+    CHECK(pthread_cond_destroy(&gate.changed) == 0 &&
+            pthread_mutex_destroy(&gate.lock) == 0 &&
+            pthread_mutex_destroy(&reopen.task.waiting_cond_lock.m) == 0,
+            "销毁失败 drain 与等待者门禁");
+    return 0;
+}
+
 int main(void) {
     if (check_error_contract() != 0)
         return 1;
@@ -1139,6 +1266,8 @@ int main(void) {
     if (check_fault_translation_source() != 0)
         return 1;
     if (check_writeback_errors_and_retry() != 0)
+        return 1;
+    if (check_failed_drain_orphan_reuse() != 0)
         return 1;
     if (check_draining_weak_slot_and_inode_isolation() != 0)
         return 1;

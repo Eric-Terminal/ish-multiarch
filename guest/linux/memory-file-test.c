@@ -1058,7 +1058,7 @@ static void test_msync_ranges_errors_and_concurrency(void) {
             probe.write_outside_page_table_lock &&
             probe.sync_outside_page_table_lock &&
             probe.release_outside_page_table_lock);
-    assert(replacement_probe.syncs == 2 &&
+    assert(replacement_probe.syncs == 1 &&
             replacement_probe.releases == 1 &&
             replacement_probe.sync_outside_page_table_lock &&
             replacement_probe.release_outside_page_table_lock);

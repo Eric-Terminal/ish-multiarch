@@ -9,6 +9,16 @@
 
 #define GUEST_FILE_PAGER_BUCKET_COUNT 64
 
+/* 高两位编码状态，低位编码强引用；只依赖 32 位 unsigned 原子。 */
+#define GUEST_FILE_PAGER_LIFECYCLE_UNIT (UINT_MAX / 4U + 1U)
+#define GUEST_FILE_PAGER_REFERENCE_MASK \
+        (GUEST_FILE_PAGER_LIFECYCLE_UNIT - 1U)
+#define GUEST_FILE_PAGER_STATE_MASK \
+        (~GUEST_FILE_PAGER_REFERENCE_MASK)
+#define GUEST_FILE_PAGER_LIVE 0U
+#define GUEST_FILE_PAGER_DRAINING GUEST_FILE_PAGER_LIFECYCLE_UNIT
+#define GUEST_FILE_PAGER_DEAD (2U * GUEST_FILE_PAGER_LIFECYCLE_UNIT)
+
 _Static_assert((GUEST_FILE_PAGER_BUCKET_COUNT &
         (GUEST_FILE_PAGER_BUCKET_COUNT - 1)) == 0,
         "文件页缓存桶数必须为二次幂");
@@ -27,13 +37,23 @@ struct cached_file_page {
 };
 
 struct guest_file_pager {
-    atomic_uint references;
+    atomic_uint lifecycle;
+    atomic_bool orphaned;
+    struct guest_file_pager *orphan_next;
     struct guest_file_source *file_source;
     struct guest_file_pager_provider provider;
     pthread_mutex_t cache_lock;
     pthread_cond_t cache_changed;
+    /* 受 cache_lock 保护；只把完整范围同步确认为全局 durability。 */
+    qword_t write_generation;
+    qword_t durable_generation;
     struct cached_file_page *buckets[GUEST_FILE_PAGER_BUCKET_COUNT];
 };
+
+static pthread_mutex_t orphan_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t orphan_retry_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct guest_file_pager *orphan_head;
+static size_t orphan_count;
 
 #if defined(GUEST_FILE_PAGER_TESTING)
 static size_t allocation_fail_at = SIZE_MAX;
@@ -51,7 +71,9 @@ size_t guest_file_pager_test_allocation_count(void) {
 unsigned guest_file_pager_test_reference_count(
         const struct guest_file_pager *pager) {
     assert(pager != NULL);
-    return atomic_load_explicit(&pager->references, memory_order_relaxed);
+    return atomic_load_explicit(
+            &pager->lifecycle, memory_order_relaxed) &
+            GUEST_FILE_PAGER_REFERENCE_MASK;
 }
 
 static void *pager_calloc(size_t count, size_t size) {
@@ -114,6 +136,7 @@ struct guest_file_pager *guest_file_pager_create(qword_t identity,
     assert((provider.opaque == NULL) == (provider.release == NULL));
     assert((provider.begin_io == NULL) == (provider.end_io == NULL));
     assert(provider.sync_range == NULL || provider.write_page != NULL);
+    assert(provider.drain_failed == NULL || provider.opaque != NULL);
 
     struct guest_file_pager *pager = pager_calloc(1, sizeof(*pager));
     if (pager == NULL)
@@ -134,22 +157,55 @@ struct guest_file_pager *guest_file_pager_create(qword_t identity,
         free(pager);
         return NULL;
     }
-    atomic_init(&pager->references, 1);
+    atomic_init(&pager->lifecycle, GUEST_FILE_PAGER_LIVE | 1U);
+    atomic_init(&pager->orphaned, false);
     pager->provider = provider;
     return pager;
+}
+
+static bool remove_orphan_reference(struct guest_file_pager *pager) {
+    if (!atomic_load_explicit(&pager->orphaned, memory_order_acquire))
+        return false;
+
+    check_pthread(pthread_mutex_lock(&orphan_lock));
+    bool removed = false;
+    if (atomic_load_explicit(&pager->orphaned, memory_order_relaxed)) {
+        struct guest_file_pager **link = &orphan_head;
+        while (*link != pager) {
+            assert(*link != NULL);
+            link = &(*link)->orphan_next;
+        }
+        *link = pager->orphan_next;
+        pager->orphan_next = NULL;
+        assert(orphan_count != 0);
+        orphan_count--;
+        atomic_store_explicit(
+                &pager->orphaned, false, memory_order_release);
+        removed = true;
+    }
+    check_pthread(pthread_mutex_unlock(&orphan_lock));
+    return removed;
 }
 
 bool guest_file_pager_try_retain(struct guest_file_pager *pager) {
     if (pager == NULL)
         return false;
-    unsigned references = atomic_load_explicit(
-            &pager->references, memory_order_acquire);
-    while (references != 0) {
-        assert(references != UINT_MAX);
+    unsigned lifecycle = atomic_load_explicit(
+            &pager->lifecycle, memory_order_acquire);
+    while ((lifecycle & GUEST_FILE_PAGER_STATE_MASK) ==
+            GUEST_FILE_PAGER_LIVE) {
+        unsigned references = lifecycle &
+                GUEST_FILE_PAGER_REFERENCE_MASK;
+        assert(references != 0 &&
+                references != GUEST_FILE_PAGER_REFERENCE_MASK);
         if (atomic_compare_exchange_weak_explicit(
-                &pager->references, &references, references + 1,
-                memory_order_acquire, memory_order_relaxed))
+                &pager->lifecycle, &lifecycle, lifecycle + 1U,
+                memory_order_acquire, memory_order_relaxed)) {
+            /* 当前 retain 已保证对象存活，可安全归还注册表维护引用。 */
+            if (remove_orphan_reference(pager))
+                guest_file_pager_release(pager);
             return true;
+        }
     }
     return false;
 }
@@ -181,23 +237,119 @@ static void destroy_cache(struct guest_file_pager *pager) {
     check_pthread(pthread_mutex_destroy(&pager->cache_lock));
 }
 
-void guest_file_pager_release(struct guest_file_pager *pager) {
-    if (pager == NULL)
-        return;
-    unsigned previous = atomic_fetch_sub_explicit(
-            &pager->references, 1, memory_order_acq_rel);
-    assert(previous != 0);
-    if (previous != 1)
-        return;
-
-    if (pager->provider.write_page != NULL)
-        (void) guest_file_pager_sync_range(pager, 0, UINT64_MAX);
-    /* 对象在同步回调返回前保持完整，供 provider 条件摘除弱引用。 */
+static void destroy_pager(struct guest_file_pager *pager) {
+    assert((atomic_load_explicit(
+            &pager->lifecycle, memory_order_relaxed) &
+            GUEST_FILE_PAGER_STATE_MASK) == GUEST_FILE_PAGER_DEAD);
+    assert(!atomic_load_explicit(
+            &pager->orphaned, memory_order_relaxed));
+    /* 对象在回调返回前保持完整，供 provider 条件摘除弱引用。 */
     if (pager->provider.release != NULL)
         pager->provider.release(pager, pager->provider.opaque);
     destroy_cache(pager);
     guest_file_source_release(pager->file_source);
     free(pager);
+}
+
+static void register_failed_drain(struct guest_file_pager *pager) {
+    bool notify_provider = pager->provider.drain_failed != NULL;
+    unsigned registry_references = notify_provider ? 2U : 1U;
+
+    check_pthread(pthread_mutex_lock(&orphan_lock));
+    assert(!atomic_load_explicit(
+            &pager->orphaned, memory_order_relaxed));
+    pager->orphan_next = orphan_head;
+    orphan_head = pager;
+    orphan_count++;
+    atomic_store_explicit(&pager->orphaned, true, memory_order_release);
+    unsigned expected = GUEST_FILE_PAGER_DRAINING;
+    bool revived = atomic_compare_exchange_strong_explicit(
+            &pager->lifecycle, &expected,
+            GUEST_FILE_PAGER_LIVE | registry_references,
+            memory_order_release, memory_order_relaxed);
+    assert(revived);
+    check_pthread(pthread_mutex_unlock(&orphan_lock));
+
+    if (notify_provider) {
+        /* 临时强引用保证弱槽唤醒回调返回前 provider 不会被销毁。 */
+        pager->provider.drain_failed(pager, pager->provider.opaque);
+        guest_file_pager_release(pager);
+    }
+}
+
+static bool pager_requires_drain(struct guest_file_pager *pager);
+
+void guest_file_pager_release(struct guest_file_pager *pager) {
+    if (pager == NULL)
+        return;
+    unsigned lifecycle = atomic_load_explicit(
+            &pager->lifecycle, memory_order_acquire);
+    for (;;) {
+        assert((lifecycle & GUEST_FILE_PAGER_STATE_MASK) ==
+                GUEST_FILE_PAGER_LIVE);
+        unsigned references = lifecycle &
+                GUEST_FILE_PAGER_REFERENCE_MASK;
+        assert(references != 0);
+        unsigned desired = references == 1U ?
+                GUEST_FILE_PAGER_DRAINING : lifecycle - 1U;
+        if (atomic_compare_exchange_weak_explicit(
+                &pager->lifecycle, &lifecycle, desired,
+                memory_order_acq_rel, memory_order_acquire)) {
+            if (references != 1U)
+                return;
+            break;
+        }
+    }
+
+    enum guest_file_sync_result result = GUEST_FILE_SYNC_OK;
+    if (pager->provider.write_page != NULL &&
+            pager_requires_drain(pager)) {
+        result = guest_file_pager_sync_range(pager, 0, UINT64_MAX);
+    }
+    if (result != GUEST_FILE_SYNC_OK) {
+        register_failed_drain(pager);
+        return;
+    }
+
+    unsigned expected = GUEST_FILE_PAGER_DRAINING;
+    bool finished = atomic_compare_exchange_strong_explicit(
+            &pager->lifecycle, &expected, GUEST_FILE_PAGER_DEAD,
+            memory_order_release, memory_order_relaxed);
+    assert(finished);
+    destroy_pager(pager);
+}
+
+size_t guest_file_pager_orphan_count(void) {
+    check_pthread(pthread_mutex_lock(&orphan_lock));
+    size_t count = orphan_count;
+    check_pthread(pthread_mutex_unlock(&orphan_lock));
+    return count;
+}
+
+size_t guest_file_pager_retry_orphans(void) {
+    check_pthread(pthread_mutex_lock(&orphan_retry_lock));
+    check_pthread(pthread_mutex_lock(&orphan_lock));
+    struct guest_file_pager *batch = orphan_head;
+    orphan_head = NULL;
+    size_t attempted = orphan_count;
+    orphan_count = 0;
+    for (struct guest_file_pager *pager = batch;
+            pager != NULL; pager = pager->orphan_next) {
+        assert(atomic_load_explicit(
+                &pager->orphaned, memory_order_relaxed));
+        atomic_store_explicit(
+                &pager->orphaned, false, memory_order_release);
+    }
+    check_pthread(pthread_mutex_unlock(&orphan_lock));
+
+    while (batch != NULL) {
+        struct guest_file_pager *next = batch->orphan_next;
+        batch->orphan_next = NULL;
+        guest_file_pager_release(batch);
+        batch = next;
+    }
+    check_pthread(pthread_mutex_unlock(&orphan_retry_lock));
+    return attempted;
 }
 
 enum guest_file_page_result guest_file_pager_get_page(
@@ -318,16 +470,24 @@ static enum guest_file_sync_result writeback_cached_page(
 
     byte_t page[GUEST_MEMORY_PAGE_SIZE];
     qword_t generation;
+    bool wrote_page = false;
     enum guest_file_sync_result result = GUEST_FILE_SYNC_OK;
     if (guest_page_backing_copy_dirty(backing, page, &generation)) {
         result = pager->provider.write_page(
                 pager->provider.opaque, entry->file_offset, page);
-        if (result == GUEST_FILE_SYNC_OK)
+        if (result == GUEST_FILE_SYNC_OK) {
             guest_page_backing_finish_writeback(backing, generation);
+            wrote_page = true;
+        }
     }
 
     check_pthread(pthread_mutex_lock(&pager->cache_lock));
     assert(entry->writeback);
+    if (wrote_page && pager->provider.sync_range != NULL) {
+        /* 代际溢出需要超过 2^64 次成功页写回，视为不可达。 */
+        assert(pager->write_generation != UINT64_MAX);
+        pager->write_generation++;
+    }
     entry->writeback = false;
     check_pthread(pthread_cond_broadcast(&pager->cache_changed));
     check_pthread(pthread_mutex_unlock(&pager->cache_lock));
@@ -381,10 +541,46 @@ enum guest_file_sync_result guest_file_pager_sync_range(
         end_provider_io(pager);
         return GUEST_FILE_SYNC_OK;
     }
+    bool full_range = file_offset == 0 && length == UINT64_MAX;
+    qword_t durability_target = 0;
+    if (full_range) {
+        check_pthread(pthread_mutex_lock(&pager->cache_lock));
+        durability_target = pager->write_generation;
+        check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    }
     enum guest_file_sync_result result = pager->provider.sync_range(
             pager->provider.opaque, file_offset, length);
+    if (result == GUEST_FILE_SYNC_OK && full_range) {
+        check_pthread(pthread_mutex_lock(&pager->cache_lock));
+        if (pager->durable_generation < durability_target)
+            pager->durable_generation = durability_target;
+        check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    }
     end_provider_io(pager);
     return result;
+}
+
+static bool pager_requires_drain(struct guest_file_pager *pager) {
+    byte_t snapshot[GUEST_MEMORY_PAGE_SIZE];
+    check_pthread(pthread_mutex_lock(&pager->cache_lock));
+    bool required = pager->write_generation !=
+            pager->durable_generation;
+    for (unsigned bucket = 0;
+            !required && bucket < GUEST_FILE_PAGER_BUCKET_COUNT; bucket++) {
+        for (struct cached_file_page *entry = pager->buckets[bucket];
+                entry != NULL; entry = entry->next) {
+            assert(entry->state == CACHED_FILE_PAGE_READY &&
+                    entry->backing != NULL && !entry->writeback);
+            qword_t generation;
+            if (guest_page_backing_copy_dirty(
+                    entry->backing, snapshot, &generation)) {
+                required = true;
+                break;
+            }
+        }
+    }
+    check_pthread(pthread_mutex_unlock(&pager->cache_lock));
+    return required;
 }
 
 static struct guest_page_backing *retain_resident_page(

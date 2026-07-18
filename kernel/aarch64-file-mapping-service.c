@@ -117,6 +117,19 @@ static enum guest_file_sync_result sync_file_range(void *opaque,
             GUEST_FILE_SYNC_IO_ERROR;
 }
 
+static void notify_failed_drain(
+        struct guest_file_pager *pager, void *opaque) {
+    struct kernel_file_pager *provider = opaque;
+    assert(provider != NULL && provider->pager == pager &&
+            provider->inode != NULL);
+    lock(&provider->inode->lock);
+    assert(provider->inode->file_pager == pager &&
+            provider->inode->file_pager_context == provider);
+    /* 等待者会 retain 同一个已复活 pager，不能建立第二套 inode cache。 */
+    notify(&provider->inode->file_pager_changed);
+    unlock(&provider->inode->lock);
+}
+
 static void release_file_pager(struct guest_file_pager *pager,
         void *opaque) {
     struct kernel_file_pager *provider = opaque;
@@ -218,6 +231,7 @@ static struct guest_file_pager *acquire_inode_pager(
                 .read_page = read_file_page,
                 .write_page = write_file_page,
                 .sync_range = sync_file_range,
+                .drain_failed = notify_failed_drain,
                 .release = release_file_pager,
             });
     if (candidate == NULL) {
