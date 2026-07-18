@@ -191,25 +191,6 @@ static bool page_end(const struct guest_linux_mm *memory,
     return true;
 }
 
-static bool range_supports_dontneed(
-        const struct guest_linux_mm *memory, qword_t first,
-        qword_t count) {
-    for (qword_t index = 0; index < count; index++) {
-        qword_t page = first +
-                (index << GUEST_MEMORY_PAGE_BITS);
-        const struct guest_linux_vma *mapping = guest_linux_vma_find(
-                &memory->vmas, (guest_addr_t) page);
-        if (mapping == NULL ||
-                (mapping->source != GUEST_LINUX_VMA_SOURCE_BRK &&
-                mapping->source !=
-                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE &&
-                mapping->source !=
-                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED))
-            return false;
-    }
-    return true;
-}
-
 static bool vma_range_intersects(const struct guest_linux_vma_set *set,
         guest_addr_t first, guest_addr_t last) {
     for (size_t index = 0; index < set->count; index++) {
@@ -1026,6 +1007,50 @@ static bool madvise_supported(dword_t advice) {
             advice == GUEST_LINUX_MADV_DONTNEED;
 }
 
+static void madvise_dontneed_vma(struct guest_linux_mm *memory,
+        const struct guest_linux_vma *mapping,
+        guest_addr_t first, guest_addr_t last) {
+    assert(mapping != NULL && first >= mapping->first &&
+            last <= mapping->last && first < last);
+    if (mapping->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED) {
+        // 当前模型没有独立于共享 backing 的 PTE/RSS 驻留层。
+        return;
+    }
+    if (mapping->source == GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE ||
+            mapping->source == GUEST_LINUX_VMA_SOURCE_FILE_SHARED) {
+        struct guest_page_range range = {
+            .first = first,
+            .page_count = (last - first) >> GUEST_MEMORY_PAGE_BITS,
+        };
+        enum guest_page_table_result result =
+                guest_page_table_unmap_range(
+                        memory->page_table, range, true);
+        assert(result == GUEST_PAGE_TABLE_OK);
+        return;
+    }
+
+    assert(mapping->source == GUEST_LINUX_VMA_SOURCE_BRK ||
+            mapping->source ==
+                    GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE);
+    for (guest_addr_t page = first; page < last;
+            page += GUEST_MEMORY_PAGE_SIZE) {
+        byte_t *host_page;
+        unsigned permissions;
+        enum guest_page_table_result lookup =
+                guest_page_table_lookup(memory->page_table,
+                        page, &host_page, &permissions);
+        assert(lookup == GUEST_PAGE_TABLE_OK ||
+                lookup == GUEST_PAGE_TABLE_NOT_MAPPED);
+        if (lookup == GUEST_PAGE_TABLE_NOT_MAPPED)
+            continue;
+        use(permissions);
+        memset(host_page, 0, GUEST_MEMORY_PAGE_SIZE);
+        guest_address_space_written(
+                &memory->page_table->address_space,
+                page, GUEST_MEMORY_PAGE_SIZE);
+    }
+}
+
 static qword_t guest_linux_madvise_unlocked(
         struct guest_linux_mm *memory, guest_addr_t address,
         qword_t length, dword_t advice) {
@@ -1041,43 +1066,36 @@ static qword_t guest_linux_madvise_unlocked(
     if (!valid_range(memory, address, count))
         return linux_error(GUEST_LINUX_ENOMEM);
 
-    // 先验证整段，避免空洞或不受支持的映射留下部分清零结果。
-    for (qword_t index = 0; index < count; index++) {
-        guest_addr_t page = address +
-                (index << GUEST_MEMORY_PAGE_BITS);
-        if (!page_is_mapped(memory, page))
-            return linux_error(GUEST_LINUX_ENOMEM);
-    }
-    if (advice != GUEST_LINUX_MADV_DONTNEED)
-        return 0;
-    if (!range_supports_dontneed(memory, address, count))
-        return linux_error(GUEST_LINUX_EINVAL);
-
-    for (qword_t index = 0; index < count; index++) {
-        guest_addr_t page = address +
-                (index << GUEST_MEMORY_PAGE_BITS);
-        const struct guest_linux_vma *mapping = guest_linux_vma_find(
-                &memory->vmas, page);
-        assert(mapping != NULL);
-        // 共享匿名页以后备对象为真值；本层没有可单独丢弃的驻留状态。
-        if (mapping->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED)
+    qword_t end = (qword_t) address +
+            (count << GUEST_MEMORY_PAGE_BITS);
+    bool unmapped = false;
+    qword_t cursor = address;
+    while (cursor < end) {
+        const struct guest_linux_vma *mapping = vma_at_or_after(
+                &memory->vmas, (guest_addr_t) cursor);
+        if (mapping == NULL || cursor < mapping->first) {
+            qword_t gap_end = mapping == NULL || mapping->first >= end ?
+                    end : mapping->first;
+            while (cursor < gap_end) {
+                if (page_is_mapped(memory, cursor)) {
+                    if (advice == GUEST_LINUX_MADV_DONTNEED)
+                        return linux_error(GUEST_LINUX_EINVAL);
+                } else {
+                    unmapped = true;
+                }
+                cursor += GUEST_MEMORY_PAGE_SIZE;
+            }
             continue;
-        assert(mapping->source == GUEST_LINUX_VMA_SOURCE_BRK ||
-                mapping->source ==
-                        GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE);
-        byte_t *host_page;
-        unsigned permissions;
-        enum guest_page_table_result lookup =
-                guest_page_table_lookup(memory->page_table,
-                        page, &host_page, &permissions);
-        assert(lookup == GUEST_PAGE_TABLE_OK);
-        use(permissions);
-        memset(host_page, 0, GUEST_MEMORY_PAGE_SIZE);
-        guest_address_space_written(
-                &memory->page_table->address_space,
-                page, GUEST_MEMORY_PAGE_SIZE);
+        }
+
+        guest_addr_t first = (guest_addr_t) cursor;
+        guest_addr_t last = mapping->last < end ?
+                mapping->last : (guest_addr_t) end;
+        if (advice == GUEST_LINUX_MADV_DONTNEED)
+            madvise_dontneed_vma(memory, mapping, first, last);
+        cursor = last;
     }
-    return 0;
+    return unmapped ? linux_error(GUEST_LINUX_ENOMEM) : 0;
 }
 
 qword_t guest_linux_madvise(struct guest_linux_mm *memory,

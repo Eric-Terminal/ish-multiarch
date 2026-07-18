@@ -344,7 +344,7 @@ static void test_mixed_dontneed(void) {
     assert(read_byte(&parent,
             TEST_BASE + GUEST_MEMORY_PAGE_SIZE) == 0x44);
 
-    // 整段先验证：尾页成为空洞后，前面的私有页不能被部分清零。
+    // 空洞决定最终返回 ENOMEM，但前面的私有 VMA 仍按 Linux 语义处理。
     write_byte(&child, TEST_BASE, 0x55);
     assert(guest_linux_munmap(&child.memory,
             TEST_BASE + GUEST_MEMORY_PAGE_SIZE,
@@ -353,7 +353,7 @@ static void test_mixed_dontneed(void) {
             2 * GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_MADV_DONTNEED) ==
             encoded_error(GUEST_LINUX_ENOMEM));
-    assert(read_byte(&child, TEST_BASE) == 0x55);
+    assert(read_byte(&child, TEST_BASE) == 0);
 
     fixture_destroy(&child);
     fixture_destroy(&parent);

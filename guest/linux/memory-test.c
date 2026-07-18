@@ -561,7 +561,8 @@ static void test_madvise(void) {
             3 * GUEST_MEMORY_PAGE_SIZE,
             GUEST_LINUX_MADV_DONTNEED) ==
             encoded_error(GUEST_LINUX_ENOMEM));
-    assert(first[0] == 0x44 && last[0] == 0x66);
+    // 与 Linux 一致：空洞决定最终返回 ENOMEM，但不阻止处理后续 VMA。
+    assert(first[0] == 0 && last[0] == 0);
 
     assert(guest_linux_brk(&memory,
             BRK_BASE + GUEST_MEMORY_PAGE_SIZE) ==

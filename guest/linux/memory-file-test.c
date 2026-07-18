@@ -843,6 +843,204 @@ static void test_fork_before_fault_and_exclusive_cow(void) {
     probe_destroy(&probe);
 }
 
+static void test_madvise_private_file_eviction_and_fork(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    struct memory_fixture parent;
+    fixture_init(&parent);
+    struct file_probe probe;
+    probe_init(&probe, &parent.table, GUEST_MEMORY_PAGE_SIZE * 2);
+    probe.data[0] = UINT8_C(0x21);
+    probe.data[GUEST_MEMORY_PAGE_SIZE] = UINT8_C(0x32);
+    struct guest_file_pager *pager =
+            probe_writable_pager(&probe, 110);
+    assert(pager != NULL);
+
+    qword_t mapped_result = map_private(&parent, pager, 0,
+            GUEST_MEMORY_PAGE_SIZE * 2,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_PRIVATE, 0);
+    assert((sqword_t) mapped_result >= 0);
+    guest_addr_t mapped = (guest_addr_t) mapped_result;
+    guest_addr_t lazy = mapped + GUEST_MEMORY_PAGE_SIZE;
+
+    qword_t generation = parent.table.address_space.generation;
+    assert(guest_linux_madvise(&parent.memory, lazy,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_WILLNEED) == 0);
+    assert(guest_linux_madvise(&parent.memory, lazy,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert_not_resident(&parent.table, lazy);
+    assert(probe.reads == 0 &&
+            parent.table.address_space.generation == generation);
+
+    byte_t value;
+    struct guest_memory_fault fault;
+    assert(guest_tlb_read(&parent.tlb, mapped, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x21));
+    byte_t replacement = UINT8_C(0xa5);
+    assert(guest_tlb_write(&parent.tlb, mapped,
+            &replacement, 1, &fault));
+    assert(guest_tlb_read(&parent.tlb, mapped, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == replacement);
+    struct guest_page_view parent_view = resolve_view(
+            &parent.table, mapped, GUEST_MEMORY_READ);
+    assert(parent_view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            !parent_view.copy_on_write && probe.reads == 1);
+
+    struct guest_page_table child_table;
+    struct guest_linux_mm child_memory;
+    assert(guest_linux_mm_clone(
+            &child_memory, &child_table, &parent.memory));
+    guest_page_table_enable_concurrency(&child_table);
+    struct guest_tlb child_tlb;
+    guest_tlb_init(&child_tlb, &child_table.address_space);
+    assert(guest_tlb_read(&child_tlb, mapped, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == replacement);
+
+    qword_t parent_generation =
+            parent.table.address_space.generation;
+    qword_t child_generation = child_table.address_space.generation;
+    assert(guest_linux_madvise(&child_memory, mapped,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert_not_resident(&child_table, mapped);
+    assert(child_table.address_space.generation ==
+                    child_generation + 1 &&
+            parent.table.address_space.generation == parent_generation);
+
+    // 同一个 TLB 必须观察页表代际变化，不能继续命中已释放的私有副本。
+    assert(guest_tlb_read(&child_tlb, mapped, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x21));
+    assert(guest_tlb_read(&parent.tlb, mapped, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == replacement);
+    struct guest_page_view child_view = resolve_view(
+            &child_table, mapped, GUEST_MEMORY_READ);
+    parent_view = resolve_view(
+            &parent.table, mapped, GUEST_MEMORY_READ);
+    assert(child_view.origin == GUEST_PAGE_ORIGIN_FILE &&
+            child_view.copy_on_write &&
+            parent_view.origin == GUEST_PAGE_ORIGIN_ANONYMOUS &&
+            child_view.backing_identity != parent_view.backing_identity &&
+            probe.reads == 1 && probe.writes == 0 && probe.syncs == 0);
+
+    guest_linux_mm_destroy(&child_memory);
+    guest_page_table_destroy(&child_table);
+    guest_file_pager_release(pager);
+    fixture_destroy(&parent);
+    assert(probe.releases == 1 &&
+            probe.read_outside_page_table_lock &&
+            probe.write_outside_page_table_lock &&
+            probe.sync_outside_page_table_lock &&
+            probe.release_outside_page_table_lock);
+    probe_destroy(&probe);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
+static void test_madvise_shared_dirty_and_holes(void) {
+    unsigned baseline = guest_page_backing_test_live_count();
+    struct memory_fixture fixture;
+    fixture_init(&fixture);
+    struct file_probe probe;
+    probe_init(&probe, &fixture.table, GUEST_MEMORY_PAGE_SIZE * 3);
+    probe.data[0] = UINT8_C(0x41);
+    probe.data[GUEST_MEMORY_PAGE_SIZE] = UINT8_C(0x52);
+    probe.data[GUEST_MEMORY_PAGE_SIZE * 2] = UINT8_C(0x63);
+    struct guest_file_pager *pager =
+            probe_writable_pager(&probe, 111);
+    assert(pager != NULL);
+
+    qword_t protection = GUEST_LINUX_PROT_READ |
+            GUEST_LINUX_PROT_WRITE;
+    qword_t first_result = map_shared(&fixture, pager, 0,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK, GUEST_LINUX_MAP_SHARED, 0);
+    assert((sqword_t) first_result >= 0);
+    guest_addr_t first = (guest_addr_t) first_result;
+    guest_addr_t alias = first + GUEST_MEMORY_PAGE_SIZE * 4;
+    assert(map_shared(&fixture, pager, alias,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_FIXED, 0) == alias);
+
+    byte_t value;
+    struct guest_memory_fault fault;
+    assert(guest_tlb_read(&fixture.tlb, first, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x41));
+    assert(guest_tlb_read(&fixture.tlb, alias, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x41));
+    byte_t replacement = UINT8_C(0xb4);
+    assert(guest_tlb_write(&fixture.tlb, first,
+            &replacement, 1, &fault));
+    assert(probe.reads == 1 && probe.writes == 0 && probe.syncs == 0);
+
+    qword_t generation = fixture.table.address_space.generation;
+    assert(guest_linux_madvise(&fixture.memory, first,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_MADV_DONTNEED) == 0);
+    assert_not_resident(&fixture.table, first);
+    assert(fixture.table.address_space.generation == generation + 1 &&
+            probe.writes == 0 && probe.syncs == 0);
+    assert(guest_tlb_read(&fixture.tlb, alias, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == replacement);
+    assert(guest_tlb_read(&fixture.tlb, first, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == replacement &&
+            probe.reads == 1);
+    assert(guest_linux_msync(&fixture.memory, first,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_MS_SYNC) == 0);
+    assert(probe.writes == 1 && probe.syncs == 1 &&
+            probe.data[0] == replacement);
+
+    guest_addr_t before_hole = first + GUEST_MEMORY_PAGE_SIZE * 8;
+    guest_addr_t after_hole = before_hole +
+            GUEST_MEMORY_PAGE_SIZE * 2;
+    assert(map_private(&fixture, pager, before_hole,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED,
+            GUEST_MEMORY_PAGE_SIZE) == before_hole);
+    assert(map_private(&fixture, pager, after_hole,
+            GUEST_MEMORY_PAGE_SIZE, protection,
+            GUEST_LINUX_PROT_MASK,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_FIXED,
+            GUEST_MEMORY_PAGE_SIZE * 2) == after_hole);
+    assert(guest_tlb_read(&fixture.tlb, before_hole, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x52));
+    replacement = UINT8_C(0xc5);
+    assert(guest_tlb_write(&fixture.tlb, before_hole,
+            &replacement, 1, &fault));
+    assert(guest_tlb_read(&fixture.tlb, after_hole, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x63));
+    replacement = UINT8_C(0xd6);
+    assert(guest_tlb_write(&fixture.tlb, after_hole,
+            &replacement, 1, &fault));
+    assert(probe.reads == 3);
+
+    generation = fixture.table.address_space.generation;
+    assert(guest_linux_madvise(&fixture.memory, before_hole,
+            GUEST_MEMORY_PAGE_SIZE * 3,
+            GUEST_LINUX_MADV_DONTNEED) ==
+            linux_error(GUEST_LINUX_ENOMEM));
+    assert_not_resident(&fixture.table, before_hole);
+    assert_not_resident(&fixture.table, after_hole);
+    assert(fixture.table.address_space.generation == generation + 2);
+    assert(guest_tlb_read(&fixture.tlb, before_hole, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x52));
+    assert(guest_tlb_read(&fixture.tlb, after_hole, &value, 1,
+            GUEST_MEMORY_READ, &fault) && value == UINT8_C(0x63));
+    assert(probe.reads == 3 && probe.writes == 1 && probe.syncs == 1);
+
+    guest_file_pager_release(pager);
+    fixture_destroy(&fixture);
+    assert(probe.releases == 1 &&
+            probe.read_outside_page_table_lock &&
+            probe.write_outside_page_table_lock &&
+            probe.sync_outside_page_table_lock &&
+            probe.release_outside_page_table_lock);
+    probe_destroy(&probe);
+    assert(guest_page_backing_test_live_count() == baseline);
+}
+
 static void test_resize_fork_aliases_and_regrow(void) {
     unsigned baseline = guest_page_backing_test_live_count();
     struct memory_fixture parent;
@@ -1423,6 +1621,8 @@ int main(void) {
     test_lazy_mprotect_holes_and_fixed_replace();
     test_fixed_file_mapping_replaces_offset();
     test_fork_before_fault_and_exclusive_cow();
+    test_madvise_private_file_eviction_and_fork();
+    test_madvise_shared_dirty_and_holes();
     test_resize_fork_aliases_and_regrow();
     test_msync_ranges_errors_and_concurrency();
     test_fault_racing_munmap_drops_stale_page();
