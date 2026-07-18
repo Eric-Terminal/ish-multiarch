@@ -38,7 +38,8 @@ static unsigned page_index(guest_addr_t address, byte_t shift) {
     return (unsigned) ((address >> shift) & GUEST_PAGE_TABLE_INDEX_MASK);
 }
 
-static struct guest_page_mapping *find_mapping(struct guest_page_table *table,
+static struct guest_page_mapping *find_mapping_slot(
+        struct guest_page_table *table,
         guest_addr_t page_base) {
     struct guest_page_table_node *level1 =
             table->root->entries[page_index(page_base, 39)];
@@ -52,8 +53,15 @@ static struct guest_page_mapping *find_mapping(struct guest_page_table *table,
             level2->entries[page_index(page_base, 21)];
     if (leaf == NULL)
         return NULL;
+    return &leaf->entries[page_index(page_base, 12)];
+}
+
+static struct guest_page_mapping *find_mapping(struct guest_page_table *table,
+        guest_addr_t page_base) {
     struct guest_page_mapping *mapping =
-            &leaf->entries[page_index(page_base, 12)];
+            find_mapping_slot(table, page_base);
+    if (mapping == NULL)
+        return NULL;
     return mapping->backing == NULL ? NULL : mapping;
 }
 
@@ -260,6 +268,8 @@ static const struct guest_address_space_ops page_table_ops = {
 #if defined(GUEST_PAGE_TABLE_TESTING)
 static size_t clone_allocation_fail_at = SIZE_MAX;
 static size_t clone_allocation_count;
+static size_t remap_allocation_fail_at = SIZE_MAX;
+static size_t remap_allocation_count;
 
 void guest_page_table_test_fail_clone_allocation_at(size_t index) {
     clone_allocation_fail_at = index;
@@ -270,6 +280,15 @@ size_t guest_page_table_test_clone_allocation_count(void) {
     return clone_allocation_count;
 }
 
+void guest_page_table_test_fail_remap_allocation_at(size_t index) {
+    remap_allocation_fail_at = index;
+    remap_allocation_count = 0;
+}
+
+size_t guest_page_table_test_remap_allocation_count(void) {
+    return remap_allocation_count;
+}
+
 static bool clone_allocation_fails(void) {
     return clone_allocation_count++ == clone_allocation_fail_at;
 }
@@ -277,8 +296,14 @@ static bool clone_allocation_fails(void) {
 static void *clone_calloc(size_t count, size_t size) {
     return clone_allocation_fails() ? NULL : calloc(count, size);
 }
+
+static void *remap_calloc(size_t count, size_t size) {
+    return remap_allocation_count++ == remap_allocation_fail_at ?
+            NULL : calloc(count, size);
+}
 #else
 #define clone_calloc calloc
+#define remap_calloc calloc
 #endif
 
 bool guest_page_table_init(struct guest_page_table *table,
@@ -537,6 +562,34 @@ static enum guest_page_table_result prepare_mapping_slot(
     if (level2 == NULL)
         return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
     struct guest_page_table_leaf *leaf = allocate_slot(
+            &level2->entries[page_index(page_base, 21)],
+            sizeof(*leaf));
+    if (leaf == NULL)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    *mapping = &leaf->entries[page_index(page_base, 12)];
+    return GUEST_PAGE_TABLE_OK;
+}
+
+static void *allocate_remap_slot(void **slot, size_t size) {
+    if (*slot == NULL)
+        *slot = remap_calloc(1, size);
+    return *slot;
+}
+
+static enum guest_page_table_result prepare_remap_mapping_slot(
+        struct guest_page_table *table, guest_addr_t page_base,
+        struct guest_page_mapping **mapping) {
+    struct guest_page_table_node *level1 = allocate_remap_slot(
+            &table->root->entries[page_index(page_base, 39)],
+            sizeof(*level1));
+    if (level1 == NULL)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    struct guest_page_table_node *level2 = allocate_remap_slot(
+            &level1->entries[page_index(page_base, 30)],
+            sizeof(*level2));
+    if (level2 == NULL)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    struct guest_page_table_leaf *leaf = allocate_remap_slot(
             &level2->entries[page_index(page_base, 21)],
             sizeof(*leaf));
     if (leaf == NULL)
@@ -820,6 +873,33 @@ static bool leaf_is_empty(const struct guest_page_table_leaf *leaf) {
     return true;
 }
 
+static void prune_empty_path(struct guest_page_table *table,
+        guest_addr_t page_base) {
+    unsigned index0 = page_index(page_base, 39);
+    unsigned index1 = page_index(page_base, 30);
+    unsigned index2 = page_index(page_base, 21);
+    struct guest_page_table_node *level1 = table->root->entries[index0];
+    if (level1 == NULL)
+        return;
+    struct guest_page_table_node *level2 = level1->entries[index1];
+    if (level2 == NULL)
+        return;
+    struct guest_page_table_leaf *leaf = level2->entries[index2];
+    if (leaf == NULL || !leaf_is_empty(leaf))
+        return;
+
+    free(leaf);
+    level2->entries[index2] = NULL;
+    if (!node_is_empty(level2))
+        return;
+    free(level2);
+    level1->entries[index1] = NULL;
+    if (!node_is_empty(level1))
+        return;
+    free(level1);
+    table->root->entries[index0] = NULL;
+}
+
 static enum guest_page_table_result unmap_page(
         struct guest_page_table *table, guest_addr_t page_base) {
     if (!valid_page(table, page_base))
@@ -841,18 +921,7 @@ static enum guest_page_table_result unmap_page(
     guest_file_source_release(leaf->entries[index3].file_source);
     guest_page_backing_release(leaf->entries[index3].backing);
     leaf->entries[index3] = (struct guest_page_mapping) {0};
-    if (leaf_is_empty(leaf)) {
-        free(leaf);
-        level2->entries[index2] = NULL;
-        if (node_is_empty(level2)) {
-            free(level2);
-            level1->entries[index1] = NULL;
-            if (node_is_empty(level1)) {
-                free(level1);
-                table->root->entries[index0] = NULL;
-            }
-        }
-    }
+    prune_empty_path(table, page_base);
     return GUEST_PAGE_TABLE_OK;
 }
 
@@ -894,6 +963,231 @@ enum guest_page_table_result guest_page_table_unmap_range(
     if (changed)
         guest_address_space_changed(&table->address_space);
     return GUEST_PAGE_TABLE_OK;
+}
+
+enum remap_range_mode {
+    REMAP_RANGE_MOVE,
+    REMAP_RANGE_MOVE_EXPAND_ZERO,
+    REMAP_RANGE_ALIAS_SHARED,
+    REMAP_RANGE_MOVE_REPLACE_ZERO,
+};
+
+static void release_prepared_zero_backings(
+        struct guest_page_backing **backings, size_t count) {
+    if (backings == NULL)
+        return;
+    for (size_t index = 0; index < count; index++) {
+        if (backings[index] != NULL)
+            guest_page_backing_release(backings[index]);
+    }
+    free(backings);
+}
+
+static enum guest_page_table_result remap_range(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first, qword_t destination_page_count,
+        enum remap_range_mode mode, unsigned zero_permissions) {
+    assert((zero_permissions & ~GUEST_MEMORY_PERMISSION_MASK) == 0);
+    struct guest_page_range destination = {
+        .first = destination_first,
+        .page_count = destination_page_count,
+    };
+    if (!valid_range(table, source) || !valid_range(table, destination))
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+    if (mode != REMAP_RANGE_MOVE_EXPAND_ZERO &&
+            destination.page_count != source.page_count)
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+    if (mode == REMAP_RANGE_MOVE_EXPAND_ZERO &&
+            destination.page_count < source.page_count)
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+    if (source.page_count == 0 && destination.page_count == 0)
+        return GUEST_PAGE_TABLE_OK;
+
+    qword_t source_end = (qword_t) source.first +
+            (source.page_count << GUEST_MEMORY_PAGE_BITS);
+    qword_t destination_end = (qword_t) destination.first +
+            (destination.page_count << GUEST_MEMORY_PAGE_BITS);
+    if (source.page_count != 0 &&
+            (qword_t) source.first < destination_end &&
+            (qword_t) destination.first < source_end)
+        return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+
+    guest_addr_t destination_page = destination.first;
+    for (qword_t index = 0; index < destination.page_count; index++) {
+        if (find_mapping(table, destination_page) != NULL)
+            return GUEST_PAGE_TABLE_ALREADY_MAPPED;
+        destination_page += GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    guest_addr_t source_page = source.first;
+    for (qword_t index = 0; index < source.page_count; index++) {
+        struct guest_page_mapping *mapping =
+                find_mapping(table, source_page);
+        if (mode == REMAP_RANGE_ALIAS_SHARED && mapping != NULL &&
+                !mapping->shared_backing)
+            return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+        if (mode == REMAP_RANGE_MOVE_REPLACE_ZERO && mapping == NULL)
+            return GUEST_PAGE_TABLE_NOT_MAPPED;
+        if (mode == REMAP_RANGE_MOVE_REPLACE_ZERO &&
+                (mapping->origin != GUEST_PAGE_ORIGIN_ANONYMOUS ||
+                mapping->file_source != NULL || mapping->shared_backing ||
+                mapping->copy_on_write))
+            return GUEST_PAGE_TABLE_INVALID_ADDRESS;
+        source_page += GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    struct guest_page_backing **zero_backings = NULL;
+    size_t count = (size_t) source.page_count;
+    if ((qword_t) count != source.page_count)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    qword_t zero_count_qword = mode == REMAP_RANGE_MOVE_REPLACE_ZERO ?
+            source.page_count : mode == REMAP_RANGE_MOVE_EXPAND_ZERO ?
+            destination.page_count - source.page_count : 0;
+    size_t zero_count = (size_t) zero_count_qword;
+    if ((qword_t) zero_count != zero_count_qword)
+        return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+    if (zero_count != 0) {
+        if (zero_count > SIZE_MAX / sizeof(*zero_backings))
+            return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+        zero_backings = remap_calloc(
+                zero_count, sizeof(*zero_backings));
+        if (zero_backings == NULL)
+            return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+        for (size_t index = 0; index < zero_count; index++) {
+            zero_backings[index] = guest_page_backing_create();
+            if (zero_backings[index] == NULL) {
+                release_prepared_zero_backings(
+                        zero_backings, zero_count);
+                return GUEST_PAGE_TABLE_OUT_OF_MEMORY;
+            }
+        }
+    }
+
+    source_page = source.first;
+    destination_page = destination.first;
+    for (qword_t index = 0; index < source.page_count; index++) {
+        if (find_mapping(table, source_page) != NULL) {
+            struct guest_page_mapping *destination_mapping;
+            enum guest_page_table_result prepared =
+                    prepare_remap_mapping_slot(table, destination_page,
+                            &destination_mapping);
+            if (prepared != GUEST_PAGE_TABLE_OK) {
+                release_prepared_zero_backings(
+                        zero_backings, zero_count);
+                return prepared;
+            }
+            assert(destination_mapping->backing == NULL);
+        }
+        source_page += GUEST_MEMORY_PAGE_SIZE;
+        destination_page += GUEST_MEMORY_PAGE_SIZE;
+    }
+    for (qword_t index = source.page_count;
+            index < destination.page_count; index++) {
+        struct guest_page_mapping *destination_mapping;
+        enum guest_page_table_result prepared =
+                prepare_remap_mapping_slot(table, destination_page,
+                        &destination_mapping);
+        if (prepared != GUEST_PAGE_TABLE_OK) {
+            release_prepared_zero_backings(zero_backings, zero_count);
+            return prepared;
+        }
+        assert(destination_mapping->backing == NULL);
+        destination_page += GUEST_MEMORY_PAGE_SIZE;
+    }
+
+    bool changed = false;
+    source_page = source.first;
+    destination_page = destination.first;
+    for (size_t index = 0; index < count; index++) {
+        struct guest_page_mapping *source_mapping =
+                find_mapping(table, source_page);
+        if (source_mapping != NULL) {
+            struct guest_page_mapping *destination_mapping =
+                    find_mapping_slot(table, destination_page);
+            assert(destination_mapping != NULL &&
+                    destination_mapping->backing == NULL);
+            if (mode == REMAP_RANGE_ALIAS_SHARED) {
+                assert(source_mapping->shared_backing);
+                guest_page_backing_retain(source_mapping->backing);
+                guest_file_source_retain(source_mapping->file_source);
+                *destination_mapping = *source_mapping;
+            } else {
+                *destination_mapping = *source_mapping;
+                if (mode == REMAP_RANGE_MOVE_REPLACE_ZERO) {
+                    *source_mapping = (struct guest_page_mapping) {
+                        .backing = zero_backings[index],
+                        .permissions = zero_permissions,
+                        .origin = GUEST_PAGE_ORIGIN_ANONYMOUS,
+                    };
+                    zero_backings[index] = NULL;
+                } else {
+                    *source_mapping = (struct guest_page_mapping) {0};
+                }
+            }
+            changed = true;
+        }
+        source_page += GUEST_MEMORY_PAGE_SIZE;
+        destination_page += GUEST_MEMORY_PAGE_SIZE;
+    }
+    if (mode == REMAP_RANGE_MOVE_EXPAND_ZERO) {
+        for (size_t index = 0; index < zero_count; index++) {
+            struct guest_page_mapping *destination_mapping =
+                    find_mapping_slot(table, destination_page);
+            assert(destination_mapping != NULL &&
+                    destination_mapping->backing == NULL);
+            *destination_mapping = (struct guest_page_mapping) {
+                .backing = zero_backings[index],
+                .permissions = zero_permissions,
+                .origin = GUEST_PAGE_ORIGIN_ANONYMOUS,
+            };
+            zero_backings[index] = NULL;
+            destination_page += GUEST_MEMORY_PAGE_SIZE;
+            changed = true;
+        }
+    }
+    if (mode == REMAP_RANGE_MOVE ||
+            mode == REMAP_RANGE_MOVE_EXPAND_ZERO) {
+        source_page = source.first;
+        for (qword_t index = 0; index < source.page_count; index++) {
+            prune_empty_path(table, source_page);
+            source_page += GUEST_MEMORY_PAGE_SIZE;
+        }
+    }
+    release_prepared_zero_backings(zero_backings, zero_count);
+    if (changed)
+        guest_address_space_changed(&table->address_space);
+    return GUEST_PAGE_TABLE_OK;
+}
+
+enum guest_page_table_result guest_page_table_move_range(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first) {
+    return remap_range(table, source, destination_first,
+            source.page_count, REMAP_RANGE_MOVE, 0);
+}
+
+enum guest_page_table_result guest_page_table_move_range_expand_zero(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first, qword_t destination_page_count,
+        unsigned destination_permissions) {
+    return remap_range(table, source, destination_first,
+            destination_page_count, REMAP_RANGE_MOVE_EXPAND_ZERO,
+            destination_permissions);
+}
+
+enum guest_page_table_result guest_page_table_alias_shared_range(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first) {
+    return remap_range(table, source, destination_first,
+            source.page_count, REMAP_RANGE_ALIAS_SHARED, 0);
+}
+
+enum guest_page_table_result guest_page_table_move_range_replace_zero(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first, unsigned source_permissions) {
+    return remap_range(table, source, destination_first,
+            source.page_count, REMAP_RANGE_MOVE_REPLACE_ZERO,
+            source_permissions);
 }
 
 enum guest_page_table_result guest_page_table_protect(

@@ -841,6 +841,22 @@ if not meson.is_cross_build()
             '-DGUEST_PAGE_BACKING_TESTING=1'])
     test('guest_linux_memory', guest_linux_memory_test)
 
+    guest_linux_mremap_test = executable('guest_linux_mremap_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
+            'guest/memory/page-table.c',
+            'guest/linux/vma.c',
+            'guest/linux/memory.c',
+            'guest/linux/mremap-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1'])
+    test('guest_linux_mremap', guest_linux_mremap_test)
+
     guest_linux_memory_shared_test = executable(
         'guest_linux_memory_shared_test', [
             'guest/memory/address-space.c',
@@ -877,6 +893,26 @@ if not meson.is_cross_build()
             '-DGUEST_FILE_PAGER_TESTING=1'],
         dependencies: threads)
     test('guest_linux_memory_file', guest_linux_memory_file_test,
+        timeout: 120)
+
+    guest_linux_mremap_file_test = executable(
+        'guest_linux_mremap_file_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/file-pager.c',
+            'guest/memory/page-table.c',
+            'guest/linux/vma.c',
+            'guest/linux/memory.c',
+            'guest/linux/mremap-file-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_LINUX_VMA_TESTING=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1',
+            '-DGUEST_FILE_PAGER_TESTING=1'],
+        dependencies: threads)
+    test('guest_linux_mremap_file', guest_linux_mremap_file_test,
         timeout: 120)
 
     guest_linux_vma_test = executable('guest_linux_vma_test', [
@@ -979,6 +1015,19 @@ if not meson.is_cross_build()
             '-DGUEST_PAGE_BACKING_TESTING=1',
             '-DGUEST_PAGE_TABLE_TESTING=1'])
     test('aarch64_page_table', aarch64_page_table_test)
+
+    aarch64_page_table_remap_test = executable(
+        'aarch64_page_table_remap_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/memory/page-backing.c',
+            'guest/memory/page-table.c',
+            'guest/memory/page-table-remap-test.c',
+        ], include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1',
+            '-DGUEST_PAGE_BACKING_TESTING=1',
+            '-DGUEST_PAGE_TABLE_TESTING=1'])
+    test('aarch64_page_table_remap', aarch64_page_table_remap_test)
 
     aarch64_page_table_cow_thread_test = executable(
         'aarch64_page_table_cow_thread_test', [

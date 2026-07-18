@@ -52,6 +52,9 @@ qword_t guest_linux_mmap_file_shared(struct guest_linux_mm *memory,
         struct guest_file_pager *pager, qword_t offset);
 qword_t guest_linux_munmap(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length);
+qword_t guest_linux_mremap(struct guest_linux_mm *memory,
+        qword_t old_address, qword_t old_length, qword_t new_length,
+        qword_t flags, qword_t new_address);
 qword_t guest_linux_mprotect(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection);
 qword_t guest_linux_msync(struct guest_linux_mm *memory,

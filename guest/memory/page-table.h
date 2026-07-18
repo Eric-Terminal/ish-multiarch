@@ -53,6 +53,8 @@ void guest_page_table_set_fault_ops(struct guest_page_table *table,
 #if defined(GUEST_PAGE_TABLE_TESTING)
 void guest_page_table_test_fail_clone_allocation_at(size_t index);
 size_t guest_page_table_test_clone_allocation_count(void);
+void guest_page_table_test_fail_remap_allocation_at(size_t index);
+size_t guest_page_table_test_remap_allocation_count(void);
 #endif
 void guest_page_table_destroy(struct guest_page_table *table);
 // 共享页表的复合映射变更须持有写锁；单次 TLB 访问会自动加锁。
@@ -119,6 +121,24 @@ enum guest_page_table_result guest_page_table_map_zero_shared_range(
 enum guest_page_table_result guest_page_table_unmap_range(
         struct guest_page_table *table, struct guest_page_range range,
         bool allow_holes);
+// 调用方持有页表写事务；目标范围必须为空，源空洞会在目标保留为空洞。
+// 驻留映射的 backing、文件来源和 COW/共享属性按所有权整体迁移。
+enum guest_page_table_result guest_page_table_move_range(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first);
+// 在迁移源驻留页的同一事务中，为目标尾部建立私有匿名零页。
+enum guest_page_table_result guest_page_table_move_range_expand_zero(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first, qword_t destination_page_count,
+        unsigned destination_permissions);
+// 只为源范围内的共享驻留映射建立别名；lazy 空洞不会被提前换页。
+enum guest_page_table_result guest_page_table_alias_shared_range(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first);
+// 迁移私有匿名范围，并以指定权限的全新零页原子替换源映射。
+enum guest_page_table_result guest_page_table_move_range_replace_zero(
+        struct guest_page_table *table, struct guest_page_range source,
+        guest_addr_t destination_first, unsigned source_permissions);
 enum guest_page_table_result guest_page_table_protect_range(
         struct guest_page_table *table, struct guest_page_range range,
         unsigned permissions);

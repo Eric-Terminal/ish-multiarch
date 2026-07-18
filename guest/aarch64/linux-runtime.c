@@ -27,6 +27,7 @@
 #define AARCH64_LINUX_SYS_CONNECT 203
 #define AARCH64_LINUX_SYS_BRK 214
 #define AARCH64_LINUX_SYS_MUNMAP 215
+#define AARCH64_LINUX_SYS_MREMAP 216
 #define AARCH64_LINUX_SYS_MMAP 222
 #define AARCH64_LINUX_SYS_MPROTECT 226
 #define AARCH64_LINUX_SYS_MSYNC 227
@@ -41,7 +42,7 @@ static qword_t linux_error(unsigned error) {
 }
 
 static qword_t untag_user_address(qword_t address) {
-    // AArch64 Linux 在 msync 参数校验前移除用户指针的顶字节标签。
+    // AArch64 Linux 只对允许 tagged-address ABI 的用户指针移除顶字节标签。
     return (address & (UINT64_C(1) << 55)) != 0 ? address :
             address & UINT64_C(0x00ffffffffffffff);
 }
@@ -503,6 +504,11 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
     } else if (syscall.number == AARCH64_LINUX_SYS_MUNMAP) {
         result.return_value = guest_linux_munmap(runtime->memory,
                 syscall.arguments[0], syscall.arguments[1]);
+    } else if (syscall.number == AARCH64_LINUX_SYS_MREMAP) {
+        result.return_value = guest_linux_mremap(runtime->memory,
+                untag_user_address(syscall.arguments[0]),
+                syscall.arguments[1], syscall.arguments[2],
+                syscall.arguments[3], syscall.arguments[4]);
     } else if (syscall.number == AARCH64_LINUX_SYS_MMAP) {
         result.return_value = dispatch_mmap(runtime, task, &syscall);
     } else if (syscall.number == AARCH64_LINUX_SYS_MPROTECT) {

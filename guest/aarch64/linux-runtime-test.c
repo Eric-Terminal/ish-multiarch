@@ -219,12 +219,65 @@ int main(void) {
     struct aarch64_linux_task task;
     aarch64_linux_task_init(&task, 1234, &host_task);
     struct cpu_state cpu = {0};
+
+    qword_t remap_source_result = guest_linux_mmap(&memory, 0,
+            GUEST_MEMORY_PAGE_SIZE,
+            GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE,
+            GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS,
+            UINT64_MAX, 0);
+    assert((sqword_t) remap_source_result >= 0);
+    guest_addr_t remap_source = (guest_addr_t) remap_source_result;
+    guest_addr_t remap_destination =
+            remap_source + 4 * GUEST_MEMORY_PAGE_SIZE;
+    struct guest_memory_fault remap_fault;
+    const byte_t remap_value = UINT8_C(0x6e);
+    assert(guest_tlb_write(&tlb, remap_source,
+            &remap_value, sizeof(remap_value), &remap_fault));
+    cpu.x[8] = 216;
+    cpu.x[0] = UINT64_C(0xab00000000000000) | remap_source;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[3] = GUEST_LINUX_MREMAP_MAYMOVE |
+            GUEST_LINUX_MREMAP_FIXED;
+    cpu.x[4] = remap_destination;
+    struct aarch64_linux_syscall_result result =
+            aarch64_linux_dispatch_syscall(
+                    &cpu, &tlb, &runtime, &task);
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME &&
+            cpu.x[0] == remap_destination);
+    byte_t remap_observed = 0;
+    assert(guest_tlb_read(&tlb, remap_destination,
+            &remap_observed, sizeof(remap_observed),
+            GUEST_MEMORY_READ, &remap_fault));
+    assert(remap_observed == remap_value);
+    assert(!guest_tlb_read(&tlb, remap_source,
+            &remap_observed, sizeof(remap_observed),
+            GUEST_MEMORY_READ, &remap_fault));
+    assert(remap_fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+
+    cpu.x[8] = 216;
+    cpu.x[0] = remap_destination;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[3] = GUEST_LINUX_MREMAP_MAYMOVE |
+            GUEST_LINUX_MREMAP_FIXED;
+    cpu.x[4] = UINT64_C(0xcd00000000000000) |
+            (remap_destination + 4 * GUEST_MEMORY_PAGE_SIZE);
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL));
+    assert(guest_tlb_read(&tlb, remap_destination,
+            &remap_observed, sizeof(remap_observed),
+            GUEST_MEMORY_READ, &remap_fault));
+    assert(remap_observed == remap_value);
+    assert(guest_linux_munmap(&memory, remap_destination,
+            GUEST_MEMORY_PAGE_SIZE) == 0);
+
     cpu.x[8] = 64;
     cpu.x[0] = 1;
     cpu.x[1] = DATA_PAGE + 32;
     cpu.x[2] = sizeof(message) - 1;
-    struct aarch64_linux_syscall_result result =
-            aarch64_linux_dispatch_syscall(
+    result = aarch64_linux_dispatch_syscall(
                     &cpu, &tlb, &runtime, &task);
     assert(result.action == AARCH64_LINUX_SYSCALL_RESUME);
     assert(cpu.x[0] == sizeof(message) - 1);

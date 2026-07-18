@@ -842,6 +842,356 @@ qword_t guest_linux_munmap(struct guest_linux_mm *memory,
     return result;
 }
 
+static bool mremap_length(qword_t length, qword_t *count,
+        qword_t *rounded) {
+    if (length == 0) {
+        *count = 0;
+        *rounded = 0;
+        return true;
+    }
+    if (!page_count(length, count))
+        return false;
+    *rounded = *count << GUEST_MEMORY_PAGE_BITS;
+    return true;
+}
+
+static bool ranges_overlap(qword_t first, qword_t length,
+        qword_t other_first, qword_t other_length) {
+    if (length == 0 || other_length == 0)
+        return false;
+    qword_t end = length > UINT64_MAX - first ?
+            UINT64_MAX : first + length;
+    qword_t other_end = other_length > UINT64_MAX - other_first ?
+            UINT64_MAX : other_first + other_length;
+    return first < other_end && other_first < end;
+}
+
+static bool private_anonymous_vma(
+        const struct guest_linux_vma *mapping) {
+    return mapping->source == GUEST_LINUX_VMA_SOURCE_BRK ||
+            mapping->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE;
+}
+
+static bool shared_vma(const struct guest_linux_vma *mapping) {
+    return mapping->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED ||
+            mapping->source == GUEST_LINUX_VMA_SOURCE_FILE_SHARED;
+}
+
+static bool mremap_file_offset_valid(
+        const struct guest_linux_vma *mapping,
+        qword_t old_address, qword_t new_size) {
+    if (!file_vma_source(mapping->source))
+        return true;
+    qword_t delta = old_address - mapping->first;
+    if (mapping->file_offset > UINT64_MAX - delta)
+        return false;
+    qword_t file_offset = mapping->file_offset + delta;
+    // VMA 以字节保存文件偏移，整个映射跨度也必须保持可表示。
+    return file_offset <= UINT64_MAX - new_size;
+}
+
+static struct guest_linux_vma make_mremap_mapping(
+        const struct guest_linux_vma *source, qword_t old_address,
+        qword_t destination, qword_t new_size, bool moved) {
+    struct guest_linux_vma mapping = *source;
+    mapping.first = (guest_addr_t) destination;
+    mapping.last = (guest_addr_t) (destination + new_size);
+    if (file_vma_source(mapping.source)) {
+        qword_t delta = old_address - source->first;
+        assert(mapping.file_offset <= UINT64_MAX - delta);
+        mapping.file_offset += delta;
+    } else {
+        mapping.file_offset = 0;
+        mapping.file_pager = NULL;
+    }
+    if (moved && mapping.source == GUEST_LINUX_VMA_SOURCE_BRK)
+        mapping.source = GUEST_LINUX_VMA_SOURCE_ANONYMOUS_PRIVATE;
+    return mapping;
+}
+
+static bool prepare_mremap_candidate(
+        const struct guest_linux_mm *memory,
+        qword_t old_address, qword_t old_size,
+        struct guest_linux_vma destination, bool keep_source,
+        struct guest_linux_vma_set *candidate) {
+    if (!guest_linux_vma_set_clone(candidate, &memory->vmas))
+        return false;
+    if (!keep_source && old_size != 0 &&
+            !guest_linux_vma_remove(candidate,
+                    (guest_addr_t) old_address,
+                    (guest_addr_t) (old_address + old_size))) {
+        guest_linux_vma_set_destroy(candidate);
+        return false;
+    }
+    if (!guest_linux_vma_insert(candidate, destination)) {
+        guest_linux_vma_set_destroy(candidate);
+        return false;
+    }
+    return true;
+}
+
+static bool select_mremap_destination(struct guest_linux_mm *memory,
+        qword_t hint, qword_t count, bool use_hint,
+        qword_t *destination) {
+    if (use_hint && hint != 0 && range_is_hole(memory, hint, count)) {
+        *destination = hint;
+        return true;
+    }
+    return find_mmap_hole(memory, count, destination);
+}
+
+static qword_t shrink_mremap_in_place(struct guest_linux_mm *memory,
+        qword_t old_address, qword_t old_size, qword_t new_size,
+        struct guest_linux_vma_set *retired) {
+    guest_addr_t tail = (guest_addr_t) (old_address + new_size);
+    guest_addr_t old_end = (guest_addr_t) (old_address + old_size);
+    struct guest_linux_vma_set candidate;
+    if (!prepare_vma_remove(memory, tail, old_end, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
+    qword_t generation = memory->page_table->address_space.generation;
+    enum guest_page_table_result unmapped = guest_page_table_unmap_range(
+            memory->page_table,
+            make_range(tail,
+                    (old_size - new_size) >> GUEST_MEMORY_PAGE_BITS),
+            true);
+    assert(unmapped == GUEST_PAGE_TABLE_OK);
+    commit_vma_candidate(memory, &candidate, retired);
+    if (memory->page_table->address_space.generation == generation)
+        guest_address_space_changed(&memory->page_table->address_space);
+    return old_address;
+}
+
+static qword_t expand_mremap_in_place(struct guest_linux_mm *memory,
+        const struct guest_linux_vma *source, qword_t old_address,
+        qword_t old_count, qword_t old_size, qword_t new_count,
+        qword_t new_size, unsigned permissions,
+        struct guest_linux_vma_set *retired) {
+    struct guest_linux_vma mapping = make_mremap_mapping(
+            source, old_address, old_address, new_size, false);
+    struct guest_linux_vma_set candidate;
+    if (!prepare_vma_insert(memory, mapping, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
+
+    qword_t generation = memory->page_table->address_space.generation;
+    if (private_anonymous_vma(source)) {
+        enum guest_page_table_result mapped =
+                guest_page_table_map_zero_range(memory->page_table,
+                        make_range(old_address + old_size,
+                                new_count - old_count),
+                        permissions, false);
+        if (mapped != GUEST_PAGE_TABLE_OK) {
+            assert(mapped == GUEST_PAGE_TABLE_OUT_OF_MEMORY);
+            guest_linux_vma_set_destroy(&candidate);
+            return linux_error(GUEST_LINUX_ENOMEM);
+        }
+    }
+    commit_vma_candidate(memory, &candidate, retired);
+    if (memory->page_table->address_space.generation == generation)
+        guest_address_space_changed(&memory->page_table->address_space);
+    return old_address;
+}
+
+static qword_t move_mremap(struct guest_linux_mm *memory,
+        const struct guest_linux_vma *source, qword_t old_address,
+        qword_t old_count, qword_t old_size, qword_t new_count,
+        qword_t new_size, qword_t destination, bool keep_source,
+        bool zero_length_duplicate, unsigned permissions,
+        struct guest_linux_vma_set *retired) {
+    struct guest_linux_vma destination_mapping = make_mremap_mapping(
+            source, old_address, destination, new_size, true);
+    struct guest_linux_vma_set candidate;
+    if (!prepare_mremap_candidate(memory, old_address, old_size,
+            destination_mapping, keep_source, &candidate))
+        return linux_error(GUEST_LINUX_ENOMEM);
+
+    qword_t generation = memory->page_table->address_space.generation;
+    enum guest_page_table_result moved = GUEST_PAGE_TABLE_OK;
+    bool dontunmap = keep_source && !zero_length_duplicate;
+    if (zero_length_duplicate) {
+        if (source->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED) {
+            moved = guest_page_table_alias_shared_range(
+                    memory->page_table,
+                    make_range(old_address, new_count),
+                    (guest_addr_t) destination);
+        }
+    } else if (dontunmap &&
+            source->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED) {
+        moved = guest_page_table_alias_shared_range(
+                memory->page_table, make_range(old_address, old_count),
+                (guest_addr_t) destination);
+    } else if (dontunmap && private_anonymous_vma(source)) {
+        moved = guest_page_table_move_range_replace_zero(
+                memory->page_table, make_range(old_address, old_count),
+                (guest_addr_t) destination, permissions);
+    } else if (new_count > old_count && private_anonymous_vma(source)) {
+        moved = guest_page_table_move_range_expand_zero(
+                memory->page_table, make_range(old_address, old_count),
+                (guest_addr_t) destination, new_count, permissions);
+    } else {
+        qword_t moved_count = old_count < new_count ?
+                old_count : new_count;
+        moved = guest_page_table_move_range(memory->page_table,
+                make_range(old_address, moved_count),
+                (guest_addr_t) destination);
+    }
+    if (moved != GUEST_PAGE_TABLE_OK) {
+        guest_linux_vma_set_destroy(&candidate);
+        assert(moved == GUEST_PAGE_TABLE_OUT_OF_MEMORY);
+        return linux_error(GUEST_LINUX_ENOMEM);
+    }
+
+    if (!keep_source && new_count < old_count) {
+        enum guest_page_table_result unmapped =
+                guest_page_table_unmap_range(memory->page_table,
+                        make_range(old_address + new_size,
+                                old_count - new_count), true);
+        assert(unmapped == GUEST_PAGE_TABLE_OK);
+    }
+    commit_vma_candidate(memory, &candidate, retired);
+    if (memory->page_table->address_space.generation == generation)
+        guest_address_space_changed(&memory->page_table->address_space);
+    return destination;
+}
+
+static qword_t guest_linux_mremap_unlocked(struct guest_linux_mm *memory,
+        qword_t old_address, qword_t old_length, qword_t new_length,
+        qword_t flags, qword_t new_address,
+        struct guest_linux_vma_set *retired_target,
+        struct guest_linux_vma_set *retired_shrink,
+        struct guest_linux_vma_set *retired_result) {
+    qword_t old_count;
+    qword_t old_size;
+    qword_t new_count;
+    qword_t new_size;
+    if (!mremap_length(old_length, &old_count, &old_size) ||
+            !mremap_length(new_length, &new_count, &new_size))
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    const qword_t allowed = GUEST_LINUX_MREMAP_MAYMOVE |
+            GUEST_LINUX_MREMAP_FIXED |
+            GUEST_LINUX_MREMAP_DONTUNMAP;
+    if ((flags & ~allowed) != 0 ||
+            (old_address & GUEST_MEMORY_PAGE_MASK) != 0)
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    qword_t limit = address_limit(memory);
+    if (new_size == 0 || new_size > limit)
+        return linux_error(GUEST_LINUX_EINVAL);
+    bool maymove = (flags & GUEST_LINUX_MREMAP_MAYMOVE) != 0;
+    bool fixed = (flags & GUEST_LINUX_MREMAP_FIXED) != 0;
+    bool dontunmap = (flags & GUEST_LINUX_MREMAP_DONTUNMAP) != 0;
+    bool implied_address = fixed || dontunmap;
+    if (implied_address &&
+            (new_address > limit - new_size ||
+            (new_address & GUEST_MEMORY_PAGE_MASK) != 0 || !maymove ||
+            (dontunmap && old_size != new_size) ||
+            ranges_overlap(old_address, old_size,
+                    new_address, new_size)))
+        return linux_error(GUEST_LINUX_EINVAL);
+    if (old_count != 0 && !valid_range(memory, old_address, old_count))
+        return linux_error(GUEST_LINUX_EFAULT);
+
+    const struct guest_linux_vma *source = guest_linux_vma_find(
+            &memory->vmas, (guest_addr_t) old_address);
+    if (source == NULL)
+        return linux_error(GUEST_LINUX_EFAULT);
+    bool zero_length_duplicate = old_count == 0;
+    if (zero_length_duplicate && !shared_vma(source))
+        return linux_error(GUEST_LINUX_EINVAL);
+
+    bool shrink = old_size > new_size;
+    bool expand = old_size < new_size;
+    if (!expand && !shrink && !implied_address)
+        return old_address;
+    qword_t checked_size = shrink ? new_size : old_size;
+    if (checked_size > (qword_t) source->last - old_address)
+        return linux_error(GUEST_LINUX_EFAULT);
+    if (!mremap_file_offset_valid(source, old_address, new_size))
+        return linux_error(GUEST_LINUX_EINVAL);
+    if (expand &&
+            source->source == GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED &&
+            (!zero_length_duplicate ||
+                    new_size > (qword_t) source->last - old_address))
+        return linux_error(GUEST_LINUX_EFAULT);
+
+    unsigned permissions;
+    bool decoded = decode_permissions(source->protection, &permissions);
+    assert(decoded);
+    if (shrink && !implied_address)
+        return shrink_mremap_in_place(memory, old_address,
+                old_size, new_size, retired_result);
+
+    bool can_expand_in_place = expand && !implied_address &&
+            !zero_length_duplicate &&
+            old_address + old_size == source->last &&
+            range_is_hole(memory, old_address + old_size,
+                    new_count - old_count) &&
+            source->source != GUEST_LINUX_VMA_SOURCE_ANONYMOUS_SHARED;
+    if (can_expand_in_place)
+        return expand_mremap_in_place(memory, source, old_address,
+                old_count, old_size, new_count, new_size,
+                permissions, retired_result);
+    if (!maymove)
+        return linux_error(GUEST_LINUX_ENOMEM);
+
+    qword_t destination;
+    if (fixed) {
+        destination = new_address;
+        qword_t unmapped = guest_linux_munmap_unlocked(memory,
+                (guest_addr_t) destination, new_size, retired_target);
+        if ((sqword_t) unmapped < 0)
+            return unmapped;
+        source = guest_linux_vma_find(
+                &memory->vmas, (guest_addr_t) old_address);
+        if (source == NULL || checked_size >
+                (qword_t) source->last - old_address)
+            return linux_error(GUEST_LINUX_EFAULT);
+        decoded = decode_permissions(source->protection, &permissions);
+        assert(decoded);
+        if (shrink) {
+            qword_t shrunk = shrink_mremap_in_place(memory,
+                    old_address, old_size, new_size, retired_shrink);
+            if ((sqword_t) shrunk < 0)
+                return shrunk;
+            old_count = new_count;
+            old_size = new_size;
+            source = guest_linux_vma_find(
+                    &memory->vmas, (guest_addr_t) old_address);
+            assert(source != NULL && old_size <=
+                    (qword_t) source->last - old_address);
+        }
+    } else if (!select_mremap_destination(memory, new_address,
+            new_count, dontunmap, &destination)) {
+        return linux_error(GUEST_LINUX_ENOMEM);
+    }
+
+    return move_mremap(memory, source, old_address, old_count,
+            old_size, new_count, new_size, destination,
+            dontunmap || zero_length_duplicate,
+            zero_length_duplicate, permissions, retired_result);
+}
+
+qword_t guest_linux_mremap(struct guest_linux_mm *memory,
+        qword_t old_address, qword_t old_length, qword_t new_length,
+        qword_t flags, qword_t new_address) {
+    assert(memory != NULL && memory->page_table != NULL);
+    struct guest_linux_vma_set retired_target;
+    struct guest_linux_vma_set retired_shrink;
+    struct guest_linux_vma_set retired_result;
+    guest_linux_vma_set_init(&retired_target);
+    guest_linux_vma_set_init(&retired_shrink);
+    guest_linux_vma_set_init(&retired_result);
+    bool locked = guest_page_table_write_lock(memory->page_table);
+    qword_t result = guest_linux_mremap_unlocked(memory,
+            old_address, old_length, new_length, flags, new_address,
+            &retired_target, &retired_shrink, &retired_result);
+    guest_page_table_write_unlock(memory->page_table, locked);
+    guest_linux_vma_set_destroy(&retired_target);
+    guest_linux_vma_set_destroy(&retired_shrink);
+    guest_linux_vma_set_destroy(&retired_result);
+    return result;
+}
+
 static qword_t guest_linux_mprotect_unlocked(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         struct guest_linux_vma_set *retired) {
