@@ -702,7 +702,7 @@ static bool select_file_mmap_range(
     return true;
 }
 
-qword_t guest_linux_mmap_file_private_preflight(
+qword_t guest_linux_mmap_file_preflight(
         struct guest_linux_mm *memory, guest_addr_t address,
         qword_t length, qword_t protection, qword_t flags,
         qword_t offset) {

@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdlib.h>
 #include "util/list.h"
 #include "kernel/fs.h"
@@ -59,9 +60,13 @@ struct inode_data *inode_get_unlocked(
         inode->mount = mount;
         inode->socket_id = 0;
         inode->file_pager = NULL;
+        inode->file_pager_context = NULL;
+        inode->host_shared_mapping_count = 0;
+        cond_init(&inode->file_pager_changed);
         cond_init(&inode->posix_unlock);
         list_init(&inode->posix_locks);
         list_init(&inode->chain);
+        lock_init(&inode->file_io_lock);
         lock_init(&inode->lock);
         list_add(&inodes_hash[inode_hash(device, ino)], &inode->chain);
     }
@@ -92,11 +97,41 @@ void inode_retain(struct inode_data *inode) {
     unlock(&inode->lock);
 }
 
+bool inode_try_begin_host_shared_mapping(struct inode_data *inode) {
+    assert(inode != NULL);
+    /* 调用方 fd 已保活 inode，先取得 token 自己的独立引用。 */
+    inode_retain(inode);
+    lock(&inode->lock);
+    if (inode->file_pager != NULL) {
+        unlock(&inode->lock);
+        inode_release(inode);
+        return false;
+    }
+    assert(inode->file_pager_context == NULL &&
+            inode->host_shared_mapping_count != UINT_MAX);
+    inode->host_shared_mapping_count++;
+    unlock(&inode->lock);
+    return true;
+}
+
+void inode_end_host_shared_mapping(struct inode_data *inode) {
+    assert(inode != NULL);
+    lock(&inode->lock);
+    assert(inode->host_shared_mapping_count != 0 &&
+            inode->file_pager == NULL &&
+            inode->file_pager_context == NULL);
+    inode->host_shared_mapping_count--;
+    unlock(&inode->lock);
+    inode_release(inode);
+}
+
 void inode_release(struct inode_data *inode) {
     lock(&inodes_lock);
     lock(&inode->lock);
     if (--inode->refcount == 0) {
-        assert(inode->file_pager == NULL);
+        assert(inode->file_pager == NULL &&
+                inode->file_pager_context == NULL &&
+                inode->host_shared_mapping_count == 0);
         unlock(&inode->lock);
         list_remove(&inode->chain);
         if (inode->mount->fs->inode_orphaned &&
@@ -104,6 +139,7 @@ void inode_release(struct inode_data *inode) {
             inode->mount->fs->inode_orphaned(inode->mount, inode->number);
         unlock(&inodes_lock);
         mount_release(inode->mount);
+        cond_destroy(&inode->file_pager_changed);
         free(inode);
     } else {
         unlock(&inode->lock);

@@ -435,17 +435,26 @@ dword_t sys_dup2(fd_t f, fd_t new_f) {
 }
 
 int fd_getflags(struct fd *fd) {
-    if (fd->ops->getflags)
-        return fd->ops->getflags(fd);
-    return fd->flags;
+    lock(&fd->lock);
+    int flags = fd->ops->getflags ?
+            fd->ops->getflags(fd) : (int) fd->flags;
+    unlock(&fd->lock);
+    return flags;
 }
 
 #define FD_ALLOWED_FLAGS (O_APPEND_ | O_NONBLOCK_)
 int fd_setflags(struct fd *fd, int flags) {
-    if (fd->ops->setflags)
-        return fd->ops->setflags(fd, flags);
-    fd->flags = (fd->flags & ~FD_ALLOWED_FLAGS) | (flags & FD_ALLOWED_FLAGS);
-    return 0;
+    lock(&fd->lock);
+    int error;
+    if (fd->ops->setflags) {
+        error = fd->ops->setflags(fd, flags);
+    } else {
+        fd->flags = (fd->flags & ~FD_ALLOWED_FLAGS) |
+                (flags & FD_ALLOWED_FLAGS);
+        error = 0;
+    }
+    unlock(&fd->lock);
+    return error;
 }
 
 dword_t sys_fcntl(fd_t f, dword_t cmd, dword_t arg) {

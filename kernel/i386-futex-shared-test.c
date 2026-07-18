@@ -162,10 +162,8 @@ static bool map_private_file_pages(struct task *task,
         data->name = "/private-cow-file";
     }
     write_wrunlock(&task->mem->lock);
-    if (result < 0) {
+    if (result < 0)
         fd_close(file);
-        (void) munmap(memory, count * PAGE_SIZE);
-    }
     return result == 0;
 }
 

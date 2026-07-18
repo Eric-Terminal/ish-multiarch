@@ -429,6 +429,30 @@ static ssize_t tmpfs_pread(struct fd *fd, void *buf,
     return res;
 }
 
+static ssize_t tmpfs_write_at_locked(struct tmp_inode *inode,
+        const void *buf, size_t bufsize, qword_t offset) {
+    assert(S_ISREG(inode->stat.mode));
+    if (bufsize == 0)
+        return 0;
+    if (offset > SIZE_MAX)
+        return _EFBIG;
+    size_t host_offset = (size_t) offset;
+    size_t new_size;
+    if (__builtin_add_overflow(host_offset, bufsize, &new_size))
+        return _EFBIG;
+#if SIZE_MAX > INT64_MAX
+    if (new_size > INT64_MAX)
+        return _EFBIG;
+#endif
+    if (inode->stat.size < new_size) {
+        int error = tmpfs_file_resize(inode, new_size);
+        if (error < 0)
+            return error;
+    }
+    memcpy(inode->file_data + host_offset, buf, bufsize);
+    return (ssize_t) bufsize;
+}
+
 static ssize_t tmpfs_write(struct fd *fd, const void *buf, size_t bufsize) {
     ssize_t res;
     struct tmp_inode *inode = tmpfs_fd_inode(fd);
@@ -438,35 +462,51 @@ static ssize_t tmpfs_write(struct fd *fd, const void *buf, size_t bufsize) {
         goto out;
     assert(S_ISREG(inode->stat.mode));
 
-    if (fd->offset < 0 || (qword_t) fd->offset > SIZE_MAX) {
+    qword_t offset;
+    if ((fd->flags & O_APPEND_) != 0) {
+        offset = inode->stat.size;
+    } else if (fd->offset < 0) {
         res = _EFBIG;
         goto out;
+    } else {
+        offset = (qword_t) fd->offset;
     }
-    size_t offset = (size_t) fd->offset;
-    size_t new_size;
-    if (__builtin_add_overflow(offset, bufsize, &new_size)) {
-        res = _EFBIG;
-        goto out;
-    }
-#if SIZE_MAX > INT64_MAX
-    if (new_size > INT64_MAX) {
-        res = _EFBIG;
-        goto out;
-    }
-#endif
-    if (inode->stat.size < new_size) {
-        res = tmpfs_file_resize(inode, new_size);
-        if (res < 0)
-            goto out;
-    }
-    if (bufsize != 0)
-        memcpy(inode->file_data + offset, buf, bufsize);
-    fd->offset = (off_t_) new_size;
-    res = (ssize_t) bufsize;
+    res = tmpfs_write_at_locked(inode, buf, bufsize, offset);
+    if (res > 0)
+        fd->offset = (off_t_) (offset + (qword_t) res);
 
 out:
     unlock(&inode->lock);
     return res;
+}
+
+static ssize_t tmpfs_pwrite_common(struct fd *fd,
+        const void *buf, size_t bufsize, off_t offset,
+        bool honor_append) {
+    if (offset < 0)
+        return _EINVAL;
+    struct tmp_inode *inode = tmpfs_fd_inode(fd);
+    lock(&inode->lock);
+    ssize_t res = _EISDIR;
+    if (S_ISDIR(inode->stat.mode))
+        goto out;
+    assert(S_ISREG(inode->stat.mode));
+    qword_t positioned = honor_append && (fd->flags & O_APPEND_) != 0 ?
+            inode->stat.size : (qword_t) offset;
+    res = tmpfs_write_at_locked(inode, buf, bufsize, positioned);
+out:
+    unlock(&inode->lock);
+    return res;
+}
+
+static ssize_t tmpfs_pwrite(struct fd *fd,
+        const void *buf, size_t bufsize, off_t offset) {
+    return tmpfs_pwrite_common(fd, buf, bufsize, offset, true);
+}
+
+static ssize_t tmpfs_page_pwrite(struct fd *fd,
+        const void *buf, size_t bufsize, off_t offset) {
+    return tmpfs_pwrite_common(fd, buf, bufsize, offset, false);
 }
 
 static off_t_ tmpfs_lseek(struct fd *fd, off_t_ off, int whence) {
@@ -550,6 +590,8 @@ const struct fd_ops tmpfs_fdops = {
     .read = tmpfs_read,
     .pread = tmpfs_pread,
     .write = tmpfs_write,
+    .pwrite = tmpfs_pwrite,
+    .page_pwrite = tmpfs_page_pwrite,
     .lseek = tmpfs_lseek,
     .readdir = tmpfs_readdir,
     .telldir = tmpfs_telldir,

@@ -17,6 +17,7 @@
 #include "kernel/calls.h"
 #include "kernel/fs.h"
 #include "fs/dev.h"
+#include "fs/inode.h"
 #include "fs/real.h"
 #include "fs/tty.h"
 #include "util/fchdir.h"
@@ -153,10 +154,41 @@ ssize_t realfs_pread(struct fd *fd, void *buf, size_t bufsize, off_t off) {
 }
 
 ssize_t realfs_pwrite(struct fd *fd, const void *buf, size_t bufsize, off_t off) {
-    ssize_t res = pwrite(fd->real_fd, buf, bufsize, off);
-    if (res < 0)
+    int flags = fcntl(fd->real_fd, F_GETFL);
+    if (flags < 0)
         return errno_map();
-    return res;
+    if ((flags & O_APPEND) == 0) {
+        ssize_t result = pwrite(fd->real_fd, buf, bufsize, off);
+        return result < 0 ? errno_map() : result;
+    }
+
+    off_t saved_offset = lseek(fd->real_fd, 0, SEEK_CUR);
+    if (saved_offset < 0)
+        return errno_map();
+    ssize_t result = write(fd->real_fd, buf, bufsize);
+    int write_error = result < 0 ? errno_map() : 0;
+    if (lseek(fd->real_fd, saved_offset, SEEK_SET) < 0 && result >= 0)
+        return errno_map();
+    return result < 0 ? write_error : result;
+}
+
+static ssize_t realfs_page_pwrite(
+        struct fd *fd, const void *buf, size_t bufsize, off_t off) {
+    assert(lock_owned_by_current(&fd->lock));
+    int flags = fcntl(fd->real_fd, F_GETFL);
+    if (flags < 0)
+        return errno_map();
+    bool restore_append = (flags & O_APPEND) != 0;
+    if (restore_append &&
+            fcntl(fd->real_fd, F_SETFL, flags & ~O_APPEND) < 0)
+        return errno_map();
+
+    ssize_t result = pwrite(fd->real_fd, buf, bufsize, off);
+    int write_error = result < 0 ? errno_map() : 0;
+    if (restore_append && fcntl(fd->real_fd, F_SETFL, flags) < 0 &&
+            result >= 0)
+        return errno_map();
+    return result < 0 ? write_error : result;
 }
 
 void realfs_opendir(struct fd *fd) {
@@ -267,15 +299,51 @@ int realfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off
     int mmap_prot = PROT_READ;
     if (prot & P_WRITE) mmap_prot |= PROT_WRITE;
 
+    if (offset < 0)
+        return _EINVAL;
     off_t real_offset = (offset / real_page_size) * real_page_size;
     off_t correction = offset - real_offset;
-    char *memory = mmap(NULL, (pages * PAGE_SIZE) + correction,
+    assert(correction >= 0 && correction < (off_t) real_page_size);
+    if ((size_t) pages >
+            (SIZE_MAX - (size_t) correction) / PAGE_SIZE)
+        return _ENOMEM;
+    size_t mapping_size = (size_t) pages * PAGE_SIZE +
+            (size_t) correction;
+
+    bool cacheable_regular = fd->inode != NULL && S_ISREG(fd->type) &&
+            fd->ops->page_cacheable;
+    struct inode_data *shared_token = NULL;
+    if (cacheable_regular && (flags & MMAP_SHARED)) {
+        if (!inode_try_begin_host_shared_mapping(fd->inode))
+            return _EBUSY;
+        shared_token = fd->inode;
+    }
+
+    char *memory = mmap(NULL, mapping_size,
             mmap_prot, mmap_flags, fd->real_fd, real_offset);
+    if (memory == MAP_FAILED) {
+        int error = errno_map();
+        if (shared_token != NULL)
+            inode_end_host_shared_mapping(shared_token);
+        return error;
+    }
     unsigned page_flags = (unsigned) prot | P_FILE_BACKED;
     // 私有文件页须在首次 guest 写或共享 futex 写固定时显式脱离文件后备。
     if (flags & MMAP_PRIVATE)
         page_flags |= P_COW;
-    return pt_map(mem, start, pages, memory, correction, page_flags);
+    int result = pt_map(mem, start, pages,
+            memory, (size_t) correction, page_flags);
+    if (result < 0) {
+        if (shared_token != NULL)
+            inode_end_host_shared_mapping(shared_token);
+        return result;
+    }
+    if (shared_token != NULL) {
+        struct data *data = mem_pt(mem, start)->data;
+        assert(data != NULL && data->host_shared_mapping_inode == NULL);
+        data->host_shared_mapping_inode = shared_token;
+    }
+    return 0;
 }
 
 ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {
@@ -531,6 +599,7 @@ const struct fd_ops realfs_fdops = {
     .write = realfs_write,
     .pread = realfs_pread,
     .pwrite = realfs_pwrite,
+    .page_pwrite = realfs_page_pwrite,
     .readdir = realfs_readdir,
     .telldir = realfs_telldir,
     .seekdir = realfs_seekdir,

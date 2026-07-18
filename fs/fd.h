@@ -149,6 +149,9 @@ struct fd_ops {
     ssize_t (*write)(struct fd *fd, const void *buf, size_t bufsize);
     ssize_t (*pread)(struct fd *fd, void *buf, size_t bufsize, off_t off);
     ssize_t (*pwrite)(struct fd *fd, const void *buf, size_t bufsize, off_t off);
+    /* pager 写回专用：严格按 off 写入，不得受 O_APPEND 或顺序 offset 影响。 */
+    ssize_t (*page_pwrite)(
+            struct fd *fd, const void *buf, size_t bufsize, off_t off);
     off_t_ (*lseek)(struct fd *fd, off_t_ off, int whence);
 
     // 调用者必须持有 fd->lock；实现不得重复获取同一把锁。

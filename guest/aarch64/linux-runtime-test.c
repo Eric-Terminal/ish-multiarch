@@ -631,6 +631,126 @@ int main(void) {
     assert(cpu.x[0] == 0 && mapping_probe.release_calls == 1 &&
             mapping_probe.handle_release_calls == 7);
 
+    unsigned previous_acquires = mapping_probe.acquire_calls;
+    unsigned previous_opens = mapping_probe.open_calls;
+    unsigned previous_handle_releases =
+            mapping_probe.handle_release_calls;
+    cpu.x[8] = 222;
+    cpu.x[0] = DATA_PAGE;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_PROT_READ;
+    cpu.x[3] = GUEST_LINUX_MAP_SHARED |
+            GUEST_LINUX_MAP_HUGETLB |
+            GUEST_LINUX_MAP_FIXED_NOREPLACE;
+    cpu.x[4] = 7;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EINVAL) &&
+            mapping_probe.acquire_calls == previous_acquires + 1 &&
+            mapping_probe.open_calls == previous_opens &&
+            mapping_probe.handle_release_calls ==
+                    previous_handle_releases + 1);
+
+    mapping_probe.open_error = -(sdword_t) GUEST_LINUX_EOPNOTSUPP;
+    previous_acquires = mapping_probe.acquire_calls;
+    previous_opens = mapping_probe.open_calls;
+    previous_handle_releases = mapping_probe.handle_release_calls;
+    cpu.x[0] = DATA_PAGE;
+    cpu.x[3] = GUEST_LINUX_MAP_SHARED_VALIDATE |
+            GUEST_LINUX_MAP_FIXED_NOREPLACE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EEXIST) &&
+            mapping_probe.acquire_calls == previous_acquires + 1 &&
+            mapping_probe.open_calls == previous_opens &&
+            mapping_probe.handle_release_calls ==
+                    previous_handle_releases + 1);
+
+    previous_acquires = mapping_probe.acquire_calls;
+    previous_opens = mapping_probe.open_calls;
+    previous_handle_releases = mapping_probe.handle_release_calls;
+    cpu.x[0] = file_mapped;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == encoded_error(GUEST_LINUX_EOPNOTSUPP) &&
+            mapping_probe.acquire_calls == previous_acquires + 1 &&
+            mapping_probe.open_calls == previous_opens + 1 &&
+            mapping_probe.handle_release_calls ==
+                    previous_handle_releases + 1);
+    mapping_probe.open_error = 0;
+
+    static const struct {
+        qword_t flags;
+        enum guest_linux_vma_source source;
+    } file_flag_cases[] = {
+        {GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_SYNC,
+                GUEST_LINUX_VMA_SOURCE_FILE_SHARED},
+        {GUEST_LINUX_MAP_SHARED_VALIDATE |
+                GUEST_LINUX_MAP_DENYWRITE |
+                GUEST_LINUX_MAP_EXECUTABLE,
+                GUEST_LINUX_VMA_SOURCE_FILE_SHARED},
+        {GUEST_LINUX_MAP_SHARED | (UINT64_C(1) << 62),
+                GUEST_LINUX_VMA_SOURCE_FILE_SHARED},
+        {GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_SYNC,
+                GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE},
+        {GUEST_LINUX_MAP_PRIVATE | (UINT64_C(1) << 62),
+                GUEST_LINUX_VMA_SOURCE_FILE_PRIVATE},
+    };
+    for (size_t index = 0; index < array_size(file_flag_cases); index++) {
+        previous_acquires = mapping_probe.acquire_calls;
+        previous_opens = mapping_probe.open_calls;
+        previous_handle_releases =
+                mapping_probe.handle_release_calls;
+        unsigned previous_pager_releases = mapping_probe.release_calls;
+        unsigned previous_reads = mapping_probe.read_calls;
+
+        cpu.x[8] = 222;
+        cpu.x[0] = 0;
+        cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+        cpu.x[2] = GUEST_LINUX_PROT_READ;
+        cpu.x[3] = file_flag_cases[index].flags;
+        cpu.x[4] = 7;
+        qword_t file_offset = (qword_t) index *
+                GUEST_MEMORY_PAGE_SIZE;
+        cpu.x[5] = file_offset;
+        result = aarch64_linux_dispatch_syscall(
+                &cpu, &tlb, &runtime, &task);
+        guest_addr_t mapped = (guest_addr_t) cpu.x[0];
+        const struct guest_linux_vma *vma =
+                guest_linux_vma_find(&memory.vmas, mapped);
+        assert(result.action == AARCH64_LINUX_SYSCALL_RESUME &&
+                result.fault.kind == GUEST_MEMORY_FAULT_NONE &&
+                mapping_probe.acquire_calls == previous_acquires + 1 &&
+                mapping_probe.open_calls == previous_opens + 1 &&
+                mapping_probe.handle_release_calls ==
+                        previous_handle_releases + 1 &&
+                mapping_probe.request.flags == file_flag_cases[index].flags &&
+                mapping_probe.request.offset == file_offset &&
+                vma != NULL && vma->source == file_flag_cases[index].source);
+        assert(guest_page_table_lookup(&table, mapped,
+                &mapped_page, &mapped_permissions) ==
+                        GUEST_PAGE_TABLE_NOT_MAPPED);
+
+        file_value = 0;
+        assert(guest_tlb_read(&tlb, mapped, &file_value,
+                sizeof(file_value), GUEST_MEMORY_READ, &file_fault) &&
+                file_value == 0x6d &&
+                mapping_probe.read_calls == previous_reads + 1 &&
+                mapping_probe.last_page_offset == file_offset);
+
+        cpu.x[8] = 215;
+        cpu.x[0] = mapped;
+        cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+        result = aarch64_linux_dispatch_syscall(
+                &cpu, &tlb, &runtime, &task);
+        assert(result.action == AARCH64_LINUX_SYSCALL_RESUME &&
+                result.fault.kind == GUEST_MEMORY_FAULT_NONE &&
+                cpu.x[0] == 0 &&
+                mapping_probe.release_calls ==
+                        previous_pager_releases + 1);
+    }
+
     memset(data_page + 12, 0x6b, sizeof(dword_t));
     cpu.x[8] = 96;
     cpu.x[0] = DATA_PAGE + 12;

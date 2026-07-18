@@ -35,6 +35,14 @@ static qword_t allocate_identity(qword_t *last_identity) {
     return identity;
 }
 
+static size_t pt_map_fail_at = SIZE_MAX;
+static size_t pt_map_allocation_count;
+
+void mem_test_fail_pt_map_at(size_t index) {
+    pt_map_fail_at = index;
+    pt_map_allocation_count = 0;
+}
+
 void mem_init(struct mem *mem) {
     mem->identity = allocate_identity(&last_memory_identity);
     mem->pgdir = calloc(MEM_PGDIR_SIZE, sizeof(struct pt_entry *));
@@ -125,14 +133,25 @@ int pt_map(struct mem *mem, page_t start, pages_t pages, void *memory, size_t of
 
     // If this fails, the munmap in pt_unmap would probably fail.
     assert((uintptr_t) memory % real_page_size == 0 || memory == vdso_data);
+    assert(pages != 0 && start < MEM_PAGES &&
+            pages <= MEM_PAGES - start);
+    assert((size_t) pages <= (SIZE_MAX - offset) / PAGE_SIZE);
+    size_t mapping_size = (size_t) pages * PAGE_SIZE + offset;
 
-    struct data *data = malloc(sizeof(struct data));
-    if (data == NULL)
+    struct data *data = pt_map_fail_at != SIZE_MAX &&
+            pt_map_allocation_count++ == pt_map_fail_at ?
+            NULL : malloc(sizeof(struct data));
+    if (data == NULL) {
+        if (memory != vdso_data &&
+                munmap(memory, mapping_size) != 0)
+            die("pt_map 失败回滚 munmap(%p, %zu)：%s", memory,
+                    mapping_size, strerror(errno));
         return _ENOMEM;
+    }
     *data = (struct data) {
         .identity = allocate_identity(&last_data_identity),
         .data = memory,
-        .size = pages * PAGE_SIZE + offset,
+        .size = mapping_size,
 
 #if LEAK_DEBUG
         .pid = current ? current->pid : 0,
@@ -174,6 +193,9 @@ int pt_unmap_always(struct mem *mem, page_t start, pages_t pages) {
                 if (err != 0)
                     die("munmap(%p, %lu) failed: %s", data->data, data->size, strerror(errno));
             }
+            if (data->host_shared_mapping_inode != NULL)
+                inode_end_host_shared_mapping(
+                        data->host_shared_mapping_inode);
             if (data->fd != NULL) {
                 fd_close(data->fd);
             }
@@ -186,7 +208,9 @@ int pt_unmap_always(struct mem *mem, page_t start, pages_t pages) {
 
 int pt_map_nothing(struct mem *mem, page_t start, pages_t pages, unsigned flags) {
     if (pages == 0) return 0;
-    void *memory = mmap(NULL, pages * PAGE_SIZE,
+    if ((size_t) pages > SIZE_MAX / PAGE_SIZE)
+        return _ENOMEM;
+    void *memory = mmap(NULL, (size_t) pages * PAGE_SIZE,
             PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
     return pt_map(mem, start, pages, memory, 0, flags | P_ANONYMOUS);
 }
@@ -288,7 +312,6 @@ static int mem_private_cow_locked(struct mem *mem, page_t page) {
     if (result < 0) {
         if (file != NULL)
             fd_close(file);
-        (void) munmap(copy, PAGE_SIZE);
         return result;
     }
     struct data *private_data = mem_pt(mem, page)->data;

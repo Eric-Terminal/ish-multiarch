@@ -377,69 +377,48 @@ dword_t sys_lseek(fd_t f, dword_t off, dword_t whence) {
 
 dword_t sys_pread(fd_t f, addr_t buf_addr, dword_t size, off_t_ off) {
     STRACE("pread(%d, 0x%x, %d, %d)", f, buf_addr, size, off);
-    struct fd *fd = f_get(f);
+    struct fd *fd = f_get_task_retain(current, f);
     if (fd == NULL)
         return _EBADF;
-    char *buf = malloc(size+1);
-    if (buf == NULL)
+    size_t allocation_size = size == 0 ? 1 : (size_t) size;
+    char *buf = malloc(allocation_size);
+    if (buf == NULL) {
+        fd_close(fd);
         return _ENOMEM;
-    lock(&fd->lock);
-    ssize_t res;
-    if (fd->ops->pread) {
-        res = fd->ops->pread(fd, buf, size, off);
-    } else {
-        off_t_ saved_off = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        if ((res = fd->ops->lseek(fd, off, LSEEK_SET)) < 0) {
-            goto out;
-        }
-        res = fd->ops->read(fd, buf, size);
-        // This really shouldn't fail. The lseek man page lists these reasons:
-        // EBADF, ESPIPE: can't happen because the last lseek wouldn't have succeeded.
-        // EOVERFLOW: can't happen for LSEEK_SET.
-        // EINVAL: can't happen other than typoing LSEEK_SET, because we know saved_off is not negative.
-        off_t_ lseek_res = fd->ops->lseek(fd, saved_off, LSEEK_SET);
-        assert(lseek_res >= 0);
     }
+    ssize_t res = file_pread_fd(fd, buf, size, off);
     if (res >= 0) {
-        buf[res] = '\0';
-        STRACE(" \"%.99s\"", buf);
+        size_t print_size = (size_t) res;
+        if (print_size > 99)
+            print_size = 99;
+        STRACE(" \"%.*s\"", (int) print_size, buf);
         if (user_write(buf_addr, buf, res))
             res = _EFAULT;
     }
-out:
-    unlock(&fd->lock);
     free(buf);
+    fd_close(fd);
     return res;
 }
 
 dword_t sys_pwrite(fd_t f, addr_t buf_addr, dword_t size, off_t_ off) {
     STRACE("pwrite(%d, 0x%x, %d, %d)", f, buf_addr, size, off);
-    struct fd *fd = f_get(f);
+    struct fd *fd = f_get_task_retain(current, f);
     if (fd == NULL)
         return _EBADF;
-    char *buf = malloc(size+1);
-    if (buf == NULL)
+    size_t allocation_size = size == 0 ? 1 : (size_t) size;
+    char *buf = malloc(allocation_size);
+    if (buf == NULL) {
+        fd_close(fd);
         return _ENOMEM;
-    if (user_read(buf_addr, buf, size))
-        return _EFAULT;
-    lock(&fd->lock);
-    ssize_t res;
-    if (fd->ops->pwrite) {
-        res = fd->ops->pwrite(fd, buf, size, off);
-    } else {
-        off_t_ saved_off = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        if ((res = fd->ops->lseek(fd, off, LSEEK_SET)) >= 0) {
-            res = fd->ops->write(fd, buf, size);
-            // This really shouldn't fail. The lseek man page lists these reasons:
-            // EBADF, ESPIPE: can't happen because the last lseek wouldn't have succeeded.
-            // EOVERFLOW: can't happen for LSEEK_SET.
-            // EINVAL: can't happen other than typoing LSEEK_SET, because we know saved_off is not negative.
-            off_t_ lseek_res = fd->ops->lseek(fd, saved_off, LSEEK_SET);
-            assert(lseek_res >= 0);
-        }
     }
-    unlock(&fd->lock);
+    if (user_read(buf_addr, buf, size)) {
+        free(buf);
+        fd_close(fd);
+        return _EFAULT;
+    }
+    ssize_t res = file_pwrite_fd(fd, buf, size, off);
     free(buf);
+    fd_close(fd);
     return res;
 }
 

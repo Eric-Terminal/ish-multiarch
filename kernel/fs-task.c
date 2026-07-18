@@ -2,7 +2,9 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "fs/inode.h"
 #include "fs/path.h"
+#include "guest/memory/file-pager.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/task.h"
@@ -24,20 +26,198 @@ static void apply_umask_task(struct task *task, mode_t_ *mode) {
     unlock(&fs->lock);
 }
 
-ssize_t file_read_fd(struct fd *fd, void *buffer, size_t size) {
-    if (fd == NULL)
-        return _EBADF;
-    if (S_ISDIR(fd->type))
-        return _EISDIR;
+struct file_io_guard {
+    struct inode_data *inode;
+    struct guest_file_pager *pager;
+};
 
-    if (fd->ops->read != NULL)
-        return fd->ops->read(fd, buffer, size);
+static bool fd_has_coherent_page_cache(const struct fd *fd) {
+    return fd != NULL && fd->inode != NULL && S_ISREG(fd->type) &&
+            fd->ops->page_cacheable;
+}
+
+static void begin_file_io(
+        struct fd *fd, struct file_io_guard *guard) {
+    *guard = (struct file_io_guard) {0};
+    if (!fd_has_coherent_page_cache(fd))
+        return;
+    struct inode_data *inode = fd->inode;
+
+    for (;;) {
+        lock(&inode->lock);
+        struct guest_file_pager *pager = inode->file_pager;
+        assert((pager == NULL) ==
+                (inode->file_pager_context == NULL));
+        if (pager != NULL) {
+            if (guest_file_pager_try_retain(pager)) {
+                unlock(&inode->lock);
+                lock(&inode->file_io_lock);
+                *guard = (struct file_io_guard) {
+                    .inode = inode,
+                    .pager = pager,
+                };
+                return;
+            }
+            int waited = wait_for_ignore_signals(
+                    &inode->file_pager_changed,
+                    &inode->lock, NULL);
+            assert(waited == 0);
+            unlock(&inode->lock);
+            continue;
+        }
+        unlock(&inode->lock);
+
+        lock(&inode->file_io_lock);
+        lock(&inode->lock);
+        pager = inode->file_pager;
+        assert((pager == NULL) ==
+                (inode->file_pager_context == NULL));
+        if (pager == NULL) {
+            unlock(&inode->lock);
+            *guard = (struct file_io_guard) {.inode = inode};
+            return;
+        }
+        if (guest_file_pager_try_retain(pager)) {
+            unlock(&inode->lock);
+            *guard = (struct file_io_guard) {
+                .inode = inode,
+                .pager = pager,
+            };
+            return;
+        }
+        unlock(&inode->lock);
+        unlock(&inode->file_io_lock);
+    }
+}
+
+static void end_file_io(struct file_io_guard *guard) {
+    if (guard->inode == NULL)
+        return;
+    unlock(&guard->inode->file_io_lock);
+    guest_file_pager_release(guard->pager);
+    *guard = (struct file_io_guard) {0};
+}
+
+static ssize_t read_locked(struct fd *fd, void *buffer, size_t size,
+        bool track_offset, qword_t *file_offset, bool *offset_known) {
+    *offset_known = false;
+    if (fd->ops->read != NULL) {
+        off_t_ start = !track_offset || fd->ops->lseek == NULL ? _ESPIPE :
+                fd->ops->lseek(fd, 0, LSEEK_CUR);
+        ssize_t result = fd->ops->read(fd, buffer, size);
+        if (result > 0 && start >= 0) {
+            *file_offset = (qword_t) start;
+            *offset_known = true;
+        }
+        return result;
+    }
     if (fd->ops->pread == NULL)
         return _EBADF;
+    if (fd->offset < 0 || fd->ops->lseek == NULL)
+        return _ESPIPE;
 
+    *file_offset = (qword_t) fd->offset;
     ssize_t result = fd->ops->pread(fd, buffer, size, fd->offset);
-    if (result > 0)
-        fd->ops->lseek(fd, result, LSEEK_CUR);
+    if (result > 0) {
+        off_t_ positioned = fd->ops->lseek(fd, result, LSEEK_CUR);
+        if (positioned < 0)
+            return positioned;
+        *offset_known = true;
+    }
+    return result;
+}
+
+static ssize_t pread_locked(struct fd *fd, void *buffer,
+        size_t size, off_t_ offset) {
+    if (fd->ops->pread != NULL)
+        return fd->ops->pread(fd, buffer, size, (off_t) offset);
+    if (fd->ops->lseek == NULL)
+        return _ESPIPE;
+
+    off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
+    if (saved_offset < 0)
+        return saved_offset;
+    off_t_ positioned = fd->ops->lseek(fd, offset, LSEEK_SET);
+    ssize_t result = positioned < 0 ? positioned :
+            fd->ops->read(fd, buffer, size);
+    off_t_ restored = fd->ops->lseek(
+            fd, saved_offset, LSEEK_SET);
+    assert(restored == saved_offset);
+    return result;
+}
+
+static ssize_t write_locked(struct fd *fd, const void *buffer,
+        size_t size, bool track_offset,
+        qword_t *file_offset, bool *offset_known) {
+    *offset_known = false;
+    if (fd->ops->write != NULL) {
+        ssize_t result = fd->ops->write(fd, buffer, size);
+        if (result <= 0 || !track_offset || fd->ops->lseek == NULL)
+            return result;
+        off_t_ end = fd->ops->lseek(fd, 0, LSEEK_CUR);
+        if (end >= result) {
+            *file_offset = (qword_t) (end - result);
+            *offset_known = true;
+        }
+        return result;
+    }
+    if (fd->ops->pwrite == NULL)
+        return _EBADF;
+    if (fd->offset < 0 || fd->ops->lseek == NULL)
+        return _ESPIPE;
+    if (track_offset)
+        *file_offset = (qword_t) fd->offset;
+    ssize_t result = fd->ops->pwrite(fd, buffer, size, fd->offset);
+    if (result > 0) {
+        off_t_ positioned = fd->ops->lseek(
+                fd, result, LSEEK_CUR);
+        if (positioned < 0)
+            return positioned;
+        *offset_known = track_offset;
+    }
+    return result;
+}
+
+static ssize_t pwrite_locked(struct fd *fd, const void *buffer,
+        size_t size, off_t_ offset) {
+    if (fd->ops->pwrite != NULL)
+        return fd->ops->pwrite(fd, buffer, size, (off_t) offset);
+    if (fd->ops->lseek == NULL)
+        return _ESPIPE;
+
+    off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
+    if (saved_offset < 0)
+        return saved_offset;
+    off_t_ positioned = fd->ops->lseek(fd, offset, LSEEK_SET);
+    ssize_t result = positioned < 0 ? positioned :
+            fd->ops->write(fd, buffer, size);
+    off_t_ restored = fd->ops->lseek(
+            fd, saved_offset, LSEEK_SET);
+    assert(restored == saved_offset);
+    return result;
+}
+
+ssize_t file_read_fd(struct fd *fd, void *buffer, size_t size) {
+    int error = file_read_check_fd(fd);
+    if (error < 0)
+        return error;
+
+    struct file_io_guard guard;
+    begin_file_io(fd, &guard);
+    qword_t offset = 0;
+    bool offset_known;
+    bool lock_fd = fd_has_coherent_page_cache(fd);
+    if (lock_fd)
+        lock(&fd->lock);
+    ssize_t result = read_locked(
+            fd, buffer, size, guard.pager != NULL,
+            &offset, &offset_known);
+    if (lock_fd)
+        unlock(&fd->lock);
+    if (result > 0 && offset_known && guard.pager != NULL)
+        guest_file_pager_read_resident(
+                guard.pager, offset, buffer, (size_t) result);
+    end_file_io(&guard);
     return result;
 }
 
@@ -58,44 +238,52 @@ ssize_t file_pread_fd(struct fd *fd, void *buffer,
     if (offset < 0)
         return _EINVAL;
 
+    struct file_io_guard guard;
+    begin_file_io(fd, &guard);
     lock(&fd->lock);
-    ssize_t result;
-    if (fd->ops->pread != NULL) {
-        result = fd->ops->pread(fd, buffer, size, (off_t) offset);
-    } else if (fd->ops->lseek == NULL) {
-        result = _ESPIPE;
-    } else {
-        off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        if (saved_offset < 0) {
-            result = (int) saved_offset;
-        } else {
-            off_t_ positioned = fd->ops->lseek(
-                    fd, offset, LSEEK_SET);
-            result = positioned < 0 ? (int) positioned :
-                    fd->ops->read(fd, buffer, size);
-        }
-        if (saved_offset >= 0) {
-            off_t_ restored = fd->ops->lseek(
-                    fd, saved_offset, LSEEK_SET);
-            assert(restored == saved_offset);
-        }
-    }
+    ssize_t result = pread_locked(fd, buffer, size, offset);
+    unlock(&fd->lock);
+    if (result > 0 && guard.pager != NULL)
+        guest_file_pager_read_resident(guard.pager,
+                (qword_t) offset, buffer, (size_t) result);
+    end_file_io(&guard);
+    return result;
+}
+
+ssize_t file_pread_fd_uncoordinated(struct fd *fd, void *buffer,
+        size_t size, off_t_ offset) {
+    int error = file_read_check_fd(fd);
+    if (error < 0)
+        return error;
+    if (offset < 0)
+        return _EINVAL;
+    lock(&fd->lock);
+    ssize_t result = pread_locked(fd, buffer, size, offset);
     unlock(&fd->lock);
     return result;
 }
 
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size) {
-    if (fd == NULL)
-        return _EBADF;
+    int error = file_write_check_fd(fd);
+    if (error < 0)
+        return error;
 
-    if (fd->ops->write != NULL)
-        return fd->ops->write(fd, buffer, size);
-    if (fd->ops->pwrite == NULL)
-        return _EBADF;
-
-    ssize_t result = fd->ops->pwrite(fd, buffer, size, fd->offset);
-    if (result > 0)
-        fd->ops->lseek(fd, result, LSEEK_CUR);
+    struct file_io_guard guard;
+    begin_file_io(fd, &guard);
+    qword_t offset = 0;
+    bool offset_known;
+    bool lock_fd = fd_has_coherent_page_cache(fd);
+    if (lock_fd)
+        lock(&fd->lock);
+    ssize_t result = write_locked(
+            fd, buffer, size, guard.pager != NULL,
+            &offset, &offset_known);
+    if (lock_fd)
+        unlock(&fd->lock);
+    if (result > 0 && offset_known && guard.pager != NULL)
+        guest_file_pager_commit_file_write(
+                guard.pager, offset, buffer, (size_t) result);
+    end_file_io(&guard);
     return result;
 }
 
@@ -116,28 +304,55 @@ ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
     if (offset < 0)
         return _EINVAL;
 
+    struct file_io_guard guard;
+    begin_file_io(fd, &guard);
+    qword_t actual_offset = (qword_t) offset;
     lock(&fd->lock);
-    ssize_t result;
-    if (fd->ops->pwrite != NULL) {
-        result = fd->ops->pwrite(fd, buffer, size, (off_t) offset);
-    } else if (fd->ops->lseek == NULL) {
-        result = _ESPIPE;
-    } else {
-        off_t_ saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        if (saved_offset < 0) {
-            result = (int) saved_offset;
-        } else {
-            off_t_ positioned = fd->ops->lseek(
-                    fd, offset, LSEEK_SET);
-            result = positioned < 0 ? (int) positioned :
-                    fd->ops->write(fd, buffer, size);
+    if (guard.pager != NULL && size != 0) {
+        int flags = fd->ops->getflags != NULL ?
+                fd->ops->getflags(fd) : (int) fd->flags;
+        if (flags < 0) {
+            unlock(&fd->lock);
+            end_file_io(&guard);
+            return flags;
         }
-        if (saved_offset >= 0) {
-            off_t_ restored = fd->ops->lseek(
-                    fd, saved_offset, LSEEK_SET);
-            assert(restored == saved_offset);
+        if ((flags & O_APPEND_) != 0) {
+            struct statbuf stat;
+            int stat_error = file_fstat_fd(fd, &stat);
+            if (stat_error < 0) {
+                unlock(&fd->lock);
+                end_file_io(&guard);
+                return stat_error;
+            }
+            actual_offset = stat.size;
         }
     }
+    ssize_t result = pwrite_locked(fd, buffer, size, offset);
+    unlock(&fd->lock);
+    if (result > 0 && guard.pager != NULL)
+        guest_file_pager_commit_file_write(guard.pager,
+                actual_offset, buffer, (size_t) result);
+    end_file_io(&guard);
+    return result;
+}
+
+ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
+        const void *buffer, size_t size, off_t_ offset) {
+    if (fd == NULL)
+        return _EBADF;
+    int flags = fd_getflags(fd);
+    if (flags < 0)
+        return flags;
+    int access_mode = flags & O_ACCMODE_;
+    if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
+        return _EBADF;
+    if (offset < 0)
+        return _EINVAL;
+    if (fd->ops->page_pwrite == NULL)
+        return _EBADF;
+    lock(&fd->lock);
+    ssize_t result = fd->ops->page_pwrite(
+            fd, buffer, size, (off_t) offset);
     unlock(&fd->lock);
     return result;
 }

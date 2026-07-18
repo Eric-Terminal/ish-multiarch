@@ -188,10 +188,8 @@ static bool map_private_file_page(
     if (result == 0)
         mem_pt(task->mem, PAGE(address))->data->fd = file;
     write_wrunlock(&task->mem->lock);
-    if (result < 0) {
+    if (result < 0)
         fd_close(file);
-        (void) munmap(memory, PAGE_SIZE);
-    }
     return result == 0;
 }
 

@@ -248,7 +248,14 @@ static qword_t dispatch_mmap(
     }
     assert(handle.opaque != NULL);
 
-    qword_t preflight = guest_linux_mmap_file_private_preflight(
+    // 普通文件 provider 不支持 hugetlb；Linux 在 fget 后、选址前拒绝。
+    if ((flags & GUEST_LINUX_MAP_HUGETLB) != 0) {
+        service->release(&handle);
+        assert(handle.opaque == NULL);
+        return linux_error(GUEST_LINUX_EINVAL);
+    }
+
+    qword_t preflight = guest_linux_mmap_file_preflight(
             runtime->memory, syscall->arguments[0], request.length,
             request.protection, request.flags, request.offset);
     if ((sqword_t) preflight < 0) {
@@ -267,10 +274,25 @@ static qword_t dispatch_mmap(
     }
     assert(mapping.pager != NULL &&
             (mapping.maximum_protection & ~GUEST_LINUX_PROT_MASK) == 0);
-    qword_t result = guest_linux_mmap_file_private(runtime->memory,
-            syscall->arguments[0], syscall->arguments[1],
-            syscall->arguments[2], mapping.maximum_protection,
-            flags, mapping.pager, syscall->arguments[5]);
+    qword_t mapping_type = flags & GUEST_LINUX_MAP_TYPE;
+    bool shared = mapping_type == GUEST_LINUX_MAP_SHARED ||
+            mapping_type == GUEST_LINUX_MAP_SHARED_VALIDATE;
+    assert(shared || mapping_type == GUEST_LINUX_MAP_PRIVATE);
+    qword_t normalized_flags = (shared ? GUEST_LINUX_MAP_SHARED :
+            GUEST_LINUX_MAP_PRIVATE) |
+            (flags & (GUEST_LINUX_MAP_FIXED |
+            GUEST_LINUX_MAP_FIXED_NOREPLACE));
+    qword_t result = shared ?
+            guest_linux_mmap_file_shared(runtime->memory,
+                    syscall->arguments[0], syscall->arguments[1],
+                    syscall->arguments[2], mapping.maximum_protection,
+                    normalized_flags, mapping.pager,
+                    syscall->arguments[5]) :
+            guest_linux_mmap_file_private(runtime->memory,
+                    syscall->arguments[0], syscall->arguments[1],
+                    syscall->arguments[2], mapping.maximum_protection,
+                    normalized_flags, mapping.pager,
+                    syscall->arguments[5]);
     guest_file_pager_release(mapping.pager);
     service->release(&handle);
     assert(handle.opaque == NULL);

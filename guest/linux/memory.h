@@ -38,7 +38,7 @@ qword_t guest_linux_mmap(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t flags, qword_t fd, qword_t offset);
 // 仅执行 do_mmap 的通用参数与地址选择检查，不修改 VMA 或页表。
-qword_t guest_linux_mmap_file_private_preflight(
+qword_t guest_linux_mmap_file_preflight(
         struct guest_linux_mm *memory, guest_addr_t address,
         qword_t length, qword_t protection, qword_t flags,
         qword_t offset);
@@ -46,7 +46,6 @@ qword_t guest_linux_mmap_file_private(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t maximum_protection, qword_t flags,
         struct guest_file_pager *pager, qword_t offset);
-// 仅供共享文件 guest core；生产 runtime 须在 provider/cache 一致性就绪后接入。
 qword_t guest_linux_mmap_file_shared(struct guest_linux_mm *memory,
         guest_addr_t address, qword_t length, qword_t protection,
         qword_t maximum_protection, qword_t flags,

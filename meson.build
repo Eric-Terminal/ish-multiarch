@@ -265,6 +265,10 @@ if get_option('kernel') == 'ish'
             'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
         test('tmpfs_pread', tmpfs_pread_test)
 
+        realfs_pwrite_test = executable(
+            'realfs_pwrite_test', 'fs/real-pwrite-test.c', dependencies: ish)
+        test('realfs_pwrite', realfs_pwrite_test)
+
         inode_identity_test = executable(
             'inode_identity_test', 'fs/inode-test.c', dependencies: ish)
         test('inode_identity', inode_identity_test)

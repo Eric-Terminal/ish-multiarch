@@ -14,6 +14,7 @@
 #include "kernel/calls.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/futex.h"
+#include "kernel/fs.h"
 #include "kernel/random.h"
 #include "kernel/errno.h"
 #include "kernel/time.h"
@@ -72,10 +73,8 @@ static inline dword_t args_copy(
 static size_t args_size(struct exec_args args);
 
 static int read_header(struct fd *fd, struct elf_header *header) {
-    int err;
-    if (fd->ops->lseek(fd, 0, SEEK_SET))
-        return _EIO;
-    if ((err = fd->ops->read(fd, header, sizeof(*header))) != sizeof(*header)) {
+    ssize_t err = file_pread_fd(fd, header, sizeof(*header), 0);
+    if (err != sizeof(*header)) {
         if (err < 0)
             return _EIO;
         return _ENOEXEC;
@@ -96,15 +95,11 @@ static int read_prg_headers(struct fd *fd, struct elf_header header, struct prg_
     if (ph == NULL)
         return _ENOMEM;
 
-    if (fd->ops->lseek(fd, header.prghead_off, SEEK_SET) < 0) {
+    ssize_t read = file_pread_fd(fd, ph, (size_t) ph_size,
+            (off_t_) header.prghead_off);
+    if (read != ph_size) {
         free(ph);
-        return _EIO;
-    }
-    if (fd->ops->read(fd, ph, ph_size) != ph_size) {
-        free(ph);
-        if (errno != 0)
-            return _EIO;
-        return _ENOEXEC;
+        return read < 0 ? _EIO : _ENOEXEC;
     }
 
     *ph_out = ph;
@@ -223,9 +218,10 @@ static int elf_exec(struct fd *fd, const char *file,
 
         // read the interpreter name out of the file
         err = _EIO;
-        if (fd->ops->lseek(fd, ph[i].offset, SEEK_SET) < 0)
-            goto out_free_interp;
-        if (fd->ops->read(fd, interp_name, ph[i].filesize) != ph[i].filesize)
+        ssize_t interp_read = file_pread_fd(fd, interp_name,
+                ph[i].filesize, (off_t_) ph[i].offset);
+        if (interp_read < 0 ||
+                (qword_t) interp_read != (qword_t) ph[i].filesize)
             goto out_free_interp;
 
         // open interpreter and read headers
@@ -642,14 +638,12 @@ static int shebang_exec(struct fd *fd, const char *file,
         struct ish_aarch64_exec_identity *identity,
         struct mm **retired_mm_out) {
     // read the first 128 bytes to get the shebang line out of
-    if (fd->ops->lseek(fd, 0, SEEK_SET))
-        return _EIO;
     char header[128];
     size_t size = 0;
     while (size < sizeof(header) - 1 &&
             memchr(header, '\n', size) == NULL) {
-        ssize_t chunk = fd->ops->read(
-                fd, header + size, sizeof(header) - 1 - size);
+        ssize_t chunk = file_pread_fd(fd, header + size,
+                sizeof(header) - 1 - size, (off_t_) size);
         if (chunk < 0)
             return _EIO;
         if (chunk == 0)

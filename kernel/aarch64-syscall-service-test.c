@@ -554,6 +554,7 @@ static bool init_fixture(struct task_fixture *fixture,
         return false;
     fixture->fs.pwd = fixture->pwd;
     fixture->fs.root = fixture->root;
+    io_fd->flags = O_RDWR_;
     if (f_install_task(&fixture->task, io_fd, 0) != 0)
         return false;
     current = &fixture->task;

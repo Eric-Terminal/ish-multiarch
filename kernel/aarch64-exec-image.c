@@ -22,7 +22,7 @@ static void release_snapshot_fd(void *opaque) {
 static int snapshot_fd(struct fd *fd,
         struct ish_aarch64_exec_image *image) {
     struct statbuf stat;
-    int error = fd->mount->fs->fstat(fd, &stat);
+    int error = file_fstat_fd(fd, &stat);
     if (error < 0)
         return error;
     if (!S_ISREG(fd->type) || fd->inode == NULL ||
@@ -38,61 +38,23 @@ static int snapshot_fd(struct fd *fd,
     if (size == 0)
         goto out_source;
 
-    bool positioned = fd->ops->pread != NULL;
-    off_t_ saved_offset = 0;
-    bool offset_locked = false;
-    bool restore_offset = false;
-    if (!positioned) {
-        if (fd->ops->read == NULL || fd->ops->lseek == NULL) {
-            error = _EIO;
-            goto out_free;
-        }
-        lock(&fd->lock);
-        offset_locked = true;
-        saved_offset = fd->ops->lseek(fd, 0, LSEEK_CUR);
-        if (saved_offset < 0) {
-            error = (int) saved_offset;
-            goto out_unlock;
-        }
-        restore_offset = true;
-        off_t_ start = fd->ops->lseek(fd, 0, LSEEK_SET);
-        if (start != 0) {
-            error = start < 0 ? (int) start : _EIO;
-            goto out_restore;
-        }
-    }
-
     size_t copied = 0;
     while (copied != size) {
         size_t remaining = size - copied;
         size_t chunk = remaining < AARCH64_EXEC_IMAGE_READ_CHUNK ?
                 remaining : AARCH64_EXEC_IMAGE_READ_CHUNK;
-        ssize_t read = positioned ?
-                fd->ops->pread(fd, data + copied, chunk, (off_t) copied) :
-                fd->ops->read(fd, data + copied, chunk);
+        ssize_t read = file_pread_fd(
+                fd, data + copied, chunk, (off_t_) copied);
         if (read < 0) {
             error = (int) read;
-            goto out_restore;
+            goto out_free;
         }
         if (read == 0 || (size_t) read > chunk) {
             error = _EIO;
-            goto out_restore;
+            goto out_free;
         }
         copied += (size_t) read;
     }
-
-out_restore:
-    if (restore_offset) {
-        off_t_ restored = fd->ops->lseek(
-                fd, saved_offset, LSEEK_SET);
-        if (error == 0 && restored != saved_offset)
-            error = restored < 0 ? (int) restored : _EIO;
-    }
-out_unlock:
-    if (offset_locked)
-        unlock(&fd->lock);
-    if (error < 0)
-        goto out_free;
 out_source:;
     struct fd *source_fd = fd_retain(fd);
     struct guest_file_source *file_source = guest_file_source_create(

@@ -23,8 +23,23 @@ struct inode_data {
 
     uint32_t socket_id;
 
-    /* 受 lock 保护的弱引用；pager 归零后必须条件摘除。 */
+    /*
+     * 两个弱字段受 lock 共同保护；pager 归零并完成最终写回后才摘除。
+     * context 只供拥有 pager 实现的 kernel 层解释。
+     */
     struct guest_file_pager *file_pager;
+    void *file_pager_context;
+    /*
+     * i386 realfs 的共享 host mmap 与独立 AArch64 pager 不能同时存在。
+     * 计数按 host mmap 的 data 后备对象登记，fork 共享不重复计数。
+     */
+    unsigned host_shared_mapping_count;
+    cond_t file_pager_changed;
+    /*
+     * 同 inode 内容 I/O 域。允许持有时短暂取 inode->lock 复查弱槽；
+     * 不得持 inode->lock 或 inodes_lock 等待此锁。
+     */
+    lock_t file_io_lock;
     lock_t lock;
 };
 
@@ -32,6 +47,10 @@ struct inode_data *inode_get(
         struct mount *mount, qword_t device, ino_t inode);
 void inode_retain(struct inode_data *inode);
 void inode_release(struct inode_data *inode);
+
+/* 成功时返回一份由 host 共享映射 token 持有的 inode 强引用。 */
+bool inode_try_begin_host_shared_mapping(struct inode_data *inode);
+void inode_end_host_shared_mapping(struct inode_data *inode);
 
 // generic_open must lock out anything trying to destroy an inode between
 // opening the file and acquiring a reference to its inode. For this purpose

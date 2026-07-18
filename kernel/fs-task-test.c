@@ -358,7 +358,7 @@ int main(void) {
             directory_fd != NULL && empty_fd != NULL && decoy_pwd != NULL &&
             target_pwd != NULL, "测试 fd 创建成功");
     target_fd->flags = O_RDWR_;
-    positioned_fd->flags = O_WRONLY_;
+    positioned_fd->flags = O_RDWR_;
     seekable_fd->flags = O_RDWR_;
     empty_fd->flags = O_RDWR_;
     decoy.fs.pwd = decoy_pwd;
