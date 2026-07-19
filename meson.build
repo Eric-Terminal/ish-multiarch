@@ -267,6 +267,18 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('socket_lifecycle', socket_lifecycle_test)
 
+        socket_stream_handshake_test = executable(
+            'socket_stream_handshake_test',
+            'fs/socket-stream-handshake-test.c',
+            dependencies: ish)
+        test('socket_stream_handshake', socket_stream_handshake_test)
+
+        socket_unix_address_test = executable(
+            'socket_unix_address_test',
+            'fs/socket-unix-address-test.c',
+            dependencies: ish)
+        test('socket_unix_address', socket_unix_address_test)
+
         tmpfs_pread_test = executable(
             'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
         test('tmpfs_pread', tmpfs_pread_test)

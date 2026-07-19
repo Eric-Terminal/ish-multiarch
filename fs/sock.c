@@ -1,8 +1,11 @@
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/tcp.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include "kernel/calls.h"
 #include "fs/fd.h"
@@ -13,10 +16,51 @@
 #include "debug.h"
 
 #define SOCKET_TYPE_MASK 0xf
+#define I386_LINUX_MAX_RW_COUNT UINT32_C(0x7ffff000)
+#define I386_LINUX_IOV_MAX UINT32_C(1024)
+#define I386_SOCKET_CONTROL_LIMIT UINT32_C(2048)
+#define I386_SCM_MAX_FDS UINT32_C(253)
 
 const struct fd_ops socket_fdops;
 
 static lock_t peer_lock = LOCK_INITIALIZER;
+static lock_t unix_bound_lock = LOCK_INITIALIZER;
+// host dummy fd 与内部 SCM 队列按同一顺序发布，但不得占用接收端 fd 锁等待 I/O。
+static lock_t unix_scm_io_lock = LOCK_INITIALIZER;
+static struct list unix_bound_sockets;
+
+struct unix_pending_peer {
+    struct list links;
+    struct fd *peer;
+    bool connect_active;
+    bool host_error_pending;
+    bool accepted;
+    bool cancel_requested;
+    bool linked;
+    uint64_t generation;
+    char peer_path[sizeof(((struct sockaddr_un *) 0)->sun_path)];
+    bool listener_cred_valid;
+    struct ucred_ listener_cred;
+};
+
+struct unix_bound_name {
+    struct list links;
+    size_t queued_messages;
+    size_t active_connects;
+    bool owner_open;
+    bool closing;
+    bool listener_cred_valid;
+    struct ucred_ listener_cred;
+    uint8_t name_length;
+    char name[SOCKADDR_DATA_MAX + 1];
+    char backing_path[sizeof(((struct sockaddr_un *) 0)->sun_path)];
+    struct list pending_peers;
+    cond_t connects_drained;
+};
+
+static void unix_socket_finish_peer_handshake(
+        struct fd *peer, struct fd *accepted);
+static void scm_free(struct scm *scm);
 
 static struct fd *sock_fd_allocate(
         int domain, int type, int protocol) {
@@ -28,15 +72,26 @@ static struct fd *sock_fd_allocate(
     fd->socket.type = type & SOCKET_TYPE_MASK;
     fd->socket.protocol = protocol;
     if (domain == AF_LOCAL_) {
-        cond_init(&fd->socket.unix_got_peer);
         list_init(&fd->socket.unix_scm);
+        list_init(&fd->socket.unix_pending_scm);
     }
     return fd;
+}
+
+static void sock_configure_host_fd(int sock_fd) {
+#if defined(__APPLE__) && defined(SO_NOSIGPIPE)
+    int no_sigpipe = 1;
+    (void) setsockopt(sock_fd, SOL_SOCKET,
+            SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#else
+    (void) sock_fd;
+#endif
 }
 
 static struct fd *sock_fd_wrap(
         int sock_fd, int domain, int type, int protocol) {
     // 进入本函数后无条件接管 raw host fd，任何失败路径都在这里释放。
+    sock_configure_host_fd(sock_fd);
     struct fd *fd = sock_fd_allocate(domain, type, protocol);
     if (fd == NULL) {
         close(sock_fd);
@@ -57,9 +112,12 @@ static fd_t sock_fd_create_task(struct task *task,
 
 int_t socket_create_task(struct task *task,
         dword_t domain, dword_t type, dword_t protocol) {
+    dword_t flags = type & ~SOCKET_TYPE_MASK;
+    if ((flags & ~(SOCK_NONBLOCK_ | SOCK_CLOEXEC_)) != 0)
+        return _EINVAL;
     int real_domain = sock_family_to_real(domain);
     if (real_domain < 0)
-        return _EINVAL;
+        return _EAFNOSUPPORT;
     int real_type = sock_type_to_real(type, protocol);
     if (real_type < 0)
         return _EINVAL;
@@ -137,8 +195,9 @@ static uint32_t unix_socket_next_id(void) {
     return id;
 }
 
-static int unix_socket_get_task(struct task *task,
-        const char *path_raw, struct fd *bind_fd, uint32_t *socket_id) {
+static int unix_socket_lookup_path_task(struct task *task,
+        const char *path_raw, uint32_t *socket_id,
+        struct inode_data **retained) {
     char path[MAX_PATH];
     int err = path_normalize_task(
             task, AT_PWD, path_raw, path, N_SYMLINK_FOLLOW);
@@ -148,36 +207,12 @@ static int unix_socket_get_task(struct task *task,
     struct statbuf stat = {};
     err = mount->fs->stat(mount, path, &stat);
 
-    // If bind was called, there are some funny semantics.
-    if (bind_fd != NULL) {
-        // If the file exists, fail.
-        if (err == 0) {
-            err = _EADDRINUSE;
-            goto out;
-        }
-        // If the file can't be found, try to create it as a socket.
-        if (err < 0) {
-            mode_t_ mode = 0777;
-            struct fs_info *fs = task->fs;
-            lock(&fs->lock);
-            mode &= ~fs->umask;
-            unlock(&fs->lock);
-            err = mount->fs->mknod(mount, path, S_IFSOCK | mode, 0);
-            if (err < 0)
-                goto out;
-            err = mount->fs->stat(mount, path, &stat);
-            if (err < 0)
-                goto out;
-        }
-    }
-
-    // If something other than bind was called, just do the obvious thing and
-    // fail if stat failed.
-    if (bind_fd == NULL && err < 0)
+    if (err < 0)
         goto out;
 
     if (!S_ISSOCK(stat.mode)) {
-        err = _ENOTSOCK;
+        // 路径存在但没有可连接的 Unix socket，Linux 返回 ECONNREFUSED。
+        err = _ECONNREFUSED;
         goto out;
     }
 
@@ -189,12 +224,11 @@ static int unix_socket_get_task(struct task *task,
         inode->socket_id = unix_socket_next_id();
     unlock(&inode->lock);
     *socket_id = inode->socket_id;
-
-    mount_release(mount);
-    if (bind_fd != NULL)
-        bind_fd->socket.unix_name_inode = inode;
+    if (retained != NULL)
+        *retained = inode;
     else
         inode_release(inode);
+    mount_release(mount);
     return 0;
 
 out:
@@ -202,12 +236,11 @@ out:
     return err;
 }
 
-// Dan Bernstein's simple and decently effective hash function
-static uint32_t str_hash(const char *str) {
+// 抽象名称允许内嵌 NUL，哈希和比较都必须使用调用方给出的精确长度。
+static uint32_t bytes_hash(const char *bytes, size_t length) {
     uint32_t hash = 5381;
-    for (int i = 0; str[i] != '\0'; i++) {
-        hash = 33 * hash ^ str[i];
-    }
+    for (size_t index = 0; index < length; index++)
+        hash = 33 * hash ^ (byte_t) bytes[index];
     return hash;
 }
 
@@ -219,69 +252,413 @@ struct unix_abstract {
     unsigned refcount;
     uint32_t hash;
     uint32_t socket_id;
+    size_t name_length;
+    int socket_type;
+    bool linked;
+    bool published;
+    char name[SOCKADDR_DATA_MAX];
     struct list links;
 };
 #define ABSTRACT_HASH_SIZE 1024
 static struct list abstract_hash[ABSTRACT_HASH_SIZE];
 static lock_t unix_abstract_lock = LOCK_INITIALIZER;
 
-static int unix_abstract_get(const char *name, struct fd *bind_fd, uint32_t *socket_id) {
-    uint32_t hash = str_hash(name);
-    lock(&unix_abstract_lock);
+static struct unix_abstract *unix_abstract_find_locked(
+        const char *name, size_t name_length,
+        int socket_type, uint32_t hash) {
     struct unix_abstract *sock_tmp;
-    struct unix_abstract *sock = NULL;
     struct list *bucket = &abstract_hash[hash % ABSTRACT_HASH_SIZE];
     if (list_null(bucket))
         list_init(bucket);
     list_for_each_entry(bucket, sock_tmp, links) {
-        if (sock_tmp->hash == hash) {
-            sock = sock_tmp;
-            break;
-        }
+        if (sock_tmp->hash == hash &&
+                sock_tmp->socket_type == socket_type &&
+                sock_tmp->name_length == name_length &&
+                memcmp(sock_tmp->name, name, name_length) == 0)
+            return sock_tmp;
     }
+    return NULL;
+}
 
-    if (bind_fd != NULL && sock != NULL) {
+static int unix_abstract_lookup(
+        const char *name, size_t name_length, int socket_type,
+        uint32_t *socket_id,
+        struct unix_abstract **retained) {
+    uint32_t hash = 33 * bytes_hash(name, name_length) ^
+            (uint32_t) socket_type;
+    lock(&unix_abstract_lock);
+    struct unix_abstract *sock = unix_abstract_find_locked(
+            name, name_length, socket_type, hash);
+    // 预留只排斥其他 bind；host bind 成功前不向 connect 发布。
+    if (sock == NULL || !sock->published) {
         unlock(&unix_abstract_lock);
-        return _EEXIST;
+        return _ECONNREFUSED;
     }
-    if (bind_fd == NULL && sock == NULL) {
-        unlock(&unix_abstract_lock);
-        return _ENOENT;
+    if (retained != NULL) {
+        assert(sock->refcount != UINT_MAX);
+        sock->refcount++;
+        *retained = sock;
     }
-
-    if (sock == NULL) {
-        sock = malloc(sizeof(struct unix_abstract));
-        sock->refcount = 0;
-        sock->hash = hash;
-        sock->socket_id = unix_socket_next_id();
-        list_add(bucket, &sock->links);
-    }
-
-    sock->refcount++;
-    unlock(&unix_abstract_lock);
     *socket_id = sock->socket_id;
-    if (bind_fd != NULL)
-        bind_fd->socket.unix_name_abstract = sock;
+    unlock(&unix_abstract_lock);
     return 0;
+}
+
+static int unix_abstract_reserve(const char *name, size_t name_length,
+        int socket_type,
+        struct unix_abstract **reserved, uint32_t *socket_id) {
+    uint32_t hash = 33 * bytes_hash(name, name_length) ^
+            (uint32_t) socket_type;
+    lock(&unix_abstract_lock);
+    if (unix_abstract_find_locked(
+            name, name_length, socket_type, hash) != NULL) {
+        unlock(&unix_abstract_lock);
+        return _EADDRINUSE;
+    }
+    struct unix_abstract *sock = malloc(sizeof(*sock));
+    if (sock == NULL) {
+        unlock(&unix_abstract_lock);
+        return _ENOMEM;
+    }
+    *sock = (struct unix_abstract) {
+        .refcount = 1,
+        .hash = hash,
+        .socket_id = unix_socket_next_id(),
+        .name_length = name_length,
+        .socket_type = socket_type,
+        .linked = true,
+    };
+    memcpy(sock->name, name, name_length);
+    struct list *bucket = &abstract_hash[hash % ABSTRACT_HASH_SIZE];
+    list_add(bucket, &sock->links);
+    *reserved = sock;
+    *socket_id = sock->socket_id;
+    unlock(&unix_abstract_lock);
+    return 0;
+}
+
+static void unix_abstract_publish(struct unix_abstract *name) {
+    lock(&unix_abstract_lock);
+    assert(name->linked && !name->published && name->refcount != 0);
+    name->published = true;
+    unlock(&unix_abstract_lock);
 }
 
 static void unix_abstract_release(struct unix_abstract *name) {
     lock(&unix_abstract_lock);
+    assert(name->refcount != 0);
     if (--name->refcount == 0) {
-        list_remove(&name->links);
+        assert(!name->linked);
         free(name);
     }
     unlock(&unix_abstract_lock);
 }
 
+static void unix_abstract_unpublish(struct unix_abstract *name) {
+    lock(&unix_abstract_lock);
+    assert(name->refcount != 0 && name->linked);
+    list_remove(&name->links);
+    name->linked = false;
+    name->published = false;
+    if (--name->refcount == 0)
+        free(name);
+    unlock(&unix_abstract_lock);
+}
+
+struct unix_bind_transaction {
+    struct inode_data *inode;
+    struct unix_abstract *abstract;
+    struct mount *created_mount;
+    bool created_path;
+    qword_t created_device;
+    qword_t created_host_inode;
+    qword_t created_inode;
+    char path[MAX_PATH];
+    uint8_t name_length;
+    char name[SOCKADDR_DATA_MAX + 1];
+    struct unix_bound_name *bound_name;
+};
+
+static int unix_socket_reserve_path_task(struct task *task,
+        const char *path_raw, struct unix_bind_transaction *transaction,
+        uint32_t *socket_id) {
+    char path[MAX_PATH];
+    int err = path_normalize_task(
+            task, AT_PWD, path_raw, path, N_SYMLINK_FOLLOW);
+    if (err < 0)
+        return err;
+    struct mount *mount = find_mount_and_trim_path(path);
+    transaction->created_mount = mount;
+
+    struct statbuf stat = {0};
+    err = mount->fs->stat(mount, path, &stat);
+    if (err == 0)
+        return _EADDRINUSE;
+    if (err != _ENOENT)
+        return err;
+
+    mode_t_ mode = 0777;
+    struct fs_info *fs = task->fs;
+    lock(&fs->lock);
+    mode &= ~fs->umask;
+    unlock(&fs->lock);
+    if (mount->fs->mknod_identity == NULL)
+        return _EPERM;
+    err = mount->fs->mknod_identity(mount, path,
+            S_IFSOCK | mode, 0,
+            &transaction->created_device,
+            &transaction->created_host_inode,
+            &transaction->created_inode);
+    if (err < 0)
+        return err;
+    transaction->created_path = true;
+    strcpy(transaction->path, path);
+    transaction->inode = inode_get(
+            mount, transaction->created_device,
+            transaction->created_inode);
+    if (transaction->inode == NULL)
+        return _ENOMEM;
+    lock(&transaction->inode->lock);
+    if (transaction->inode->socket_id == 0)
+        transaction->inode->socket_id = unix_socket_next_id();
+    *socket_id = transaction->inode->socket_id;
+    unlock(&transaction->inode->lock);
+    return 0;
+}
+
+static void unix_bind_rollback(
+        struct unix_bind_transaction *transaction) {
+    if (transaction->created_path) {
+        assert(transaction->created_mount->fs->unlink_if_identity != NULL);
+        int error = transaction->created_mount->fs->unlink_if_identity(
+                transaction->created_mount, transaction->path,
+                transaction->created_device,
+                transaction->created_host_inode,
+                transaction->created_inode);
+        if (error < 0)
+            TRACE("回滚 Unix socket 名称失败：%d\n", error);
+    }
+    inode_release_if_exist(transaction->inode);
+    if (transaction->abstract != NULL)
+        unix_abstract_unpublish(transaction->abstract);
+    if (transaction->bound_name != NULL) {
+        cond_destroy(&transaction->bound_name->connects_drained);
+        free(transaction->bound_name);
+    }
+    if (transaction->created_mount != NULL)
+        mount_release(transaction->created_mount);
+    *transaction = (struct unix_bind_transaction) {0};
+}
+
+static void unix_bind_commit(struct unix_bind_transaction *transaction,
+        struct fd *socket) {
+    assert(socket->socket.unix_name_inode == NULL &&
+            socket->socket.unix_name_abstract == NULL);
+    assert(transaction->bound_name != NULL);
+    lock(&unix_bound_lock);
+    if (list_null(&unix_bound_sockets))
+        list_init(&unix_bound_sockets);
+    socket->socket.unix_name_inode = transaction->inode;
+    socket->socket.unix_name_abstract = transaction->abstract;
+    socket->socket.unix_name_len = transaction->name_length;
+    memcpy(socket->socket.unix_name,
+            transaction->name, transaction->name_length);
+    socket->socket.unix_bound_name = transaction->bound_name;
+    transaction->bound_name->owner_open = true;
+    list_add(&unix_bound_sockets, &transaction->bound_name->links);
+    unlock(&unix_bound_lock);
+    // 同一临界区内先完整写入 socket 元数据，再对 connect 发布名称。
+    if (transaction->abstract != NULL)
+        unix_abstract_publish(transaction->abstract);
+    transaction->inode = NULL;
+    transaction->abstract = NULL;
+    transaction->bound_name = NULL;
+    if (transaction->created_mount != NULL)
+        mount_release(transaction->created_mount);
+    *transaction = (struct unix_bind_transaction) {0};
+}
+
+static void unix_bound_maybe_free_locked(struct unix_bound_name *name) {
+    if (name->owner_open || name->queued_messages != 0 ||
+            name->active_connects != 0 ||
+            !list_empty(&name->pending_peers))
+        return;
+    list_remove(&name->links);
+    cond_destroy(&name->connects_drained);
+    free(name);
+}
+
+static struct unix_bound_name *unix_bound_message_begin(struct fd *socket) {
+    if (socket->socket.domain != AF_LOCAL_ ||
+            socket->socket.type == SOCK_STREAM_)
+        return NULL;
+    lock(&unix_bound_lock);
+    struct unix_bound_name *name = socket->socket.unix_bound_name;
+    if (name != NULL) {
+        assert(name->owner_open && name->queued_messages != SIZE_MAX);
+        name->queued_messages++;
+    }
+    unlock(&unix_bound_lock);
+    return name;
+}
+
+static void unix_bound_message_cancel(struct unix_bound_name *name) {
+    if (name == NULL)
+        return;
+    lock(&unix_bound_lock);
+    assert(name->queued_messages != 0);
+    name->queued_messages--;
+    unix_bound_maybe_free_locked(name);
+    unlock(&unix_bound_lock);
+}
+
+static bool unix_bound_owner_begin_close(struct fd *socket) {
+    lock(&unix_bound_lock);
+    struct unix_bound_name *name = socket->socket.unix_bound_name;
+    if (name != NULL) {
+        assert(name->owner_open && !name->closing);
+        name->closing = true;
+    }
+    unlock(&unix_bound_lock);
+    return name != NULL && socket->socket.domain == AF_LOCAL_ &&
+            socket->socket.type == SOCK_STREAM_;
+}
+
+static void unix_bound_owner_finish_close(struct fd *socket) {
+    struct list canceled_peers;
+    list_init(&canceled_peers);
+
+    lock(&unix_bound_lock);
+    struct unix_bound_name *name = socket->socket.unix_bound_name;
+    socket->socket.unix_bound_name = NULL;
+    if (name != NULL) {
+        assert(name->owner_open && name->closing);
+        while (name->active_connects != 0)
+            (void) wait_for_ignore_signals(
+                    &name->connects_drained, &unix_bound_lock, NULL);
+        while (!list_empty(&name->pending_peers)) {
+            struct unix_pending_peer *pending = list_first_entry(
+                    &name->pending_peers,
+                    struct unix_pending_peer, links);
+            assert(pending->linked && !pending->connect_active &&
+                    !pending->accepted && pending->peer != NULL);
+            list_remove(&pending->links);
+            pending->linked = false;
+            if (pending->peer->socket.unix_pending_connect == pending)
+                pending->peer->socket.unix_pending_connect = NULL;
+            list_add_tail(&canceled_peers, &pending->links);
+        }
+        name->owner_open = false;
+        unix_bound_maybe_free_locked(name);
+    }
+    unlock(&unix_bound_lock);
+
+    while (!list_empty(&canceled_peers)) {
+        struct unix_pending_peer *pending = list_first_entry(
+                &canceled_peers, struct unix_pending_peer, links);
+        list_remove(&pending->links);
+        unix_socket_finish_peer_handshake(pending->peer, NULL);
+        free(pending);
+    }
+}
+
+static bool unix_bound_name_copy(const char *backing_path,
+        void *guest_address, uint_t *guest_length, bool consume) {
+    lock(&unix_bound_lock);
+    if (list_null(&unix_bound_sockets)) {
+        unlock(&unix_bound_lock);
+        return false;
+    }
+    struct unix_bound_name *name;
+    list_for_each_entry(&unix_bound_sockets, name, links) {
+        assert(name != NULL);
+        if (strcmp(name->backing_path, backing_path) != 0)
+            continue;
+        struct sockaddr_ *guest = guest_address;
+        guest->family = PF_LOCAL_;
+        memcpy((byte_t *) guest_address + offsetof(struct sockaddr_, data),
+                name->name, name->name_length);
+        *guest_length = (uint_t) (offsetof(struct sockaddr_, data) +
+                name->name_length);
+        if (consume && name->queued_messages != 0) {
+            name->queued_messages--;
+            unix_bound_maybe_free_locked(name);
+        }
+        unlock(&unix_bound_lock);
+        return true;
+    }
+    unlock(&unix_bound_lock);
+    return false;
+}
+
 const char *sock_tmp_prefix = "/tmp/ishsock";
 
+static int unix_socket_transport_path(struct fd *socket,
+        char path[sizeof(((struct sockaddr_un *) 0)->sun_path)]) {
+    assert(socket != NULL && socket->socket.domain == AF_LOCAL_);
+    lock(&socket->lock);
+    if (socket->socket.unix_backing_path[0] != '\0') {
+        strcpy(path, socket->socket.unix_backing_path);
+        unlock(&socket->lock);
+        return 0;
+    }
+
+    struct sockaddr_un address = {
+        .sun_family = AF_UNIX,
+    };
+    int bind_error = EADDRINUSE;
+    for (unsigned attempt = 0; attempt < 16; attempt++) {
+        uint32_t socket_id = unix_socket_next_id();
+        int path_length = snprintf(address.sun_path,
+                sizeof(address.sun_path), "%s%d.%u",
+                sock_tmp_prefix, getpid(), socket_id);
+        if (path_length < 0 ||
+                (size_t) path_length >= sizeof(address.sun_path)) {
+            unlock(&socket->lock);
+            return _ENAMETOOLONG;
+        }
+        socklen_t address_length = (socklen_t) (
+                offsetof(struct sockaddr_un, sun_path) + path_length);
+#ifdef __APPLE__
+        address.sun_len = (uint8_t) address_length;
+#endif
+        if (bind(socket->real_fd,
+                (const struct sockaddr *) &address,
+                address_length) == 0) {
+            bind_error = 0;
+            break;
+        }
+        bind_error = errno;
+        if (bind_error != EADDRINUSE)
+            break;
+    }
+    if (bind_error != 0) {
+        unlock(&socket->lock);
+        return err_map(bind_error);
+    }
+
+    strcpy(socket->socket.unix_backing_path, address.sun_path);
+    struct stat host_stat;
+    if (lstat(address.sun_path, &host_stat) == 0) {
+        socket->socket.unix_backing_owned = true;
+        socket->socket.unix_backing_device =
+                (uint64_t) host_stat.st_dev;
+        socket->socket.unix_backing_inode =
+                (uint64_t) host_stat.st_ino;
+    }
+    strcpy(path, address.sun_path);
+    unlock(&socket->lock);
+    return 0;
+}
+
 static int sockaddr_prepare_task(struct task *task,
-        void *sockaddr, uint_t *sockaddr_len, struct fd *bind_fd) {
+        int socket_type, void *sockaddr, uint_t *sockaddr_len,
+        struct unix_bind_transaction *bind,
+        struct socket_address *lookup) {
     // Make sure we can read things without overflowing buffers
     if (*sockaddr_len < 2)
         return _EINVAL;
-    if (*sockaddr_len > sizeof(struct sockaddr_max_))
+    if (*sockaddr_len > sizeof(struct sockaddr_storage))
         return _EINVAL;
 
     struct sockaddr *real_addr = sockaddr;
@@ -292,85 +669,147 @@ static int sockaddr_prepare_task(struct task *task,
         case PF_INET:
             if (*sockaddr_len < sizeof(struct sockaddr_in))
                 return _EINVAL;
+            *sockaddr_len = sizeof(struct sockaddr_in);
             break;
         case PF_INET6:
-            if (*sockaddr_len < sizeof(struct sockaddr_in6))
+            // Linux 保留 RFC2133 的 24 字节兼容输入；host 侧补零 scope_id。
+            if (*sockaddr_len < offsetof(struct sockaddr_in6, sin6_scope_id))
                 return _EINVAL;
+            *sockaddr_len = sizeof(struct sockaddr_in6);
             break;
 
         case PF_LOCAL: {
             // First pull out the path, being careful to not overflow anything.
             char path[SOCKADDR_DATA_MAX + 1];
             size_t path_size = *sockaddr_len - offsetof(struct sockaddr_, data);
+            if (path_size > SOCKADDR_DATA_MAX)
+                return _EINVAL;
             memcpy(path, fake_addr->data, path_size);
             path[path_size] = '\0';
 
-            uint32_t socket_id;
+            uint32_t socket_id = 0;
             int err;
+            int namespace_type = socket_type == SOCK_RAW_ ?
+                    SOCK_DGRAM_ : socket_type;
             if (path_size == 0) {
-                return _ENOENT;
+                if (bind == NULL)
+                    return _ENOENT;
+                // Linux 的 addrlen==2 会生成五位抽象名称。
+                do {
+                    uint32_t name_id = unix_socket_next_id();
+                    path[0] = '\0';
+                    snprintf(path + 1, 6, "%05x", name_id & 0xfffff);
+                    path_size = 6;
+                    err = unix_abstract_reserve(path + 1,
+                            path_size - 1, namespace_type,
+                            &bind->abstract,
+                            &socket_id);
+                } while (err == _EADDRINUSE);
             } else if (path[0] != '\0') {
                 STRACE(" unix socket %s", path);
-                err = unix_socket_get_task(
-                        task, path, bind_fd, &socket_id);
+                err = bind == NULL ?
+                        unix_socket_lookup_path_task(
+                                task, path, &socket_id,
+                                lookup != NULL ?
+                                        &lookup->lookup_inode : NULL) :
+                        unix_socket_reserve_path_task(
+                                task, path, bind, &socket_id);
             } else {
                 STRACE(" unix abstract socket %s", path + 1);
-                err = unix_abstract_get(path + 1, bind_fd, &socket_id);
+                err = bind == NULL ?
+                        unix_abstract_lookup(path + 1, path_size - 1,
+                                namespace_type, &socket_id,
+                                lookup != NULL ?
+                                        &lookup->lookup_abstract : NULL) :
+                        unix_abstract_reserve(path + 1, path_size - 1,
+                                namespace_type, &bind->abstract,
+                                &socket_id);
             }
             if (err < 0)
                 return err;
-            if (bind_fd != NULL) {
-                bind_fd->socket.unix_name_len = path_size;
-                memcpy(bind_fd->socket.unix_name, path, path_size);
+            size_t stored_size = path[0] == '\0' ?
+                    path_size : strlen(path) + 1;
+            if (bind != NULL) {
+                assert(stored_size <= sizeof(bind->name));
+                bind->name_length = (uint8_t) stored_size;
+                memcpy(bind->name, path, stored_size);
+            }
+            if (lookup != NULL) {
+                assert(stored_size <= sizeof(lookup->unix_name));
+                lookup->unix_name_valid = true;
+                lookup->unix_name_length = (uint8_t) stored_size;
+                memcpy(lookup->unix_name, path, stored_size);
             }
 
             struct sockaddr_un *real_addr_un = sockaddr;
-            size_t path_len = sprintf(real_addr_un->sun_path, "%s%d.%u", sock_tmp_prefix, getpid(), socket_id);
-            // The call to real bind will fail if the backing socket already
-            // exists from a previous run or something. We already checked that
-            // the fake file doesn't exist in unix_socket_get, so try a simple
-            // solution.
-            if (bind_fd != NULL)
-                unlink(real_addr_un->sun_path);
-            *sockaddr_len = offsetof(struct sockaddr_un, sun_path) + path_len;
+            int path_len = snprintf(real_addr_un->sun_path,
+                    sizeof(real_addr_un->sun_path), "%s%d.%u",
+                    sock_tmp_prefix, getpid(), socket_id);
+            if (path_len < 0 ||
+                    (size_t) path_len >= sizeof(real_addr_un->sun_path))
+                return _ENAMETOOLONG;
+            *sockaddr_len = (uint_t) (
+                    offsetof(struct sockaddr_un, sun_path) + path_len);
             break;
         }
         default:
             return _EINVAL;
     }
+#ifdef __APPLE__
+    real_addr->sa_len = (uint8_t) *sockaddr_len;
+#endif
     return 0;
 }
 
-static int sockaddr_read_bind(addr_t sockaddr_addr, void *sockaddr,
-        uint_t *sockaddr_len, struct fd *bind_fd) {
+static int sockaddr_read(addr_t sockaddr_addr, int socket_type,
+        void *sockaddr, uint_t *sockaddr_len) {
     if (*sockaddr_len < 2 ||
             *sockaddr_len > sizeof(struct sockaddr_max_))
         return _EINVAL;
     if (user_read(sockaddr_addr, sockaddr, *sockaddr_len))
         return _EFAULT;
     return sockaddr_prepare_task(
-            current, sockaddr, sockaddr_len, bind_fd);
+            current, socket_type, sockaddr, sockaddr_len, NULL, NULL);
 }
 
-static int sockaddr_read(addr_t sockaddr_addr, void *sockaddr, uint_t *sockaddr_len) {
-    struct inode_data *inode = NULL;
-    int err = sockaddr_read_bind(sockaddr_addr, sockaddr, sockaddr_len, NULL);
-    inode_release_if_exist(inode);
-    return err;
-}
+static int sockaddr_from_real(void *sockaddr, size_t storage_size,
+        uint_t *sockaddr_len, bool consume_unix_message) {
+    uint_t host_length = *sockaddr_len;
+    if (host_length == 0)
+        return 0;
+    size_t available = host_length < storage_size ?
+            host_length : storage_size;
+    if (available < offsetof(struct sockaddr, sa_data))
+        return _EINVAL;
 
-static int sockaddr_write(addr_t sockaddr_addr, void *sockaddr, uint_t buffer_len, uint_t *sockaddr_len) {
-    struct sockaddr *real_addr = sockaddr;
-    struct sockaddr_ *fake_addr = sockaddr;
+    struct sockaddr_storage host_storage = {0};
+    memcpy(&host_storage, sockaddr, available);
+    const struct sockaddr *real_addr =
+            (const struct sockaddr *) &host_storage;
+    struct sockaddr_storage guest_storage = {0};
+    memcpy(&guest_storage, &host_storage, available);
+    struct sockaddr_ *fake_addr = (struct sockaddr_ *) &guest_storage;
     fake_addr->family = sock_family_from_real(real_addr->sa_family);
     switch (fake_addr->family) {
         case PF_LOCAL_: {
-            // Most callers of sockaddr_write use it to return a peer name, and
-            // since we don't know the peer name in this case, just return the
-            // default peer name, which is the null address.
-            static struct sockaddr_ unix_domain_null = {.family = PF_LOCAL_};
-            sockaddr = &unix_domain_null;
-            *sockaddr_len = sizeof(unix_domain_null);
+            char host_path[sizeof(((struct sockaddr_un *) 0)->sun_path)] = {0};
+            size_t path_offset = offsetof(struct sockaddr_un, sun_path);
+            size_t path_length = available > path_offset ?
+                    available - path_offset : 0;
+            if (path_length >= sizeof(host_path))
+                path_length = sizeof(host_path) - 1;
+            const struct sockaddr_un *host =
+                    (const struct sockaddr_un *) &host_storage;
+            memcpy(host_path, host->sun_path, path_length);
+            memset(&guest_storage, 0, sizeof(guest_storage));
+            bool found = unix_bound_name_copy(host_path,
+                    &guest_storage, sockaddr_len,
+                    consume_unix_message);
+            if (!found) {
+                fake_addr = (struct sockaddr_ *) &guest_storage;
+                fake_addr->family = PF_LOCAL_;
+                *sockaddr_len = offsetof(struct sockaddr_, data);
+            }
             break;
         }
         case PF_INET_:
@@ -379,9 +818,19 @@ static int sockaddr_write(addr_t sockaddr_addr, void *sockaddr, uint_t buffer_le
         default:
             return _EINVAL;
     }
+    size_t copied = storage_size < sizeof(guest_storage) ?
+            storage_size : sizeof(guest_storage);
+    memcpy(sockaddr, &guest_storage, copied);
+    return 0;
+}
 
-    if (buffer_len > *sockaddr_len)
-        buffer_len = *sockaddr_len;
+static int sockaddr_copy_to_user(addr_t sockaddr_addr,
+        const void *sockaddr, size_t storage_size,
+        uint_t buffer_len, uint_t sockaddr_len) {
+    if (buffer_len > sockaddr_len)
+        buffer_len = sockaddr_len;
+    if (buffer_len > storage_size)
+        buffer_len = (uint_t) storage_size;
     // The address is supposed to be truncated if the specified length is too
     // short, instead of returning an error.
     if (user_write(sockaddr_addr, sockaddr, buffer_len))
@@ -389,26 +838,357 @@ static int sockaddr_write(addr_t sockaddr_addr, void *sockaddr, uint_t buffer_le
     return 0;
 }
 
+static int socket_address_prepare_raw_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length,
+        struct socket_address *prepared) {
+    assert(task != NULL && socket != NULL && socket->fd != NULL &&
+            address != NULL && prepared != NULL);
+    if (address_length > sizeof(prepared->storage))
+        return _EINVAL;
+    *prepared = (struct socket_address) {0};
+    memcpy(&prepared->storage, address, address_length);
+    uint_t length = (uint_t) address_length;
+    int error = sockaddr_prepare_task(
+            task, socket->fd->socket.type,
+            &prepared->storage, &length, NULL, prepared);
+    if (error < 0) {
+        socket_address_release(prepared);
+        return error;
+    }
+    prepared->length = (socklen_t) length;
+    return 0;
+}
+
+int socket_address_prepare_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length,
+        struct socket_address *prepared) {
+    assert(task != NULL && socket != NULL && socket->fd != NULL &&
+            address != NULL && prepared != NULL);
+    if (address_length > sizeof(prepared->storage))
+        return _EINVAL;
+    *prepared = (struct socket_address) {0};
+    if (address_length == 0)
+        return 0;
+
+    // Linux 的 INET stream sendto 忽略 msg_name；connect 走原始转换入口。
+    if ((socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_STREAM_)
+        return 0;
+    if (address_length < sizeof(uint16_t))
+        return _EINVAL;
+
+    uint16_t family;
+    memcpy(&family, address, sizeof(family));
+    if (socket->fd->socket.domain == AF_INET6_) {
+        if (family == 0 && socket->fd->socket.type != SOCK_RAW_)
+            return 0;
+        if (family == 0) {
+            struct sockaddr_storage normalized = {0};
+            memcpy(&normalized, address, address_length);
+            uint16_t inet6_family = AF_INET6_;
+            memcpy(&normalized, &inet6_family, sizeof(inet6_family));
+            return socket_address_prepare_raw_task(task, socket,
+                    &normalized, address_length, prepared);
+        }
+        if (family == AF_INET_) {
+            const byte_t *wire = address;
+            struct sockaddr_in6 mapped = {0};
+            mapped.sin6_family = AF_INET6;
+            memcpy(&mapped.sin6_port, wire + 2,
+                    sizeof(mapped.sin6_port));
+            mapped.sin6_addr.s6_addr[10] = 0xff;
+            mapped.sin6_addr.s6_addr[11] = 0xff;
+            memcpy(&mapped.sin6_addr.s6_addr[12], wire + 4, 4);
+#ifdef __APPLE__
+            mapped.sin6_len = sizeof(mapped);
+#endif
+            memcpy(&prepared->storage, &mapped, sizeof(mapped));
+            prepared->length = sizeof(mapped);
+            return 0;
+        }
+    }
+
+    if (socket->fd->socket.domain == AF_INET_ && family == 0) {
+        struct sockaddr_storage normalized = {0};
+        memcpy(&normalized, address, address_length);
+        uint16_t inet_family = AF_INET_;
+        memcpy(&normalized, &inet_family, sizeof(inet_family));
+        return socket_address_prepare_raw_task(task, socket,
+                &normalized, address_length, prepared);
+    }
+    return socket_address_prepare_raw_task(
+            task, socket, address, address_length, prepared);
+}
+
+int socket_address_validate_for_socket(const struct socket_ref *socket,
+        const void *address, size_t address_length) {
+    assert(socket != NULL && socket->fd != NULL && address != NULL);
+    if (address_length > sizeof(struct sockaddr_storage))
+        return _EINVAL;
+    if (address_length == 0) {
+        if (socket->fd->socket.domain == AF_LOCAL_ ||
+                socket->fd->socket.type == SOCK_STREAM_)
+            return 0;
+        // UDP/ping 与 rawv6 按非空 msg_name 校验；raw4 只看 namelen。
+        return socket->fd->socket.domain == AF_INET_ &&
+                socket->fd->socket.type == SOCK_RAW_ ? 0 : _EINVAL;
+    }
+    if ((socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_STREAM_)
+        return 0;
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_STREAM_) {
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        return getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &peer_length) == 0 ?
+                _EISCONN : _EOPNOTSUPP;
+    }
+    if (address_length < sizeof(uint16_t))
+        return _EINVAL;
+    uint16_t family;
+    memcpy(&family, address, sizeof(family));
+    if (socket->fd->socket.domain == AF_LOCAL_)
+        return address_length <= offsetof(struct sockaddr_, data) ||
+                family != AF_LOCAL_ ? _EINVAL : 0;
+
+    bool udp = socket->fd->socket.type == SOCK_DGRAM_ &&
+            (socket->fd->socket.protocol == 0 ||
+            socket->fd->socket.protocol == IPPROTO_UDP);
+    bool ping = socket_sendto_prefix_size(socket) != 0;
+    if (socket->fd->socket.domain == AF_INET_) {
+        if (address_length < sizeof(struct sockaddr_in))
+            return _EINVAL;
+        if (ping)
+            return family == AF_INET_ ? 0 : _EAFNOSUPPORT;
+        if (family != AF_INET_ && family != 0)
+            return _EAFNOSUPPORT;
+        if (udp) {
+            uint16_t port;
+            memcpy(&port, (const byte_t *) address + 2, sizeof(port));
+            if (port == 0)
+                return _EINVAL;
+        }
+        return 0;
+    }
+
+    assert(socket->fd->socket.domain == AF_INET6_);
+    if (ping) {
+        if (address_length < sizeof(struct sockaddr_in6))
+            return _EINVAL;
+        return family == AF_INET6_ ? 0 : _EAFNOSUPPORT;
+    }
+    if (socket->fd->socket.type == SOCK_RAW_) {
+        if (address_length < offsetof(
+                struct sockaddr_in6, sin6_scope_id))
+            return _EINVAL;
+        if (family != 0 && family != AF_INET6_)
+            return _EAFNOSUPPORT;
+        uint16_t protocol;
+        memcpy(&protocol, (const byte_t *) address + 2,
+                sizeof(protocol));
+        protocol = ntohs(protocol);
+        if (protocol > UINT8_MAX ||
+                (protocol != 0 &&
+                socket->fd->socket.protocol != IPPROTO_RAW &&
+                protocol != socket->fd->socket.protocol))
+            return _EINVAL;
+        return 0;
+    }
+    if (family == AF_INET6_) {
+        if (address_length < offsetof(
+                struct sockaddr_in6, sin6_scope_id))
+            return _EINVAL;
+        if (udp) {
+            uint16_t port;
+            memcpy(&port, (const byte_t *) address + 2, sizeof(port));
+            if (port == 0)
+                return _EINVAL;
+        }
+        return 0;
+    }
+    if (family == AF_INET_) {
+        if (address_length < sizeof(struct sockaddr_in))
+            return _EINVAL;
+        int ipv6_only = 0;
+        socklen_t option_length = sizeof(ipv6_only);
+        if (getsockopt(socket->fd->real_fd, IPPROTO_IPV6,
+                IPV6_V6ONLY, &ipv6_only, &option_length) < 0)
+            return errno_map();
+        if (ipv6_only)
+            return _ENETUNREACH;
+        if (udp) {
+            uint16_t port;
+            memcpy(&port, (const byte_t *) address + 2, sizeof(port));
+            if (port == 0)
+                return _EINVAL;
+        }
+        return 0;
+    }
+    return family == 0 ? 0 : _EINVAL;
+}
+
+static int socket_bind_address_validate(const struct socket_ref *socket,
+        const void *address, size_t address_length) {
+    assert(socket != NULL && socket->fd != NULL && address != NULL);
+    uint16_t family;
+    if (socket->fd->socket.domain == AF_INET_) {
+        if (address_length < sizeof(struct sockaddr_in))
+            return _EINVAL;
+        memcpy(&family, address, sizeof(family));
+        if (family == AF_INET_)
+            return 0;
+        uint32_t ipv4_address;
+        memcpy(&ipv4_address, (const byte_t *) address + 4,
+                sizeof(ipv4_address));
+        return family == 0 && ipv4_address == INADDR_ANY ?
+                0 : _EAFNOSUPPORT;
+    }
+    if (socket->fd->socket.domain == AF_INET6_) {
+        if (address_length < offsetof(
+                struct sockaddr_in6, sin6_scope_id))
+            return _EINVAL;
+        memcpy(&family, address, sizeof(family));
+        return family == AF_INET6_ ? 0 : _EAFNOSUPPORT;
+    }
+    if (address_length < sizeof(uint16_t))
+        return _EINVAL;
+    memcpy(&family, address, sizeof(family));
+    return family == AF_LOCAL_ ? 0 : _EINVAL;
+}
+
+void socket_address_release(struct socket_address *address) {
+    assert(address != NULL);
+    inode_release_if_exist(address->lookup_inode);
+    if (address->lookup_abstract != NULL)
+        unix_abstract_release(address->lookup_abstract);
+    address->lookup_inode = NULL;
+    address->lookup_abstract = NULL;
+}
+
+int_t socket_bind_ref_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length) {
+    assert(task != NULL && socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops && address != NULL);
+    if (address_length < 2 ||
+            address_length > sizeof(struct sockaddr_storage))
+        return _EINVAL;
+    int error = socket_bind_address_validate(
+            socket, address, address_length);
+    if (error < 0)
+        return error;
+
+    bool unix_autobind = socket->fd->socket.domain == AF_LOCAL_ &&
+            address_length == sizeof(uint16_t);
+    struct sockaddr_storage sockaddr = {0};
+    memcpy(&sockaddr, address, address_length);
+    if (socket->fd->socket.domain == AF_INET_) {
+        uint16_t family;
+        memcpy(&family, &sockaddr, sizeof(family));
+        if (family == 0) {
+            family = AF_INET_;
+            memcpy(&sockaddr, &family, sizeof(family));
+        }
+    }
+    uint_t sockaddr_len = (uint_t) address_length;
+    struct unix_bind_transaction transaction = {0};
+
+    // fd 锁在这里承担 Linux unix bindlock 的职责，保证同一
+    // socket 的 host bind、名称发布与元数据提交不会交叉。
+    lock(&socket->fd->lock);
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            (socket->fd->socket.unix_name_inode != NULL ||
+            socket->fd->socket.unix_name_abstract != NULL ||
+            socket->fd->socket.unix_backing_path[0] != '\0')) {
+        unlock(&socket->fd->lock);
+        return unix_autobind ? 0 : _EINVAL;
+    }
+    error = sockaddr_prepare_task(
+            task, socket->fd->socket.type,
+            &sockaddr, &sockaddr_len, &transaction, NULL);
+    if (error < 0) {
+        unlock(&socket->fd->lock);
+        unix_bind_rollback(&transaction);
+        return error;
+    }
+
+    if (socket->fd->socket.domain == AF_LOCAL_) {
+        transaction.bound_name = calloc(1, sizeof(*transaction.bound_name));
+        if (transaction.bound_name == NULL) {
+            unlock(&socket->fd->lock);
+            unix_bind_rollback(&transaction);
+            return _ENOMEM;
+        }
+        list_init(&transaction.bound_name->links);
+        list_init(&transaction.bound_name->pending_peers);
+        cond_init(&transaction.bound_name->connects_drained);
+        transaction.bound_name->name_length = transaction.name_length;
+        memcpy(transaction.bound_name->name,
+                transaction.name, transaction.name_length);
+        const struct sockaddr_un *host_address =
+                (const struct sockaddr_un *) &sockaddr;
+        strcpy(transaction.bound_name->backing_path,
+                host_address->sun_path);
+    }
+
+    if (bind(socket->fd->real_fd,
+            (void *) &sockaddr, (socklen_t) sockaddr_len) < 0) {
+        error = errno_map();
+        unlock(&socket->fd->lock);
+        unix_bind_rollback(&transaction);
+        return error;
+    }
+    if (socket->fd->socket.domain == AF_LOCAL_) {
+        const struct sockaddr_un *host_address =
+                (const struct sockaddr_un *) &sockaddr;
+        struct stat host_stat;
+        if (lstat(host_address->sun_path, &host_stat) == 0) {
+            socket->fd->socket.unix_backing_owned = true;
+            socket->fd->socket.unix_backing_device =
+                    (uint64_t) host_stat.st_dev;
+            socket->fd->socket.unix_backing_inode =
+                    (uint64_t) host_stat.st_ino;
+        }
+        strcpy(socket->fd->socket.unix_backing_path,
+                host_address->sun_path);
+        unix_bind_commit(&transaction, socket->fd);
+    } else {
+        uint16_t port;
+        memcpy(&port, (const byte_t *) address + 2, sizeof(port));
+        socket->fd->socket.inet_explicitly_bound = port != 0;
+    }
+    unlock(&socket->fd->lock);
+    if (socket->fd->socket.domain != AF_LOCAL_)
+        unix_bind_rollback(&transaction);
+    return 0;
+}
+
 int_t sys_bind(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
     STRACE("bind(%d, 0x%x, %d)", sock_fd, sockaddr_addr, sockaddr_len);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    struct sockaddr_max_ sockaddr;
-    struct inode_data *inode = NULL;
-    int err = sockaddr_read_bind(sockaddr_addr, &sockaddr, &sockaddr_len, sock);
-    if (err < 0)
-        return err;
-
-    err = bind(sock->real_fd, (void *) &sockaddr, sockaddr_len);
-    if (err < 0) {
-        inode_release_if_exist(sock->socket.unix_name_inode);
-        if (sock->socket.unix_name_abstract != NULL)
-            unix_abstract_release(sock->socket.unix_name_abstract);
-        return errno_map();
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+    if (sockaddr_len < 2 ||
+            sockaddr_len > sizeof(struct sockaddr_storage)) {
+        result = _EINVAL;
+        goto out;
     }
-    sock->socket.unix_name_inode = inode;
-    return 0;
+    struct sockaddr_storage sockaddr = {0};
+    if (user_read(sockaddr_addr, &sockaddr, sockaddr_len)) {
+        result = _EFAULT;
+        goto out;
+    }
+    result = socket_bind_ref_task(
+            current, &socket, &sockaddr, sockaddr_len);
+out:
+    socket_ref_release(&socket);
+    return result;
 }
 
 static void fill_cred_task(struct task *task, struct ucred_ *cred) {
@@ -419,35 +1199,198 @@ static void fill_cred_task(struct task *task, struct ucred_ *cred) {
     cred->gid = credentials.egid;
 }
 
-static bool unix_socket_write_peer(int real_fd, struct fd *peer) {
-    size_t offset = 0;
-    while (offset != sizeof(peer)) {
-        ssize_t written = write(real_fd,
-                (const char *) &peer + offset, sizeof(peer) - offset);
-        if (written > 0) {
-            offset += (size_t) written;
-            continue;
-        }
-        if (written < 0 && errno == EINTR)
-            continue;
-        return false;
+static int unix_bound_connect_begin(const struct socket_address *address,
+        struct fd *peer, struct unix_bound_name **target,
+        struct unix_pending_peer **pending,
+        struct ucred_ *listener_cred, bool *listener_cred_valid,
+        uint64_t generation) {
+    struct unix_pending_peer *candidate = calloc(1, sizeof(*candidate));
+    if (candidate == NULL)
+        return _ENOMEM;
+    list_init(&candidate->links);
+    int path_error = unix_socket_transport_path(
+            peer, candidate->peer_path);
+    if (path_error < 0) {
+        free(candidate);
+        return path_error;
     }
+
+    const struct sockaddr_un *host_address =
+            (const struct sockaddr_un *) &address->storage;
+    lock(&unix_bound_lock);
+    struct unix_bound_name *name = NULL;
+    if (!list_null(&unix_bound_sockets)) {
+        struct unix_bound_name *entry;
+        list_for_each_entry(&unix_bound_sockets, entry, links) {
+            if (entry->owner_open && !entry->closing &&
+                    strcmp(entry->backing_path,
+                            host_address->sun_path) == 0) {
+                name = entry;
+                break;
+            }
+        }
+    }
+    if (name == NULL) {
+        unlock(&unix_bound_lock);
+        free(candidate);
+        return _ECONNREFUSED;
+    }
+
+    candidate->peer = fd_retain(peer);
+    candidate->connect_active = true;
+    candidate->generation = generation;
+    candidate->listener_cred = name->listener_cred;
+    candidate->listener_cred_valid = name->listener_cred_valid;
+    name->active_connects++;
+    list_add_tail(&name->pending_peers, &candidate->links);
+    candidate->linked = true;
+    assert(peer->socket.unix_pending_connect == NULL);
+    peer->socket.unix_pending_connect = candidate;
+    *target = name;
+    *pending = candidate;
+    *listener_cred = name->listener_cred;
+    *listener_cred_valid = name->listener_cred_valid;
+    unlock(&unix_bound_lock);
+    return 0;
+}
+
+static void unix_bound_connect_complete(struct unix_bound_name *target,
+        struct unix_pending_peer *pending,
+        bool connected, bool asynchronous) {
+    struct fd *canceled_peer = NULL;
+    bool free_pending = false;
+    lock(&unix_bound_lock);
+    assert(target->active_connects != 0);
+    assert(pending->connect_active);
+    pending->connect_active = false;
+    pending->host_error_pending = connected && asynchronous;
+    if ((!connected || pending->cancel_requested) &&
+            !pending->accepted) {
+        assert(pending->linked);
+        list_remove(&pending->links);
+        pending->linked = false;
+        canceled_peer = pending->peer;
+        pending->peer = NULL;
+        if (canceled_peer->socket.unix_pending_connect == pending)
+            canceled_peer->socket.unix_pending_connect = NULL;
+        free_pending = true;
+    } else if (pending->accepted) {
+        free_pending = true;
+    }
+    target->active_connects--;
+    if (target->active_connects == 0)
+        notify(&target->connects_drained);
+    unlock(&unix_bound_lock);
+
+    if (canceled_peer != NULL) {
+        unix_socket_finish_peer_handshake(canceled_peer, NULL);
+    }
+    if (free_pending)
+        free(pending);
+}
+
+static bool unix_bound_cancel_peer(
+        struct fd *peer, uint64_t generation) {
+    struct unix_pending_peer *canceled = NULL;
+    lock(&unix_bound_lock);
+    struct unix_pending_peer *pending =
+            peer->socket.unix_pending_connect;
+    if (pending != NULL && pending->generation == generation &&
+            pending->host_error_pending) {
+        pending->cancel_requested = true;
+        if (!pending->connect_active) {
+            assert(pending->linked && !pending->accepted &&
+                    pending->peer == peer);
+            list_remove(&pending->links);
+            pending->linked = false;
+            pending->peer = NULL;
+            peer->socket.unix_pending_connect = NULL;
+            canceled = pending;
+        }
+    }
+    unlock(&unix_bound_lock);
+    if (canceled == NULL)
+        return false;
+    unix_socket_finish_peer_handshake(peer, NULL);
+    free(canceled);
     return true;
 }
 
-static struct fd *unix_socket_read_peer(int real_fd) {
-    struct fd *peer = NULL;
-    size_t offset = 0;
-    while (offset != sizeof(peer)) {
-        ssize_t read_size = read(real_fd,
-                (char *) &peer + offset, sizeof(peer) - offset);
-        if (read_size > 0) {
-            offset += (size_t) read_size;
-            continue;
-        }
-        if (read_size < 0 && errno == EINTR)
-            continue;
+enum unix_connect_error_phase {
+    UNIX_CONNECT_ERROR_NONE,
+    UNIX_CONNECT_ERROR_DEFERRED,
+    UNIX_CONNECT_ERROR_ASYNC,
+};
+
+static enum unix_connect_error_phase unix_bound_connect_error_snapshot(
+        struct fd *peer, uint64_t *generation) {
+    enum unix_connect_error_phase phase = UNIX_CONNECT_ERROR_NONE;
+    *generation = 0;
+    lock(&unix_bound_lock);
+    struct unix_pending_peer *pending =
+            peer->socket.unix_pending_connect;
+    if (pending != NULL) {
+        phase = pending->host_error_pending ?
+                UNIX_CONNECT_ERROR_ASYNC :
+                UNIX_CONNECT_ERROR_DEFERRED;
+        *generation = pending->generation;
+    }
+    unlock(&unix_bound_lock);
+    return phase;
+}
+
+static struct fd *unix_bound_accept_peer(
+        struct fd *listener, const struct sockaddr_storage *address,
+        socklen_t address_length) {
+    if (address_length <= offsetof(struct sockaddr_un, sun_path))
         return NULL;
+    const struct sockaddr_un *peer_address =
+            (const struct sockaddr_un *) address;
+    if (peer_address->sun_family != AF_UNIX)
+        return NULL;
+    size_t path_length = address_length -
+            offsetof(struct sockaddr_un, sun_path);
+    if (path_length >= sizeof(peer_address->sun_path))
+        path_length = sizeof(peer_address->sun_path) - 1;
+    char peer_path[sizeof(peer_address->sun_path)];
+    memcpy(peer_path, peer_address->sun_path, path_length);
+    peer_path[path_length] = '\0';
+
+    struct fd *peer = NULL;
+    struct ucred_ listener_cred = {0};
+    bool listener_cred_valid = false;
+    lock(&unix_bound_lock);
+    struct unix_bound_name *name = listener->socket.unix_bound_name;
+    if (name != NULL) {
+        struct unix_pending_peer *pending;
+        list_for_each_entry(&name->pending_peers, pending, links) {
+            if (strcmp(pending->peer_path, peer_path) != 0)
+                continue;
+            assert(pending->linked);
+            list_remove(&pending->links);
+            pending->linked = false;
+            peer = pending->peer;
+            pending->peer = NULL;
+            pending->accepted = true;
+            if (peer->socket.unix_pending_connect == pending)
+                peer->socket.unix_pending_connect = NULL;
+            listener_cred = pending->listener_cred;
+            listener_cred_valid = pending->listener_cred_valid;
+            if (!listener_cred_valid && name->listener_cred_valid) {
+                listener_cred = name->listener_cred;
+                listener_cred_valid = true;
+            }
+            if (!pending->connect_active)
+                free(pending);
+            break;
+        }
+    }
+    unlock(&unix_bound_lock);
+    if (peer != NULL && listener_cred_valid) {
+        lock(&peer_lock);
+        peer->socket.unix_peer_cred = listener_cred;
+        peer->socket.unix_peer_cred_valid = true;
+        unlock(&peer_lock);
     }
     return peer;
 }
@@ -456,45 +1399,365 @@ static void unix_socket_finish_peer_handshake(
         struct fd *peer, struct fd *accepted) {
     if (peer == NULL)
         return;
+    struct list rejected_scm;
+    list_init(&rejected_scm);
     lock(&peer_lock);
+    lock(&peer->lock);
     if (accepted != NULL) {
+        lock(&accepted->lock);
         accepted->socket.unix_peer = peer;
-        accepted->socket.unix_peer_handshake_done = true;
         peer->socket.unix_peer = accepted;
+        accepted->socket.unix_peer_name_valid = true;
+        accepted->socket.unix_peer_name_len =
+                peer->socket.unix_name_len;
+        memcpy(accepted->socket.unix_peer_name,
+                peer->socket.unix_name,
+                peer->socket.unix_name_len);
+        peer->socket.unix_peer_name_valid = true;
+        peer->socket.unix_peer_name_len =
+                accepted->socket.unix_name_len;
+        memcpy(peer->socket.unix_peer_name,
+                accepted->socket.unix_name,
+                accepted->socket.unix_name_len);
+        accepted->socket.unix_peer_cred = peer->socket.unix_cred;
+        accepted->socket.unix_peer_cred_valid = true;
+        if (!peer->socket.unix_peer_cred_valid) {
+            peer->socket.unix_peer_cred = accepted->socket.unix_cred;
+            peer->socket.unix_peer_cred_valid = true;
+        }
+        peer->socket.unix_peer_handshake_pending = false;
+        peer->socket.unix_peer_handshake_rejected = false;
+        while (!list_empty(&peer->socket.unix_pending_scm)) {
+            struct scm *scm = list_first_entry(
+                    &peer->socket.unix_pending_scm,
+                    struct scm, queue);
+            list_remove(&scm->queue);
+            list_add_tail(&accepted->socket.unix_scm, &scm->queue);
+        }
+        unlock(&accepted->lock);
+    } else {
+        peer->socket.unix_peer_handshake_pending = false;
+        peer->socket.unix_peer_handshake_rejected = true;
+        while (!list_empty(&peer->socket.unix_pending_scm)) {
+            struct scm *scm = list_first_entry(
+                    &peer->socket.unix_pending_scm,
+                    struct scm, queue);
+            list_remove(&scm->queue);
+            list_add_tail(&rejected_scm, &scm->queue);
+        }
     }
-    peer->socket.unix_peer_handshake_done = true;
-    notify(&peer->socket.unix_got_peer);
+    unlock(&peer->lock);
     unlock(&peer_lock);
+
+    while (!list_empty(&rejected_scm)) {
+        struct scm *scm = list_first_entry(
+                &rejected_scm, struct scm, queue);
+        list_remove(&scm->queue);
+        scm_free(scm);
+    }
+    // 待 accept 注册表携带一份强引用，由成功、拒绝或 listener 关闭消费。
+    fd_close(peer);
 }
 
 static int socket_connect_prepared(
         struct task *task, struct fd *sock,
-        void *sockaddr, uint_t sockaddr_len) {
-    int err = sockaddr_prepare_task(
-            task, sockaddr, &sockaddr_len, NULL);
-    if (err < 0)
-        return err;
-
-    err = connect(sock->real_fd, sockaddr, sockaddr_len);
-    if (err < 0)
-        return errno_map();
-
-    if (sock->socket.domain == AF_LOCAL_) {
-        fill_cred_task(task, &sock->socket.unix_cred);
+        const struct socket_address *address) {
+    bool unix_stream = sock->socket.domain == AF_LOCAL_ &&
+            sock->socket.type == SOCK_STREAM_;
+    struct unix_bound_name *target = NULL;
+    struct unix_pending_peer *pending = NULL;
+    struct ucred_ listener_cred = {0};
+    bool listener_cred_valid = false;
+    uint64_t connect_generation = 0;
+    if (unix_stream) {
+        struct sockaddr_storage connected_address;
+        socklen_t connected_length = sizeof(connected_address);
+        if (getpeername(sock->real_fd,
+                (struct sockaddr *) &connected_address,
+                &connected_length) == 0)
+            return _EISCONN;
         lock(&peer_lock);
-        assert(sock->socket.unix_peer == NULL);
-        sock->socket.unix_peer_handshake_done = false;
+        bool pending_connect =
+                sock->socket.unix_peer_handshake_pending;
+        if (!pending_connect) {
+            sock->socket.unix_peer_handshake_pending = true;
+            sock->socket.unix_peer_handshake_rejected = false;
+            connect_generation = ++sock->socket.unix_connect_generation;
+            if (connect_generation == 0)
+                connect_generation = ++sock->socket.unix_connect_generation;
+        } else {
+            connect_generation = sock->socket.unix_connect_generation;
+        }
         unlock(&peer_lock);
-        // accept 端以该指针建立进程内 peer 关系；调用方强引用持续到确认完成。
-        if (unix_socket_write_peer(sock->real_fd, sock)) {
+        if (pending_connect) {
+            connected_length = sizeof(connected_address);
+            if (getpeername(sock->real_fd,
+                    (struct sockaddr *) &connected_address,
+                    &connected_length) == 0)
+                return _EISCONN;
+            enum unix_connect_error_phase error_phase =
+                    unix_bound_connect_error_snapshot(
+                            sock, &connect_generation);
+            if (error_phase != UNIX_CONNECT_ERROR_ASYNC)
+                return _EALREADY;
+            int host_error = 0;
+            socklen_t error_length = sizeof(host_error);
+            if (getsockopt(sock->real_fd, SOL_SOCKET, SO_ERROR,
+                    &host_error, &error_length) < 0)
+                return errno_map();
+            if (host_error == 0)
+                return _EALREADY;
+            (void) unix_bound_cancel_peer(
+                    sock, connect_generation);
+            return err_map(host_error);
+        }
+        lock(&sock->lock);
+        fill_cred_task(task, &sock->socket.unix_cred);
+        unlock(&sock->lock);
+        int begin_error = unix_bound_connect_begin(
+                address, sock, &target, &pending,
+                &listener_cred, &listener_cred_valid,
+                connect_generation);
+        if (begin_error < 0) {
             lock(&peer_lock);
-            while (!sock->socket.unix_peer_handshake_done)
-                wait_for_ignore_signals(&sock->socket.unix_got_peer, &peer_lock, NULL);
+            sock->socket.unix_peer_handshake_pending = false;
             unlock(&peer_lock);
+            return begin_error;
         }
     }
 
+    bool serialize_inet = sock->socket.domain == AF_INET_ ||
+            sock->socket.domain == AF_INET6_;
+    if (serialize_inet)
+        lock(&sock->lock);
+    int err = connect(sock->real_fd,
+            (const struct sockaddr *) &address->storage,
+            address->length);
+    int host_error = errno;
+    if (serialize_inet)
+        unlock(&sock->lock);
+    bool asynchronous = err < 0 &&
+            (host_error == EINPROGRESS || host_error == EALREADY);
+    if (unix_stream)
+        unix_bound_connect_complete(
+                target, pending, err == 0 || asynchronous,
+                asynchronous);
+    if (err < 0 && host_error == ENOENT &&
+            (address->lookup_inode != NULL ||
+            address->lookup_abstract != NULL))
+        return _ECONNREFUSED;
+    if (err < 0)
+        return err_map(host_error);
+
+    if (sock->socket.domain == AF_LOCAL_ && address->unix_name_valid) {
+        lock(&peer_lock);
+        sock->socket.unix_peer_handshake_rejected = false;
+        sock->socket.unix_peer_name_valid = true;
+        sock->socket.unix_peer_name_len = address->unix_name_length;
+        memcpy(sock->socket.unix_peer_name,
+                address->unix_name, address->unix_name_length);
+        if (unix_stream && listener_cred_valid) {
+            sock->socket.unix_peer_cred = listener_cred;
+            sock->socket.unix_peer_cred_valid = true;
+        }
+        unlock(&peer_lock);
+    }
+
     return err;
+}
+
+static int socket_connect_address_prepare_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length,
+        struct socket_address *prepared) {
+    uint16_t family;
+    memcpy(&family, address, sizeof(family));
+    if (socket->fd->socket.domain == AF_INET_) {
+        if (address_length < sizeof(struct sockaddr_in))
+            return _EINVAL;
+        if (family != AF_INET_)
+            return _EAFNOSUPPORT;
+    } else if (socket->fd->socket.domain == AF_INET6_) {
+        if (family == AF_INET_) {
+            if (address_length < sizeof(struct sockaddr_in))
+                return _EINVAL;
+            int ipv6_only = 0;
+            socklen_t option_length = sizeof(ipv6_only);
+            if (getsockopt(socket->fd->real_fd, IPPROTO_IPV6,
+                    IPV6_V6ONLY, &ipv6_only, &option_length) < 0)
+                return errno_map();
+            if (ipv6_only)
+                return _EAFNOSUPPORT;
+            const byte_t *wire = address;
+            struct sockaddr_in6 mapped = {0};
+            mapped.sin6_family = AF_INET6;
+            memcpy(&mapped.sin6_port, wire + 2,
+                    sizeof(mapped.sin6_port));
+            mapped.sin6_addr.s6_addr[10] = 0xff;
+            mapped.sin6_addr.s6_addr[11] = 0xff;
+            memcpy(&mapped.sin6_addr.s6_addr[12], wire + 4, 4);
+#ifdef __APPLE__
+            mapped.sin6_len = sizeof(mapped);
+#endif
+            *prepared = (struct socket_address) {
+                .length = sizeof(mapped),
+            };
+            memcpy(&prepared->storage, &mapped, sizeof(mapped));
+            return 0;
+        }
+        if (address_length < offsetof(
+                struct sockaddr_in6, sin6_scope_id))
+            return _EINVAL;
+        if (family != AF_INET6_)
+            return _EAFNOSUPPORT;
+    }
+    return socket_address_prepare_raw_task(
+            task, socket, address, address_length, prepared);
+}
+
+#ifdef __APPLE__
+struct copied_socket_option {
+    int level;
+    int option;
+};
+
+static int socket_copy_option(int source, int destination,
+        const struct copied_socket_option *option) {
+    byte_t value[256];
+    socklen_t value_length = sizeof(value);
+    if (getsockopt(source, option->level, option->option,
+            value, &value_length) < 0) {
+        if (errno == ENOPROTOOPT || errno == EINVAL)
+            return 0;
+        return errno_map();
+    }
+    if (setsockopt(destination, option->level, option->option,
+            value, value_length) < 0)
+        return errno_map();
+    return 0;
+}
+
+static int socket_recreate_unbound_inet(struct fd *fd) {
+    static const struct copied_socket_option common_options[] = {
+        {SOL_SOCKET, SO_REUSEADDR},
+        {SOL_SOCKET, SO_BROADCAST},
+        {SOL_SOCKET, SO_KEEPALIVE},
+        {SOL_SOCKET, SO_LINGER},
+#ifdef SO_REUSEPORT
+        {SOL_SOCKET, SO_REUSEPORT},
+#endif
+        {SOL_SOCKET, SO_SNDBUF},
+        {SOL_SOCKET, SO_RCVBUF},
+#ifdef SO_TIMESTAMP
+        {SOL_SOCKET, SO_TIMESTAMP},
+#endif
+        {SOL_SOCKET, SO_RCVTIMEO},
+        {SOL_SOCKET, SO_SNDTIMEO},
+    };
+    static const struct copied_socket_option ipv4_options[] = {
+        {IPPROTO_IP, IP_TOS},
+        {IPPROTO_IP, IP_TTL},
+        {IPPROTO_IP, IP_RECVTTL},
+        {IPPROTO_IP, IP_RECVTOS},
+    };
+    static const struct copied_socket_option ipv6_options[] = {
+        {IPPROTO_IPV6, IPV6_UNICAST_HOPS},
+        {IPPROTO_IPV6, IPV6_TCLASS},
+        {IPPROTO_IPV6, IPV6_V6ONLY},
+    };
+
+    int real_domain = sock_family_to_real(fd->socket.domain);
+    int real_type = sock_type_to_real(
+            fd->socket.type, fd->socket.protocol);
+    if (real_domain < 0 || real_type < 0)
+        return _EINVAL;
+    int replacement = socket(real_domain, real_type,
+            fd->socket.protocol);
+    if (replacement < 0)
+        return errno_map();
+    sock_configure_host_fd(replacement);
+    if (fd->socket.domain == AF_INET_ &&
+            fd->socket.type == SOCK_DGRAM_) {
+        int strip_header = 1;
+        (void) setsockopt(replacement, IPPROTO_IP,
+                IP_STRIPHDR, &strip_header, sizeof(strip_header));
+    }
+
+    int result = 0;
+    int status_flags = fcntl(fd->real_fd, F_GETFL);
+    if (status_flags < 0 ||
+            fcntl(replacement, F_SETFL, status_flags) < 0) {
+        result = errno_map();
+        goto out;
+    }
+    for (size_t index = 0;
+            index < array_size(common_options); index++) {
+        result = socket_copy_option(fd->real_fd, replacement,
+                &common_options[index]);
+        if (result < 0)
+            goto out;
+    }
+    const struct copied_socket_option *family_options =
+            fd->socket.domain == AF_INET_ ?
+            ipv4_options : ipv6_options;
+    size_t family_option_count = fd->socket.domain == AF_INET_ ?
+            array_size(ipv4_options) : array_size(ipv6_options);
+    for (size_t index = 0; index < family_option_count; index++) {
+        result = socket_copy_option(fd->real_fd, replacement,
+                &family_options[index]);
+        if (result < 0)
+            goto out;
+    }
+    if (dup2(replacement, fd->real_fd) < 0) {
+        result = errno_map();
+        goto out;
+    }
+out:
+    close(replacement);
+    return result;
+}
+#endif
+
+static int socket_disconnect_inet(struct fd *socket) {
+    int error = 0;
+    lock(&socket->lock);
+#ifdef __APPLE__
+    // Darwin 的 stream disconnectx 只执行 shutdown，不能像 Linux 一样重新 connect。
+    if (socket->socket.type == SOCK_STREAM_) {
+        unlock(&socket->lock);
+        return _EOPNOTSUPP;
+    }
+    if (socket->socket.type == SOCK_DGRAM_ &&
+            !socket->socket.inet_explicitly_bound) {
+        error = socket_recreate_unbound_inet(socket);
+    } else {
+        int result = disconnectx(
+                socket->real_fd, SAE_ASSOCID_ANY, SAE_CONNID_ANY);
+        if (result < 0 && (errno == ENOTCONN || errno == EINVAL))
+            result = 0;
+        if (result < 0)
+            error = errno_map();
+    }
+#else
+    struct sockaddr address = {.sa_family = AF_UNSPEC};
+    if (connect(socket->real_fd, &address, sizeof(address)) < 0)
+        error = errno_map();
+#endif
+    unlock(&socket->lock);
+    if (error < 0)
+        return error;
+
+    lock(&peer_lock);
+    struct fd *peer = socket->socket.unix_peer;
+    if (peer != NULL && peer->socket.unix_peer == socket)
+        peer->socket.unix_peer = NULL;
+    socket->socket.unix_peer = NULL;
+    socket->socket.unix_peer_name_valid = false;
+    socket->socket.unix_peer_cred_valid = false;
+    socket->socket.unix_peer_handshake_pending = false;
+    socket->socket.unix_peer_handshake_rejected = false;
+    unlock(&peer_lock);
+    return 0;
 }
 
 int_t socket_connect_ref_task(struct task *task,
@@ -503,46 +1766,92 @@ int_t socket_connect_ref_task(struct task *task,
     assert(task != NULL && socket != NULL && socket->fd != NULL &&
             socket->fd->ops == &socket_fdops);
     if (address_length < 2 ||
-            address_length > sizeof(struct sockaddr_max_))
+            address_length > sizeof(struct sockaddr_storage))
         return _EINVAL;
-    struct sockaddr_max_ sockaddr = {0};
-    memcpy(&sockaddr, address, address_length);
-    return socket_connect_prepared(
-            task, socket->fd, &sockaddr, (uint_t) address_length);
+    uint16_t family;
+    memcpy(&family, address, sizeof(family));
+    if (family == 0 &&
+            (socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_))
+        return socket_disconnect_inet(socket->fd);
+    struct socket_address prepared = {0};
+    int_t result = socket_connect_address_prepare_task(
+            task, socket, address, address_length, &prepared);
+    if (result < 0)
+        return result;
+    result = socket_connect_prepared(
+            task, socket->fd, &prepared);
+    socket_address_release(&prepared);
+    return result;
+}
+
+int_t socket_connect_retained_task(struct task *task,
+        struct fd *fd, const void *address, size_t address_length) {
+    assert(task != NULL && fd != NULL && address != NULL);
+    if (fd->ops != &socket_fdops)
+        return _ENOTSOCK;
+    const struct socket_ref socket = {.fd = fd};
+    return socket_connect_ref_task(
+            task, &socket, address, address_length);
 }
 
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
     STRACE("connect(%d, 0x%x, %d)", sock_fd, sockaddr_addr, sockaddr_len);
-    struct socket_ref socket;
-    int_t result = socket_ref_get_task(current, sock_fd, &socket);
-    if (result < 0)
-        return result;
-    if (sockaddr_len < 2 || sockaddr_len > sizeof(struct sockaddr_max_)) {
+    struct fd *fd = f_get_task_retain(current, sock_fd);
+    if (fd == NULL)
+        return _EBADF;
+    int_t result;
+    if (sockaddr_len > sizeof(struct sockaddr_storage)) {
         result = _EINVAL;
         goto out;
     }
-    struct sockaddr_max_ sockaddr = {0};
-    if (user_read(sockaddr_addr, &sockaddr, sockaddr_len)) {
+    struct sockaddr_storage sockaddr = {0};
+    if (sockaddr_len != 0 &&
+            user_read(sockaddr_addr, &sockaddr, sockaddr_len)) {
         result = _EFAULT;
         goto out;
     }
-    result = socket_connect_ref_task(
-            current, &socket, &sockaddr, sockaddr_len);
+    result = socket_connect_retained_task(
+            current, fd, &sockaddr, sockaddr_len);
 out:
-    socket_ref_release(&socket);
+    fd_close(fd);
     return result;
 }
 
 int_t sys_listen(fd_t sock_fd, int_t backlog) {
     STRACE("listen(%d, %d)", sock_fd, backlog);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    int err = listen(sock->real_fd, backlog);
-    if (err < 0)
-        return errno_map();
+    struct socket_ref listener;
+    int_t result = socket_ref_get_task(current, sock_fd, &listener);
+    if (result < 0)
+        return result;
+    struct fd *sock = listener.fd;
+    struct ucred_ listener_cred = {0};
+    if (sock->socket.domain == AF_LOCAL_) {
+        fill_cred_task(current, &listener_cred);
+        lock(&sock->lock);
+        sock->socket.unix_cred = listener_cred;
+        unlock(&sock->lock);
+        lock(&unix_bound_lock);
+    }
+    if (listen(sock->real_fd, backlog) < 0) {
+        result = errno_map();
+        if (sock->socket.domain == AF_LOCAL_)
+            unlock(&unix_bound_lock);
+        goto out;
+    }
+    if (sock->socket.domain == AF_LOCAL_) {
+        struct unix_bound_name *name = sock->socket.unix_bound_name;
+        if (name != NULL && name->owner_open && !name->closing) {
+            name->listener_cred = listener_cred;
+            name->listener_cred_valid = true;
+        }
+        unlock(&unix_bound_lock);
+    }
     sockrestart_begin_listen(sock);
-    return err;
+    result = 0;
+out:
+    socket_ref_release(&listener);
+    return result;
 }
 
 int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
@@ -553,14 +1862,8 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     if (result < 0)
         return result;
     sdword_t guest_sockaddr_len = 0;
-    if (sockaddr_addr != 0) {
-        if (user_get(sockaddr_len_addr, guest_sockaddr_len)) {
-            result = _EFAULT;
-            goto out_listener;
-        }
-    }
 
-    struct sockaddr_max_ sockaddr = {0};
+    struct sockaddr_storage sockaddr = {0};
     socklen_t host_sockaddr_len = sizeof(sockaddr);
     int client;
     do {
@@ -568,21 +1871,22 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
         sockrestart_begin_listen_wait(listener.fd);
         errno = 0;
         client = accept(listener.fd->real_fd,
-                sockaddr_addr != 0 ? (void *) &sockaddr : NULL,
-                sockaddr_addr != 0 ? &host_sockaddr_len : NULL);
+                (void *) &sockaddr, &host_sockaddr_len);
         sockrestart_end_listen_wait(listener.fd);
     } while (sockrestart_should_restart_listen_wait() && errno == EINTR);
     if (client < 0) {
         result = errno_map();
         goto out_listener;
     }
+    sock_configure_host_fd(client);
 
     struct fd *client_fd = sock_fd_allocate(
             listener.fd->socket.domain, listener.fd->socket.type,
             listener.fd->socket.protocol);
     if (client_fd == NULL) {
         struct fd *peer = listener.fd->socket.domain == AF_LOCAL_ ?
-                unix_socket_read_peer(client) : NULL;
+                unix_bound_accept_peer(listener.fd,
+                        &sockaddr, host_sockaddr_len) : NULL;
         unix_socket_finish_peer_handshake(peer, NULL);
         close(client);
         result = _ENOMEM;
@@ -590,18 +1894,32 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     }
     // 从这里起 wrapper 独占 raw client 的关闭责任。
     client_fd->real_fd = client;
+    if (listener.fd->socket.domain == AF_LOCAL_) {
+        lock(&listener.fd->lock);
+        client_fd->socket.unix_name_len =
+                listener.fd->socket.unix_name_len;
+        memcpy(client_fd->socket.unix_name,
+                listener.fd->socket.unix_name,
+                listener.fd->socket.unix_name_len);
+        unlock(&listener.fd->lock);
+    }
     struct fd *connecting_peer =
             listener.fd->socket.domain == AF_LOCAL_ ?
-            unix_socket_read_peer(client_fd->real_fd) : NULL;
+            unix_bound_accept_peer(listener.fd,
+                    &sockaddr, host_sockaddr_len) : NULL;
 
     if (sockaddr_addr != 0) {
+        if (user_get(sockaddr_len_addr, guest_sockaddr_len)) {
+            result = _EFAULT;
+            goto reject_client;
+        }
         if (guest_sockaddr_len < 0) {
             result = _EINVAL;
             goto reject_client;
         }
         uint_t returned_length = host_sockaddr_len;
-        int err = sockaddr_write(sockaddr_addr, &sockaddr,
-                (uint_t) guest_sockaddr_len, &returned_length);
+        int err = sockaddr_from_real(
+                &sockaddr, sizeof(sockaddr), &returned_length, false);
         if (err < 0) {
             result = err;
             goto reject_client;
@@ -610,21 +1928,26 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
             result = _EFAULT;
             goto reject_client;
         }
-    }
-
-    fd_retain(client_fd);
-    result = f_install_task(current, client_fd, 0);
-    if (result < 0) {
-        unix_socket_finish_peer_handshake(
-                connecting_peer, NULL);
-        fd_close(client_fd);
-        goto out_listener;
+        err = sockaddr_copy_to_user(sockaddr_addr, &sockaddr,
+                sizeof(sockaddr), (uint_t) guest_sockaddr_len,
+                returned_length);
+        if (err < 0) {
+            result = err;
+            goto reject_client;
+        }
     }
 
     if (listener.fd->socket.domain == AF_LOCAL_) {
         fill_cred_task(current, &client_fd->socket.unix_cred);
         unix_socket_finish_peer_handshake(
                 connecting_peer, client_fd);
+    }
+
+    fd_retain(client_fd);
+    result = f_install_task(current, client_fd, 0);
+    if (result < 0) {
+        fd_close(client_fd);
+        goto out_listener;
     }
 
     fd_close(client_fd);
@@ -638,74 +1961,119 @@ out_listener:
     return result;
 }
 
-static void copy_unix_name(char *sockaddr, dword_t *sockaddr_len, struct fd *sock) {
-    struct sockaddr_ *fake_addr = (void *) sockaddr;
+static dword_t copy_unix_name(void *sockaddr, const struct fd *sock) {
+    struct sockaddr_ *fake_addr = sockaddr;
     fake_addr->family = PF_LOCAL_;
-
-    size_t data_len = *sockaddr_len - offsetof(struct sockaddr_, data);
     size_t name_len = sock->socket.unix_name_len;
-    if (name_len > data_len)
-        name_len = data_len;
-    memset(fake_addr->data, 0, data_len);
-    memcpy(fake_addr->data, sock->socket.unix_name, name_len);
-    *sockaddr_len = offsetof(struct sockaddr_, data) + name_len;
+    assert(name_len <= SOCKADDR_DATA_MAX + 1);
+    memcpy((byte_t *) sockaddr + offsetof(struct sockaddr_, data),
+            sock->socket.unix_name, name_len);
+    return (dword_t) (offsetof(struct sockaddr_, data) + name_len);
 }
 
 int_t sys_getsockname(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     STRACE("getsockname(%d, 0x%x, 0x%x)", sock_fd, sockaddr_addr, sockaddr_len_addr);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    dword_t sockaddr_len;
-    if (user_get(sockaddr_len_addr, sockaddr_len))
-        return _EFAULT;
-    char sockaddr[sockaddr_len];
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
 
-    // if this is a unix socket, return the same string passed to bind
-    if (sock->socket.domain == PF_LOCAL_) {
-        copy_unix_name(sockaddr, &sockaddr_len, sock);
-        if (user_write(sockaddr_addr, sockaddr, sizeof(sockaddr)))
-            return _EFAULT;
-        if (user_put(sockaddr_len_addr, sockaddr_len))
-            return _EFAULT;
-        return 0;
+    struct sockaddr_storage address = {0};
+    dword_t true_length;
+    if (socket.fd->socket.domain == PF_LOCAL_) {
+        lock(&socket.fd->lock);
+        true_length = copy_unix_name(&address, socket.fd);
+        unlock(&socket.fd->lock);
+    } else {
+        socklen_t host_length = sizeof(address);
+        if (getsockname(socket.fd->real_fd,
+                (struct sockaddr *) &address, &host_length) < 0) {
+            result = errno_map();
+            goto out;
+        }
+        true_length = (dword_t) host_length;
+        result = sockaddr_from_real(
+                &address, sizeof(address), &true_length, false);
+        if (result < 0)
+            goto out;
     }
 
-    int res = getsockname(sock->real_fd, (void *) sockaddr, &sockaddr_len);
-    if (res < 0)
-        return errno_map();
-
-    int err = sockaddr_write(sockaddr_addr, sockaddr, sizeof(sockaddr), &sockaddr_len);
-    if (err < 0)
-        return err;
-    if (user_put(sockaddr_len_addr, sockaddr_len))
-        return _EFAULT;
-    return res;
+    sdword_t capacity;
+    if (user_get(sockaddr_len_addr, capacity)) {
+        result = _EFAULT;
+        goto out;
+    }
+    if (capacity < 0) {
+        result = _EINVAL;
+        goto out;
+    }
+    if (user_put(sockaddr_len_addr, true_length)) {
+        result = _EFAULT;
+        goto out;
+    }
+    dword_t copied = (dword_t) capacity < true_length ?
+            (dword_t) capacity : true_length;
+    result = copied != 0 && user_write(
+            sockaddr_addr, &address, copied) ? _EFAULT : 0;
+out:
+    socket_ref_release(&socket);
+    return result;
 }
 
 int_t sys_getpeername(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     STRACE("getpeername(%d, 0x%x, 0x%x)", sock_fd, sockaddr_addr, sockaddr_len_addr);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    dword_t sockaddr_len;
-    if (user_get(sockaddr_len_addr, sockaddr_len))
-        return _EFAULT;
-
-    // TODO if this is a unix socket, return the same string the peer passed to
-    // bind once the peer pointer is available
-
-    char sockaddr[sockaddr_len];
-    int res = getpeername(sock->real_fd, (void *) sockaddr, &sockaddr_len);
-    if (res < 0)
-        return errno_map();
-
-    int err = sockaddr_write(sockaddr_addr, sockaddr, sizeof(sockaddr), &sockaddr_len);
-    if (err < 0)
-        return err;
-    if (user_put(sockaddr_len_addr, sockaddr_len))
-        return _EFAULT;
-    return res;
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+    struct sockaddr_storage address = {0};
+    uint_t returned_length;
+    if (socket.fd->socket.domain == AF_LOCAL_) {
+        lock(&peer_lock);
+        if (!socket.fd->socket.unix_peer_name_valid) {
+            unlock(&peer_lock);
+            result = _ENOTCONN;
+            goto out;
+        }
+        struct sockaddr_ *guest = (struct sockaddr_ *) &address;
+        guest->family = PF_LOCAL_;
+        memcpy((byte_t *) &address + offsetof(struct sockaddr_, data),
+                socket.fd->socket.unix_peer_name,
+                socket.fd->socket.unix_peer_name_len);
+        returned_length = (uint_t) (offsetof(struct sockaddr_, data) +
+                socket.fd->socket.unix_peer_name_len);
+        unlock(&peer_lock);
+    } else {
+        socklen_t host_length = sizeof(address);
+        if (getpeername(socket.fd->real_fd,
+                (struct sockaddr *) &address, &host_length) < 0) {
+            result = errno_map();
+            goto out;
+        }
+        returned_length = (uint_t) host_length;
+        result = sockaddr_from_real(
+                &address, sizeof(address), &returned_length, false);
+        if (result < 0)
+            goto out;
+    }
+    sdword_t capacity;
+    if (user_get(sockaddr_len_addr, capacity)) {
+        result = _EFAULT;
+        goto out;
+    }
+    if (capacity < 0) {
+        result = _EINVAL;
+        goto out;
+    }
+    if (user_put(sockaddr_len_addr, returned_length)) {
+        result = _EFAULT;
+        goto out;
+    }
+    result = sockaddr_copy_to_user(sockaddr_addr, &address,
+            sizeof(address), (uint_t) capacity, returned_length);
+out:
+    socket_ref_release(&socket);
+    return result;
 }
 
 int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sockets_addr) {
@@ -736,12 +2104,20 @@ int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sock
         return _ENOMEM;
     }
 
+    fill_cred_task(current, &socket_fds[0]->socket.unix_cred);
+    fill_cred_task(current, &socket_fds[1]->socket.unix_cred);
+    socket_fds[0]->socket.unix_peer_cred =
+            socket_fds[1]->socket.unix_cred;
+    socket_fds[1]->socket.unix_peer_cred =
+            socket_fds[0]->socket.unix_cred;
+    socket_fds[0]->socket.unix_peer_cred_valid = true;
+    socket_fds[1]->socket.unix_peer_cred_valid = true;
     // 两端发布到 fdtable 前先完成 peer 关系，避免并发观察到半初始化对象。
     lock(&peer_lock);
     socket_fds[0]->socket.unix_peer = socket_fds[1];
     socket_fds[1]->socket.unix_peer = socket_fds[0];
-    socket_fds[0]->socket.unix_peer_handshake_done = true;
-    socket_fds[1]->socket.unix_peer_handshake_done = true;
+    socket_fds[0]->socket.unix_peer_name_valid = true;
+    socket_fds[1]->socket.unix_peer_name_valid = true;
     unlock(&peer_lock);
 
     int fake_sockets[2];
@@ -775,75 +2151,393 @@ int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sock
     return 0;
 }
 
-int_t sys_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags, addr_t sockaddr_addr, dword_t sockaddr_len) {
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    char *buffer = malloc(len + 1);
-    if (user_read(buffer_addr, buffer, len))
-        return _EFAULT;
-    buffer[len] = '\0';
-    STRACE("sendto(%d, \"%.100s\", %d, %d, 0x%x, %d)", sock_fd, buffer, len, flags, sockaddr_addr, sockaddr_len);
-    int real_flags = sock_flags_to_real(flags);
-    int err = _EINVAL;
-    if (real_flags < 0)
-        goto error;
-    struct sockaddr_max_ sockaddr;
-    if (sockaddr_addr) {
-        err = sockaddr_read(sockaddr_addr, &sockaddr, &sockaddr_len);
-        if (err < 0)
-            goto error;
-    }
-
-    ssize_t res = sendto(sock->real_fd, buffer, len, real_flags,
-            sockaddr_addr ? (void *) &sockaddr : NULL, sockaddr_len);
-    free(buffer);
-    if (res < 0)
-        return errno_map();
-    return res;
-
-error:
-    free(buffer);
-    return err;
-}
-
-int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
-    STRACE("recvfrom(%d, 0x%x, %d, %d, 0x%x, 0x%x)", sock_fd, buffer_addr, len, flags, sockaddr_addr, sockaddr_len_addr);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
+int socket_sendto_validate(const struct socket_ref *socket,
+        size_t length, dword_t flags) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
     int real_flags = sock_flags_to_real(flags);
     if (real_flags < 0)
         return _EINVAL;
-    uint_t sockaddr_len = 0;
-    if (sockaddr_len_addr != 0)
-        if (user_get(sockaddr_len_addr, sockaddr_len))
-            return _EFAULT;
+    bool ping = socket_sendto_prefix_size(socket) != 0;
+    if (ping) {
+        if (length > UINT16_MAX)
+            return _EMSGSIZE;
+        if (length < 8)
+            return _EINVAL;
+        if (flags & MSG_OOB_)
+            return _EOPNOTSUPP;
+    }
+    bool ipv4_datagram = socket->fd->socket.domain == AF_INET_ &&
+            ((socket->fd->socket.type == SOCK_DGRAM_ &&
+            (socket->fd->socket.protocol == 0 ||
+            socket->fd->socket.protocol == IPPROTO_UDP)) ||
+            socket->fd->socket.type == SOCK_RAW_);
+    if (ipv4_datagram) {
+        if (length > UINT16_MAX)
+            return _EMSGSIZE;
+        if (flags & MSG_OOB_)
+            return _EOPNOTSUPP;
+    }
+    if ((socket->fd->socket.domain == AF_LOCAL_ ||
+            (socket->fd->socket.domain == AF_INET6_ &&
+            socket->fd->socket.type == SOCK_RAW_)) &&
+            (flags & MSG_OOB_))
+        return _EOPNOTSUPP;
+    return 0;
+}
 
-    char *buffer = malloc(len);
-    char sockaddr[sockaddr_len];
-    ssize_t res = recvfrom(sock->real_fd, buffer, len, real_flags,
-            sockaddr_addr != 0 ? (void *) sockaddr : NULL,
-            sockaddr_len_addr != 0 ? &sockaddr_len : NULL);
-    if (res < 0) {
-        free(buffer);
+size_t socket_sendto_prefix_size(const struct socket_ref *socket) {
+    assert(socket != NULL && socket->fd != NULL);
+    return socket->fd->socket.type == SOCK_DGRAM_ &&
+            ((socket->fd->socket.domain == AF_INET_ &&
+            socket->fd->socket.protocol == IPPROTO_ICMP) ||
+            (socket->fd->socket.domain == AF_INET6_ &&
+            socket->fd->socket.protocol == IPPROTO_ICMPV6)) ? 8 : 0;
+}
+
+int socket_sendto_prefix_validate(const struct socket_ref *socket,
+        const void *prefix, size_t prefix_size) {
+    size_t required = socket_sendto_prefix_size(socket);
+    assert(required != 0 && prefix != NULL && prefix_size == required);
+    const byte_t *header = prefix;
+    bool supported = header[1] == 0 &&
+            ((socket->fd->socket.domain == AF_INET_ &&
+            (header[0] == 8 || header[0] == 42)) ||
+            (socket->fd->socket.domain == AF_INET6_ &&
+            (header[0] == 128 || header[0] == 160)));
+    return supported ? 0 : _EINVAL;
+}
+
+size_t socket_sendto_transaction_size(const struct socket_ref *socket,
+        size_t length, dword_t flags) {
+    size_t limit = SOCKET_IO_TRANSACTION_LIMIT;
+    if (socket->fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_DONTWAIT_))
+        limit = SOCKET_STREAM_NONBLOCK_TRANSACTION_LIMIT;
+    return length < limit ? length : limit;
+}
+
+int socket_sendto_transaction_validate(const struct socket_ref *socket,
+        size_t length) {
+    assert(socket != NULL && socket->fd != NULL);
+    return socket->fd->socket.type != SOCK_STREAM_ &&
+            length > SOCKET_IO_TRANSACTION_LIMIT ? _EMSGSIZE : 0;
+}
+
+int socket_sendto_destination_validate(const struct socket_ref *socket,
+        const struct socket_address *address) {
+    assert(socket != NULL && socket->fd != NULL);
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_STREAM_ &&
+            (address == NULL || address->length == 0)) {
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        return getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &peer_length) == 0 ?
+                0 : _ENOTCONN;
+    }
+    bool requires_destination = socket->fd->socket.type == SOCK_RAW_ ||
+            socket_sendto_prefix_size(socket) != 0 ||
+            (socket->fd->socket.type == SOCK_DGRAM_ &&
+            (socket->fd->socket.protocol == 0 ||
+            socket->fd->socket.protocol == IPPROTO_UDP));
+    if (!requires_destination ||
+            (socket->fd->socket.domain != AF_INET_ &&
+            socket->fd->socket.domain != AF_INET6_) ||
+            (address != NULL && address->length != 0))
+        return 0;
+    struct sockaddr_storage peer;
+    socklen_t peer_length = sizeof(peer);
+    return getpeername(socket->fd->real_fd,
+            (struct sockaddr *) &peer, &peer_length) == 0 ?
+            0 : _EDESTADDRREQ;
+}
+
+ssize_t socket_sendto_ref(const struct socket_ref *socket,
+        const void *buffer, size_t length, dword_t flags,
+        const struct socket_address *address) {
+    int error = socket_sendto_validate(socket, length, flags);
+    if (error < 0)
+        return error;
+    size_t prefix_size = socket_sendto_prefix_size(socket);
+    if (prefix_size != 0) {
+        error = socket_sendto_prefix_validate(
+                socket, buffer, prefix_size);
+        if (error < 0)
+            return error;
+    }
+    error = socket_sendto_transaction_validate(socket, length);
+    if (error < 0)
+        return error;
+    error = socket_sendto_destination_validate(socket, address);
+    if (error < 0)
+        return error;
+    int real_flags = sock_flags_to_real(flags);
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type != SOCK_STREAM_ &&
+            (address == NULL || address->length == 0)) {
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        if (getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &peer_length) < 0)
+            return _ENOTCONN;
+    }
+    struct unix_bound_name *queued_name =
+            unix_bound_message_begin(socket->fd);
+    byte_t empty = 0;
+    bool has_address = address != NULL && address->length != 0;
+    ssize_t result = sendto(socket->fd->real_fd,
+            length != 0 ? buffer : &empty, length,
+            real_flags,
+            has_address ?
+                    (const struct sockaddr *) &address->storage : NULL,
+            has_address ? address->length : 0);
+    if (result < 0)
+        unix_bound_message_cancel(queued_name);
+    if (result < 0 && errno == ENOENT && address != NULL &&
+            (address->lookup_inode != NULL ||
+            address->lookup_abstract != NULL))
+        return _ECONNREFUSED;
+    if (result < 0 && errno == EPIPE && (flags & MSG_NOSIGNAL_))
+        return err_map(errno);
+    if (result < 0)
         return errno_map();
+    return result;
+}
+
+ssize_t socket_recvfrom_ref(const struct socket_ref *socket,
+        void *buffer, size_t length, dword_t flags,
+        struct socket_address *address) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
+    int real_flags = sock_flags_to_real(flags);
+    if (real_flags < 0)
+        return _EINVAL;
+    if ((socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_TRUNC_))
+        real_flags &= ~MSG_TRUNC;
+    bool track_unix_source = socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type != SOCK_STREAM_;
+    struct socket_address discarded_address;
+    struct socket_address *received_address = address != NULL ?
+            address : (track_unix_source ? &discarded_address : NULL);
+    if (received_address != NULL) {
+        *received_address = (struct socket_address) {0};
+        received_address->length = sizeof(received_address->storage);
+    }
+    byte_t empty = 0;
+    ssize_t result = recvfrom(socket->fd->real_fd,
+            length != 0 ? buffer : &empty, length,
+            real_flags,
+            received_address != NULL ?
+                    (struct sockaddr *) &received_address->storage : NULL,
+            received_address != NULL ? &received_address->length : NULL);
+    if (result < 0)
+        return errno_map();
+    if (received_address != NULL && received_address->length != 0) {
+        uint_t address_length = (uint_t) received_address->length;
+        int error = sockaddr_from_real(&received_address->storage,
+                sizeof(received_address->storage), &address_length,
+                track_unix_source && !(flags & MSG_PEEK_));
+        if (error < 0)
+            return error;
+        received_address->length = (socklen_t) address_length;
+    }
+    return result;
+}
+
+int_t sys_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len,
+        dword_t flags, addr_t sockaddr_addr, dword_t sockaddr_len) {
+    STRACE("sendto(%d, 0x%x, %u, %u, 0x%x, %u)",
+            sock_fd, buffer_addr, len, flags,
+            sockaddr_addr, sockaddr_len);
+    dword_t length = len < I386_LINUX_MAX_RW_COUNT ?
+            len : I386_LINUX_MAX_RW_COUNT;
+    qword_t available = UINT64_C(1) + UINT32_MAX - (qword_t) buffer_addr;
+    if ((qword_t) length > available)
+        return _EFAULT;
+
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+
+    struct sockaddr_storage guest_address = {0};
+    sdword_t signed_length = 0;
+    struct socket_address address;
+    struct socket_address *address_pointer = NULL;
+    void *buffer = NULL;
+    if (sockaddr_addr != 0) {
+        signed_length = (sdword_t) sockaddr_len;
+        if (signed_length < 0 ||
+                (size_t) signed_length > sizeof(address.storage)) {
+            result = _EINVAL;
+            goto out;
+        }
+        if (signed_length != 0 && user_read(sockaddr_addr,
+                &guest_address, (size_t) signed_length)) {
+            result = _EFAULT;
+            goto out;
+        }
     }
 
-    if (user_write(buffer_addr, buffer, len)) {
-        free(buffer);
+    result = socket_sendto_validate(&socket, length, flags);
+    if (result < 0)
+        goto out;
+    byte_t prefix[8];
+    size_t prefix_size = socket_sendto_prefix_size(&socket);
+    if (prefix_size != 0) {
+        assert(prefix_size <= sizeof(prefix));
+        if (user_read(buffer_addr, prefix, prefix_size)) {
+            result = _EFAULT;
+            goto out;
+        }
+        result = socket_sendto_prefix_validate(
+                &socket, prefix, prefix_size);
+        if (result < 0)
+            goto out;
+    }
+    bool defer_unix_lookup = sockaddr_addr != 0 &&
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    if (sockaddr_addr != 0) {
+        result = socket_address_validate_for_socket(&socket,
+                &guest_address, (size_t) signed_length);
+        if (result < 0)
+            goto out;
+        if (!defer_unix_lookup) {
+            result = socket_address_prepare_task(current,
+                    &socket, &guest_address,
+                    (size_t) signed_length, &address);
+            if (result < 0)
+                goto out;
+            address_pointer = &address;
+        }
+    }
+    result = socket_sendto_transaction_validate(&socket, length);
+    if (result < 0)
+        goto out;
+    result = socket_sendto_destination_validate(
+            &socket, address_pointer);
+    if (result < 0)
+        goto out;
+    size_t transaction_length = socket_sendto_transaction_size(
+            &socket, length, flags);
+    buffer = transaction_length == 0 ? NULL : malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = _ENOMEM;
+        goto out;
+    }
+    if (transaction_length != 0) {
+        memcpy(buffer, prefix, prefix_size);
+        size_t remaining = transaction_length - prefix_size;
+        if (remaining != 0 && user_read(
+                buffer_addr + (addr_t) prefix_size,
+                (byte_t *) buffer + prefix_size, remaining)) {
+            result = _EFAULT;
+            goto out;
+        }
+    }
+    if (defer_unix_lookup) {
+        result = socket_address_prepare_task(current,
+                &socket, &guest_address,
+                (size_t) signed_length, &address);
+        if (result < 0)
+            goto out;
+        address_pointer = &address;
+    }
+    result = (int_t) socket_sendto_ref(
+            &socket, buffer, transaction_length, flags, address_pointer);
+out:
+    free(buffer);
+    if (address_pointer != NULL)
+        socket_address_release(address_pointer);
+    socket_ref_release(&socket);
+    return result;
+}
+
+int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len,
+        dword_t flags, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
+    STRACE("recvfrom(%d, 0x%x, %u, %u, 0x%x, 0x%x)",
+            sock_fd, buffer_addr, len, flags,
+            sockaddr_addr, sockaddr_len_addr);
+    dword_t length = len < I386_LINUX_MAX_RW_COUNT ?
+            len : I386_LINUX_MAX_RW_COUNT;
+    qword_t available = UINT64_C(1) + UINT32_MAX - (qword_t) buffer_addr;
+    if ((qword_t) length > available)
         return _EFAULT;
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+    bool full_datagram_length = (flags & MSG_TRUNC_) != 0 &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    size_t transaction_length = full_datagram_length ?
+            SOCKET_IO_TRANSACTION_LIMIT :
+            (length < SOCKET_IO_TRANSACTION_LIMIT ?
+                    length : SOCKET_IO_TRANSACTION_LIMIT);
+    void *buffer = transaction_length == 0 ? NULL :
+            malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = _ENOMEM;
+        goto out;
+    }
+    struct socket_address source;
+    ssize_t received = socket_recvfrom_ref(&socket,
+            buffer, transaction_length, flags,
+            sockaddr_addr != 0 ? &source : NULL);
+    if (received < 0) {
+        free(buffer);
+        result = (int_t) received;
+        goto out;
+    }
+    size_t payload_size = (size_t) received < length ?
+            (size_t) received : length;
+    // MSG_TRUNC 可能返回大于内部事务缓冲区的真实报文长度。
+    if (payload_size > transaction_length)
+        payload_size = transaction_length;
+    if ((socket.fd->socket.domain == AF_INET_ ||
+            socket.fd->socket.domain == AF_INET6_) &&
+            socket.fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_TRUNC_))
+        payload_size = 0;
+    if (payload_size != 0 && user_write(
+            buffer_addr, buffer, payload_size)) {
+        free(buffer);
+        result = _EFAULT;
+        goto out;
     }
     free(buffer);
+
     if (sockaddr_addr != 0) {
-        int err = sockaddr_write(sockaddr_addr, sockaddr, sizeof(sockaddr), &sockaddr_len);
-        if (err < 0)
-            return err;
+        sdword_t capacity;
+        if (user_get(sockaddr_len_addr, capacity)) {
+            result = _EFAULT;
+            goto out;
+        }
+        if (capacity < 0) {
+            result = _EINVAL;
+            goto out;
+        }
+        dword_t true_length = (dword_t) source.length;
+        if (user_put(sockaddr_len_addr, true_length)) {
+            result = _EFAULT;
+            goto out;
+        }
+        size_t copied = (dword_t) capacity < true_length ?
+                (dword_t) capacity : true_length;
+        if (copied != 0 && user_write(
+                sockaddr_addr, &source.storage, copied)) {
+            result = _EFAULT;
+            goto out;
+        }
     }
-    if (sockaddr_len_addr != 0)
-        if (user_put(sockaddr_len_addr, sockaddr_len))
-            return _EFAULT;
-    return res;
+    result = (int_t) received;
+out:
+    socket_ref_release(&socket);
+    return result;
 }
 
 int_t sys_send(fd_t sock_fd, addr_t buf, dword_t len, int_t flags) {
@@ -866,60 +2560,268 @@ int_t sys_shutdown(fd_t sock_fd, dword_t how) {
 }
 
 #define DEFAULT_TCP_CONGESTION "cubic"
+#define LINUX_TCP_CA_NAME_MAX 16
+#define LINUX_ICMP6_FILTER_SIZE 32
 
-int_t sys_setsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_addr, dword_t value_len) {
-    STRACE("setsockopt(%d, %d, %d, 0x%x, %d)", sock_fd, level, option, value_addr, value_len);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    char value[value_len];
-    if (user_read(value_addr, value, value_len))
-        return _EFAULT;
+struct linux_socket_linger {
+    sdword_t enabled;
+    sdword_t seconds;
+};
 
-    // ICMP6_FILTER can only be set on real SOCK_RAW
-    if (level == IPPROTO_ICMPV6 && option == ICMP6_FILTER_)
-        return 0;
-    // IP_MTU_DISCOVER has no equivalent on Darwin
-    if (level == IPPROTO_IP && option == IP_MTU_DISCOVER_)
-        return 0;
-    // TCP_CONGESTION also has no equivalent on Darwin
-#if defined(__APPLE__)
+struct linux_socket_timeval {
+    int64_t seconds;
+    int64_t microseconds;
+};
+
+struct linux_socket_timeval32 {
+    int32_t seconds;
+    int32_t microseconds;
+};
+
+static bool socket_option_is_timeout(sdword_t level, sdword_t option) {
+    return level == SOL_SOCKET_ &&
+            (option == SO_RCVTIMEO_OLD_ ||
+            option == SO_SNDTIMEO_OLD_ ||
+            option == SO_RCVTIMEO_NEW_ ||
+            option == SO_SNDTIMEO_NEW_);
+}
+
+static bool socket_option_is_old_timeout(sdword_t level, sdword_t option) {
+    return level == SOL_SOCKET_ &&
+            (option == SO_RCVTIMEO_OLD_ || option == SO_SNDTIMEO_OLD_);
+}
+
+static size_t socket_timeout_wire_size(sdword_t level, sdword_t option,
+        enum socket_guest_abi guest_abi) {
+    if (guest_abi == SOCKET_GUEST_I386 &&
+            socket_option_is_old_timeout(level, option))
+        return sizeof(struct linux_socket_timeval32);
+    return sizeof(struct linux_socket_timeval);
+}
+
+static bool socket_ip_option_allows_empty(sdword_t option) {
+    return option == IP_TOS_ || option == IP_HDRINCL_ ||
+            option == IP_RETOPTS_ ||
+            option == IP_MTU_DISCOVER_ || option == IP_RECVERR_ ||
+            option == IP_RECVTTL_ || option == IP_RECVTOS_;
+}
+
+static bool socket_ip_option_known(sdword_t option) {
+    return option == IP_TOS_ || option == IP_TTL_ ||
+            option == IP_HDRINCL_ || option == IP_RETOPTS_ ||
+            option == IP_MTU_DISCOVER_ || option == IP_RECVERR_ ||
+            option == IP_RECVTTL_ || option == IP_RECVTOS_;
+}
+
+ssize_t socket_setsockopt_value_size(
+        sdword_t level, sdword_t option, sdword_t value_length,
+        enum socket_guest_abi guest_abi) {
+    if (value_length < 0)
+        return _EINVAL;
     if (level == IPPROTO_TCP && option == TCP_CONGESTION_) {
-        if (strncmp(value, DEFAULT_TCP_CONGESTION, sizeof(value)) == 0)
-            return 0;
-        return _ENOENT;
+        if (value_length < 1)
+            return _EINVAL;
+        return value_length < LINUX_TCP_CA_NAME_MAX - 1 ?
+                value_length : LINUX_TCP_CA_NAME_MAX - 1;
     }
-#endif
+    if (level == IPPROTO_ICMPV6 && option == ICMP6_FILTER_) {
+        return value_length < LINUX_ICMP6_FILTER_SIZE ?
+                value_length : LINUX_ICMP6_FILTER_SIZE;
+    }
 
-    int real_opt = sock_opt_to_real(option, level);
-    if (real_opt < 0)
-        return _EINVAL;
-    int real_level = sock_level_to_real(level);
-    if (real_level < 0)
-        return _EINVAL;
-
-    // 0 means the option is not implemented, but things rely on it, so we
-    // should just ignore attempts to set it.
-    if (real_opt == 0)
+    bool known_level = level == SOL_SOCKET_ || level == IPPROTO_IP ||
+            level == IPPROTO_TCP || level == IPPROTO_IPV6;
+    if (!known_level)
         return 0;
+    if (level == IPPROTO_IP && !socket_ip_option_known(option))
+        return 0;
+    if (level == IPPROTO_IP && value_length < (sdword_t) sizeof(sdword_t)) {
+        if (value_length == 0)
+            return socket_ip_option_allows_empty(option) ? 0 : _EINVAL;
+        return 1;
+    }
+    if (value_length < (sdword_t) sizeof(sdword_t))
+        return _EINVAL;
+    if (level == SOL_SOCKET_ && option == SO_LINGER_)
+        return value_length < (sdword_t) sizeof(struct linux_socket_linger) ?
+                sizeof(sdword_t) : sizeof(struct linux_socket_linger);
+    if (socket_option_is_timeout(level, option)) {
+        size_t wire_size = socket_timeout_wire_size(
+                level, option, guest_abi);
+        return value_length < (sdword_t) wire_size ?
+                sizeof(sdword_t) : (ssize_t) wire_size;
+    }
+    return sizeof(sdword_t);
+}
 
-    int err = setsockopt(sock->real_fd, real_level, real_opt, value, value_len);
-    if (err < 0)
+static int_t socket_set_timeout_ref(const struct socket_ref *socket,
+        bool receive, const struct linux_socket_timeval *guest) {
+    if (guest->microseconds < 0 || guest->microseconds >= 1000000)
+        return _EDOM;
+    struct timeval host = {0};
+    if (guest->seconds >= 0) {
+        int64_t maximum_seconds = sizeof(host.tv_sec) < sizeof(int64_t) ?
+                INT32_MAX : INT64_MAX;
+        int64_t seconds = guest->seconds < maximum_seconds ?
+                guest->seconds : maximum_seconds;
+        host.tv_sec = (__typeof__(host.tv_sec)) seconds;
+        host.tv_usec = (__typeof__(host.tv_usec)) guest->microseconds;
+    }
+    int option = receive ? SO_RCVTIMEO : SO_SNDTIMEO;
+    if (setsockopt(socket->fd->real_fd, SOL_SOCKET,
+            option, &host, sizeof(host)) < 0)
         return errno_map();
     return 0;
 }
 
-int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_addr, dword_t len_addr) {
-    STRACE("getsockopt(%d, %d, %d, %#x, %#x)", sock_fd, level, option, value_addr, len_addr);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
+static int_t socket_setsockopt_locked(const struct socket_ref *socket,
+        sdword_t level, sdword_t option,
+        const void *value, sdword_t value_length,
+        enum socket_guest_abi guest_abi) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
+    ssize_t copied = socket_setsockopt_value_size(
+            level, option, value_length, guest_abi);
+    if (copied < 0)
+        return (int_t) copied;
+    assert(copied == 0 || value != NULL);
+
+    if (level == IPPROTO_TCP && option == TCP_CONGESTION_) {
+        char name[LINUX_TCP_CA_NAME_MAX] = {0};
+        memcpy(name, value, (size_t) copied);
+#if defined(__APPLE__)
+        return strcmp(name, DEFAULT_TCP_CONGESTION) == 0 ? 0 : _ENOENT;
+#else
+        if (setsockopt(socket->fd->real_fd, IPPROTO_TCP,
+                TCP_CONGESTION, name, (socklen_t) copied) < 0)
+            return errno_map();
+        return 0;
+#endif
+    }
+
+    if (level == IPPROTO_ICMPV6 && option == ICMP6_FILTER_)
+        return 0;
+    if (level == IPPROTO_IP &&
+            (option == IP_MTU_DISCOVER_ || option == IP_RECVERR_))
+        return 0;
+    if (level == IPPROTO_IPV6 && option == IPV6_RECVERR_)
+        return 0;
+    if (level == IPPROTO_TCP && option == TCP_DEFER_ACCEPT_)
+        return 0;
+
+    if (socket_option_is_timeout(level, option)) {
+        size_t wire_size = socket_timeout_wire_size(
+                level, option, guest_abi);
+        if (value_length < (sdword_t) wire_size)
+            return _EINVAL;
+        struct linux_socket_timeval timeout = {0};
+        if (wire_size == sizeof(struct linux_socket_timeval32)) {
+            struct linux_socket_timeval32 timeout32;
+            memcpy(&timeout32, value, sizeof(timeout32));
+            timeout.seconds = timeout32.seconds;
+            timeout.microseconds = timeout32.microseconds;
+        } else {
+            memcpy(&timeout, value, sizeof(timeout));
+        }
+        bool receive = option == SO_RCVTIMEO_OLD_ ||
+                option == SO_RCVTIMEO_NEW_;
+        return socket_set_timeout_ref(socket, receive, &timeout);
+    }
+
+    if (level == SOL_SOCKET_ && option == SO_LINGER_) {
+        if (value_length < (sdword_t) sizeof(struct linux_socket_linger))
+            return _EINVAL;
+        struct linux_socket_linger guest;
+        memcpy(&guest, value, sizeof(guest));
+        struct linger host = {
+            .l_onoff = guest.enabled,
+            .l_linger = guest.seconds,
+        };
+        if (setsockopt(socket->fd->real_fd, SOL_SOCKET,
+                SO_LINGER, &host, sizeof(host)) < 0)
+            return errno_map();
+        return 0;
+    }
+
+    if (level == SOL_SOCKET_ &&
+            (option == SO_TYPE_ || option == SO_ERROR_ ||
+            option == SO_PROTOCOL_ || option == SO_DOMAIN_))
+        return _ENOPROTOOPT;
+
+    int real_option = sock_opt_to_real(option, level);
+    int real_level = sock_level_to_real(level);
+    if (real_option < 0 || real_level < 0)
+        return _ENOPROTOOPT;
+    if (real_option == 0)
+        return 0;
+
+    sdword_t integer = 0;
+    if (copied == 1)
+        integer = *(const uint8_t *) value;
+    else if (copied >= (ssize_t) sizeof(integer))
+        memcpy(&integer, value, sizeof(integer));
+    if (setsockopt(socket->fd->real_fd, real_level,
+            real_option, &integer, sizeof(integer)) < 0)
+        return errno_map();
+    return 0;
+}
+
+int_t socket_setsockopt_ref(const struct socket_ref *socket,
+        sdword_t level, sdword_t option,
+        const void *value, sdword_t value_length,
+        enum socket_guest_abi guest_abi) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
+    lock(&socket->fd->lock);
+    int_t result = socket_setsockopt_locked(socket,
+            level, option, value, value_length, guest_abi);
+    unlock(&socket->fd->lock);
+    return result;
+}
+
+int_t sys_setsockopt(fd_t sock_fd, dword_t level, dword_t option,
+        addr_t value_addr, dword_t value_len) {
+    STRACE("setsockopt(%d, %d, %d, 0x%x, %d)",
+            sock_fd, level, option, value_addr, value_len);
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+    sdword_t signed_level = (sdword_t) level;
+    sdword_t signed_option = (sdword_t) option;
+    sdword_t signed_length = (sdword_t) value_len;
+    ssize_t copied = socket_setsockopt_value_size(
+            signed_level, signed_option, signed_length,
+            SOCKET_GUEST_I386);
+    if (copied < 0) {
+        result = (int_t) copied;
+        goto out;
+    }
+    byte_t value[LINUX_ICMP6_FILTER_SIZE] = {0};
+    assert((size_t) copied <= sizeof(value));
+    if (copied != 0 && user_read(
+            value_addr, value, (size_t) copied)) {
+        result = _EFAULT;
+        goto out;
+    }
+    result = socket_setsockopt_ref(&socket,
+            signed_level, signed_option, value, signed_length,
+            SOCKET_GUEST_I386);
+out:
+    socket_ref_release(&socket);
+    return result;
+}
+
+static int_t socket_getsockopt_ref(const struct socket_ref *socket,
+        dword_t level, dword_t option,
+        addr_t value_addr, addr_t len_addr) {
+    struct fd *sock = socket->fd;
     dword_t value_len;
     if (user_get(len_addr, value_len))
         return _EFAULT;
-    char value[value_len];
-    if (user_read(value_addr, value, value_len))
-        return _EFAULT;
+    if ((sdword_t) value_len < 0)
+        return _EINVAL;
+    byte_t value[sizeof(struct tcp_info_)] = {0};
 
     if (level == SOL_SOCKET_ && (option == SO_DOMAIN_ || option == SO_TYPE_ || option == SO_PROTOCOL_)) {
         dword_t *value_p = (dword_t *) value;
@@ -936,24 +2838,44 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_a
         if (value_len != sizeof(*cred))
             return _EINVAL;
         lock(&peer_lock);
-        if (sock->socket.domain != AF_LOCAL_ || sock->socket.unix_peer == NULL) {
+        if (sock->socket.domain != AF_LOCAL_ ||
+                !sock->socket.unix_peer_cred_valid) {
             cred->pid = 0;
             cred->uid = cred->gid = -1;
         } else {
-            *cred = sock->socket.unix_peer->socket.unix_cred;
+            *cred = sock->socket.unix_peer_cred;
         }
         unlock(&peer_lock);
     } else if (level == SOL_SOCKET_ && option == SO_ERROR_) {
         if (value_len != sizeof(dword_t))
             return _EINVAL;
-        int real_error;
-        socklen_t real_error_len = sizeof(real_error);
-        int err = getsockopt(sock->real_fd, SOL_SOCKET, SO_ERROR, &real_error, &real_error_len);
-        if (err < 0)
-            return errno_map();
+        uint64_t connect_generation = 0;
+        enum unix_connect_error_phase error_phase =
+                unix_bound_connect_error_snapshot(
+                        sock, &connect_generation);
+        lock(&peer_lock);
+        bool handshake_pending =
+                sock->socket.unix_peer_handshake_pending;
+        unlock(&peer_lock);
+        int real_error = 0;
+        if (error_phase == UNIX_CONNECT_ERROR_ASYNC ||
+                (error_phase == UNIX_CONNECT_ERROR_NONE &&
+                !handshake_pending)) {
+            socklen_t real_error_len = sizeof(real_error);
+            int err = getsockopt(sock->real_fd, SOL_SOCKET, SO_ERROR,
+                    &real_error, &real_error_len);
+            if (err < 0)
+                return errno_map();
+        }
+        if (real_error != 0 &&
+                error_phase == UNIX_CONNECT_ERROR_ASYNC)
+            (void) unix_bound_cancel_peer(
+                    sock, connect_generation);
         *(dword_t *) value = real_error == 0 ? 0 : -err_map(real_error);
     } else if (level == IPPROTO_TCP && option == TCP_CONGESTION_) {
-        value_len = strlen(DEFAULT_TCP_CONGESTION);
+        size_t congestion_length = strlen(DEFAULT_TCP_CONGESTION);
+        if (value_len > congestion_length)
+            value_len = (dword_t) congestion_length;
         memcpy(value, DEFAULT_TCP_CONGESTION, value_len);
 #if defined(__APPLE__)
     } else if (level == IPPROTO_TCP && option == TCP_INFO_) {
@@ -1010,294 +2932,615 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_a
         if (real_level < 0)
             return _EINVAL;
 
-        int err = getsockopt(sock->real_fd, real_level, real_opt, value, &value_len);
+        socklen_t host_value_len = value_len < sizeof(value) ?
+                (socklen_t) value_len : (socklen_t) sizeof(value);
+        int err = getsockopt(sock->real_fd, real_level, real_opt,
+                value, &host_value_len);
         if (err < 0)
             return errno_map();
+        value_len = host_value_len;
     }
 
     if (user_put(len_addr, value_len))
         return _EFAULT;
-    if (user_put(value_addr, value))
+    if (user_write(value_addr, value, value_len))
         return _EFAULT;
     return 0;
 }
 
+int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option,
+        addr_t value_addr, dword_t len_addr) {
+    STRACE("getsockopt(%d, %d, %d, %#x, %#x)",
+            sock_fd, level, option, value_addr, len_addr);
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+    result = socket_getsockopt_ref(
+            &socket, level, option, value_addr, len_addr);
+    socket_ref_release(&socket);
+    return result;
+}
+
 static void scm_free(struct scm *scm) {
     for (unsigned i = 0; i < scm->num_fds; i++)
-        fd_close(scm->fds[i]);
+        if (scm->fds[i] != NULL)
+            fd_close(scm->fds[i]);
     free(scm);
 }
 
-int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
-    int err;
-    STRACE("sendmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
+struct i386_message_iov {
+    struct iovec_ *guest;
+    struct iovec *host;
+    size_t count;
+    size_t transaction_size;
+};
 
-    struct msghdr msg;
-    struct msghdr_ msg_fake;
-    if (user_get(msghdr_addr, msg_fake))
+static void i386_message_iov_destroy(struct i386_message_iov *iov) {
+    if (iov->host != NULL) {
+        for (size_t index = 0; index < iov->count; index++)
+            free(iov->host[index].iov_base);
+    }
+    free(iov->host);
+    free(iov->guest);
+    *iov = (struct i386_message_iov) {0};
+}
+
+static int i386_message_iov_prepare(const struct socket_ref *socket,
+        addr_t guest_address, uint_t count, dword_t flags,
+        bool copy_from_guest, struct i386_message_iov *iov) {
+    *iov = (struct i386_message_iov) {0};
+    if (count > I386_LINUX_IOV_MAX)
+        return _EMSGSIZE;
+    iov->count = count;
+    if (count == 0)
+        return 0;
+
+    iov->guest = calloc(count, sizeof(*iov->guest));
+    iov->host = calloc(count, sizeof(*iov->host));
+    if (iov->guest == NULL || iov->host == NULL) {
+        i386_message_iov_destroy(iov);
+        return _ENOMEM;
+    }
+    if (user_read(guest_address, iov->guest,
+            count * sizeof(*iov->guest))) {
+        i386_message_iov_destroy(iov);
         return _EFAULT;
+    }
+
+    uint64_t requested = 0;
+    for (size_t index = 0; index < count; index++)
+        requested += iov->guest[index].len;
+    if (copy_from_guest && socket->fd->socket.type != SOCK_STREAM_ &&
+            requested > SOCKET_IO_TRANSACTION_LIMIT) {
+        i386_message_iov_destroy(iov);
+        return _EMSGSIZE;
+    }
+
+    size_t limit = SOCKET_IO_TRANSACTION_LIMIT;
+    if (socket->fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_DONTWAIT_))
+        limit = SOCKET_STREAM_NONBLOCK_TRANSACTION_LIMIT;
+    iov->transaction_size = requested < limit ?
+            (size_t) requested : limit;
+    size_t remaining = iov->transaction_size;
+    for (size_t index = 0; index < count; index++) {
+        size_t length = iov->guest[index].len < remaining ?
+                iov->guest[index].len : remaining;
+        iov->host[index].iov_len = length;
+        if (length != 0) {
+            iov->host[index].iov_base = malloc(length);
+            if (iov->host[index].iov_base == NULL) {
+                i386_message_iov_destroy(iov);
+                return _ENOMEM;
+            }
+            if (copy_from_guest && user_read(iov->guest[index].base,
+                    iov->host[index].iov_base, length)) {
+                i386_message_iov_destroy(iov);
+                return _EFAULT;
+            }
+        }
+        remaining -= length;
+    }
+    return 0;
+}
+
+static int i386_message_control_read(const struct msghdr_ *message,
+        uint8_t **control) {
+    *control = NULL;
+    if (message->msg_controllen == 0)
+        return 0;
+    if (message->msg_controllen > I386_SOCKET_CONTROL_LIMIT)
+        return _EINVAL;
+    if (message->msg_control == 0)
+        return _EFAULT;
+    *control = malloc(message->msg_controllen);
+    if (*control == NULL)
+        return _ENOMEM;
+    if (user_read(message->msg_control,
+            *control, message->msg_controllen)) {
+        free(*control);
+        *control = NULL;
+        return _EFAULT;
+    }
+    return 0;
+}
+
+static int i386_scm_rights_count(const uint8_t *control,
+        size_t control_length, unsigned *count) {
+    *count = 0;
+    for (size_t offset = 0;
+            control_length - offset >= sizeof(struct cmsghdr_);) {
+        struct cmsghdr_ header;
+        memcpy(&header, control + offset, sizeof(header));
+        size_t remaining = control_length - offset;
+        if (header.len < sizeof(header) || header.len > remaining)
+            return _EINVAL;
+        if (header.level == SOL_SOCKET_) {
+            if (header.type != SCM_RIGHTS_)
+                return _EINVAL;
+            size_t payload_length = header.len - sizeof(header);
+            if (payload_length % sizeof(fd_t) != 0)
+                return _EINVAL;
+            size_t message_count = payload_length / sizeof(fd_t);
+            if (message_count > I386_SCM_MAX_FDS - *count)
+                return _EINVAL;
+            *count += (unsigned) message_count;
+        }
+        size_t aligned_length =
+                (header.len + sizeof(dword_t) - 1) &
+                ~(sizeof(dword_t) - 1);
+        if (aligned_length > remaining)
+            break;
+        offset += aligned_length;
+    }
+    return 0;
+}
+
+static int i386_scm_retain_rights(const uint8_t *control,
+        size_t control_length, struct scm *scm) {
+    for (size_t offset = 0;
+            control_length - offset >= sizeof(struct cmsghdr_);) {
+        struct cmsghdr_ header;
+        memcpy(&header, control + offset, sizeof(header));
+        if (header.level == SOL_SOCKET_ && header.type == SCM_RIGHTS_) {
+            size_t message_count =
+                    (header.len - sizeof(header)) / sizeof(fd_t);
+            const uint8_t *wire_fds = control + offset + sizeof(header);
+            for (size_t index = 0; index < message_count; index++) {
+                fd_t number;
+                memcpy(&number, wire_fds + index * sizeof(number),
+                        sizeof(number));
+                STRACE(" sending fd %d", number);
+                struct fd *transferred =
+                        f_get_task_retain(current, number);
+                if (transferred == NULL)
+                    return _EBADF;
+                scm->fds[scm->num_fds++] = transferred;
+            }
+        }
+        size_t remaining = control_length - offset;
+        size_t aligned_length =
+                (header.len + sizeof(dword_t) - 1) &
+                ~(sizeof(dword_t) - 1);
+        if (aligned_length > remaining)
+            break;
+        offset += aligned_length;
+    }
+    return 0;
+}
+
+static int unix_scm_sender_validate(struct fd *sender) {
+    lock(&peer_lock);
+    bool connected = sender->socket.unix_peer != NULL ||
+            (sender->socket.type == SOCK_STREAM_ &&
+            sender->socket.unix_peer_handshake_pending &&
+            !sender->socket.unix_peer_handshake_rejected);
+    unlock(&peer_lock);
+    if (connected)
+        return 0;
+    return sender->socket.type == SOCK_STREAM_ ? _EPIPE : _ENOTCONN;
+}
+
+// unix_scm_io_lock 保证接收者看到 dummy 时，内部队列已经按 host 顺序发布。
+static bool unix_scm_queue_delivered(
+        struct fd *sender, struct scm *scm) {
+    struct fd *owner = NULL;
+    bool pending = false;
+    lock(&peer_lock);
+    if (sender->socket.unix_peer != NULL) {
+        owner = fd_retain(sender->socket.unix_peer);
+    } else if (sender->socket.type == SOCK_STREAM_ &&
+            sender->socket.unix_peer_handshake_pending &&
+            !sender->socket.unix_peer_handshake_rejected) {
+        owner = fd_retain(sender);
+        pending = true;
+    }
+    if (owner != NULL) {
+        lock(&owner->lock);
+        list_add_tail(pending ? &owner->socket.unix_pending_scm :
+                &owner->socket.unix_scm, &scm->queue);
+        unlock(&owner->lock);
+    }
+    unlock(&peer_lock);
+    if (owner != NULL)
+        fd_close(owner);
+    return owner != NULL;
+}
+
+static bool close_host_scm_rights(struct msghdr *message) {
+    bool found = false;
+    struct cmsghdr *header;
+    for (header = CMSG_FIRSTHDR(message); header != NULL;
+            header = CMSG_NXTHDR(message, header)) {
+        if (header->cmsg_level != SOL_SOCKET ||
+                header->cmsg_type != SCM_RIGHTS ||
+                header->cmsg_len < CMSG_LEN(0))
+            continue;
+        size_t count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        const uint8_t *wire_fds = CMSG_DATA(header);
+        for (size_t index = 0; index < count; index++) {
+            int received;
+            memcpy(&received, wire_fds + index * sizeof(received),
+                    sizeof(received));
+            close(received);
+            found = true;
+        }
+    }
+    return found;
+}
+
+struct scm_delivery {
+    unsigned count;
+    fd_t numbers[I386_SCM_MAX_FDS];
+    qword_t generations[I386_SCM_MAX_FDS];
+    struct fd *objects[I386_SCM_MAX_FDS];
+};
+
+static int scm_delivery_install(struct task *task, struct scm *scm,
+        unsigned count, struct scm_delivery *delivery) {
+    for (unsigned index = 0; index < count; index++) {
+        struct fd *object = scm->fds[index];
+        struct fd *rollback_reference = fd_retain(object);
+        scm->fds[index] = NULL;
+        qword_t generation = 0;
+        fd_t number = f_install_task_tracked(
+                task, object, 0, &generation);
+        if (number < 0) {
+            fd_close(rollback_reference);
+            return number;
+        }
+        delivery->numbers[delivery->count] = number;
+        delivery->generations[delivery->count] = generation;
+        delivery->objects[delivery->count] = rollback_reference;
+        delivery->count++;
+    }
+    return 0;
+}
+
+static void scm_delivery_finish(
+        struct task *task, struct scm_delivery *delivery, bool rollback) {
+    for (unsigned index = 0; index < delivery->count; index++) {
+        if (rollback)
+            f_close_task_if_matches(task, delivery->numbers[index],
+                    delivery->objects[index], delivery->generations[index]);
+        fd_close(delivery->objects[index]);
+    }
+    delivery->count = 0;
+}
+
+int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
+    STRACE("sendmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+
+    struct msghdr msg = {0};
+    struct msghdr_ msg_fake;
+    struct i386_message_iov iov = {0};
+    uint8_t *guest_control = NULL;
+    struct scm *scm = NULL;
+    bool scm_io_locked = false;
+    if (user_get(msghdr_addr, msg_fake)) {
+        result = _EFAULT;
+        goto out;
+    }
 
     // msg_name
     struct sockaddr_max_ msg_name;
     if (msg_fake.msg_name != 0) {
-        int err = sockaddr_read(msg_fake.msg_name, &msg_name, &msg_fake.msg_namelen);
-        if (err < 0)
-            return err;
+        result = sockaddr_read(msg_fake.msg_name, socket.fd->socket.type,
+                &msg_name, &msg_fake.msg_namelen);
+        if (result < 0)
+            goto out;
         msg.msg_name = &msg_name;
         msg.msg_namelen = msg_fake.msg_namelen;
-    } else {
-        msg.msg_name = NULL;
     }
 
-    // msg_iovec
-    struct iovec_ msg_iov_fake[msg_fake.msg_iovlen];
-    if (user_get(msg_fake.msg_iov, msg_iov_fake))
-        return _EFAULT;
-    struct iovec msg_iov[msg_fake.msg_iovlen];
-    memset(msg_iov, 0, sizeof(msg_iov));
-    msg.msg_iov = msg_iov;
-    msg.msg_iovlen = sizeof(msg_iov) / sizeof(msg_iov[0]);
-    for (size_t i = 0; i < (size_t) msg.msg_iovlen; i++) {
-        msg_iov[i].iov_len = msg_iov_fake[i].len;
-        msg_iov[i].iov_base = malloc(msg_iov_fake[i].len);
-        err = _EFAULT;
-        if (user_read(msg_iov_fake[i].base, msg_iov[i].iov_base, msg_iov_fake[i].len))
-            goto out_free_iov;
-    }
+    result = i386_message_iov_prepare(&socket, msg_fake.msg_iov,
+            msg_fake.msg_iovlen, (dword_t) flags, true, &iov);
+    if (result < 0)
+        goto out;
+    msg.msg_iov = iov.host;
+    msg.msg_iovlen = iov.count;
 
     // msg_control
-    uint8_t msg_control_buf[2048];
-    uint8_t *msg_control = NULL;
-    if (msg_fake.msg_control != 0) {
-        if (msg_fake.msg_controllen > sizeof(msg_control_buf)) {
-            err = _EINVAL;
-            goto out_free_iov;
-        }
-        msg_control = msg_control_buf;
-        err = _EFAULT;
-        if (user_read(msg_fake.msg_control, msg_control, msg_fake.msg_controllen))
-            goto out_free_iov;
-    }
-    msg.msg_control = NULL;
-    msg.msg_controllen = 0;
-
-    struct scm *scm = NULL;
-    char real_msg_control[CMSG_SPACE(sizeof(int))]; // only used if actually sending an fd
-    if (sock->socket.domain == AF_LOCAL_ && msg_control != NULL && msg_fake.msg_controllen >= sizeof(struct cmsghdr_)) {
-        // figure out how many file descriptors we're sending
-        uint8_t *mhdr_end = msg_control + msg_fake.msg_controllen;
-        unsigned num_fds = 0;
-        struct cmsghdr_ *cmsg;
-        for (cmsg = (void *) msg_control; cmsg != NULL; cmsg = CMSG_NXTHDR_(cmsg, mhdr_end)) {
-            if (cmsg->level != SOL_SOCKET_)
-                continue;
-            if (cmsg->type != SCM_RIGHTS_)
-                return _EINVAL;
-            num_fds += (cmsg->len - sizeof(struct cmsghdr_)) / sizeof(fd_t);
-        }
-        if (num_fds > 253) // *magic*
-            return _EINVAL;
-
-        if (num_fds > 0) {
-            // send one (1) real fd and put the rest in a struct scm
-            static int real_fd = -1;
-            if (real_fd == -1) {
-                real_fd = open(".", O_RDONLY);
-                if (real_fd < 0)
-                    ERRNO_DIE("no");
+    result = i386_message_control_read(&msg_fake, &guest_control);
+    if (result < 0)
+        goto out;
+    unsigned rights_count = 0;
+    if (socket.fd->socket.domain == AF_LOCAL_ && guest_control != NULL) {
+        result = i386_scm_rights_count(guest_control,
+                msg_fake.msg_controllen, &rights_count);
+        if (result < 0)
+            goto out;
+        if (rights_count != 0) {
+            scm = calloc(1, sizeof(*scm) +
+                    rights_count * sizeof(*scm->fds));
+            if (scm == NULL) {
+                result = _ENOMEM;
+                goto out;
             }
-            msg.msg_control = real_msg_control;
-            msg.msg_controllen = sizeof(real_msg_control);
-            struct cmsghdr *real_cmsg = CMSG_FIRSTHDR(&msg);
-            real_cmsg->cmsg_level = SOL_SOCKET;
-            real_cmsg->cmsg_type = SCM_RIGHTS;
-            real_cmsg->cmsg_len = CMSG_LEN(sizeof(real_fd));
-            memcpy(CMSG_DATA(real_cmsg), &real_fd, sizeof(real_fd));
-
-            scm = malloc(sizeof(struct scm) + num_fds * sizeof(struct fd *));
             list_init(&scm->queue);
-            scm->num_fds = num_fds;
-            unsigned fd_i = 0;
-            for (cmsg = (void *) msg_control; cmsg != NULL; cmsg = CMSG_NXTHDR_(cmsg, mhdr_end)) {
-                if (cmsg->level != SOL_SOCKET_)
-                    continue;
-                fd_t *fds = (void *) cmsg->data;
-                for (unsigned i = 0; i < (cmsg->len - sizeof(struct cmsghdr_)) / sizeof(fd_t); i++) {
-                    STRACE(" sending fd %d", fds[i]);
-                    scm->fds[fd_i++] = fd_retain(f_get(fds[i]));
-                }
-            }
-            lock(&peer_lock);
-            struct fd *peer = sock->socket.unix_peer;
-            if (peer == NULL) {
-                unlock(&peer_lock);
-                err = _EPIPE;
-                goto out_free_scm;
-            }
-            lock(&peer->lock);
-            list_add_tail(&peer->socket.unix_scm, &scm->queue);
-            unlock(&peer->lock);
-            unlock(&peer_lock);
+            result = i386_scm_retain_rights(guest_control,
+                    msg_fake.msg_controllen, scm);
+            if (result < 0)
+                goto out;
+            result = unix_scm_sender_validate(socket.fd);
+            if (result < 0)
+                goto out;
         }
     }
 
     msg.msg_flags = sock_flags_to_real(msg_fake.msg_flags);
-    err = _EINVAL;
-    if (msg.msg_flags < 0)
-        goto out_free_scm;
     int real_flags = sock_flags_to_real(flags);
-    if (real_flags < 0)
-        goto out_free_scm;
-
-    err = sendmsg(sock->real_fd, &msg, real_flags);
-    if (err < 0) {
-        err = errno_map();
-        goto out_free_scm;
+    if (msg.msg_flags < 0 || real_flags < 0) {
+        result = _EINVAL;
+        goto out;
     }
-    goto out_free_iov;
 
-out_free_scm:
+    // 只传一个 host dummy fd；真实 guest 引用由内部 SCM 容器携带。
+    char real_msg_control[CMSG_SPACE(sizeof(int))] = {0};
     if (scm != NULL) {
-        lock(&peer_lock);
-        struct fd *peer = sock->socket.unix_peer;
-        if (peer != NULL) {
-            lock(&peer->lock);
-            list_remove_safe(&scm->queue);
-            unlock(&peer->lock);
+        lock(&unix_scm_io_lock);
+        scm_io_locked = true;
+        static int dummy_fd = -1;
+        if (dummy_fd < 0) {
+            dummy_fd = open(".", O_RDONLY);
+            if (dummy_fd < 0) {
+                result = errno_map();
+                goto out;
+            }
         }
-        unlock(&peer_lock);
-        scm_free(scm);
+        msg.msg_control = real_msg_control;
+        msg.msg_controllen = sizeof(real_msg_control);
+        struct cmsghdr *real_cmsg = CMSG_FIRSTHDR(&msg);
+        real_cmsg->cmsg_level = SOL_SOCKET;
+        real_cmsg->cmsg_type = SCM_RIGHTS;
+        real_cmsg->cmsg_len = CMSG_LEN(sizeof(dummy_fd));
+        memcpy(CMSG_DATA(real_cmsg), &dummy_fd, sizeof(dummy_fd));
     }
-out_free_iov:
-    for (size_t i = 0; i < (size_t) msg.msg_iovlen; i++)
-        free(msg_iov[i].iov_base);
-    return err;
+
+    struct unix_bound_name *queued_name =
+            unix_bound_message_begin(socket.fd);
+    ssize_t sent = sendmsg(socket.fd->real_fd, &msg, real_flags);
+    if (sent < 0) {
+        unix_bound_message_cancel(queued_name);
+        result = errno_map();
+        goto out;
+    }
+    result = (int_t) sent;
+    if (scm != NULL) {
+        if (!unix_scm_queue_delivered(socket.fd, scm))
+            scm_free(scm);
+        scm = NULL;
+        unlock(&unix_scm_io_lock);
+        scm_io_locked = false;
+    }
+
+out:
+    if (scm_io_locked)
+        unlock(&unix_scm_io_lock);
+    if (scm != NULL)
+        scm_free(scm);
+    free(guest_control);
+    i386_message_iov_destroy(&iov);
+    socket_ref_release(&socket);
+    return result;
 }
 
 int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     STRACE("recvmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
 
-    struct msghdr msg;
+    struct msghdr msg = {0};
     struct msghdr_ msg_fake;
-    if (user_get(msghdr_addr, msg_fake))
-        return _EFAULT;
-
-    // msg_name
-    char msg_name[msg_fake.msg_namelen];
-    if (msg_fake.msg_name != 0) {
-        msg.msg_name = msg_name;
-        msg.msg_namelen = sizeof(msg_name);
-    } else {
-        msg.msg_name = NULL;
-        msg.msg_namelen = 0;
+    struct i386_message_iov iov = {0};
+    struct scm_delivery delivery = {0};
+    struct scm *received_scm = NULL;
+    uint8_t *guest_control_wire = NULL;
+    if (user_get(msghdr_addr, msg_fake)) {
+        result = _EFAULT;
+        goto out;
     }
 
-    char real_msg_control[CMSG_SPACE(sizeof(int))] = {}; // only used if needed
-    if (msg_fake.msg_controllen != 0) {
-        // msg_control, include room for one (1) fd
+    // msg_name
+    struct sockaddr_storage msg_name = {0};
+    dword_t guest_name_capacity = msg_fake.msg_namelen;
+    bool wants_name = msg_fake.msg_name != 0;
+    bool track_unix_source = socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    if (wants_name || track_unix_source) {
+        msg.msg_name = &msg_name;
+        msg.msg_namelen = sizeof(msg_name);
+    }
+
+    // AF_UNIX 始终接收 host dummy，guest 未提供空间时也必须同步丢弃内部 SCM。
+    char real_msg_control[CMSG_SPACE(sizeof(int))] = {0};
+    if (socket.fd->socket.domain == AF_LOCAL_ ||
+            msg_fake.msg_controllen != 0) {
         msg.msg_control = real_msg_control;
         msg.msg_controllen = sizeof(real_msg_control);
-    } else {
-        msg.msg_control = NULL;
-        msg.msg_controllen = 0;
     }
 
     int real_flags = sock_flags_to_real(flags);
-    if (real_flags < 0)
-        return _EINVAL;
-
-    // msg_iovec (no initial content)
-    struct iovec_ msg_iov_fake[msg_fake.msg_iovlen];
-    if (user_get(msg_fake.msg_iov, msg_iov_fake))
-        return _EFAULT;
-    struct iovec msg_iov[msg_fake.msg_iovlen];
-    msg.msg_iov = msg_iov;
-    msg.msg_iovlen = sizeof(msg_iov) / sizeof(msg_iov[0]);
-    for (size_t i = 0; i < (size_t) msg.msg_iovlen; i++) {
-        msg_iov[i].iov_len = msg_iov_fake[i].len;
-        msg_iov[i].iov_base = malloc(msg_iov_fake[i].len);
+    if (real_flags < 0) {
+        result = _EINVAL;
+        goto out;
     }
 
-    ssize_t res = recvmsg(sock->real_fd, &msg, real_flags);
-    int err = 0;
-    if (res < 0)
-        err = errno_map();
-    // don't return err quite yet, there are outstanding mallocs
+    result = i386_message_iov_prepare(&socket, msg_fake.msg_iov,
+            msg_fake.msg_iovlen, (dword_t) flags, false, &iov);
+    if (result < 0)
+        goto out;
+    msg.msg_iov = iov.host;
+    msg.msg_iovlen = iov.count;
+
+    ssize_t received = recvmsg(socket.fd->real_fd, &msg, real_flags);
+    if (received < 0) {
+        result = errno_map();
+        goto out;
+    }
+    result = (int_t) received;
+
+    int post_receive_error = 0;
+    if (msg.msg_name != NULL) {
+        uint_t returned_length = (uint_t) msg.msg_namelen;
+        post_receive_error = sockaddr_from_real(msg.msg_name,
+                sizeof(msg_name), &returned_length,
+                track_unix_source && !(flags & MSG_PEEK_));
+        if (post_receive_error == 0)
+            msg.msg_namelen = (socklen_t) returned_length;
+    }
 
     // msg_iovec (changed)
     // copy as many bytes as were received, according to the return value
-    size_t n = res;
-    if (res < 0)
-        n = 0;
-    for (size_t i = 0; i < (size_t) msg.msg_iovlen; i++) {
-        size_t chunk_size = msg_iov[i].iov_len;
-        if (chunk_size > n)
-            chunk_size = n;
-        if (chunk_size > 0)
-            if (user_write(msg_iov_fake[i].base, msg_iov[i].iov_base, chunk_size))
-                return _EFAULT;
-        n -= chunk_size;
-        free(msg_iov[i].iov_base);
+    size_t remaining = (size_t) received < iov.transaction_size ?
+            (size_t) received : iov.transaction_size;
+    for (size_t index = 0; index < iov.count; index++) {
+        size_t chunk_size = iov.host[index].iov_len < remaining ?
+                iov.host[index].iov_len : remaining;
+        if (chunk_size > 0 && post_receive_error == 0 &&
+                user_write(iov.guest[index].base,
+                        iov.host[index].iov_base, chunk_size))
+            post_receive_error = _EFAULT;
+        remaining -= chunk_size;
     }
 
     // msg_control (changed)
+    dword_t guest_control_capacity = msg_fake.msg_control != 0 ?
+            msg_fake.msg_controllen : 0;
     msg_fake.msg_controllen = 0;
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (sock->socket.domain == AF_LOCAL_ && cmsg != NULL &&
-            cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-        int dummy_fd = ((int *) CMSG_DATA(cmsg))[0];
-        close(dummy_fd);
-
-        lock(&sock->lock);
-        assert(!list_empty(&sock->socket.unix_scm));
-        struct scm *scm = list_first_entry(&sock->socket.unix_scm, struct scm, queue);
-        list_remove(&scm->queue);
-        unlock(&sock->lock);
-
-        if (res < 0) {
-            scm_free(scm);
-            return err;
+    bool guest_control_truncated = false;
+    bool host_rights = socket.fd->socket.domain == AF_LOCAL_ &&
+            close_host_scm_rights(&msg);
+    if (host_rights && (flags & MSG_PEEK_)) {
+        // PEEK 不消费内部所有权；后续正式接收仍与同一个 dummy 对齐。
+        guest_control_truncated = true;
+    } else if (host_rights) {
+        lock(&unix_scm_io_lock);
+        lock(&socket.fd->lock);
+        if (!list_empty(&socket.fd->socket.unix_scm)) {
+            received_scm = list_first_entry(
+                    &socket.fd->socket.unix_scm, struct scm, queue);
+            list_remove(&received_scm->queue);
         }
+        unlock(&socket.fd->lock);
+        unlock(&unix_scm_io_lock);
 
-        uint8_t msg_control[sizeof(struct cmsghdr_) + scm->num_fds * sizeof(fd_t)];
-        struct cmsghdr_ *cmsg = (void *) msg_control;
-        cmsg->len = sizeof(msg_control);
-        cmsg->level = SOL_SOCKET_;
-        cmsg->type = SCM_RIGHTS_;
-        fd_t *fds = (void *) cmsg->data;
-        for (unsigned i = 0; i < scm->num_fds; i++) {
-            fds[i] = f_install(scm->fds[i], 0);
-            STRACE(" receiving fd %d", fds[i]);
+        if (received_scm == NULL) {
+            if (post_receive_error == 0)
+                post_receive_error = _EIO;
+        } else if (post_receive_error < 0) {
+            scm_free(received_scm);
+            received_scm = NULL;
+        } else {
+            unsigned deliverable = 0;
+            if (guest_control_capacity >=
+                    sizeof(struct cmsghdr_) + sizeof(fd_t)) {
+                deliverable = (unsigned) ((guest_control_capacity -
+                        sizeof(struct cmsghdr_)) / sizeof(fd_t));
+                if (deliverable > received_scm->num_fds)
+                    deliverable = received_scm->num_fds;
+            }
+            guest_control_truncated =
+                    deliverable < received_scm->num_fds;
+            if (deliverable != 0) {
+                size_t wire_length = sizeof(struct cmsghdr_) +
+                        deliverable * sizeof(fd_t);
+                guest_control_wire = calloc(1, wire_length);
+                if (guest_control_wire == NULL) {
+                    post_receive_error = _ENOMEM;
+                } else {
+                    struct cmsghdr_ *guest_header =
+                            (struct cmsghdr_ *) guest_control_wire;
+                    guest_header->len = (dword_t) wire_length;
+                    guest_header->level = SOL_SOCKET_;
+                    guest_header->type = SCM_RIGHTS_;
+                    post_receive_error = scm_delivery_install(current,
+                            received_scm, deliverable, &delivery);
+                    for (unsigned index = 0;
+                            index < delivery.count; index++) {
+                        STRACE(" receiving fd %d",
+                                delivery.numbers[index]);
+                        memcpy(guest_header->data +
+                                index * sizeof(fd_t),
+                                &delivery.numbers[index], sizeof(fd_t));
+                    }
+                    if (post_receive_error == 0 &&
+                            user_write(msg_fake.msg_control,
+                                    guest_control_wire, wire_length))
+                        post_receive_error = _EFAULT;
+                    if (post_receive_error == 0)
+                        msg_fake.msg_controllen = (dword_t) wire_length;
+                }
+            }
+            scm_free(received_scm);
+            received_scm = NULL;
         }
-        if (user_write(msg_fake.msg_control, cmsg, cmsg->len))
-            return _EFAULT;
-        msg_fake.msg_controllen = msg.msg_controllen;
     }
-
-    // by now the iovecs and scm have been freed so we can return
-    if (res < 0)
-        return err;
 
     // msg_name (changed)
-    if (msg.msg_name != 0) {
-        int err = sockaddr_write(msg_fake.msg_name, msg.msg_name, sizeof(msg_name), &msg.msg_namelen);
-        if (err < 0)
-            return err;
+    if (post_receive_error == 0 && msg.msg_name != NULL) {
+        uint_t returned_length = (uint_t) msg.msg_namelen;
+        if (wants_name) {
+            int name_error = sockaddr_copy_to_user(
+                    msg_fake.msg_name, msg.msg_name,
+                    sizeof(msg_name), guest_name_capacity,
+                    returned_length);
+            if (name_error < 0)
+                post_receive_error = name_error;
+        }
+        msg.msg_namelen = (socklen_t) returned_length;
     }
-    msg_fake.msg_namelen = msg.msg_namelen;
+    msg_fake.msg_namelen = wants_name ? msg.msg_namelen : 0;
 
     // msg_flags (changed)
     msg_fake.msg_flags = sock_flags_from_real(msg.msg_flags);
+    if (guest_control_truncated)
+        msg_fake.msg_flags |= MSG_CTRUNC_;
 
-    if (user_put(msghdr_addr, msg_fake))
-        return _EFAULT;
-    return res;
+    if (post_receive_error == 0 && user_put(msghdr_addr, msg_fake))
+        post_receive_error = _EFAULT;
+    if (post_receive_error < 0) {
+        result = post_receive_error;
+        goto out;
+    }
+
+    scm_delivery_finish(current, &delivery, false);
+out:
+    if (delivery.count != 0)
+        scm_delivery_finish(current, &delivery, true);
+    if (received_scm != NULL)
+        scm_free(received_scm);
+    free(guest_control_wire);
+    i386_message_iov_destroy(&iov);
+    socket_ref_release(&socket);
+    return result;
 }
 
 struct mmsghdr_ {
@@ -1347,23 +3590,73 @@ static void sock_translate_err(struct fd *fd, int *err) {
 }
 
 static ssize_t sock_read(struct fd *fd, void *buf, size_t size) {
-    int err = realfs_read(fd, buf, size);
+    int err;
+    if (fd->socket.domain == AF_LOCAL_ &&
+            fd->socket.type != SOCK_STREAM_) {
+        struct socket_ref socket = {.fd = fd};
+        err = (int) socket_recvfrom_ref(
+                &socket, buf, size, 0, NULL);
+    } else {
+        err = realfs_read(fd, buf, size);
+    }
     sock_translate_err(fd, &err);
     return err;
 }
 
 static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
+    struct unix_bound_name *queued_name =
+            unix_bound_message_begin(fd);
     int err = realfs_write(fd, buf, size);
+    if (err < 0)
+        unix_bound_message_cancel(queued_name);
     sock_translate_err(fd, &err);
     return err;
 }
 
+static void unix_bound_drain_messages(struct fd *fd) {
+    if (fd->socket.domain != AF_LOCAL_ ||
+            fd->socket.type == SOCK_STREAM_)
+        return;
+    for (;;) {
+        byte_t discarded;
+        struct sockaddr_storage source = {0};
+        socklen_t source_length = sizeof(source);
+        ssize_t result = recvfrom(fd->real_fd, &discarded, sizeof(discarded),
+                MSG_DONTWAIT | MSG_TRUNC,
+                (struct sockaddr *) &source, &source_length);
+        if (result < 0)
+            break;
+        if (source_length != 0) {
+            uint_t converted_length = (uint_t) source_length;
+            (void) sockaddr_from_real(&source, sizeof(source),
+                    &converted_length, true);
+        }
+    }
+}
+
 static int sock_close(struct fd *fd) {
     sockrestart_end_listen(fd);
-    // FIXME next 3 lines should go in a function like release_unix_names
+    bool close_host_early = unix_bound_owner_begin_close(fd);
+    int close_result = 0;
+    if (close_host_early) {
+        if (close(fd->real_fd) < 0)
+            close_result = errno_map();
+        fd->real_fd = -1;
+    }
+    unix_bound_drain_messages(fd);
+    unix_bound_owner_finish_close(fd);
     inode_release_if_exist(fd->socket.unix_name_inode);
     if (fd->socket.unix_name_abstract != NULL)
-        unix_abstract_release(fd->socket.unix_name_abstract);
+        unix_abstract_unpublish(fd->socket.unix_name_abstract);
+    if (fd->socket.unix_backing_owned) {
+        struct stat host_stat;
+        if (lstat(fd->socket.unix_backing_path, &host_stat) == 0 &&
+                (uint64_t) host_stat.st_dev ==
+                        fd->socket.unix_backing_device &&
+                (uint64_t) host_stat.st_ino ==
+                        fd->socket.unix_backing_inode)
+            (void) unlink(fd->socket.unix_backing_path);
+    }
     lock(&peer_lock);
     struct fd *peer = fd->socket.unix_peer;
     if (peer != NULL)
@@ -1376,9 +3669,16 @@ static int sock_close(struct fd *fd) {
             list_remove(&scm->queue);
             scm_free(scm);
         }
+        list_for_each_entry_safe(
+                &fd->socket.unix_pending_scm, scm, tmp, queue) {
+            list_remove(&scm->queue);
+            scm_free(scm);
+        }
         unlock(&fd->lock);
     }
-    return realfs_close(fd);
+    if (fd->real_fd >= 0)
+        return realfs_close(fd);
+    return close_result;
 }
 
 const struct fd_ops socket_fdops = {

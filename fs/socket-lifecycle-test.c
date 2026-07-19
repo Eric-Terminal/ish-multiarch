@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -24,6 +26,7 @@
 #define UNMAPPED_PAGE UINT32_C(0x2000)
 #define ACCEPT_ADDRESS (LENGTH_PAGE + UINT32_C(0x080))
 #define UNIX_ADDRESS (LENGTH_PAGE + UINT32_C(0x100))
+#define UNIX_SECOND_ADDRESS (LENGTH_PAGE + UINT32_C(0x200))
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -88,6 +91,16 @@ struct accept_call {
     int_t result;
 };
 
+struct bind_call {
+    struct task *task;
+    struct socket_ref socket;
+    struct sockaddr_max_ address;
+    size_t address_length;
+    atomic_uint *ready;
+    atomic_bool *start;
+    int_t result;
+};
+
 static void *run_connect(void *opaque) {
     struct connect_call *call = opaque;
     current = call->task;
@@ -105,6 +118,20 @@ static void *run_accept(void *opaque) {
     call->result = sys_accept(call->listener, 0, 0);
     atomic_store_explicit(
             &call->finished, true, memory_order_release);
+    current = NULL;
+    return NULL;
+}
+
+static void *run_bind(void *opaque) {
+    struct bind_call *call = opaque;
+    current = call->task;
+    atomic_fetch_add_explicit(call->ready, 1, memory_order_release);
+    const struct timespec interval = {.tv_nsec = 1000000};
+    while (!atomic_load_explicit(call->start, memory_order_acquire))
+        nanosleep(&interval, NULL);
+    call->result = socket_bind_ref_task(call->task, &call->socket,
+            &call->address, call->address_length);
+    socket_ref_release(&call->socket);
     current = NULL;
     return NULL;
 }
@@ -152,20 +179,6 @@ static bool wait_for_accept_install_gate(
     return false;
 }
 
-static bool wait_for_task_condition(struct task *task,
-        cond_t *condition, unsigned timeout_ms) {
-    const struct timespec interval = {.tv_nsec = 1000000};
-    for (unsigned elapsed = 0; elapsed < timeout_ms; elapsed++) {
-        lock(&task->waiting_cond_lock);
-        bool registered = task->waiting_cond == condition;
-        unlock(&task->waiting_cond_lock);
-        if (registered)
-            return true;
-        nanosleep(&interval, NULL);
-    }
-    return false;
-}
-
 int main(void) {
     struct task task;
     struct tgroup group;
@@ -194,6 +207,66 @@ int main(void) {
     int_t socket_number = socket_create_task(
             &task, AF_INET_, SOCK_STREAM_, 0);
     CHECK(socket_number == 1, "测试 socket 安装到第二个槽位");
+    CHECK(sys_getsockopt(99, SOL_SOCKET_, SO_DOMAIN_,
+                    UNMAPPED_PAGE, UNMAPPED_PAGE) == _EBADF,
+            "getsockopt 在读取用户长度前拒绝缺失 fd");
+    CHECK(sys_getsockopt(0, SOL_SOCKET_, SO_DOMAIN_,
+                    UNMAPPED_PAGE, UNMAPPED_PAGE) == _ENOTSOCK,
+            "getsockopt 对稳定非套接字返回 ENOTSOCK");
+    CHECK(sys_getsockopt(socket_number, SOL_SOCKET_, SO_DOMAIN_,
+                    UNMAPPED_PAGE, UNMAPPED_PAGE) == _EFAULT,
+            "getsockopt 对不可读长度地址返回 EFAULT");
+    sdword_t negative_option_length = -1;
+    CHECK(user_write(LENGTH_PAGE, &negative_option_length,
+                    sizeof(negative_option_length)) == 0 &&
+            sys_getsockopt(socket_number, SOL_SOCKET_, SO_DOMAIN_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == _EINVAL,
+            "getsockopt 拒绝负的 guest optlen 且不建立无界 VLA");
+    dword_t option_length = sizeof(dword_t);
+    dword_t option_value = UINT32_C(0xa5a5a5a5);
+    CHECK(user_write(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            user_write(ACCEPT_ADDRESS, &option_value,
+                    sizeof(option_value)) == 0 &&
+            sys_getsockopt(socket_number, SOL_SOCKET_, SO_DOMAIN_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS, &option_value,
+                    sizeof(option_value)) == 0 &&
+            user_read(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            option_value == AF_INET_ &&
+            option_length == sizeof(option_value),
+            "getsockopt 从 retained socket 返回 guest domain");
+    char congestion = '\0';
+    option_length = sizeof(congestion);
+    CHECK(user_write(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            sys_getsockopt(socket_number, IPPROTO_TCP, TCP_CONGESTION_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS,
+                    &congestion, sizeof(congestion)) == 0 &&
+            user_read(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            congestion == 'c' &&
+            option_length == sizeof(congestion),
+            "getsockopt 按 guest 容量截断 TCP 拥塞算法名称");
+    struct sockaddr_ invalid_address = {
+        .family = UINT16_C(0x7fff),
+    };
+    CHECK(user_write(UNIX_ADDRESS, &invalid_address,
+                    sizeof(invalid_address)) == 0,
+            "i386 connect 错误顺序地址写入成功");
+    CHECK(sys_connect(99, UNMAPPED_PAGE, 1) == _EBADF,
+            "i386 connect 在地址复制前拒绝缺失 fd");
+    CHECK(sys_connect(0, UNMAPPED_PAGE, 1) == _EFAULT,
+            "i386 connect 对非套接字仍先复制地址");
+    CHECK(sys_connect(0, UNIX_ADDRESS,
+                    sizeof(invalid_address)) == _ENOTSOCK,
+            "i386 connect 在地址复制后拒绝稳定非套接字");
+    CHECK(sys_connect(socket_number, UNMAPPED_PAGE, 1) == _EFAULT,
+            "i386 connect 的短 sockaddr 保持复制故障优先");
+    CHECK(sys_connect(socket_number, UNIX_ADDRESS, 1) == _EINVAL,
+            "i386 connect 复制短 sockaddr 后由协议拒绝");
     CHECK(socket_ref_get_task(&task, socket_number, &retained) == 0 &&
             retained.fd != NULL,
             "socket retained 引用获取成功");
@@ -451,6 +524,23 @@ int main(void) {
             f_getfd_task(&task, installed_pair[0]) == FD_CLOEXEC_ &&
             f_getfd_task(&task, installed_pair[1]) == FD_CLOEXEC_,
             "socketpair 发布前建立 peer 并向双端应用描述符标志");
+    byte_t socketpair_payload = 0x5a;
+    dword_t socketpair_source_capacity = sizeof(struct sockaddr_);
+    CHECK(user_write(ACCEPT_ADDRESS, &socketpair_payload,
+                    sizeof(socketpair_payload)) == 0 &&
+            sys_sendto(installed_pair[0], ACCEPT_ADDRESS,
+                    sizeof(socketpair_payload), 0, 0, 0) ==
+                    sizeof(socketpair_payload) &&
+            user_write(LENGTH_PAGE, &socketpair_source_capacity,
+                    sizeof(socketpair_source_capacity)) == 0 &&
+            sys_recvfrom(installed_pair[1], ACCEPT_ADDRESS,
+                    sizeof(socketpair_payload), 0,
+                    UNIX_ADDRESS, LENGTH_PAGE) ==
+                    sizeof(socketpair_payload) &&
+            user_read(LENGTH_PAGE, &socketpair_source_capacity,
+                    sizeof(socketpair_source_capacity)) == 0 &&
+            socketpair_source_capacity == 0,
+            "AF_UNIX stream 的零长度源地址不得在消费数据后变成 EINVAL");
     CHECK(f_close_task(&task, installed_pair[1]) == 0 &&
             f_close_task(&task, installed_pair[0]) == 0,
             "socketpair 原子发布成功项清理完成");
@@ -473,6 +563,24 @@ int main(void) {
                     &unix_connector) == 0,
             "AF_UNIX 握手回归取得两端对象");
 
+    struct {
+        sdword_t seconds;
+        sdword_t microseconds;
+    } i386_timeout = {1, 250000};
+    CHECK(user_write(UNIX_SECOND_ADDRESS, &i386_timeout,
+                    sizeof(i386_timeout)) == 0 &&
+            sys_setsockopt(unix_listener_number,
+                    SOL_SOCKET_, SO_RCVTIMEO_OLD_,
+                    UNIX_SECOND_ADDRESS, sizeof(i386_timeout)) == 0,
+            "i386 旧 timeval32 socket option 按八字节解析");
+    struct timeval host_timeout = {0};
+    socklen_t host_timeout_length = sizeof(host_timeout);
+    CHECK(getsockopt(unix_listener->real_fd,
+                    SOL_SOCKET, SO_RCVTIMEO,
+                    &host_timeout, &host_timeout_length) == 0 &&
+            host_timeout.tv_sec == 1 && host_timeout.tv_usec == 250000,
+            "i386 timeval32 已显式转换到 host timeval");
+
     struct sockaddr_max_ guest_unix_address = {
         .family = AF_LOCAL_,
     };
@@ -486,7 +594,166 @@ int main(void) {
                     guest_unix_address_length) == 0 &&
             sys_bind(unix_listener_number, UNIX_ADDRESS,
                     (uint_t) guest_unix_address_length) == 0 &&
-            sys_listen(unix_listener_number, 1) == 0,
+            unix_listener->socket.unix_name_len ==
+                    guest_unix_address_length -
+                    offsetof(struct sockaddr_max_, data) &&
+            memcmp(unix_listener->socket.unix_name,
+                    guest_unix_address.data,
+                    unix_listener->socket.unix_name_len) == 0,
+            "AF_UNIX 抽象监听名称绑定并保存成功");
+
+    struct sockaddr_max_ second_unix_address = {
+        .family = AF_LOCAL_,
+    };
+    snprintf(second_unix_address.data + 1,
+            sizeof(second_unix_address.data) - 1,
+            "rollback-%ld", (long) getpid());
+    size_t second_unix_address_length =
+            offsetof(struct sockaddr_max_, data) + 1 +
+            strlen(second_unix_address.data + 1);
+    CHECK(user_write(UNIX_SECOND_ADDRESS, &second_unix_address,
+                    second_unix_address_length) == 0 &&
+            sys_bind(unix_listener_number, UNIX_SECOND_ADDRESS,
+                    (uint_t) second_unix_address_length) < 0 &&
+            unix_listener->socket.unix_name_len ==
+                    guest_unix_address_length -
+                    offsetof(struct sockaddr_max_, data) &&
+            memcmp(unix_listener->socket.unix_name,
+                    guest_unix_address.data,
+                    unix_listener->socket.unix_name_len) == 0,
+            "AF_UNIX 重复 bind 失败回滚新名称且保留原名称");
+    int_t rollback_socket_number = socket_create_task(
+            &task, AF_LOCAL_, SOCK_STREAM_, 0);
+    CHECK(rollback_socket_number == 4 &&
+            sys_bind(rollback_socket_number, UNIX_SECOND_ADDRESS,
+                    (uint_t) second_unix_address_length) == 0,
+            "AF_UNIX 失败事务释放名称供新 socket 立即绑定");
+    struct fd *rollback_socket = f_get_task(
+            &task, rollback_socket_number);
+    struct sockaddr_un rollback_backing = {0};
+    socklen_t rollback_backing_length = sizeof(rollback_backing);
+    CHECK(rollback_socket != NULL &&
+            getsockname(rollback_socket->real_fd,
+                    (struct sockaddr *) &rollback_backing,
+                    &rollback_backing_length) == 0 &&
+            f_close_task(&task, rollback_socket_number) == 0,
+            "AF_UNIX 回滚验证 socket 关闭成功");
+    errno = 0;
+    CHECK(lstat(rollback_backing.sun_path, &(struct stat) {0}) == -1 &&
+            errno == ENOENT,
+            "AF_UNIX 最终关闭按身份删除内部 host 后备节点");
+
+    struct sockaddr_ autobind_address = {.family = AF_LOCAL_};
+    CHECK(user_write(UNIX_SECOND_ADDRESS, &autobind_address,
+                    sizeof(autobind_address.family)) == 0,
+            "AF_UNIX autobind 地址写入成功");
+    int_t autobind_socket_number = socket_create_task(
+            &task, AF_LOCAL_, SOCK_DGRAM_, 0);
+    CHECK(autobind_socket_number == 4 &&
+            sys_bind(autobind_socket_number, UNIX_SECOND_ADDRESS,
+                    sizeof(autobind_address.family)) == 0,
+            "AF_UNIX addrlen=2 执行 Linux autobind");
+    struct fd *autobind_socket = f_get_task(
+            &task, autobind_socket_number);
+    CHECK(autobind_socket != NULL &&
+            autobind_socket->socket.unix_name_len == 6 &&
+            autobind_socket->socket.unix_name[0] == '\0',
+            "AF_UNIX autobind 保存 NUL 加五位名称");
+    char autobind_name[6];
+    memcpy(autobind_name, autobind_socket->socket.unix_name,
+            sizeof(autobind_name));
+    CHECK(sys_bind(autobind_socket_number, UNIX_SECOND_ADDRESS,
+                    sizeof(autobind_address.family)) == 0 &&
+            autobind_socket->socket.unix_name_len == sizeof(autobind_name) &&
+            memcmp(autobind_socket->socket.unix_name,
+                    autobind_name, sizeof(autobind_name)) == 0,
+            "AF_UNIX 已绑定 socket 的 autobind 为幂等成功");
+    struct sockaddr_un autobind_backing = {0};
+    socklen_t autobind_backing_length = sizeof(autobind_backing);
+    CHECK(getsockname(autobind_socket->real_fd,
+                    (struct sockaddr *) &autobind_backing,
+                    &autobind_backing_length) == 0 &&
+            f_close_task(&task, autobind_socket_number) == 0,
+            "AF_UNIX autobind socket 清理成功");
+    errno = 0;
+    CHECK(lstat(autobind_backing.sun_path, &(struct stat) {0}) == -1 &&
+            errno == ENOENT,
+            "AF_UNIX autobind 内部 host 后备节点已清理");
+
+    int_t concurrent_socket_number = socket_create_task(
+            &task, AF_LOCAL_, SOCK_DGRAM_, 0);
+    CHECK(concurrent_socket_number == 4,
+            "AF_UNIX 并发 bind 测试 socket 创建成功");
+    atomic_uint bind_ready;
+    atomic_bool bind_start;
+    atomic_init(&bind_ready, 0);
+    atomic_init(&bind_start, false);
+    struct bind_call bind_calls[2] = {0};
+    for (size_t index = 0; index < 2; index++) {
+        bind_calls[index].task = &task;
+        bind_calls[index].address.family = AF_LOCAL_;
+        snprintf(bind_calls[index].address.data + 1,
+                sizeof(bind_calls[index].address.data) - 1,
+                "bind-race-%zu-%ld", index, (long) getpid());
+        bind_calls[index].address_length =
+                offsetof(struct sockaddr_max_, data) + 1 +
+                strlen(bind_calls[index].address.data + 1);
+        bind_calls[index].ready = &bind_ready;
+        bind_calls[index].start = &bind_start;
+        bind_calls[index].result = _EIO;
+        CHECK(socket_ref_get_task(&task, concurrent_socket_number,
+                        &bind_calls[index].socket) == 0,
+                "AF_UNIX 并发 bind 取得独立强引用");
+    }
+    pthread_t bind_threads[2];
+    CHECK(pthread_create(&bind_threads[0], NULL,
+                    run_bind, &bind_calls[0]) == 0 &&
+            pthread_create(&bind_threads[1], NULL,
+                    run_bind, &bind_calls[1]) == 0,
+            "AF_UNIX 并发 bind 线程启动成功");
+    const struct timespec bind_interval = {.tv_nsec = 1000000};
+    for (unsigned elapsed = 0; elapsed < 1000 &&
+            atomic_load_explicit(&bind_ready, memory_order_acquire) != 2;
+            elapsed++)
+        nanosleep(&bind_interval, NULL);
+    bool both_binds_ready = atomic_load_explicit(
+            &bind_ready, memory_order_acquire) == 2;
+    atomic_store_explicit(&bind_start, true, memory_order_release);
+    int first_bind_join = pthread_join(bind_threads[0], NULL);
+    int second_bind_join = pthread_join(bind_threads[1], NULL);
+    CHECK(both_binds_ready && first_bind_join == 0 &&
+            second_bind_join == 0,
+            "AF_UNIX 两个 bind 在同一起点后及时退出");
+    int winner = bind_calls[0].result == 0 ? 0 : 1;
+    int loser = 1 - winner;
+    struct fd *concurrent_socket = f_get_task(
+            &task, concurrent_socket_number);
+    CHECK(bind_calls[winner].result == 0 &&
+            bind_calls[loser].result == _EINVAL &&
+            concurrent_socket != NULL &&
+            concurrent_socket->socket.unix_name_len ==
+                    bind_calls[winner].address_length -
+                    offsetof(struct sockaddr_max_, data) &&
+            memcmp(concurrent_socket->socket.unix_name,
+                    bind_calls[winner].address.data,
+                    concurrent_socket->socket.unix_name_len) == 0,
+            "AF_UNIX 并发 bind 只提交赢家名称和元数据");
+    int_t loser_socket_number = socket_create_task(
+            &task, AF_LOCAL_, SOCK_DGRAM_, 0);
+    struct socket_ref loser_socket;
+    CHECK(loser_socket_number == 5 &&
+            socket_ref_get_task(&task, loser_socket_number,
+                    &loser_socket) == 0 &&
+            socket_bind_ref_task(&task, &loser_socket,
+                    &bind_calls[loser].address,
+                    bind_calls[loser].address_length) == 0,
+            "AF_UNIX 并发败者的预留名称立即可重用");
+    socket_ref_release(&loser_socket);
+    CHECK(f_close_task(&task, loser_socket_number) == 0 &&
+            f_close_task(&task, concurrent_socket_number) == 0,
+            "AF_UNIX 并发 bind 测试 socket 清理成功");
+
+    CHECK(sys_listen(unix_listener_number, 1) == 0,
             "AF_UNIX 抽象监听 socket 启动成功");
     struct sockaddr_un backing_address = {0};
     socklen_t backing_address_length = sizeof(backing_address);
@@ -520,47 +787,31 @@ int main(void) {
     pthread_t connector_thread;
     pthread_t accept_thread;
 
-    // 卡住最终 fd 安装，使连接线程确定进入 peer 条件等待后再放行取消路径。
+    // 卡住最终 fd 安装，验证 connect 不依赖应用层 accept 完成。
     lock(&group.lock);
     CHECK(pthread_create(&connector_thread, NULL,
                     run_connect, &connect_call) == 0,
             "启动 AF_UNIX 连接等待线程");
     CHECK(wait_for_listener(unix_listener->real_fd, 1000),
             "AF_UNIX 连接进入 host accept 队列");
+    CHECK(wait_for_completion(&connect_call.finished, 1000) &&
+            pthread_join(connector_thread, NULL) == 0 &&
+            connect_call.result == 0,
+            "AF_UNIX stream connect 在进入 backlog 后立即返回");
     CHECK(pthread_create(&accept_thread, NULL,
                     run_accept, &accept_call) == 0,
             "启动 AF_UNIX accept 线程");
     CHECK(wait_for_accept_install_gate(unix_listener->real_fd,
                     task.files, 1000),
             "AF_UNIX accept 在满表安装点等待门闩");
-    CHECK(wait_for_task_condition(&task,
-                    &unix_connector.fd->socket.unix_got_peer, 1000),
-            "AF_UNIX connect 已登记 peer 条件等待");
     unlock(&group.lock);
 
     CHECK(wait_for_completion(&accept_call.finished, 1000) &&
             pthread_join(accept_thread, NULL) == 0,
             "AF_UNIX accept 取消路径及时返回");
-    bool connector_woke_without_rescue =
-            wait_for_completion(&connect_call.finished, 250);
-    if (!connector_woke_without_rescue) {
-        // 防止回归时测试进程本身挂死；该唤醒只用于收尾，断言仍会失败。
-        notify(&unix_connector.fd->socket.unix_got_peer);
-        if (!wait_for_completion(&connect_call.finished, 1000)) {
-            pthread_cancel(connector_thread);
-            pthread_detach(connector_thread);
-            fprintf(stderr,
-                    "socket 生命周期测试失败：AF_UNIX connect 救援后仍未退出（第 %d 行）\n",
-                    __LINE__);
-            return 1;
-        }
-    }
-    CHECK(pthread_join(connector_thread, NULL) == 0 &&
-            connector_woke_without_rescue &&
-            accept_call.result == _EMFILE && connect_call.result == 0 &&
-            unix_connector.fd->socket.unix_peer_handshake_done &&
+    CHECK(accept_call.result == _EMFILE &&
             unix_connector.fd->socket.unix_peer == NULL,
-            "AF_UNIX 满表取消唤醒真实 connect waiter");
+            "AF_UNIX 满表取消释放在途 peer 引用");
     errno = 0;
     CHECK(fcntl(unix_accepted_host_fd, F_GETFD) == -1 &&
             errno == EBADF,
@@ -568,11 +819,37 @@ int main(void) {
     lock(&group.lock);
     group.limits[RLIMIT_NOFILE_].cur = 8;
     unlock(&group.lock);
+    struct socket_address retained_abstract_name;
+    struct socket_ref listener_name_socket;
+    CHECK(socket_ref_get_task(&task, unix_listener_number,
+                    &listener_name_socket) == 0 &&
+            socket_address_prepare_task(&task, &listener_name_socket,
+                    &guest_unix_address, guest_unix_address_length,
+                    &retained_abstract_name) == 0,
+            "AF_UNIX 关闭重绑前保留旧名称查询令牌");
+    socket_ref_release(&listener_name_socket);
     socket_ref_release(&unix_connector);
     CHECK(f_close_task(&task, unix_connector_number) == 0 &&
             f_close_task(&task, unix_listener_number) == 0,
             "AF_UNIX 握手回归 socket 清理成功");
-    unlink(backing_address.sun_path);
+    errno = 0;
+    CHECK(lstat(backing_address.sun_path, &(struct stat) {0}) == -1 &&
+            errno == ENOENT,
+            "AF_UNIX 监听 socket 最终关闭清理内部 host 后备节点");
+    int_t rebound_socket_number = socket_create_task(
+            &task, AF_LOCAL_, SOCK_STREAM_, 0);
+    struct socket_ref rebound_socket;
+    CHECK(rebound_socket_number == unix_listener_number &&
+            socket_ref_get_task(&task, rebound_socket_number,
+                    &rebound_socket) == 0 &&
+            socket_bind_ref_task(&task, &rebound_socket,
+                    &guest_unix_address,
+                    guest_unix_address_length) == 0,
+            "AF_UNIX owner 关闭后不受旧 lookup 强引用阻塞同名重绑");
+    socket_ref_release(&rebound_socket);
+    CHECK(f_close_task(&task, rebound_socket_number) == 0,
+            "AF_UNIX 同名重绑 socket 清理成功");
+    socket_address_release(&retained_abstract_name);
 
     CHECK(f_close_task(&task, socket_number) == 0 &&
             replacement_probe.calls == 1,

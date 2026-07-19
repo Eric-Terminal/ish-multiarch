@@ -18,6 +18,9 @@ int_t socket_create_task(struct task *task,
 struct socket_ref {
     struct fd *fd;
 };
+struct socket_address;
+struct inode_data;
+struct unix_abstract;
 
 // 强引用跨越 guest 回调与 host I/O，成功获取后必须配对 release。
 int socket_ref_get_task(struct task *task, fd_t sock_fd,
@@ -26,6 +29,51 @@ void socket_ref_release(struct socket_ref *socket);
 int_t socket_connect_ref_task(struct task *task,
         const struct socket_ref *socket,
         const void *address, size_t address_length);
+int_t socket_connect_retained_task(struct task *task,
+        struct fd *fd, const void *address, size_t address_length);
+int_t socket_bind_ref_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length);
+int socket_address_prepare_task(struct task *task,
+        const struct socket_ref *socket,
+        const void *address, size_t address_length,
+        struct socket_address *prepared);
+int socket_address_validate_for_socket(const struct socket_ref *socket,
+        const void *address, size_t address_length);
+void socket_address_release(struct socket_address *address);
+int socket_sendto_validate(const struct socket_ref *socket,
+        size_t length, dword_t flags);
+size_t socket_sendto_prefix_size(const struct socket_ref *socket);
+int socket_sendto_prefix_validate(const struct socket_ref *socket,
+        const void *prefix, size_t prefix_size);
+size_t socket_sendto_transaction_size(const struct socket_ref *socket,
+        size_t length, dword_t flags);
+int socket_sendto_transaction_validate(const struct socket_ref *socket,
+        size_t length);
+int socket_sendto_destination_validate(const struct socket_ref *socket,
+        const struct socket_address *address);
+ssize_t socket_sendto_ref(const struct socket_ref *socket,
+        const void *buffer, size_t length, dword_t flags,
+        const struct socket_address *address);
+ssize_t socket_recvfrom_ref(const struct socket_ref *socket,
+        void *buffer, size_t length, dword_t flags,
+        struct socket_address *address);
+
+enum socket_guest_abi {
+    SOCKET_GUEST_I386,
+    SOCKET_GUEST_AARCH64,
+};
+
+ssize_t socket_setsockopt_value_size(
+        sdword_t level, sdword_t option, sdword_t value_length,
+        enum socket_guest_abi guest_abi);
+int_t socket_setsockopt_ref(const struct socket_ref *socket,
+        sdword_t level, sdword_t option,
+        const void *value, sdword_t value_length,
+        enum socket_guest_abi guest_abi);
+
+#define SOCKET_IO_TRANSACTION_LIMIT UINT32_C(0x100000)
+#define SOCKET_STREAM_NONBLOCK_TRANSACTION_LIMIT UINT32_C(0x10000)
 
 int_t sys_bind(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len);
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len);
@@ -52,6 +100,16 @@ struct sockaddr_ {
 struct sockaddr_max_ {
     uint16_t family;
     char data[SOCKADDR_DATA_MAX];
+};
+
+struct socket_address {
+    struct sockaddr_storage storage;
+    socklen_t length;
+    struct inode_data *lookup_inode;
+    struct unix_abstract *lookup_abstract;
+    bool unix_name_valid;
+    uint8_t unix_name_length;
+    char unix_name[SOCKADDR_DATA_MAX + 1];
 };
 
 size_t sockaddr_size(void *p);
@@ -151,36 +209,68 @@ static inline int sock_type_to_real(int type, int protocol) {
 
 #define MSG_OOB_ 0x1
 #define MSG_PEEK_ 0x2
+#define MSG_DONTROUTE_ 0x4
 #define MSG_CTRUNC_  0x8
 #define MSG_TRUNC_  0x20
 #define MSG_DONTWAIT_ 0x40
 #define MSG_EOR_    0x80
 #define MSG_WAITALL_ 0x100
+#define MSG_CONFIRM_ 0x800
+#define MSG_ERRQUEUE_ 0x2000
+#define MSG_NOSIGNAL_ 0x4000
+#define MSG_MORE_ 0x8000
 
 static inline int sock_flags_to_real(int fake) {
     int real = 0;
     if (fake & MSG_OOB_) real |= MSG_OOB;
     if (fake & MSG_PEEK_) real |= MSG_PEEK;
+    if (fake & MSG_DONTROUTE_) real |= MSG_DONTROUTE;
     if (fake & MSG_CTRUNC_) real |= MSG_CTRUNC;
     if (fake & MSG_TRUNC_) real |= MSG_TRUNC;
     if (fake & MSG_DONTWAIT_) real |= MSG_DONTWAIT;
     if (fake & MSG_EOR_) real |= MSG_EOR;
     if (fake & MSG_WAITALL_) real |= MSG_WAITALL;
-    if (fake & ~(MSG_OOB_|MSG_PEEK_|MSG_CTRUNC_|MSG_TRUNC_|MSG_DONTWAIT_|MSG_EOR_|MSG_WAITALL_))
-        TRACE("unimplemented socket flags %d\n", fake);
+#ifdef MSG_CONFIRM
+    if (fake & MSG_CONFIRM_) real |= MSG_CONFIRM;
+#endif
+#ifdef MSG_ERRQUEUE
+    if (fake & MSG_ERRQUEUE_) real |= MSG_ERRQUEUE;
+#endif
+#ifdef MSG_NOSIGNAL
+    if (fake & MSG_NOSIGNAL_) real |= MSG_NOSIGNAL;
+#endif
+#ifdef MSG_MORE
+    if (fake & MSG_MORE_) real |= MSG_MORE;
+#endif
+    if (fake & ~(MSG_OOB_|MSG_PEEK_|MSG_DONTROUTE_|MSG_CTRUNC_|
+            MSG_TRUNC_|MSG_DONTWAIT_|MSG_EOR_|MSG_WAITALL_|
+            MSG_CONFIRM_|MSG_ERRQUEUE_|MSG_NOSIGNAL_|MSG_MORE_))
+        // Linux 不在 syscall 层统一拒绝未知消息位；UDP 未定义位由回归测试固定。
+        TRACE("忽略未映射的 Linux socket flags：%d\n", fake);
     return real;
 }
 static inline int sock_flags_from_real(int real) {
     int fake = 0;
     if (real & MSG_OOB) fake |= MSG_OOB_;
     if (real & MSG_PEEK) fake |= MSG_PEEK_;
+    if (real & MSG_DONTROUTE) fake |= MSG_DONTROUTE_;
     if (real & MSG_CTRUNC) fake |= MSG_CTRUNC_;
     if (real & MSG_TRUNC) fake |= MSG_TRUNC_;
     if (real & MSG_DONTWAIT) fake |= MSG_DONTWAIT_;
     if (real & MSG_EOR) fake |= MSG_EOR_;
     if (real & MSG_WAITALL) fake |= MSG_WAITALL_;
-    if (real & ~(MSG_OOB|MSG_PEEK|MSG_CTRUNC|MSG_TRUNC|MSG_DONTWAIT|MSG_EOR|MSG_WAITALL))
-        TRACE("unimplemented socket flags %d\n", real);
+#ifdef MSG_CONFIRM
+    if (real & MSG_CONFIRM) fake |= MSG_CONFIRM_;
+#endif
+#ifdef MSG_ERRQUEUE
+    if (real & MSG_ERRQUEUE) fake |= MSG_ERRQUEUE_;
+#endif
+#ifdef MSG_NOSIGNAL
+    if (real & MSG_NOSIGNAL) fake |= MSG_NOSIGNAL_;
+#endif
+#ifdef MSG_MORE
+    if (real & MSG_MORE) fake |= MSG_MORE_;
+#endif
     return fake;
 }
 
@@ -194,17 +284,23 @@ static inline int sock_flags_from_real(int real) {
 #define SO_RCVBUF_ 8
 #define SO_KEEPALIVE_ 9
 #define SO_LINGER_ 13
+#define SO_REUSEPORT_ 15
 #define SO_PEERCRED_ 17
 #define SO_TIMESTAMP_ 29
 #define SO_PROTOCOL_ 38
 #define SO_DOMAIN_ 39
-#define SO_RCVTIMEO_ 66
-#define SO_SNDTIMEO_ 67
+#define SO_RCVTIMEO_OLD_ 20
+#define SO_SNDTIMEO_OLD_ 21
+#define SO_RCVTIMEO_NEW_ 66
+#define SO_SNDTIMEO_NEW_ 67
+#define SO_RCVTIMEO_ SO_RCVTIMEO_NEW_
+#define SO_SNDTIMEO_ SO_SNDTIMEO_NEW_
 #define IP_TOS_ 1
 #define IP_TTL_ 2
 #define IP_HDRINCL_ 3
 #define IP_RETOPTS_ 7
 #define IP_MTU_DISCOVER_ 10
+#define IP_RECVERR_ 11
 #define IP_RECVTTL_ 12
 #define IP_RECVTOS_ 13
 #define TCP_NODELAY_ 1
@@ -212,6 +308,7 @@ static inline int sock_flags_from_real(int real) {
 #define TCP_INFO_ 11
 #define TCP_CONGESTION_ 13
 #define IPV6_UNICAST_HOPS_ 16
+#define IPV6_RECVERR_ 25
 #define IPV6_V6ONLY_ 26
 #define IPV6_TCLASS_ 67
 #define ICMP6_FILTER_ 1
@@ -225,11 +322,16 @@ static inline int sock_opt_to_real(int fake, int level) {
             case SO_BROADCAST_: return SO_BROADCAST;
             case SO_KEEPALIVE_: return SO_KEEPALIVE;
             case SO_LINGER_: return SO_LINGER;
+#ifdef SO_REUSEPORT
+            case SO_REUSEPORT_: return SO_REUSEPORT;
+#endif
             case SO_SNDBUF_: return SO_SNDBUF;
             case SO_RCVBUF_: return SO_RCVBUF;
             case SO_TIMESTAMP_: return SO_TIMESTAMP;
-            case SO_RCVTIMEO_: return SO_RCVTIMEO;
-            case SO_SNDTIMEO_: return SO_SNDTIMEO;
+            case SO_RCVTIMEO_OLD_:
+            case SO_RCVTIMEO_NEW_: return SO_RCVTIMEO;
+            case SO_SNDTIMEO_OLD_:
+            case SO_SNDTIMEO_NEW_: return SO_SNDTIMEO;
         } break;
         case IPPROTO_TCP: switch (fake) {
             case TCP_NODELAY_: return TCP_NODELAY;

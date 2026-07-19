@@ -10,6 +10,7 @@
 #include "fs/sockrestart.h"
 
 struct task;
+struct unix_pending_peer;
 
 // FIXME almost everything that uses the structs in this file does so without any kind of sane locking
 
@@ -49,25 +50,43 @@ struct fd {
             int domain;
             int type;
             int protocol;
+            bool inet_explicitly_bound;
 
             // These are only used as strong references, to keep the inode
             // alive while there is a listener.
             struct inode_data *unix_name_inode;
             struct unix_abstract *unix_name_abstract;
             uint8_t unix_name_len;
-            char unix_name[108];
+            // pathname 在未传终止 NUL 时需要额外一字节保存 Linux 返回形式。
+            char unix_name[109];
+            // 内部 host 后备节点不属于 guest 命名空间，最终关闭时按身份清理。
+            bool unix_backing_owned;
+            uint64_t unix_backing_device;
+            uint64_t unix_backing_inode;
+            char unix_backing_path[108];
+            // 反向名称对象会被已排队的数据报保活，源 fd 关闭后仍可回报名称。
+            struct unix_bound_name *unix_bound_name;
             struct fd *unix_peer; // locked by peer_lock, for simplicity
-            // 与弱 peer 指针分离，避免对端立即关闭后丢失握手唤醒。
-            bool unix_peer_handshake_done;
-            cond_t unix_got_peer;
-            // Queue of struct scm for sending file descriptors
-            // locked by fd->lock
-            struct list unix_scm;
+            // 对端关闭后，本地查询仍必须返回建连时确认的 Unix 名称。
+            bool unix_peer_name_valid;
+            uint8_t unix_peer_name_len;
+            char unix_peer_name[109];
+            bool unix_peer_handshake_pending;
+            bool unix_peer_handshake_rejected;
+            uint64_t unix_connect_generation;
+            struct unix_pending_peer *unix_pending_connect;
+            bool unix_peer_cred_valid;
             struct ucred_ {
                 pid_t_ pid;
                 uid_t_ uid;
                 uid_t_ gid;
-            } unix_cred;
+            } unix_peer_cred;
+            // Queue of struct scm for sending file descriptors
+            // locked by fd->lock
+            struct list unix_scm;
+            // connect 已完成而 accept 尚未发生时暂存发送的 SCM_RIGHTS。
+            struct list unix_pending_scm;
+            struct ucred_ unix_cred;
         } socket;
 
         // See app/Pasteboard.m
