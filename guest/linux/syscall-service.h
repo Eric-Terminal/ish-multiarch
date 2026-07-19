@@ -37,8 +37,15 @@ enum guest_linux_syscall_disposition {
     GUEST_LINUX_SYSCALL_REPLACED_IMAGE,
 };
 
+enum guest_linux_syscall_restart {
+    GUEST_LINUX_SYSCALL_RESTART_DEFAULT,
+    GUEST_LINUX_SYSCALL_RESTART_NEVER,
+};
+
 struct guest_linux_syscall_completion {
     dword_t disposition;
+    // 服务端只在结果为 EINTR 且 Linux 明确禁止重启时覆盖默认值。
+    dword_t restart;
 };
 
 struct guest_linux_syscall_context {
@@ -62,7 +69,10 @@ struct guest_linux_syscall_service {
 };
 
 _Static_assert(sizeof(enum guest_linux_syscall_disposition) == 4 &&
-        sizeof(struct guest_linux_syscall_completion) == 4,
-        "Linux syscall 完成状态必须保持 32 位");
+        sizeof(enum guest_linux_syscall_restart) == 4 &&
+        offsetof(struct guest_linux_syscall_completion, disposition) == 0 &&
+        offsetof(struct guest_linux_syscall_completion, restart) == 4 &&
+        sizeof(struct guest_linux_syscall_completion) == 8,
+        "Linux syscall 完成状态必须保持两个 32 位字段");
 
 #endif

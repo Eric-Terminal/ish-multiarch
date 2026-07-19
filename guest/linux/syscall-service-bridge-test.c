@@ -70,6 +70,7 @@ int main(void) {
     assert(fault.access == UINT32_C(0xa1b2c3d4));
     assert(fault.kind == UINT32_C(0xe5f60718));
     assert(completion.disposition ==
-            GUEST_LINUX_SYSCALL_REPLACED_IMAGE);
+                    GUEST_LINUX_SYSCALL_REPLACED_IMAGE &&
+            completion.restart == GUEST_LINUX_SYSCALL_RESTART_NEVER);
     return 0;
 }

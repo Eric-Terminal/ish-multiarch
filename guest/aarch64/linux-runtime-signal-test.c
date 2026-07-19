@@ -25,6 +25,8 @@
 #define SYS_CONNECT UINT64_C(203)
 #define SYS_SENDTO UINT64_C(206)
 #define SYS_RECVFROM UINT64_C(207)
+#define SYS_SENDMSG UINT64_C(211)
+#define SYS_RECVMSG UINT64_C(212)
 #define SYS_FUTEX_WAITV UINT64_C(449)
 #define DISABLED_ALTSTACK 2
 #define MAX_INSTALLS 2
@@ -53,6 +55,7 @@ struct interrupted_syscall_probe {
     qword_t number;
     qword_t result;
     unsigned calls;
+    bool prevent_restart;
 };
 
 static qword_t return_interrupted_syscall(
@@ -62,6 +65,11 @@ static qword_t return_interrupted_syscall(
     struct interrupted_syscall_probe *probe = context->runtime_opaque;
     assert(syscall->number == probe->number);
     assert(fault->kind == GUEST_MEMORY_FAULT_NONE);
+    if (probe->prevent_restart) {
+        assert(context->completion != NULL);
+        context->completion->restart =
+                GUEST_LINUX_SYSCALL_RESTART_NEVER;
+    }
     probe->calls++;
     return probe->result;
 }
@@ -561,6 +569,8 @@ int main(void) {
         SYS_CONNECT,
         SYS_SENDTO,
         SYS_RECVFROM,
+        SYS_SENDMSG,
+        SYS_RECVMSG,
     };
     for (size_t index = 0;
             index < sizeof(socket_restart_syscalls) /
@@ -594,6 +604,31 @@ int main(void) {
         assert(frame.uc.mcontext.regs[8] ==
                 socket_restart_syscalls[index]);
     }
+
+    cpu = make_cpu(NORMAL_STACK_TOP);
+    cpu.x[8] = SYS_RECVMSG;
+    cpu.x[0] = UINT64_C(0x2468);
+    cpu.x[1] = UINT64_C(0x0000600012342800);
+    const struct cpu_state timed_socket_entry = cpu;
+    interrupted = (struct interrupted_syscall_probe) {
+        .number = SYS_RECVMSG,
+        .result = interrupted_result,
+        .prevent_restart = true,
+    };
+    probe = (struct signal_probe) {
+        .deliveries = {restarting},
+        .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+        .delivery_count = 1,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+        .return_signal = restarting.info.signal,
+    };
+    syscall = dispatch_interrupted_probe(
+            &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+    frame = read_frame(&tlb, cpu.sp);
+    assert(syscall.return_value == interrupted_result &&
+            frame.uc.mcontext.pc == timed_socket_entry.pc &&
+            frame.uc.mcontext.regs[0] == interrupted_result &&
+            frame.uc.mcontext.regs[8] == SYS_RECVMSG);
 
     cpu = syscall_entry;
     cpu.x[8] = SYS_FUTEX_WAITV;

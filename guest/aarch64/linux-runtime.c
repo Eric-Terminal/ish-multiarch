@@ -27,6 +27,8 @@
 #define AARCH64_LINUX_SYS_CONNECT 203
 #define AARCH64_LINUX_SYS_SENDTO 206
 #define AARCH64_LINUX_SYS_RECVFROM 207
+#define AARCH64_LINUX_SYS_SENDMSG 211
+#define AARCH64_LINUX_SYS_RECVMSG 212
 #define AARCH64_LINUX_SYS_BRK 214
 #define AARCH64_LINUX_SYS_MUNMAP 215
 #define AARCH64_LINUX_SYS_MREMAP 216
@@ -167,6 +169,7 @@ static enum guest_linux_signal_install_status install_signal_frame(
 struct service_dispatch_result {
     qword_t return_value;
     bool replaced_image;
+    bool restart_allowed;
 };
 
 static struct service_dispatch_result dispatch_service(
@@ -179,10 +182,12 @@ static struct service_dispatch_result dispatch_service(
             services->syscalls->dispatch == NULL) {
         return (struct service_dispatch_result) {
             .return_value = linux_error(GUEST_LINUX_ENOSYS),
+            .restart_allowed = true,
         };
     }
     struct guest_linux_syscall_completion completion = {
         .disposition = GUEST_LINUX_SYSCALL_RETURN,
+        .restart = GUEST_LINUX_SYSCALL_RESTART_DEFAULT,
     };
     const struct guest_linux_syscall_context context = {
         .runtime_opaque = services->syscalls->runtime_opaque,
@@ -200,6 +205,7 @@ static struct service_dispatch_result dispatch_service(
             &context, syscall, &service_fault);
     assert(completion.disposition <=
             GUEST_LINUX_SYSCALL_REPLACED_IMAGE);
+    assert(completion.restart <= GUEST_LINUX_SYSCALL_RESTART_NEVER);
     *fault = (struct guest_memory_fault) {
         .address = (guest_addr_t) service_fault.address,
         .access = (enum guest_memory_access) service_fault.access,
@@ -209,6 +215,8 @@ static struct service_dispatch_result dispatch_service(
         .return_value = result,
         .replaced_image = completion.disposition ==
                 GUEST_LINUX_SYSCALL_REPLACED_IMAGE,
+        .restart_allowed = completion.restart !=
+                GUEST_LINUX_SYSCALL_RESTART_NEVER,
     };
 }
 
@@ -406,6 +414,8 @@ static bool syscall_may_restart(qword_t number) {
         case AARCH64_LINUX_SYS_CONNECT:
         case AARCH64_LINUX_SYS_SENDTO:
         case AARCH64_LINUX_SYS_RECVFROM:
+        case AARCH64_LINUX_SYS_SENDMSG:
+        case AARCH64_LINUX_SYS_RECVMSG:
         case AARCH64_LINUX_SYS_WAIT4:
         case AARCH64_LINUX_SYS_PREADV2:
         case AARCH64_LINUX_SYS_PWRITEV2:
@@ -473,6 +483,7 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
         .action = AARCH64_LINUX_SYSCALL_RESUME,
         .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
     };
+    bool restart_allowed = true;
 
     const struct guest_linux_signal_service *signal_service =
             runtime_signal_service(runtime);
@@ -541,11 +552,12 @@ struct aarch64_linux_syscall_result aarch64_linux_dispatch_syscall(
             return result;
         }
         result.return_value = service.return_value;
+        restart_allowed = service.restart_allowed;
     }
     aarch64_linux_write_syscall_result(cpu, result.return_value);
     const struct cpu_state *restart_state = NULL;
     if (result.return_value == linux_error(GUEST_LINUX_EINTR) &&
-            syscall_may_restart(syscall.number)) {
+            syscall_may_restart(syscall.number) && restart_allowed) {
         assert(restart.pc >= 4);
         restart.pc -= 4;
         restart_state = &restart;

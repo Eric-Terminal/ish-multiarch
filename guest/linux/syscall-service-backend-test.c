@@ -16,7 +16,9 @@ qword_t guest_linux_service_backend_probe(
     assert(context->stack_pointer == UINT64_C(0xfedcba9876543210));
     assert(context->completion != NULL &&
             context->completion->disposition ==
-                    GUEST_LINUX_SYSCALL_RETURN);
+                    GUEST_LINUX_SYSCALL_RETURN &&
+            context->completion->restart ==
+                    GUEST_LINUX_SYSCALL_RESTART_DEFAULT);
     assert(syscall->number == UINT64_C(0xfedcba9876543210));
     assert(syscall->arguments[5] == UINT64_C(0x8000000000000005));
 
@@ -39,5 +41,6 @@ qword_t guest_linux_service_backend_probe(
     };
     context->completion->disposition =
             GUEST_LINUX_SYSCALL_REPLACED_IMAGE;
+    context->completion->restart = GUEST_LINUX_SYSCALL_RESTART_NEVER;
     return UINT64_C(0xc123456789abcdef);
 }

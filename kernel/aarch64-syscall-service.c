@@ -2480,6 +2480,9 @@ static qword_t dispatch_syscall(
     struct task *task = context->task_opaque;
     assert(task != NULL && current == task);
     *fault = (struct guest_linux_user_fault) {0};
+    if (context->completion != NULL)
+        context->completion->restart =
+                GUEST_LINUX_SYSCALL_RESTART_DEFAULT;
 
     switch (syscall->number) {
         case AARCH64_LINUX_SYS_GETCWD:
