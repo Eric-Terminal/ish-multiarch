@@ -14,6 +14,7 @@
 #include "guest/aarch64/linux-process-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-signal-info.h"
+#include "guest/aarch64/linux-socket-abi.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
@@ -33,6 +34,8 @@
 #define AARCH64_LINUX_IO_CHUNK_SIZE 4096
 #define AARCH64_LINUX_IOV_MAX UINT64_C(1024)
 #define AARCH64_LINUX_IOV_TRANSACTION_LIMIT UINT64_C(0x100000)
+// Linux 默认 optmem_max 为 128 KiB，单次控制缓冲必须严格小于该值。
+#define AARCH64_LINUX_SOCKET_OPTMEM_MAX UINT64_C(0x20000)
 #define AARCH64_LINUX_MAX_PID_NS_LEVEL UINT64_C(32)
 #define AARCH64_LINUX_CLONE3_ZERO_CHUNK 32
 #define AARCH64_LINUX_USER_ADDRESS_LIMIT \
@@ -121,6 +124,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SENDTO = 206,
     AARCH64_LINUX_SYS_RECVFROM = 207,
     AARCH64_LINUX_SYS_SETSOCKOPT = 208,
+    AARCH64_LINUX_SYS_SENDMSG = 211,
+    AARCH64_LINUX_SYS_RECVMSG = 212,
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO = 240,
@@ -846,6 +851,761 @@ static int copy_socket_address_from_user(
             address, socket_address, (dword_t) length, fault))
         return _EFAULT;
     return 0;
+}
+
+static int copy_socket_message_header_from_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, struct aarch64_linux_user_msghdr *message,
+        struct guest_linux_user_fault *fault) {
+    if (!aarch64_user_range_fits(address, sizeof(*message))) {
+        (void) user_range_error(fault, address, GUEST_MEMORY_READ);
+        return _EFAULT;
+    }
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            address, message, sizeof(*message), fault))
+        return _EFAULT;
+    return 0;
+}
+
+static int copy_socket_message_iovecs_from_user(
+        const struct guest_linux_syscall_context *context,
+        const struct aarch64_linux_user_msghdr *message,
+        enum guest_memory_access payload_access,
+        struct aarch64_linux_iovec **vectors, qword_t *total,
+        struct guest_linux_user_fault *fault) {
+    if (message->vector_count > AARCH64_LINUX_IOV_MAX)
+        return _EMSGSIZE;
+    return copy_iovecs_from_user(context,
+            message->vectors, message->vector_count,
+            payload_access, vectors, total, fault);
+}
+
+static int copy_socket_message_payload_from_user(
+        const struct guest_linux_syscall_context *context,
+        const struct aarch64_linux_iovec *vectors, qword_t count,
+        size_t skip, byte_t *buffer, size_t length,
+        struct guest_linux_user_fault *fault) {
+    size_t copied = 0;
+    for (size_t index = 0;
+            index < (size_t) count && copied < length; index++) {
+        if ((qword_t) skip >= vectors[index].length) {
+            skip -= (size_t) vectors[index].length;
+            continue;
+        }
+        qword_t remaining = (qword_t) length - copied;
+        qword_t available = vectors[index].length - (qword_t) skip;
+        qword_t chunk = available < remaining ? available : remaining;
+        if (chunk == 0)
+            continue;
+        assert(chunk <= UINT32_MAX && context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                vectors[index].base + (qword_t) skip, buffer + copied,
+                (dword_t) chunk, fault))
+            return _EFAULT;
+        copied += (size_t) chunk;
+        skip = 0;
+    }
+    assert(copied == length);
+    return 0;
+}
+
+static int copy_socket_message_payload_to_user(
+        const struct guest_linux_syscall_context *context,
+        const struct aarch64_linux_iovec *vectors, qword_t count,
+        const byte_t *buffer, size_t length,
+        struct guest_linux_user_fault *fault) {
+    size_t copied = 0;
+    for (size_t index = 0;
+            index < (size_t) count && copied < length; index++) {
+        qword_t remaining = (qword_t) length - copied;
+        qword_t chunk = vectors[index].length < remaining ?
+                vectors[index].length : remaining;
+        if (chunk == 0)
+            continue;
+        assert(chunk <= UINT32_MAX && context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                vectors[index].base, buffer + copied,
+                (dword_t) chunk, fault))
+            return _EFAULT;
+        copied += (size_t) chunk;
+    }
+    assert(copied == length);
+    return 0;
+}
+
+static int copy_socket_message_control_from_user(
+        const struct guest_linux_syscall_context *context,
+        const struct aarch64_linux_user_msghdr *message,
+        byte_t **control, dword_t *control_length,
+        struct guest_linux_user_fault *fault) {
+    *control = NULL;
+    *control_length = 0;
+    if (message->control_length == 0)
+        return 0;
+    if (message->control_length > INT_MAX ||
+            message->control_length >=
+                    AARCH64_LINUX_SOCKET_OPTMEM_MAX)
+        return _ENOBUFS;
+    dword_t length = (dword_t) message->control_length;
+    if (!aarch64_user_range_fits(message->control, length)) {
+        (void) user_range_error(
+                fault, message->control, GUEST_MEMORY_READ);
+        return _EFAULT;
+    }
+    byte_t *copied = malloc(length);
+    if (copied == NULL)
+        return _ENOBUFS;
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            message->control, copied, length, fault)) {
+        free(copied);
+        return _EFAULT;
+    }
+    *control = copied;
+    *control_length = length;
+    return 0;
+}
+
+enum socket_message_network_path {
+    SOCKET_MESSAGE_NETWORK_NONE,
+    SOCKET_MESSAGE_NETWORK_IPV4,
+    SOCKET_MESSAGE_NETWORK_IPV4_MAPPED,
+    SOCKET_MESSAGE_NETWORK_IPV6,
+};
+
+static enum socket_message_network_path socket_message_network_path(
+        const struct socket_ref *socket,
+        const struct socket_address *destination) {
+    if (socket->fd->socket.domain == AF_INET_)
+        return SOCKET_MESSAGE_NETWORK_IPV4;
+    if (socket->fd->socket.domain != AF_INET6_)
+        return SOCKET_MESSAGE_NETWORK_NONE;
+
+    struct sockaddr_storage peer;
+    const struct sockaddr_storage *address = NULL;
+    socklen_t length = 0;
+    if (destination != NULL && destination->length != 0) {
+        address = &destination->storage;
+        length = destination->length;
+    } else {
+        length = sizeof(peer);
+        if (getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &length) == 0)
+            address = &peer;
+    }
+    if (address == NULL)
+        return SOCKET_MESSAGE_NETWORK_IPV6;
+    if (address->ss_family == AF_INET)
+        return SOCKET_MESSAGE_NETWORK_IPV4_MAPPED;
+    if (address->ss_family == AF_INET6 &&
+            length >= offsetof(struct sockaddr_in6, sin6_addr) +
+                    sizeof(struct in6_addr) &&
+            IN6_IS_ADDR_V4MAPPED(
+                    &((const struct sockaddr_in6 *) address)->sin6_addr))
+        return SOCKET_MESSAGE_NETWORK_IPV4_MAPPED;
+    return SOCKET_MESSAGE_NETWORK_IPV6;
+}
+
+static bool socket_message_is_udp(
+        const struct socket_ref *socket) {
+    return (socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_DGRAM_ &&
+            (socket->fd->socket.protocol == 0 ||
+            socket->fd->socket.protocol == AARCH64_LINUX_SOL_UDP);
+}
+
+static bool aarch64_linux_ip_send_control_type(sdword_t type) {
+    switch (type) {
+        case AARCH64_LINUX_IP_TOS:
+        case AARCH64_LINUX_IP_TTL:
+        case AARCH64_LINUX_IP_RETOPTS:
+        case AARCH64_LINUX_IP_PKTINFO:
+        case AARCH64_LINUX_IP_PROTOCOL:
+            return true;
+    }
+    return false;
+}
+
+static bool aarch64_linux_ipv6_send_control_type(sdword_t type) {
+    switch (type) {
+        case AARCH64_LINUX_IPV6_2292PKTINFO:
+        case AARCH64_LINUX_IPV6_2292HOPOPTS:
+        case AARCH64_LINUX_IPV6_2292DSTOPTS:
+        case AARCH64_LINUX_IPV6_2292RTHDR:
+        case AARCH64_LINUX_IPV6_2292HOPLIMIT:
+        case AARCH64_LINUX_IPV6_FLOWINFO:
+        case AARCH64_LINUX_IPV6_PKTINFO:
+        case AARCH64_LINUX_IPV6_HOPLIMIT:
+        case AARCH64_LINUX_IPV6_HOPOPTS:
+        case AARCH64_LINUX_IPV6_RTHDRDSTOPTS:
+        case AARCH64_LINUX_IPV6_RTHDR:
+        case AARCH64_LINUX_IPV6_DSTOPTS:
+        case AARCH64_LINUX_IPV6_DONTFRAG:
+        case AARCH64_LINUX_IPV6_TCLASS:
+            return true;
+    }
+    return false;
+}
+
+static bool aarch64_linux_ipv6_address_is_v4mapped(
+        const byte_t *address) {
+    static const byte_t prefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+    };
+    return memcmp(address, prefix, sizeof(prefix)) == 0;
+}
+
+static int parse_socket_message_control(
+        const byte_t *control, dword_t length,
+        struct task *task, const struct socket_ref *socket,
+        enum socket_message_network_path network_path,
+        struct scm **scm) {
+    *scm = NULL;
+    fd_t numbers[SOCKET_SCM_MAX_FDS];
+    unsigned count = 0;
+    for (size_t offset = 0;
+            (size_t) length - offset >=
+                    sizeof(struct aarch64_linux_cmsghdr);) {
+        struct aarch64_linux_cmsghdr header;
+        memcpy(&header, control + offset, sizeof(header));
+        size_t remaining = (size_t) length - offset;
+        if (header.length < sizeof(header) ||
+                header.length > remaining)
+            return _EINVAL;
+        if (header.level == SOL_SOCKET_) {
+            if (socket->fd->socket.domain != AF_LOCAL_ &&
+                    (header.type == SCM_RIGHTS_ ||
+                    header.type == SCM_CREDENTIALS_)) {
+                // Linux 把这两类消息视为 SOL_UNIX；INET 协议会忽略它们。
+            } else if (header.type != SCM_RIGHTS_ ||
+                    socket->fd->socket.domain != AF_LOCAL_)
+                return _EINVAL;
+            else {
+                qword_t payload = header.length - sizeof(header);
+                qword_t message_count = payload / sizeof(fd_t);
+                if (message_count > SOCKET_SCM_MAX_FDS - count)
+                    return _EINVAL;
+                memcpy(numbers + count,
+                        control + offset + sizeof(header),
+                        (size_t) message_count * sizeof(fd_t));
+                count += (unsigned) message_count;
+            }
+        } else if (socket->fd->socket.type != SOCK_STREAM_) {
+            if (header.level == AARCH64_LINUX_SOL_UDP &&
+                    socket_message_is_udp(socket)) {
+                if (header.type != AARCH64_LINUX_UDP_SEGMENT ||
+                        header.length != AARCH64_LINUX_CMSG_LEN(
+                                sizeof(uint16_t)))
+                    return _EINVAL;
+                // host 发送路径尚未实现 UDP GSO，不能把合法请求静默降级。
+                return _EOPNOTSUPP;
+            }
+            if ((network_path == SOCKET_MESSAGE_NETWORK_IPV4 ||
+                    network_path == SOCKET_MESSAGE_NETWORK_IPV4_MAPPED) &&
+                    header.level == AARCH64_LINUX_SOL_IP)
+                return aarch64_linux_ip_send_control_type(header.type) ?
+                        _EOPNOTSUPP : _EINVAL;
+            if (network_path == SOCKET_MESSAGE_NETWORK_IPV6 &&
+                    header.level == AARCH64_LINUX_SOL_IPV6)
+                return aarch64_linux_ipv6_send_control_type(header.type) ?
+                        _EOPNOTSUPP : _EINVAL;
+            if (network_path == SOCKET_MESSAGE_NETWORK_IPV4_MAPPED &&
+                    header.level == AARCH64_LINUX_SOL_IPV6 &&
+                    header.type == AARCH64_LINUX_IPV6_PKTINFO) {
+                qword_t required = AARCH64_LINUX_CMSG_LEN(20);
+                if (header.length < required ||
+                        !aarch64_linux_ipv6_address_is_v4mapped(
+                                control + offset + sizeof(header)))
+                    return _EINVAL;
+                // Linux 会把 v4-mapped pktinfo 转入 IPv4 路由控制。
+                return _EOPNOTSUPP;
+            }
+        }
+        qword_t aligned = AARCH64_LINUX_CMSG_ALIGN(header.length);
+        if (aligned > remaining)
+            break;
+        offset += (size_t) aligned;
+    }
+    return socket_scm_create_task(task, numbers, count, scm);
+}
+
+static int write_socket_message_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, const void *value, dword_t size,
+        struct guest_linux_user_fault *fault) {
+    if (!aarch64_user_range_fits(address, size)) {
+        (void) user_range_error(fault, address, GUEST_MEMORY_WRITE);
+        return _EFAULT;
+    }
+    assert(context->user.write != NULL);
+    return context->user.write(context->user.opaque,
+            address, value, size, fault) ? 0 : _EFAULT;
+}
+
+struct socket_message_fd_write {
+    const struct guest_linux_syscall_context *context;
+    qword_t address;
+    struct guest_linux_user_fault *fault;
+};
+
+static int write_socket_message_fd_number(
+        void *opaque, fd_t number) {
+    struct socket_message_fd_write *write = opaque;
+    return write_socket_message_user(write->context,
+            write->address, &number, sizeof(number), write->fault);
+}
+
+static qword_t deliver_socket_message_scm_to_user(
+        const struct guest_linux_syscall_context *context,
+        struct task *task, struct scm *scm,
+        qword_t control_address, qword_t control_capacity,
+        dword_t receive_flags, dword_t *message_flags,
+        struct guest_linux_user_fault *fault) {
+    if (scm == NULL)
+        return 0;
+    qword_t deliverable = 0;
+    if (control_address != 0 &&
+            control_capacity > sizeof(struct aarch64_linux_cmsghdr))
+        deliverable = (control_capacity -
+                sizeof(struct aarch64_linux_cmsghdr)) / sizeof(fd_t);
+    if (deliverable > scm->num_fds)
+        deliverable = scm->num_fds;
+
+    unsigned delivered = 0;
+    int install_flags = (receive_flags &
+            AARCH64_LINUX_MSG_CMSG_CLOEXEC) ? O_CLOEXEC_ : 0;
+    while (delivered < (unsigned) deliverable) {
+        qword_t number_offset =
+                sizeof(struct aarch64_linux_cmsghdr) +
+                (qword_t) delivered * sizeof(fd_t);
+        if (control_address > UINT64_MAX - number_offset) {
+            (void) user_range_error(
+                    fault, control_address, GUEST_MEMORY_WRITE);
+            break;
+        }
+        struct socket_message_fd_write write = {
+            .context = context,
+            .address = control_address + number_offset,
+            .fault = fault,
+        };
+        struct fd *object = scm->fds[delivered];
+        scm->fds[delivered] = NULL;
+        fd_t number = f_receive_task(task, object, install_flags,
+                write_socket_message_fd_number, &write);
+        if (number < 0)
+            break;
+        delivered++;
+    }
+    if (delivered < scm->num_fds)
+        *message_flags |= MSG_CTRUNC_;
+    if (delivered == 0)
+        return 0;
+
+    sdword_t level = SOL_SOCKET_;
+    sdword_t type = SCM_RIGHTS_;
+    qword_t length = AARCH64_LINUX_CMSG_LEN(
+            (qword_t) delivered * sizeof(fd_t));
+    bool header_written =
+            write_socket_message_user(context,
+                    control_address + 8, &level,
+                    sizeof(level), fault) == 0 &&
+            write_socket_message_user(context,
+                    control_address + 12, &type,
+                    sizeof(type), fault) == 0 &&
+            write_socket_message_user(context,
+                    control_address, &length,
+                    sizeof(length), fault) == 0;
+    if (!header_written)
+        return 0;
+    qword_t used = AARCH64_LINUX_CMSG_SPACE(
+            (qword_t) delivered * sizeof(fd_t));
+    return used < control_capacity ? used : control_capacity;
+}
+
+static qword_t dispatch_sendmsg(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t flags = (dword_t) syscall->arguments[2];
+    if (flags & AARCH64_LINUX_MSG_CMSG_COMPAT)
+        return syscall_result(_EINVAL);
+    dword_t operation_flags =
+            flags & ~AARCH64_LINUX_MSG_CMSG_CLOEXEC;
+
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    qword_t result;
+    struct aarch64_linux_user_msghdr message;
+    struct aarch64_linux_iovec *vectors = NULL;
+    struct scm *scm = NULL;
+    byte_t *control = NULL;
+    dword_t control_length = 0;
+    byte_t *buffer = NULL;
+    struct socket_address destination;
+    struct socket_address *destination_pointer = NULL;
+    struct sockaddr_storage guest_address = {0};
+    size_t address_length = 0;
+    qword_t total = 0;
+
+    error = copy_socket_message_header_from_user(context,
+            syscall->arguments[1], &message, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    bool has_name_pointer = message.name != 0;
+    if (has_name_pointer) {
+        if (message.name_length < 0) {
+            result = syscall_result(_EINVAL);
+            goto out;
+        }
+        address_length = (dword_t) message.name_length;
+        if (address_length > sizeof(guest_address))
+            address_length = sizeof(guest_address);
+        if (address_length != 0 && !aarch64_user_range_fits(
+                message.name, address_length)) {
+            result = user_range_error(
+                    fault, message.name, GUEST_MEMORY_READ);
+            goto out;
+        }
+        if (address_length != 0) {
+            assert(context->user.read != NULL);
+                if (!context->user.read(context->user.opaque,
+                    message.name, &guest_address,
+                    (dword_t) address_length, fault)) {
+                result = syscall_result(_EFAULT);
+                goto out;
+            }
+        }
+    }
+    bool has_destination = has_name_pointer && address_length != 0;
+
+    error = copy_socket_message_iovecs_from_user(context,
+            &message, GUEST_MEMORY_READ, &vectors, &total, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    error = copy_socket_message_control_from_user(context,
+            &message, &control, &control_length, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    if (socket.fd->socket.domain == AF_LOCAL_) {
+        error = parse_socket_message_control(control,
+                control_length, task, &socket,
+                SOCKET_MESSAGE_NETWORK_NONE, &scm);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+
+    error = socket_sendto_validate(
+            &socket, (size_t) total, operation_flags);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    byte_t prefix[8];
+    size_t prefix_size = socket_sendto_prefix_size(&socket);
+    if (prefix_size != 0) {
+        assert(prefix_size <= sizeof(prefix));
+        error = copy_socket_message_payload_from_user(context,
+                vectors, message.vector_count, 0,
+                prefix, prefix_size, fault);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        error = socket_sendto_prefix_validate(
+                &socket, prefix, prefix_size);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+    bool defer_unix_lookup = has_destination &&
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    bool defer_unix_destination =
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    bool stream_socket = socket.fd->socket.type == SOCK_STREAM_;
+    if (has_destination && stream_socket &&
+            socket.fd->socket.domain == AF_LOCAL_) {
+        const struct socket_address supplied_name = {
+            .length = (socklen_t) address_length,
+        };
+        error = socket_sendto_destination_check(
+                &socket, &supplied_name, operation_flags);
+        assert(error < 0);
+        result = syscall_result(error);
+        goto out;
+    }
+    if (has_destination && !stream_socket) {
+        error = socket_address_validate_for_socket(
+                &socket, &guest_address, address_length);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        if (!defer_unix_lookup) {
+            error = socket_address_prepare_task(task,
+                    &socket, &guest_address, address_length,
+                    &destination);
+            if (error < 0) {
+                result = syscall_result(error);
+                goto out;
+            }
+            destination_pointer = &destination;
+        }
+    }
+    error = socket_sendto_transaction_validate(
+            &socket, (size_t) total);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    if (!defer_unix_destination) {
+        bool destination_timeout_enabled =
+                socket_timeout_enabled(socket.fd, false);
+        error = socket_sendto_destination_check(
+                &socket, destination_pointer, operation_flags);
+        if (error < 0) {
+            complete_socket_interrupt(context,
+                    destination_timeout_enabled, error);
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+    if (socket.fd->socket.domain != AF_LOCAL_) {
+        error = parse_socket_message_control(control,
+                control_length, task, &socket,
+                socket_message_network_path(
+                        &socket, destination_pointer), &scm);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+
+    size_t transaction_length = socket_sendto_transaction_size(
+            &socket, (size_t) total, operation_flags);
+    buffer = transaction_length == 0 ? NULL : malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = syscall_result(_ENOMEM);
+        goto out;
+    }
+    if (prefix_size != 0)
+        memcpy(buffer, prefix, prefix_size);
+    byte_t *tail = transaction_length > prefix_size ?
+            buffer + prefix_size : NULL;
+    error = copy_socket_message_payload_from_user(context,
+            vectors, message.vector_count, prefix_size,
+            tail, transaction_length - prefix_size, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    if (defer_unix_lookup) {
+        error = socket_address_prepare_task(task,
+                &socket, &guest_address, address_length,
+                &destination);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        destination_pointer = &destination;
+    }
+    bool timeout_enabled = socket_timeout_enabled(socket.fd, false);
+    result = syscall_result(socket_sendmsg_ref(&socket,
+            buffer, transaction_length, operation_flags,
+            destination_pointer, &scm));
+    complete_socket_interrupt(
+            context, timeout_enabled, (sqword_t) result);
+
+out:
+    if (scm != NULL)
+        socket_scm_release(scm);
+    free(control);
+    free(buffer);
+    free(vectors);
+    if (destination_pointer != NULL)
+        socket_address_release(destination_pointer);
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_recvmsg(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t flags = (dword_t) syscall->arguments[2];
+    if (flags & AARCH64_LINUX_MSG_CMSG_COMPAT)
+        return syscall_result(_EINVAL);
+
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    qword_t result;
+    struct aarch64_linux_user_msghdr message;
+    struct aarch64_linux_iovec *vectors = NULL;
+    struct scm *scm = NULL;
+    byte_t *buffer = NULL;
+    qword_t total = 0;
+
+    error = copy_socket_message_header_from_user(context,
+            syscall->arguments[1], &message, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    bool wants_name = message.name != 0;
+    if (wants_name && message.name_length < 0) {
+        result = syscall_result(_EINVAL);
+        goto out;
+    }
+    error = copy_socket_message_iovecs_from_user(context,
+            &message, GUEST_MEMORY_WRITE, &vectors, &total, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    bool full_datagram_length = (flags & MSG_TRUNC_) != 0 &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    size_t transaction_length = full_datagram_length ?
+            SOCKET_IO_TRANSACTION_LIMIT :
+            ((size_t) total < SOCKET_IO_TRANSACTION_LIMIT ?
+                    (size_t) total : SOCKET_IO_TRANSACTION_LIMIT);
+    buffer = transaction_length == 0 ? NULL : malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = syscall_result(_ENOMEM);
+        goto out;
+    }
+
+    struct socket_address source;
+    dword_t message_flags;
+    dword_t host_flags = flags & ~AARCH64_LINUX_MSG_CMSG_CLOEXEC;
+    bool timeout_enabled = socket_timeout_enabled(socket.fd, true);
+    ssize_t received = socket_recvmsg_ref(&socket,
+            buffer, transaction_length, host_flags,
+            wants_name ? &source : NULL, &message_flags, &scm);
+    if (received < 0) {
+        complete_socket_interrupt(
+                context, timeout_enabled, received);
+        result = syscall_result(received);
+        goto out;
+    }
+    message_flags |= flags & AARCH64_LINUX_MSG_CMSG_CLOEXEC;
+
+    size_t payload_length = (qword_t) received < total ?
+            (size_t) received : (size_t) total;
+    if (payload_length > transaction_length)
+        payload_length = transaction_length;
+    if ((socket.fd->socket.domain == AF_INET_ ||
+            socket.fd->socket.domain == AF_INET6_) &&
+            socket.fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_TRUNC_))
+        payload_length = 0;
+    error = copy_socket_message_payload_to_user(context,
+            vectors, message.vector_count,
+            buffer, payload_length, fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    qword_t control_capacity = message.control != 0 ?
+            message.control_length : 0;
+    qword_t used_control = deliver_socket_message_scm_to_user(
+            context, task, scm, message.control,
+            control_capacity, flags, &message_flags, fault);
+
+    qword_t header_address = syscall->arguments[1];
+    if (wants_name) {
+        qword_t name_length_address = header_address +
+                __builtin_offsetof(
+                        struct aarch64_linux_user_msghdr, name_length);
+        sdword_t capacity;
+        if (!aarch64_user_range_fits(
+                name_length_address, sizeof(capacity))) {
+            result = user_range_error(
+                    fault, name_length_address, GUEST_MEMORY_READ);
+            goto out;
+        }
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                name_length_address, &capacity,
+                sizeof(capacity), fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+        if (capacity < 0) {
+            result = syscall_result(_EINVAL);
+            goto out;
+        }
+        dword_t true_length = (dword_t) source.length;
+        error = write_socket_message_user(context,
+                name_length_address, &true_length,
+                sizeof(true_length), fault);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        dword_t copied = (dword_t) capacity < true_length ?
+                (dword_t) capacity : true_length;
+        if (copied != 0) {
+            error = write_socket_message_user(context,
+                    message.name, &source.storage, copied, fault);
+            if (error < 0) {
+                result = syscall_result(error);
+                goto out;
+            }
+        }
+    }
+
+    qword_t flags_address = header_address +
+            __builtin_offsetof(
+                    struct aarch64_linux_user_msghdr, flags);
+    error = write_socket_message_user(context,
+            flags_address, &message_flags,
+            sizeof(message_flags), fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    qword_t control_length_address = header_address +
+            __builtin_offsetof(
+                    struct aarch64_linux_user_msghdr, control_length);
+    error = write_socket_message_user(context,
+            control_length_address, &used_control,
+            sizeof(used_control), fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    result = (qword_t) received;
+
+out:
+    if (scm != NULL)
+        socket_scm_release(scm);
+    free(buffer);
+    free(vectors);
+    socket_ref_release(&socket);
+    return result;
 }
 
 static qword_t dispatch_bind(
@@ -2768,6 +3528,12 @@ static qword_t dispatch_syscall(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_SETSOCKOPT:
             return dispatch_setsockopt(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SENDMSG:
+            return dispatch_sendmsg(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RECVMSG:
+            return dispatch_recvmsg(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLONE:
             // 旧 clone ABI 的高 32 位不参与 flags。

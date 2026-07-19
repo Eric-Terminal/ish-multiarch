@@ -370,6 +370,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_socket_ping', aarch64_socket_ping_test)
 
+        aarch64_socket_message_test = executable(
+            'aarch64_socket_message_test',
+            'kernel/aarch64-socket-message-test.c',
+            dependencies: ish)
+        test('aarch64_socket_message', aarch64_socket_message_test)
+
         aarch64_file_syscall_test = executable(
             'aarch64_file_syscall_test',
             'kernel/aarch64-file-syscall-test.c',

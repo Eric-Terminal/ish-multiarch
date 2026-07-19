@@ -144,6 +144,7 @@ struct cmsghdr_ {
     uint8_t data[];
 };
 #define SCM_RIGHTS_ 1
+#define SCM_CREDENTIALS_ 2
 // copied and ported from musl
 #define CMSG_LEN_(cmsg) (((cmsg)->len + sizeof(dword_t) - 1) & ~(dword_t)(sizeof(dword_t) - 1))
 #define CMSG_NEXT_(cmsg) ((uint8_t *)(cmsg) + CMSG_LEN_(cmsg))

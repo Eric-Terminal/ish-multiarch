@@ -10,6 +10,7 @@
 
 #include "fs/fd.h"
 #include "fs/sock.h"
+#include "guest/aarch64/linux-socket-abi.h"
 #include "guest/linux/syscall-service.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
@@ -23,6 +24,7 @@
 
 #define SYS_SOCKET 198
 #define SYS_SENDTO 206
+#define SYS_SENDMSG 211
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -45,6 +47,11 @@ struct linux_sockaddr_in6 {
     uint32_t flowinfo;
     byte_t address[16];
     uint32_t scope_id;
+};
+
+struct aarch64_linux_iovec_wire {
+    qword_t base;
+    qword_t length;
 };
 
 _Static_assert(sizeof(struct linux_sockaddr_in) == 16,
@@ -236,6 +243,17 @@ static bool access_is(const struct user_memory *memory, unsigned index,
             memory->accesses[index].address == address &&
             memory->accesses[index].size == size &&
             memory->accesses[index].access == GUEST_MEMORY_READ;
+}
+
+static unsigned access_count_at(const struct user_memory *memory,
+        qword_t address, dword_t size) {
+    unsigned count = 0;
+    unsigned recorded = memory->access_count < USER_ACCESS_LOG_SIZE ?
+            memory->access_count : USER_ACCESS_LOG_SIZE;
+    for (unsigned index = 0; index < recorded; index++)
+        if (access_is(memory, index, address, size))
+            count++;
+    return count;
 }
 
 static int create_ping_socket(struct fixture *fixture,
@@ -464,6 +482,72 @@ static int test_destination_state(struct fixture *fixture,
     return 0;
 }
 
+static int test_sendmsg_split_prefix(struct fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault) {
+    int socket_number = create_ping_socket(
+            fixture, memory, fault, AF_INET_, IPPROTO_ICMP);
+    CHECK(socket_number >= 0, "sendmsg ping guest socket 创建成功");
+    CHECK(attach_connected_host_pair(fixture, socket_number),
+            "sendmsg ping 建立无网络 socket peer");
+
+    const byte_t first[3] = {8, 0, 0x11};
+    const byte_t second[5] = {0x22, 0x33, 0x44, 0x55, 0x66};
+    const byte_t tail[3] = {0x77, 0x88, 0x99};
+    qword_t first_pointer = put_user(
+            memory, 0x1000, first, sizeof(first));
+    qword_t second_pointer = put_user(
+            memory, 0x1100, second, sizeof(second));
+    qword_t tail_pointer = put_user(
+            memory, 0x1200, tail, sizeof(tail));
+    struct aarch64_linux_iovec_wire vectors[] = {
+        {.base = USER_BASE, .length = 0},
+        {.base = first_pointer, .length = sizeof(first)},
+        {.base = USER_BASE, .length = 0},
+        {.base = second_pointer, .length = sizeof(second)},
+        {.base = tail_pointer, .length = sizeof(tail)},
+    };
+    qword_t vectors_pointer = put_user(
+            memory, 0x2000, vectors, sizeof(vectors));
+    struct aarch64_linux_user_msghdr message = {
+        .vectors = vectors_pointer,
+        .vector_count = sizeof(vectors) / sizeof(vectors[0]),
+    };
+    qword_t message_pointer = put_user(
+            memory, 0x3000, &message, sizeof(message));
+
+    reset_access(memory);
+    memory->fail_read_at = tail_pointer;
+    CHECK(invoke(fixture, memory, fault, SYS_SENDMSG,
+                    (dword_t) socket_number, message_pointer,
+                    0, 0, 0, 0) == encoded_error(_EFAULT) &&
+            memory->read_calls == 5 &&
+            access_count_at(memory, first_pointer, sizeof(first)) == 1 &&
+            access_count_at(memory, second_pointer, sizeof(second)) == 1 &&
+            access_count_at(memory, tail_pointer, sizeof(tail)) == 1,
+            "sendmsg 跨 iovec 读取八字节头一次，再从精确尾部继续");
+
+    reset_access(memory);
+    CHECK(invoke(fixture, memory, fault, SYS_SENDMSG,
+                    (dword_t) socket_number, message_pointer,
+                    0, 0, 0, 0) == sizeof(first) + sizeof(second) +
+                            sizeof(tail) &&
+            memory->read_calls == 5 &&
+            access_count_at(memory, first_pointer, sizeof(first)) == 1 &&
+            access_count_at(memory, second_pointer, sizeof(second)) == 1,
+            "sendmsg 不重复读取跨 iovec 的 ICMP 前缀");
+
+    byte_t received[sizeof(first) + sizeof(second) + sizeof(tail)] = {0};
+    byte_t expected[sizeof(received)];
+    memcpy(expected, first, sizeof(first));
+    memcpy(expected + sizeof(first), second, sizeof(second));
+    memcpy(expected + sizeof(first) + sizeof(second), tail, sizeof(tail));
+    CHECK(recv(fixture->connected_peers[0], received,
+                    sizeof(received), 0) == sizeof(received) &&
+            memcmp(received, expected, sizeof(expected)) == 0,
+            "sendmsg 跨 iovec 的头部与尾部保持 guest 字节顺序");
+    return 0;
+}
+
 static int run_test(const char *name, test_function function) {
     struct fixture fixture;
     struct user_memory memory = {
@@ -492,6 +576,7 @@ int main(void) {
         {"ICMP/ICMPv6 公共错误顺序", test_common_errors},
         {"ICMP/ICMPv6 头部与地址顺序", test_address_order},
         {"ICMP/ICMPv6 目的连接状态", test_destination_state},
+        {"ICMP sendmsg 跨 iovec 前缀", test_sendmsg_split_prefix},
     };
     unsigned failures = 0;
     for (size_t index = 0; index < sizeof(tests) / sizeof(tests[0]); index++)
