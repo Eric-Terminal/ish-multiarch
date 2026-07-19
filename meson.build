@@ -261,6 +261,12 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        socket_lifecycle_test = executable(
+            'socket_lifecycle_test',
+            'fs/socket-lifecycle-test.c',
+            dependencies: ish)
+        test('socket_lifecycle', socket_lifecycle_test)
+
         tmpfs_pread_test = executable(
             'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
         test('tmpfs_pread', tmpfs_pread_test)
@@ -333,6 +339,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-file-syscall-test.c',
             dependencies: ish)
         test('aarch64_file_syscall', aarch64_file_syscall_test)
+
+        aarch64_io_lifecycle_test = executable(
+            'aarch64_io_lifecycle_test',
+            'kernel/aarch64-io-lifecycle-test.c',
+            dependencies: ish)
+        test('aarch64_io_lifecycle', aarch64_io_lifecycle_test)
 
         aarch64_file_mapping_service_test = executable(
             'aarch64_file_mapping_service_test',

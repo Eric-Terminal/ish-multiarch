@@ -57,6 +57,8 @@ struct fd {
             uint8_t unix_name_len;
             char unix_name[108];
             struct fd *unix_peer; // locked by peer_lock, for simplicity
+            // 与弱 peer 指针分离，避免对端立即关闭后丢失握手唤醒。
+            bool unix_peer_handshake_done;
             cond_t unix_got_peer;
             // Queue of struct scm for sending file descriptors
             // locked by fd->lock
@@ -218,6 +220,10 @@ fd_t f_install_task(struct task *task, struct fd *fd, int flags);
 // tracked 版本额外返回本次安装的槽位代数，供跨回调的精确失败回滚使用。
 fd_t f_install_task_tracked(struct task *task, struct fd *fd,
         int flags, qword_t *generation);
+// 在同一 fdtable 临界区选择并发布两个互异槽位；无论成败都接管两个引用。
+int f_install_pair_task_tracked(struct task *task,
+        struct fd *fds[2], int flags, fd_t installed[2],
+        qword_t generations[2]);
 fd_t f_install(struct fd *fd, int flags);
 int f_close_task(struct task *task, fd_t f);
 int f_close(fd_t f);

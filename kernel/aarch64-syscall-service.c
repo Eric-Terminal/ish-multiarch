@@ -761,22 +761,34 @@ static qword_t dispatch_connect(
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
     fd_t socket_fd = syscall_fd(syscall->arguments[0]);
-    int error = socket_check_fd_task(task, socket_fd);
+    struct socket_ref socket;
+    int error = socket_ref_get_task(task, socket_fd, &socket);
     if (error < 0)
         return syscall_result(error);
+    qword_t result;
     dword_t length = (dword_t) syscall->arguments[2];
-    if (length < 2 || length > sizeof(struct sockaddr_max_))
-        return syscall_result(_EINVAL);
+    if (length < 2 || length > sizeof(struct sockaddr_max_)) {
+        result = syscall_result(_EINVAL);
+        goto out;
+    }
     qword_t address = syscall->arguments[1];
-    if (!aarch64_user_range_fits(address, length))
-        return user_range_error(fault, address, GUEST_MEMORY_READ);
+    if (!aarch64_user_range_fits(address, length)) {
+        result = user_range_error(
+                fault, address, GUEST_MEMORY_READ);
+        goto out;
+    }
     struct sockaddr_max_ socket_address = {0};
     assert(context->user.read != NULL);
     if (!context->user.read(context->user.opaque,
-            address, &socket_address, length, fault))
-        return syscall_result(_EFAULT);
-    return syscall_result(socket_connect_task(
-            task, socket_fd, &socket_address, length));
+            address, &socket_address, length, fault)) {
+        result = syscall_result(_EFAULT);
+        goto out;
+    }
+    result = syscall_result(socket_connect_ref_task(
+            task, &socket, &socket_address, length));
+out:
+    socket_ref_release(&socket);
+    return result;
 }
 
 static qword_t dispatch_chdir(
@@ -1291,89 +1303,146 @@ static qword_t dispatch_read(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
-    fd_t fd = syscall_fd(syscall->arguments[0]);
+    // guest 写回可能并发关闭并复用槽位；整次 read 固定同一文件对象。
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_read_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
     qword_t address = syscall->arguments[1];
     qword_t remaining = syscall->arguments[2] < AARCH64_LINUX_MAX_RW_COUNT ?
             syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
     byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
-    if (remaining == 0)
-        return syscall_result(file_read_task(task, fd, buffer, 0));
+    qword_t result;
+    if (remaining == 0) {
+        result = syscall_result(file_read_fd(target, buffer, 0));
+        goto out;
+    }
 
     qword_t completed = 0;
     while (remaining != 0) {
         size_t chunk = remaining < sizeof(buffer) ?
                 (size_t) remaining : sizeof(buffer);
-        ssize_t read = file_read_task(task, fd, buffer, chunk);
-        if (read < 0)
-            return completed != 0 ? completed : syscall_result(read);
+        ssize_t read = file_read_fd(target, buffer, chunk);
+        if (read < 0) {
+            result = completed != 0 ? completed : syscall_result(read);
+            goto out;
+        }
         assert((size_t) read <= chunk);
-        if (read == 0)
-            return completed;
+        if (read == 0) {
+            result = completed;
+            goto out;
+        }
         dword_t copy_size = (dword_t) read;
-        if (!user_range_fits(address, copy_size))
-            return completed != 0 ? completed :
+        if (!user_range_fits(address, copy_size)) {
+            result = completed != 0 ? completed :
                     user_range_error(fault, address, GUEST_MEMORY_WRITE);
+            goto out;
+        }
         assert(context->user.write != NULL);
         // 跨页写回失败前可能已复制前缀；文件位置沿用现有 host-buffer 语义，不尝试回滚。
         if (!context->user.write(context->user.opaque,
-                address, buffer, copy_size, fault))
-            return completed != 0 ? completed : syscall_result(_EFAULT);
+                address, buffer, copy_size, fault)) {
+            result = completed != 0 ?
+                    completed : syscall_result(_EFAULT);
+            goto out;
+        }
         completed += (qword_t) read;
-        if ((size_t) read != chunk)
-            return completed;
+        if ((size_t) read != chunk) {
+            result = completed;
+            goto out;
+        }
         remaining -= (qword_t) read;
-        if (remaining == 0)
-            return completed;
+        if (remaining == 0) {
+            result = completed;
+            goto out;
+        }
         if (address > UINT64_MAX - (qword_t) read) {
             user_range_error(fault, address, GUEST_MEMORY_WRITE);
-            return completed;
+            result = completed;
+            goto out;
         }
         address += (qword_t) read;
     }
-    return completed;
+    result = completed;
+out:
+    fd_close(target);
+    return result;
 }
 
 static qword_t dispatch_write(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
-    fd_t fd = syscall_fd(syscall->arguments[0]);
+    // guest 读取可能并发关闭并复用槽位；整次 write 固定同一文件对象。
+    struct fd *target = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (target == NULL)
+        return syscall_result(_EBADF);
+    int error = file_write_check_fd(target);
+    if (error < 0) {
+        fd_close(target);
+        return syscall_result(error);
+    }
     qword_t address = syscall->arguments[1];
     qword_t remaining = syscall->arguments[2] < AARCH64_LINUX_MAX_RW_COUNT ?
             syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
     byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
-    if (remaining == 0)
-        return syscall_result(file_write_task(task, fd, buffer, 0));
+    qword_t result;
+    if (remaining == 0) {
+        result = syscall_result(file_write_fd(target, buffer, 0));
+        goto out;
+    }
 
     qword_t completed = 0;
     while (remaining != 0) {
         size_t chunk = remaining < sizeof(buffer) ?
                 (size_t) remaining : sizeof(buffer);
         dword_t copy_size = (dword_t) chunk;
-        if (!user_range_fits(address, copy_size))
-            return completed != 0 ? completed :
+        if (!user_range_fits(address, copy_size)) {
+            result = completed != 0 ? completed :
                     user_range_error(fault, address, GUEST_MEMORY_READ);
+            goto out;
+        }
         assert(context->user.read != NULL);
         if (!context->user.read(context->user.opaque,
-                address, buffer, copy_size, fault))
-            return completed != 0 ? completed : syscall_result(_EFAULT);
-        ssize_t written = file_write_task(task, fd, buffer, chunk);
-        if (written < 0)
-            return completed != 0 ? completed : syscall_result(written);
+                address, buffer, copy_size, fault)) {
+            result = completed != 0 ?
+                    completed : syscall_result(_EFAULT);
+            goto out;
+        }
+        ssize_t written = file_write_fd(target, buffer, chunk);
+        if (written < 0) {
+            result = completed != 0 ?
+                    completed : syscall_result(written);
+            goto out;
+        }
         assert((size_t) written <= chunk);
         completed += (qword_t) written;
-        if ((size_t) written != chunk)
-            return completed;
+        if ((size_t) written != chunk) {
+            result = completed;
+            goto out;
+        }
         remaining -= (qword_t) written;
-        if (remaining == 0)
-            return completed;
+        if (remaining == 0) {
+            result = completed;
+            goto out;
+        }
         if (address > UINT64_MAX - (qword_t) written) {
             user_range_error(fault, address, GUEST_MEMORY_READ);
-            return completed;
+            result = completed;
+            goto out;
         }
         address += (qword_t) written;
     }
-    return completed;
+    result = completed;
+out:
+    fd_close(target);
+    return result;
 }
 
 static qword_t dispatch_pread64(

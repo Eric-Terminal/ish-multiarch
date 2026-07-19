@@ -59,27 +59,18 @@ int file_pipe2_task(
         }
     }
 
-    fd_retain(read_end);
-    fd_t read_fd = f_install_task_tracked(task, read_end,
-            flags & O_CLOEXEC_, &result->generations[0]);
-    if (read_fd < 0) {
+    struct fd *install_ends[2] = {
+        fd_retain(read_end),
+        fd_retain(write_end),
+    };
+    int error = f_install_pair_task_tracked(task, install_ends,
+            flags & O_CLOEXEC_, result->fds, result->generations);
+    if (error < 0) {
         fd_close(read_end);
         fd_close(write_end);
-        return read_fd;
-    }
-    fd_retain(write_end);
-    fd_t write_fd = f_install_task_tracked(task, write_end,
-            flags & O_CLOEXEC_, &result->generations[1]);
-    if (write_fd < 0) {
-        fd_close(write_end);
-        f_close_task_if_matches(task, read_fd, read_end,
-                result->generations[0]);
-        fd_close(read_end);
-        return write_fd;
+        return error;
     }
 
-    result->fds[0] = read_fd;
-    result->fds[1] = write_fd;
     result->ends[0] = read_end;
     result->ends[1] = write_end;
     return 0;

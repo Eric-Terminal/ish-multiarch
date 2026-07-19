@@ -164,10 +164,54 @@ int main(void) {
     CHECK(f_get_task(&target_task, 0) == target_fds[0],
             "当前任务关闭不得影响目标任务");
 
+    struct task pair_task;
+    struct tgroup pair_group;
+    init_task(&pair_task, &pair_group, 2, 1);
+    CHECK(!IS_ERR(pair_task.files), "双端原子安装表创建成功");
+    struct fd *pair[2] = {
+        fd_create(&test_fd_ops),
+        fd_create(&test_fd_ops),
+    };
+    CHECK(pair[0] != NULL && pair[1] != NULL,
+            "双端原子安装对象创建成功");
+    fd_t pair_numbers[2] = {-1, -1};
+    qword_t pair_generations[2] = {0, 0};
+    CHECK(f_install_pair_task_tracked(&pair_task, pair,
+                    O_CLOEXEC_, pair_numbers, pair_generations) == 0 &&
+            pair_numbers[0] == 0 && pair_numbers[1] == 1 &&
+            pair_generations[0] == 1 && pair_generations[1] == 1 &&
+            f_get_task(&pair_task, 0) == pair[0] &&
+            f_get_task(&pair_task, 1) == pair[1] &&
+            f_getfd_task(&pair_task, 0) == FD_CLOEXEC_ &&
+            f_getfd_task(&pair_task, 1) == FD_CLOEXEC_,
+            "双端在同一操作内取得互异最低槽位并发布标志");
+    CHECK(f_close_task(&pair_task, 1) == 0 &&
+            f_close_task(&pair_task, 0) == 0,
+            "双端原子安装成功项可独立关闭");
+    fdtable_release(pair_task.files);
+
+    struct task one_slot_task;
+    struct tgroup one_slot_group;
+    init_task(&one_slot_task, &one_slot_group, 1, 1);
+    CHECK(!IS_ERR(one_slot_task.files), "单槽回滚表创建成功");
+    struct fd *rejected_pair[2] = {
+        fd_create(&test_fd_ops),
+        fd_create(&test_fd_ops),
+    };
+    CHECK(rejected_pair[0] != NULL && rejected_pair[1] != NULL,
+            "单槽回滚对象创建成功");
+    before_close = closed_fds;
+    CHECK(f_install_pair_task_tracked(&one_slot_task, rejected_pair,
+                    0, pair_numbers, pair_generations) == _EMFILE &&
+            f_get_task(&one_slot_task, 0) == NULL &&
+            closed_fds == before_close + 2,
+            "第二槽不足时原子回滚首端并消费两端引用");
+    fdtable_release(one_slot_task.files);
+
     current = NULL;
     fdtable_release(current_task.files);
     fdtable_release(target_task.files);
     fdtable_release(small_task.files);
-    CHECK(closed_fds == 7, "清理阶段恰好释放全部七个测试 fd");
+    CHECK(closed_fds == 11, "清理阶段恰好释放全部十一个测试 fd");
     return 0;
 }

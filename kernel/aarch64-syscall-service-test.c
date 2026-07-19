@@ -1147,7 +1147,12 @@ int main(void) {
             USER_BASE + socket_address_offset,
             sizeof(invalid_socket_address), 0);
     CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0,
-            "connect 在访问地址前拒绝非套接字 fd");
+            "connect 在访问地址前拒绝缺失 fd");
+    result = invoke(&fixture, &memory, &fault, 203, 0,
+            USER_BASE + socket_address_offset,
+            sizeof(invalid_socket_address), 0);
+    CHECK(result == encoded_error(_ENOTSOCK) && memory.read_calls == 0,
+            "connect 在访问地址前拒绝稳定存在的非套接字 fd");
     result = invoke(&fixture, &memory, &fault, 203, 1,
             USER_BASE + socket_address_offset, 1, 0);
     CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,

@@ -217,19 +217,55 @@ static fd_t f_install_start(struct task *task, struct fd *fd,
     return f;
 }
 
+static void f_install_finish(
+        struct fdtable *table, fd_t f, struct fd *fd, int flags) {
+    if (flags & O_CLOEXEC_)
+        bit_set(f, table->cloexec);
+    if (flags & O_NONBLOCK_)
+        fd_setflags(fd, O_NONBLOCK_);
+}
+
+static int fdtable_close(struct fdtable *table, fd_t f);
+
 fd_t f_install_task_tracked(struct task *task, struct fd *fd,
         int flags, qword_t *generation) {
     struct fdtable *table = task->files;
     lock(&table->lock);
     fd_t f = f_install_start(task, fd, 0, generation);
-    if (f >= 0) {
-        if (flags & O_CLOEXEC_)
-            bit_set(f, table->cloexec);
-        if (flags & O_NONBLOCK_)
-            fd_setflags(fd, O_NONBLOCK_);
-    }
+    if (f >= 0)
+        f_install_finish(table, f, fd, flags);
     unlock(&table->lock);
     return f;
+}
+
+int f_install_pair_task_tracked(struct task *task,
+        struct fd *fds[2], int flags, fd_t installed[2],
+        qword_t generations[2]) {
+    assert(task != NULL && fds != NULL && fds[0] != NULL &&
+            fds[1] != NULL && installed != NULL && generations != NULL);
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    fd_t first = f_install_start(
+            task, fds[0], 0, &generations[0]);
+    if (first < 0) {
+        unlock(&table->lock);
+        fd_close(fds[1]);
+        return first;
+    }
+    f_install_finish(table, first, fds[0], flags);
+
+    fd_t second = f_install_start(
+            task, fds[1], 0, &generations[1]);
+    if (second < 0) {
+        fdtable_close(table, first);
+        unlock(&table->lock);
+        return second;
+    }
+    f_install_finish(table, second, fds[1], flags);
+    installed[0] = first;
+    installed[1] = second;
+    unlock(&table->lock);
+    return 0;
 }
 
 fd_t f_install_task(struct task *task, struct fd *fd, int flags) {
