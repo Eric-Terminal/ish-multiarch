@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "fs/fd.h"
+#include "fs/sock.h"
 #include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-futex-abi.h"
@@ -3304,7 +3305,7 @@ static qword_t dispatch_rt_sigaction(
     return 0;
 }
 
-static qword_t dispatch_syscall(
+static qword_t dispatch_syscall_inner(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
         struct guest_linux_user_fault *fault) {
@@ -3572,6 +3573,16 @@ static qword_t dispatch_syscall(
         default:
             return syscall_result(_ENOSYS);
     }
+}
+
+static qword_t dispatch_syscall(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    qword_t result = dispatch_syscall_inner(
+            context, syscall, fault);
+    socket_scm_collect_checkpoint();
+    return result;
 }
 
 const struct guest_linux_syscall_service ish_aarch64_linux_syscall_service = {

@@ -171,6 +171,22 @@ struct scm {
 int socket_scm_create_task(struct task *task,
         const fd_t *numbers, unsigned count, struct scm **scm);
 void socket_scm_release(struct scm *scm);
+// 显式入口用于安全点与确定性测试；checkpoint 在没有请求时仅做原子读取。
+void socket_scm_collect_now(void);
+void socket_scm_collect_checkpoint(void);
+qword_t socket_scm_inflight_count(uid_t_ uid);
+
+struct socket_scm_ref_drop {
+    uint64_t edge_generation;
+    unsigned incoming;
+    bool tracked;
+};
+
+// drop 前只读取活对象；drop 后仅凭栈快照触发全局请求，避免并发 final free。
+void socket_scm_ref_drop_prepare(
+        struct fd *fd, struct socket_scm_ref_drop *drop);
+void socket_scm_ref_drop_complete(
+        const struct socket_scm_ref_drop *drop, unsigned remaining);
 
 #define PF_LOCAL_ 1
 #define PF_INET_ 2

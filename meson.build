@@ -291,6 +291,18 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('socket_scm_accounting', socket_scm_accounting_test)
 
+        socket_scm_gc_test = executable(
+            'socket_scm_gc_test',
+            'fs/socket-scm-gc-test.c',
+            dependencies: ish)
+        test('socket_scm_gc', socket_scm_gc_test)
+
+        socket_scm_gc_race_test = executable(
+            'socket_scm_gc_race_test',
+            'fs/socket-scm-gc-race-test.c',
+            dependencies: ish)
+        test('socket_scm_gc_race', socket_scm_gc_race_test)
+
         tmpfs_pread_test = executable(
             'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
         test('tmpfs_pread', tmpfs_pread_test)

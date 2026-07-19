@@ -35,16 +35,26 @@ static lock_t unix_scm_dummy_lock = LOCK_INITIALIZER;
 static int unix_scm_dummy_fd = -1;
 static struct list unix_scm_inflight =
         LIST_INITIALIZER(unix_scm_inflight);
+static struct list unix_scm_vertices =
+        LIST_INITIALIZER(unix_scm_vertices);
+static atomic_bool unix_scm_gc_requested = ATOMIC_VAR_INIT(false);
+static atomic_bool unix_scm_gc_running = ATOMIC_VAR_INIT(false);
+static atomic_uint_fast64_t unix_scm_edge_generation =
+        ATOMIC_VAR_INIT(0);
 static struct list unix_bound_sockets;
+
+struct unix_bound_name;
 
 struct unix_pending_peer {
     struct list links;
     struct fd *peer;
+    struct fd *listener;
     bool connect_active;
     bool host_error_pending;
     bool accepted;
     bool cancel_requested;
     bool linked;
+    bool handshake_finished;
     uint64_t generation;
     char peer_path[sizeof(((struct sockaddr_un *) 0)->sun_path)];
     bool listener_cred_valid;
@@ -69,6 +79,8 @@ struct unix_bound_name {
 
 struct unix_scm_receiver {
     struct fd *owner;
+    struct fd *logical;
+    struct fd *queued;
     bool pending;
 };
 
@@ -77,6 +89,8 @@ static void unix_socket_finish_peer_handshake(
 void socket_scm_release(struct scm *scm);
 static int unix_scm_receiver_retain(struct fd *sender,
         const struct socket_address *address,
+        struct unix_scm_receiver *receiver);
+static void unix_scm_receiver_release(
         struct unix_scm_receiver *receiver);
 static bool socket_message_may_wait(struct fd *socket, dword_t flags);
 static bool socket_message_send_would_block(
@@ -107,6 +121,8 @@ static struct fd *sock_fd_allocate(
     if (domain == AF_LOCAL_) {
         list_init(&fd->socket.unix_scm);
         list_init(&fd->socket.unix_pending_scm);
+        list_init(&fd->socket.unix_scm_vertex);
+        atomic_init(&fd->socket.unix_scm_incoming, 0);
         lock_init(&fd->socket.unix_recv_lock);
     }
     return fd;
@@ -213,8 +229,9 @@ int socket_ref_get_task(struct task *task, fd_t sock_fd,
 
 void socket_ref_release(struct socket_ref *socket) {
     assert(socket != NULL && socket->fd != NULL);
-    fd_close(socket->fd);
+    struct fd *fd = socket->fd;
     socket->fd = NULL;
+    fd_close(fd);
 }
 
 static uint32_t unix_socket_next_id(void) {
@@ -576,8 +593,6 @@ static void unix_bound_owner_finish_close(struct fd *socket) {
                     !pending->accepted && pending->peer != NULL);
             list_remove(&pending->links);
             pending->linked = false;
-            if (pending->peer->socket.unix_pending_connect == pending)
-                pending->peer->socket.unix_pending_connect = NULL;
             list_add_tail(&canceled_peers, &pending->links);
         }
         name->owner_open = false;
@@ -590,8 +605,9 @@ static void unix_bound_owner_finish_close(struct fd *socket) {
         struct unix_pending_peer *pending = list_first_entry(
                 &canceled_peers, struct unix_pending_peer, links);
         list_remove(&pending->links);
-        unix_socket_finish_peer_handshake(pending->peer, NULL);
-        free(pending);
+        struct fd *peer = pending->peer;
+        pending->peer = NULL;
+        unix_socket_finish_peer_handshake(peer, NULL);
     }
 }
 
@@ -1270,6 +1286,7 @@ static int unix_bound_connect_begin(const struct socket_address *address,
     }
 
     candidate->peer = fd_retain(peer);
+    candidate->listener = name->owner;
     candidate->connect_active = true;
     candidate->generation = generation;
     candidate->listener_cred = name->listener_cred;
@@ -1304,10 +1321,8 @@ static void unix_bound_connect_complete(struct unix_bound_name *target,
         pending->linked = false;
         canceled_peer = pending->peer;
         pending->peer = NULL;
-        if (canceled_peer->socket.unix_pending_connect == pending)
-            canceled_peer->socket.unix_pending_connect = NULL;
-        free_pending = true;
-    } else if (pending->accepted) {
+        pending->listener = NULL;
+    } else if (pending->accepted && pending->handshake_finished) {
         free_pending = true;
     }
     target->active_connects--;
@@ -1318,8 +1333,10 @@ static void unix_bound_connect_complete(struct unix_bound_name *target,
     if (canceled_peer != NULL) {
         unix_socket_finish_peer_handshake(canceled_peer, NULL);
     }
-    if (free_pending)
+    if (free_pending) {
+        pending->listener = NULL;
         free(pending);
+    }
 }
 
 static bool unix_bound_cancel_peer(
@@ -1331,13 +1348,12 @@ static bool unix_bound_cancel_peer(
     if (pending != NULL && pending->generation == generation &&
             pending->host_error_pending) {
         pending->cancel_requested = true;
-        if (!pending->connect_active) {
-            assert(pending->linked && !pending->accepted &&
-                    pending->peer == peer);
+        if (!pending->connect_active && pending->linked &&
+                !pending->accepted && pending->peer == peer) {
             list_remove(&pending->links);
             pending->linked = false;
             pending->peer = NULL;
-            peer->socket.unix_pending_connect = NULL;
+            pending->listener = NULL;
             canceled = pending;
         }
     }
@@ -1345,7 +1361,6 @@ static bool unix_bound_cancel_peer(
     if (canceled == NULL)
         return false;
     unix_socket_finish_peer_handshake(peer, NULL);
-    free(canceled);
     return true;
 }
 
@@ -1405,16 +1420,12 @@ static struct fd *unix_bound_accept_peer(
             peer = pending->peer;
             pending->peer = NULL;
             pending->accepted = true;
-            if (peer->socket.unix_pending_connect == pending)
-                peer->socket.unix_pending_connect = NULL;
             listener_cred = pending->listener_cred;
             listener_cred_valid = pending->listener_cred_valid;
             if (!listener_cred_valid && name->listener_cred_valid) {
                 listener_cred = name->listener_cred;
                 listener_cred_valid = true;
             }
-            if (!pending->connect_active)
-                free(pending);
             break;
         }
     }
@@ -1434,7 +1445,18 @@ static void unix_socket_finish_peer_handshake(
         return;
     struct list rejected_scm;
     list_init(&rejected_scm);
+    struct unix_pending_peer *finished_pending = NULL;
+    bool free_pending = false;
     lock(&unix_scm_io_lock);
+    lock(&unix_bound_lock);
+    finished_pending = peer->socket.unix_pending_connect;
+    if (finished_pending != NULL) {
+        peer->socket.unix_pending_connect = NULL;
+        finished_pending->handshake_finished = true;
+        finished_pending->listener = NULL;
+        free_pending = !finished_pending->connect_active;
+    }
+    unlock(&unix_bound_lock);
     lock(&peer_lock);
     if (accepted != NULL) {
         accepted->socket.unix_peer = peer;
@@ -1491,6 +1513,8 @@ static void unix_socket_finish_peer_handshake(
     }
     // 待 accept 注册表携带一份强引用，由成功、拒绝或 listener 关闭消费。
     fd_close(peer);
+    if (free_pending)
+        free(finished_pending);
 }
 
 static int socket_connect_prepared(
@@ -2465,8 +2489,7 @@ out:
     if (serialize_unix_datagram)
         unlock(&unix_scm_io_lock);
 release_receiver:
-    if (receiver.owner != NULL)
-        fd_close(receiver.owner);
+    unix_scm_receiver_release(&receiver);
     return error;
 }
 
@@ -3239,19 +3262,219 @@ static int socket_scm_send_check_locked(const struct scm *scm) {
     return inflight > scm->sender_nofile ? _ETOOMANYREFS : 0;
 }
 
+static bool socket_scm_graph_fd(const struct fd *fd) {
+    return fd != NULL && fd->ops == &socket_fdops &&
+            fd->socket.domain == AF_LOCAL_;
+}
+
+void socket_scm_ref_drop_prepare(
+        struct fd *fd, struct socket_scm_ref_drop *drop) {
+    *drop = (struct socket_scm_ref_drop) {0};
+    if (!socket_scm_graph_fd(fd))
+        return;
+    drop->tracked = true;
+    drop->edge_generation = atomic_load(
+            &unix_scm_edge_generation);
+    drop->incoming = atomic_load(
+            &fd->socket.unix_scm_incoming);
+}
+
+void socket_scm_ref_drop_complete(
+        const struct socket_scm_ref_drop *drop,
+        unsigned remaining) {
+    if (drop->tracked &&
+            ((drop->incoming != 0 &&
+                    remaining <= drop->incoming) ||
+            atomic_load(&unix_scm_edge_generation) !=
+                    drop->edge_generation))
+        atomic_store(&unix_scm_gc_requested, true);
+}
+
+static bool socket_scm_edge_add_locked(struct fd *fd) {
+    if (!socket_scm_graph_fd(fd))
+        return false;
+    unsigned previous = atomic_fetch_add(
+            &fd->socket.unix_scm_incoming, 1);
+    assert(previous != UINT_MAX);
+    if (previous == 0)
+        list_add_tail(&unix_scm_vertices,
+                &fd->socket.unix_scm_vertex);
+    atomic_fetch_add(&unix_scm_edge_generation, 1);
+    // detached SCM 引用发布为图边后，只有失去最后非图引用才可能成环。
+    return fd_refcount_read(fd) <= previous + 1;
+}
+
+static void socket_scm_edge_remove_locked(struct fd *fd) {
+    if (!socket_scm_graph_fd(fd))
+        return;
+    unsigned previous = atomic_fetch_sub(
+            &fd->socket.unix_scm_incoming, 1);
+    assert(previous != 0);
+    if (previous == 1)
+        list_remove(&fd->socket.unix_scm_vertex);
+}
+
 static void socket_scm_publish_locked(
         struct scm *scm, struct fd *receiver) {
     assert(scm != NULL && receiver != NULL && !scm->inflight);
     scm->receiver = receiver;
     scm->inflight = true;
+    bool candidate_edge = false;
+    for (unsigned index = 0; index < scm->num_fds; index++)
+        candidate_edge |= socket_scm_edge_add_locked(scm->fds[index]);
     list_add_tail(&unix_scm_inflight, &scm->inflight_queue);
+    // 新边只有从既有图顶点出发且目标同时失去最后外部根时才可能闭环。
+    if (candidate_edge && socket_scm_graph_fd(receiver) &&
+            atomic_load(&receiver->socket.unix_scm_incoming) != 0)
+        atomic_store(&unix_scm_gc_requested, true);
 }
 
 static void socket_scm_unpublish_locked(struct scm *scm) {
     assert(scm != NULL && scm->inflight);
     list_remove(&scm->inflight_queue);
+    for (unsigned index = 0; index < scm->num_fds; index++)
+        socket_scm_edge_remove_locked(scm->fds[index]);
     scm->receiver = NULL;
     scm->inflight = false;
+}
+
+qword_t socket_scm_inflight_count(uid_t_ uid) {
+    lock(&unix_scm_io_lock);
+    qword_t count = socket_scm_inflight_for_uid_locked(uid);
+    unlock(&unix_scm_io_lock);
+    return count;
+}
+
+static bool socket_scm_receiver_live_locked(const struct scm *scm) {
+    struct fd *receiver = scm->receiver;
+    assert(socket_scm_graph_fd(receiver));
+    unsigned incoming = atomic_load(
+            &receiver->socket.unix_scm_incoming);
+    return incoming == 0 || receiver->socket.unix_scm_gc_live;
+}
+
+static void socket_scm_collect_once(void) {
+    struct list garbage;
+    list_init(&garbage);
+
+    lock(&unix_scm_io_lock);
+    if (list_empty(&unix_scm_vertices)) {
+        unlock(&unix_scm_io_lock);
+        return;
+    }
+
+    struct fd *vertex;
+    list_for_each_entry(
+            &unix_scm_vertices, vertex, socket.unix_scm_vertex) {
+        unsigned incoming = atomic_load(
+                &vertex->socket.unix_scm_incoming);
+        unsigned references = fd_refcount_read(vertex);
+        // 不等于而非仅大于：计数异常时宁可延期，也不能提前回收。
+        vertex->socket.unix_scm_gc_live = references != incoming;
+        vertex->socket.unix_scm_gc_collect = false;
+    }
+
+    bool changed;
+    do {
+        changed = false;
+        struct scm *scm;
+        list_for_each_entry(
+                &unix_scm_inflight, scm, inflight_queue) {
+            if (!socket_scm_receiver_live_locked(scm))
+                continue;
+            for (unsigned index = 0;
+                    index < scm->num_fds; index++) {
+                struct fd *transferred = scm->fds[index];
+                unsigned incoming = socket_scm_graph_fd(transferred) ?
+                        atomic_load(&transferred->socket.unix_scm_incoming) :
+                        0;
+                if (!socket_scm_graph_fd(transferred) ||
+                        incoming == 0 ||
+                        transferred->socket.unix_scm_gc_live)
+                    continue;
+                transferred->socket.unix_scm_gc_live = true;
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    list_for_each_entry(
+            &unix_scm_vertices, vertex, socket.unix_scm_vertex) {
+        if (vertex->socket.unix_scm_gc_live)
+            continue;
+        vertex->socket.unix_scm_gc_collect = true;
+        atomic_fetch_or(&vertex->refcount,
+                FD_REFCOUNT_ACQUIRE_BLOCKED);
+    }
+
+    bool retry = false;
+    list_for_each_entry(
+            &unix_scm_vertices, vertex, socket.unix_scm_vertex) {
+        if (!vertex->socket.unix_scm_gc_collect)
+            continue;
+        unsigned incoming = atomic_load(
+                &vertex->socket.unix_scm_incoming);
+        if (fd_refcount_read(vertex) != incoming) {
+            retry = true;
+            break;
+        }
+    }
+    if (retry) {
+        list_for_each_entry(
+                &unix_scm_vertices, vertex,
+                socket.unix_scm_vertex) {
+            if (vertex->socket.unix_scm_gc_collect)
+                atomic_fetch_and(&vertex->refcount,
+                        ~FD_REFCOUNT_ACQUIRE_BLOCKED);
+            vertex->socket.unix_scm_gc_live = false;
+            vertex->socket.unix_scm_gc_collect = false;
+        }
+        unlock(&unix_scm_io_lock);
+        return;
+    }
+
+    struct scm *scm, *temporary;
+    list_for_each_entry_safe(
+            &unix_scm_inflight, scm, temporary,
+            inflight_queue) {
+        if (!scm->receiver->socket.unix_scm_gc_collect)
+            continue;
+        list_remove(&scm->queue);
+        socket_scm_unpublish_locked(scm);
+        list_add_tail(&garbage, &scm->queue);
+    }
+    list_for_each_entry(
+            &unix_scm_vertices, vertex, socket.unix_scm_vertex) {
+        vertex->socket.unix_scm_gc_live = false;
+        vertex->socket.unix_scm_gc_collect = false;
+    }
+    unlock(&unix_scm_io_lock);
+
+    socket_scm_release_list(&garbage);
+}
+
+static void socket_scm_try_collect(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(
+            &unix_scm_gc_running, &expected, true))
+        return;
+    do {
+        atomic_store(&unix_scm_gc_requested, false);
+        socket_scm_collect_once();
+    } while (atomic_exchange(&unix_scm_gc_requested, false));
+    atomic_store(&unix_scm_gc_running, false);
+    if (atomic_load(&unix_scm_gc_requested))
+        socket_scm_try_collect();
+}
+
+void socket_scm_collect_now(void) {
+    atomic_store(&unix_scm_gc_requested, true);
+    socket_scm_try_collect();
+}
+
+void socket_scm_collect_checkpoint(void) {
+    if (atomic_load(&unix_scm_gc_requested))
+        socket_scm_try_collect();
 }
 
 void socket_scm_release(struct scm *scm) {
@@ -3463,6 +3686,7 @@ static int unix_scm_receiver_retain(struct fd *sender,
             address != NULL && address->length != 0;
     if (sender->socket.type == SOCK_STREAM_ ||
             !explicit_destination) {
+        bool pending = false;
         lock(&peer_lock);
         if (sender->socket.unix_peer != NULL)
             receiver->owner =
@@ -3470,11 +3694,23 @@ static int unix_scm_receiver_retain(struct fd *sender,
         if (receiver->owner == NULL &&
                 sender->socket.type == SOCK_STREAM_ &&
                 sender->socket.unix_peer_handshake_pending &&
-                !sender->socket.unix_peer_handshake_rejected) {
-            receiver->owner = fd_retain(sender);
-            receiver->pending = true;
-        }
+                !sender->socket.unix_peer_handshake_rejected)
+            pending = true;
         unlock(&peer_lock);
+        if (pending) {
+            lock(&unix_bound_lock);
+            struct unix_pending_peer *state =
+                    sender->socket.unix_pending_connect;
+            if (state != NULL && !state->handshake_finished &&
+                    state->listener != NULL)
+                receiver->logical =
+                        fd_try_retain(state->listener);
+            if (receiver->logical != NULL) {
+                receiver->owner = fd_retain(sender);
+                receiver->pending = true;
+            }
+            unlock(&unix_bound_lock);
+        }
         if (receiver->owner != NULL)
             return 0;
         if (sender->socket.type == SOCK_STREAM_)
@@ -3516,24 +3752,39 @@ static int unix_scm_receiver_retain(struct fd *sender,
     }
 }
 
+static void unix_scm_receiver_release(
+        struct unix_scm_receiver *receiver) {
+    if (receiver->queued != NULL)
+        fd_close(receiver->queued);
+    if (receiver->logical != NULL)
+        fd_close(receiver->logical);
+    if (receiver->owner != NULL)
+        fd_close(receiver->owner);
+    *receiver = (struct unix_scm_receiver) {0};
+}
+
 // 调用方持有 unix_scm_io_lock 和 receiver 强引用，host dummy 与队列同序发布。
 static bool unix_scm_receiver_queue(
-        const struct unix_scm_receiver *receiver, struct scm *scm) {
+        struct unix_scm_receiver *receiver, struct scm *scm) {
     assert(receiver->owner != NULL);
     if (receiver->pending) {
         bool queued = false;
         lock(&peer_lock);
         struct fd *accepted =
                 receiver->owner->socket.unix_peer;
-        if (accepted != NULL) {
-            list_add_tail(&accepted->socket.unix_scm, &scm->queue);
-            socket_scm_publish_locked(scm, accepted);
+        if (accepted != NULL)
+            receiver->queued = fd_try_retain(accepted);
+        if (receiver->queued != NULL) {
+            list_add_tail(&receiver->queued->socket.unix_scm,
+                    &scm->queue);
+            socket_scm_publish_locked(scm, receiver->queued);
             queued = true;
         } else if (receiver->owner->socket.unix_peer_handshake_pending &&
                 !receiver->owner->socket.unix_peer_handshake_rejected) {
+            assert(receiver->logical != NULL);
             list_add_tail(&receiver->owner->socket.unix_pending_scm,
                     &scm->queue);
-            socket_scm_publish_locked(scm, receiver->owner);
+            socket_scm_publish_locked(scm, receiver->logical);
             queued = true;
         }
         unlock(&peer_lock);
@@ -3848,8 +4099,7 @@ out:
         unlock(&unix_scm_io_lock);
     if (rejected_scm != NULL)
         socket_scm_release(rejected_scm);
-    if (receiver.owner != NULL)
-        fd_close(receiver.owner);
+    unix_scm_receiver_release(&receiver);
     return error;
 }
 
@@ -4254,8 +4504,7 @@ out:
         unlock(&unix_scm_io_lock);
     if (rejected_scm != NULL)
         socket_scm_release(rejected_scm);
-    if (scm_receiver.owner != NULL)
-        fd_close(scm_receiver.owner);
+    unix_scm_receiver_release(&scm_receiver);
     if (scm != NULL)
         socket_scm_release(scm);
     free(guest_control);
@@ -4664,6 +4913,10 @@ static void socket_scm_release_list(struct list *scm_list) {
 }
 
 static int sock_close(struct fd *fd) {
+    if (fd->socket.domain == AF_LOCAL_) {
+        assert(atomic_load(&fd->socket.unix_scm_incoming) == 0);
+        assert(list_empty(&fd->socket.unix_scm_vertex));
+    }
     sockrestart_end_listen(fd);
     bool close_host_early = unix_bound_owner_begin_close(fd);
     int close_result = 0;

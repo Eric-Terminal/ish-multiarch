@@ -1,5 +1,6 @@
 #include <string.h>
 #include "debug.h"
+#include "fs/sock.h"
 #include "kernel/calls.h"
 #include "emu/interrupt.h"
 #include "kernel/memory.h"
@@ -274,6 +275,7 @@ void handle_interrupt(int interrupt) {
             }
             STRACE("%d call %-3d ", current->pid, syscall_num);
             int result = syscall_table[syscall_num](cpu->ebx, cpu->ecx, cpu->edx, cpu->esi, cpu->edi, cpu->ebp);
+            socket_scm_collect_checkpoint();
             STRACE(" = 0x%x\n", result);
             if (task_has_aarch64_exec_candidate(current))
                 return;

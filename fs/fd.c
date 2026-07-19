@@ -8,6 +8,7 @@
 #include "fs/poll.h"
 #include "fs/fd.h"
 #include "fs/inode.h"
+#include "fs/sock.h"
 
 struct fd *fd_create(const struct fd_ops *ops) {
     struct fd *fd = malloc(sizeof(struct fd));
@@ -15,7 +16,7 @@ struct fd *fd_create(const struct fd_ops *ops) {
         return NULL;
     *fd = (struct fd) {};
     fd->ops = ops;
-    fd->refcount = 1;
+    atomic_init(&fd->refcount, 1);
     fd->flags = 0;
     fd->mount = NULL;
     fd->offset = 0;
@@ -27,16 +28,21 @@ struct fd *fd_create(const struct fd_ops *ops) {
 }
 
 struct fd *fd_retain(struct fd *fd) {
-    fd->refcount++;
+    unsigned state = atomic_fetch_add(&fd->refcount, 1);
+    unsigned references = state & FD_REFCOUNT_VALUE_MASK;
+    assert(references != 0 &&
+            references != FD_REFCOUNT_VALUE_MASK);
     return fd;
 }
 
 struct fd *fd_try_retain(struct fd *fd) {
-    unsigned references = atomic_load(&fd->refcount);
-    while (references != 0) {
-        assert(references != UINT_MAX);
+    unsigned state = atomic_load(&fd->refcount);
+    while ((state & FD_REFCOUNT_ACQUIRE_BLOCKED) == 0 &&
+            (state & FD_REFCOUNT_VALUE_MASK) != 0) {
+        assert((state & FD_REFCOUNT_VALUE_MASK) !=
+                FD_REFCOUNT_VALUE_MASK);
         if (atomic_compare_exchange_weak(
-                &fd->refcount, &references, references + 1))
+                &fd->refcount, &state, state + 1))
             return fd;
     }
     return NULL;
@@ -44,7 +50,14 @@ struct fd *fd_try_retain(struct fd *fd) {
 
 int fd_close(struct fd *fd) {
     int err = 0;
-    if (--fd->refcount == 0) {
+    struct socket_scm_ref_drop scm_drop;
+    socket_scm_ref_drop_prepare(fd, &scm_drop);
+    unsigned previous = atomic_fetch_sub(&fd->refcount, 1);
+    unsigned references = previous & FD_REFCOUNT_VALUE_MASK;
+    assert(references != 0);
+    references--;
+    socket_scm_ref_drop_complete(&scm_drop, references);
+    if (references == 0) {
         poll_cleanup_fd(fd);
         if (fd->ops->close)
             err = fd->ops->close(fd);
@@ -102,6 +115,7 @@ void fdtable_release(struct fdtable *table) {
     } else {
         unlock(&table->lock);
     }
+    socket_scm_collect_checkpoint();
 }
 
 static int fdtable_resize(struct fdtable *table, unsigned size) {
@@ -168,7 +182,7 @@ struct fdtable *fdtable_copy(struct fdtable *table) {
     memcpy(new_table->files, table->files, sizeof(struct fd *) * size);
     for (fd_t f = 0; f < size; f++)
         if (new_table->files[f])
-            new_table->files[f]->refcount++;
+            fd_retain(new_table->files[f]);
     memcpy(new_table->cloexec, table->cloexec, BITS_SIZE(size));
     memcpy(new_table->generations, table->generations,
             sizeof(*table->generations) * size);
@@ -398,6 +412,7 @@ void fdtable_do_cloexec(struct fdtable *table) {
         if (bit_test(f, table->cloexec))
             fdtable_close(table, f);
     unlock(&table->lock);
+    socket_scm_collect_checkpoint();
 }
 
 #define F_GETLK_ 5

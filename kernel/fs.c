@@ -520,12 +520,7 @@ dword_t sys_chdir(addr_t path_addr) {
 
 dword_t sys_fchdir(fd_t f) {
     STRACE("fchdir(%d)", f);
-    struct fd *dir = f_get(f);
-    if (dir == NULL)
-        return _EBADF;
-    dir->refcount++;
-    fs_chdir(current->fs, dir);
-    return 0;
+    return file_fchdir_task(current, f);
 }
 
 dword_t sys_chroot(addr_t path_addr) {

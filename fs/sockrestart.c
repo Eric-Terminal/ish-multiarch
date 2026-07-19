@@ -81,7 +81,11 @@ void sockrestart_on_suspend(void) {
         struct saved_socket *saved = malloc(sizeof(struct saved_socket));
         if (saved == NULL)
             continue; // better than a crash
-        saved->sock = fd_retain(sock);
+        saved->sock = fd_try_retain(sock);
+        if (saved->sock == NULL) {
+            free(saved);
+            continue;
+        }
         saved->proto = sock->socket.protocol;
         unsigned size = sizeof(saved->type);
         getsockopt(sock->real_fd, SOL_SOCKET, SO_TYPE, &saved->type, &size);
@@ -94,6 +98,8 @@ void sockrestart_on_suspend(void) {
 }
 
 void sockrestart_on_resume(void) {
+    struct list released_sockets;
+    list_init(&released_sockets);
     lock(&sockrestart_lock);
     struct saved_socket *saved, *tmp;
     list_for_each_entry_safe(&saved_sockets, saved, tmp, saved) {
@@ -106,12 +112,13 @@ void sockrestart_on_resume(void) {
         }
         if (bind(new_sock, (struct sockaddr *) &saved->name, saved->name_len) < 0) {
             printk("rebinding socket failed: %s\n", strerror(errno));
-            goto thank_u_next;
+        } else if (dup2(new_sock, saved->sock->real_fd) < 0) {
+            printk("replacing socket failed: %s\n", strerror(errno));
         }
-        dup2(new_sock, saved->sock->real_fd);
+        close(new_sock);
 
 thank_u_next:
-        fd_close(saved->sock);
+        list_add_tail(&released_sockets, &saved->saved);
     }
     struct task *task;
     list_for_each_entry(&listen_tasks, task, sockrestart.listen) {
@@ -119,4 +126,12 @@ thank_u_next:
         pthread_kill(task_thread_load(task), SIGUSR1);
     }
     unlock(&sockrestart_lock);
+    while (!list_empty(&released_sockets)) {
+        saved = list_first_entry(
+                &released_sockets, struct saved_socket, saved);
+        list_remove(&saved->saved);
+        fd_close(saved->sock);
+        free(saved);
+    }
+    socket_scm_collect_checkpoint();
 }

@@ -179,7 +179,50 @@ static bool wait_for_accept_install_gate(
     return false;
 }
 
+static int test_resume_releases_closed_listener(void) {
+    struct task task;
+    struct tgroup group;
+    task_fixture_init(&task, &group);
+    CHECK(!IS_ERR(task.files), "恢复回归 fd 表创建成功");
+    current = &task;
+
+    fd_t number = socket_create_task(
+            &task, AF_INET_, SOCK_STREAM_, 0);
+    struct fd *listener = f_get_task(&task, number);
+    CHECK(number == 0 && listener != NULL,
+            "恢复回归监听 socket 创建成功");
+    struct sockaddr_in address = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+    CHECK(bind(listener->real_fd,
+                    (const struct sockaddr *) &address,
+                    sizeof(address)) == 0 &&
+            sys_listen(number, 1) == 0,
+            "恢复回归监听 socket 启动成功");
+    int host_fd = listener->real_fd;
+
+    sockrestart_on_suspend();
+    CHECK(f_close_task(&task, number) == 0 &&
+                    fcntl(host_fd, F_GETFD) >= 0,
+            "挂起快照在 guest close 后保留监听 socket");
+    sockrestart_on_resume();
+    errno = 0;
+    CHECK(fcntl(host_fd, F_GETFD) < 0 && errno == EBADF,
+            "恢复在锁外释放最终快照引用与 host socket");
+
+    current = NULL;
+    fdtable_release(task.files);
+    pthread_mutex_destroy(&task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&group.lock.m);
+    return 0;
+}
+
 int main(void) {
+    if (test_resume_releases_closed_listener() != 0)
+        return 1;
+
     struct task task;
     struct tgroup group;
     task_fixture_init(&task, &group);

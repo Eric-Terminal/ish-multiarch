@@ -680,6 +680,150 @@ static fd_t receive_rights(fd_t accepted_number) {
     return rights.fd;
 }
 
+struct pending_scm_cycle {
+    struct fd *listener;
+    struct fd *transferred;
+    int listener_host_fd;
+    int transferred_host_fd;
+    qword_t inflight_before;
+};
+
+static bool host_fd_open(int host_fd) {
+    return host_fd >= 0 && fcntl(host_fd, F_GETFD) >= 0;
+}
+
+static bool host_fd_closed(int host_fd) {
+    errno = 0;
+    return host_fd >= 0 && fcntl(host_fd, F_GETFD) < 0 && errno == EBADF;
+}
+
+static bool prepare_pending_scm_cycle(struct fixture *fixture,
+        struct pending_scm_cycle *cycle) {
+    fd_t bridge[2];
+    if (sys_socketpair(AF_LOCAL_, SOCK_STREAM_ | SOCK_NONBLOCK_, 0,
+                    QUERY_ADDRESS) < 0 ||
+            user_read(QUERY_ADDRESS, bridge, sizeof(bridge)) != 0)
+        return false;
+
+    cycle->listener = f_get_task(
+            &fixture->task, fixture->listener_number);
+    cycle->transferred = f_get_task(&fixture->task, bridge[1]);
+    if (cycle->listener == NULL || cycle->transferred == NULL)
+        return false;
+    cycle->listener_host_fd = cycle->listener->real_fd;
+    cycle->transferred_host_fd = cycle->transferred->real_fd;
+    cycle->inflight_before = socket_scm_inflight_count(fixture->task.uid);
+
+    // accept 前消息的物理队列位于 connector，图上的接收者仍是 listener。
+    fixture->passed_number = bridge[1];
+    if (!prepare_sendmsg(fixture) ||
+            sys_sendmsg(fixture->connector_number, SEND_HEADER, 0) != 1)
+        return false;
+
+    // bridge[1] 是被传递的 A；由其对端发送 listener，组成 L -> A -> L。
+    fixture->passed_number = fixture->listener_number;
+    if (!prepare_sendmsg(fixture) ||
+            sys_sendmsg(bridge[0], SEND_HEADER, 0) != 1)
+        return false;
+
+    if (f_close_task(&fixture->task, bridge[0]) != 0 ||
+            f_close_task(&fixture->task, bridge[1]) != 0 ||
+            f_close_task(&fixture->task,
+                    fixture->connector_number) != 0)
+        return false;
+    fixture->connector_number = -1;
+    fixture->connector = NULL;
+    fixture->passed_number = -1;
+    return true;
+}
+
+static void test_pending_scm_cycle_uses_logical_listener(void) {
+    struct fixture delivery_fixture;
+    struct pending_scm_cycle delivery = {0};
+    if (!fixture_init(&delivery_fixture, false) ||
+            !prepare_pending_scm_cycle(&delivery_fixture, &delivery)) {
+        EXPECT(false, "构造 accept 前 SCM 逻辑接收者环");
+        fixture_destroy(&delivery_fixture);
+        return;
+    }
+
+    EXPECT(socket_scm_inflight_count(delivery_fixture.task.uid) ==
+                    delivery.inflight_before + 2,
+            "accept 前逻辑 listener 环包含两条 inflight 边");
+    socket_scm_collect_now();
+    EXPECT(socket_scm_inflight_count(delivery_fixture.task.uid) ==
+                    delivery.inflight_before + 2 &&
+                    host_fd_open(delivery.listener_host_fd) &&
+                    host_fd_open(delivery.transferred_host_fd),
+            "listener 外部根在 accept 前保活完整 SCM 环");
+
+    fd_t accepted = sys_accept(
+            delivery_fixture.listener_number, 0, 0);
+    EXPECT(accepted >= 0, "保活后的 pending 连接仍可 accept");
+    fd_t received_transferred = accepted >= 0 ?
+            receive_rights(accepted) : -1;
+    EXPECT(received_transferred >= 0 &&
+                    f_get_task(&delivery_fixture.task,
+                            received_transferred) == delivery.transferred,
+            "accept 将 pending SCM 重定向给 accepted 并交付 A");
+    fd_t received_listener = received_transferred >= 0 ?
+            receive_rights(received_transferred) : -1;
+    EXPECT(received_listener >= 0 &&
+                    f_get_task(&delivery_fixture.task,
+                            received_listener) == delivery.listener,
+            "经 A 接收环上的 listener 且对象身份不变");
+    EXPECT(socket_scm_inflight_count(delivery_fixture.task.uid) ==
+                    delivery.inflight_before,
+            "依次接收两条 rights 后清空 pending 环记账");
+
+    if (accepted >= 0)
+        EXPECT(f_close_task(&delivery_fixture.task, accepted) == 0,
+                "关闭 pending 环 accepted 描述符");
+    if (received_transferred >= 0)
+        EXPECT(f_close_task(&delivery_fixture.task,
+                        received_transferred) == 0,
+                "关闭接收的 A 描述符");
+    EXPECT(host_fd_closed(delivery.transferred_host_fd),
+            "A 的消息边与最终外部根释放后完成析构");
+    EXPECT(f_close_task(&delivery_fixture.task,
+                    delivery_fixture.listener_number) == 0,
+            "关闭 listener 原始外部根");
+    delivery_fixture.listener_number = -1;
+    EXPECT(host_fd_open(delivery.listener_host_fd),
+            "接收的 listener 描述符继续保留最终外部根");
+    if (received_listener >= 0)
+        EXPECT(f_close_task(&delivery_fixture.task,
+                        received_listener) == 0,
+                "释放接收的 listener 最终外部根");
+    EXPECT(host_fd_closed(delivery.listener_host_fd),
+            "listener 的最终外部根释放后完成析构");
+    fixture_destroy(&delivery_fixture);
+
+    struct fixture collection_fixture;
+    struct pending_scm_cycle collection = {0};
+    if (!fixture_init(&collection_fixture, false) ||
+            !prepare_pending_scm_cycle(&collection_fixture, &collection)) {
+        EXPECT(false, "构造待回收的 accept 前 SCM 环");
+        fixture_destroy(&collection_fixture);
+        return;
+    }
+    socket_scm_collect_now();
+    EXPECT(socket_scm_inflight_count(collection_fixture.task.uid) ==
+                    collection.inflight_before + 2,
+            "显式收集不会越过 listener 外部根");
+    EXPECT(f_close_task(&collection_fixture.task,
+                    collection_fixture.listener_number) == 0,
+            "释放未 accept 环的 listener 最终外部根");
+    collection_fixture.listener_number = -1;
+    socket_scm_collect_now();
+    EXPECT(socket_scm_inflight_count(collection_fixture.task.uid) ==
+                    collection.inflight_before &&
+                    host_fd_closed(collection.listener_host_fd) &&
+                    host_fd_closed(collection.transferred_host_fd),
+            "最终根释放后回收 pending SCM 环及两端 socket");
+    fixture_destroy(&collection_fixture);
+}
+
 static bool wait_for_completion(atomic_bool *finished, unsigned timeout_ms) {
     const struct timespec interval = {.tv_nsec = 1000000};
     for (unsigned elapsed = 0; elapsed < timeout_ms; elapsed++) {
@@ -1186,6 +1330,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--successful-paths") == 0) {
         test_preaccept_peercred_snapshots();
         test_preaccept_rights_reach_accepted_peer();
+        test_pending_scm_cycle_uses_logical_listener();
         test_zero_payload_does_not_deliver_rights();
         test_accept_sendmsg_lock_order();
         return failures == 0 ? 0 : 1;
@@ -1196,6 +1341,7 @@ int main(int argc, char **argv) {
     test_binary_abstract_anonymous_name_snapshots();
     test_preaccept_peercred_snapshots();
     test_preaccept_rights_reach_accepted_peer();
+    test_pending_scm_cycle_uses_logical_listener();
     test_zero_payload_does_not_deliver_rights();
     test_peer_close_sigpipe_and_nosignal();
     test_peer_close_rejects_rights_without_pending_queue();

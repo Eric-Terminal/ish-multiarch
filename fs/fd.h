@@ -1,6 +1,7 @@
 #ifndef FD_H
 #define FD_H
 #include <dirent.h>
+#include <limits.h>
 #include "kernel/memory.h"
 #include "util/list.h"
 #include "util/sync.h"
@@ -11,6 +12,10 @@
 
 struct task;
 struct unix_pending_peer;
+
+// 高位与引用数共用一次 CAS，使 GC 封锁和弱引用获取不可交错穿透。
+#define FD_REFCOUNT_ACQUIRE_BLOCKED (UINT_MAX / 2 + 1)
+#define FD_REFCOUNT_VALUE_MASK (FD_REFCOUNT_ACQUIRE_BLOCKED - 1)
 
 // FIXME almost everything that uses the structs in this file does so without any kind of sane locking
 
@@ -89,6 +94,11 @@ struct fd {
             struct list unix_pending_scm;
             // host 消息与内部 SCM 队列必须按同一个接收顺序配对。
             lock_t unix_recv_lock;
+            // 只有 SCM 强引用存在时进入 vertex 链，链本身不持有引用。
+            struct list unix_scm_vertex;
+            atomic_uint unix_scm_incoming;
+            bool unix_scm_gc_live;
+            bool unix_scm_gc_collect;
             // Darwin 在读 shutdown 后把数据报接收表现为永久 EOF，
             // close 不得再次排空。
             bool unix_read_shutdown;
@@ -142,6 +152,10 @@ struct fd {
     lock_t lock;
     cond_t cond;
 };
+
+static inline unsigned fd_refcount_read(const struct fd *fd) {
+    return atomic_load(&fd->refcount) & FD_REFCOUNT_VALUE_MASK;
+}
 
 typedef sdword_t fd_t;
 #define AT_FDCWD_ -100

@@ -12,6 +12,7 @@
 #include "fs/fd.h"
 #include "fs/poll.h"
 #include "fs/real.h"
+#include "fs/sock.h"
 
 #include "fs/sockrestart.h"
 
@@ -103,15 +104,7 @@ static void poll_notify_waiters_locked(struct poll *poll) {
 // 快照只能从活着的 fd 取得强引用；若最终关闭已将计数
 // 降为零，它会在 poll 解锁后自行拆除登记，不得再复活。
 static bool poll_fd_try_retain(struct fd *fd) {
-    unsigned refcount = atomic_load_explicit(
-            &fd->refcount, memory_order_relaxed);
-    while (refcount != 0) {
-        if (atomic_compare_exchange_weak_explicit(
-                &fd->refcount, &refcount, refcount + 1,
-                memory_order_acquire, memory_order_relaxed))
-            return true;
-    }
-    return false;
+    return fd_try_retain(fd) != NULL;
 }
 
 bool poll_has_fd(struct poll *poll, struct fd *fd) {
@@ -522,6 +515,7 @@ static int poll_wait_deadline(struct poll *poll_,
         for (size_t index = 0; index < listen_wait_count; index++)
             fd_close(listen_waits[index]);
         free(listen_waits);
+        socket_scm_collect_checkpoint();
         lock(&poll_->lock);
         if (stop_waiting)
             break;
