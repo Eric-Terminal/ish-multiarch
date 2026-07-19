@@ -22,6 +22,9 @@
 #define SYS_READ UINT64_C(63)
 #define SYS_PSELECT6 UINT64_C(72)
 #define SYS_NANOSLEEP UINT64_C(101)
+#define SYS_CONNECT UINT64_C(203)
+#define SYS_SENDTO UINT64_C(206)
+#define SYS_RECVFROM UINT64_C(207)
 #define SYS_FUTEX_WAITV UINT64_C(449)
 #define DISABLED_ALTSTACK 2
 #define MAX_INSTALLS 2
@@ -553,6 +556,44 @@ int main(void) {
     assert(frame.uc.mcontext.regs[0] == syscall_entry.x[0]);
     assert(frame.uc.mcontext.regs[1] == syscall_entry.x[1]);
     assert(frame.uc.mcontext.regs[8] == SYS_READ);
+
+    static const qword_t socket_restart_syscalls[] = {
+        SYS_CONNECT,
+        SYS_SENDTO,
+        SYS_RECVFROM,
+    };
+    for (size_t index = 0;
+            index < sizeof(socket_restart_syscalls) /
+                    sizeof(socket_restart_syscalls[0]); index++) {
+        cpu = make_cpu(NORMAL_STACK_TOP);
+        cpu.x[8] = socket_restart_syscalls[index];
+        cpu.x[0] = UINT64_C(0x1234);
+        cpu.x[1] = UINT64_C(0x0000600012342000) + index * 0x100;
+        cpu.x[2] = UINT64_C(0x55aa) + index;
+        const struct cpu_state socket_entry = cpu;
+        interrupted = (struct interrupted_syscall_probe) {
+            .number = socket_restart_syscalls[index],
+            .result = interrupted_result,
+        };
+        probe = (struct signal_probe) {
+            .deliveries = {restarting},
+            .expected = {GUEST_LINUX_SIGNAL_INSTALL_COMPLETE},
+            .delivery_count = 1,
+            .return_status = GUEST_LINUX_SIGNAL_POLL_HANDLER,
+            .return_signal = restarting.info.signal,
+        };
+        syscall = dispatch_interrupted_probe(
+                &runtime, &task, &tlb, &cpu, &probe, &interrupted);
+        assert(syscall.return_value == interrupted_result &&
+                syscall.signal == restarting.info.signal);
+        frame = read_frame(&tlb, cpu.sp);
+        assert(frame.uc.mcontext.pc == socket_entry.pc - 4);
+        assert(frame.uc.mcontext.regs[0] == socket_entry.x[0]);
+        assert(frame.uc.mcontext.regs[1] == socket_entry.x[1]);
+        assert(frame.uc.mcontext.regs[2] == socket_entry.x[2]);
+        assert(frame.uc.mcontext.regs[8] ==
+                socket_restart_syscalls[index]);
+    }
 
     cpu = syscall_entry;
     cpu.x[8] = SYS_FUTEX_WAITV;

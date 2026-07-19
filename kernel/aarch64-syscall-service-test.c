@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1134,6 +1135,31 @@ int main(void) {
             network_socket->real_fd >= 0 &&
             bit_test(1, fixture.task.files->cloexec),
             "socket 按低 32 位创建 IPv4 流并设置 CLOEXEC");
+    result = invoke(&fixture, &memory, &fault, 198,
+            UINT64_C(0x1234567800007fff), SOCK_STREAM_, 0, 0);
+    CHECK(result == encoded_error(_EAFNOSUPPORT) &&
+                    f_get_task(&fixture.task, 2) == NULL,
+            "socket 对未知低 32 位 family 返回 EAFNOSUPPORT");
+    result = invoke(&fixture, &memory, &fault, 198, AF_INET_,
+            SOCK_STREAM_ | UINT32_C(0x40000000), 0, 0);
+    CHECK(result == encoded_error(_EINVAL) &&
+                    f_get_task(&fixture.task, 2) == NULL,
+            "socket 拒绝 CLOEXEC 与 NONBLOCK 之外的 type flags");
+    result = invoke(&fixture, &memory, &fault, 198, AF_INET_,
+            SOCK_STREAM_, IPPROTO_UDP, 0);
+    CHECK(result == encoded_error(_EINVAL) &&
+                    f_get_task(&fixture.task, 2) == NULL,
+            "socket 拒绝与 stream 类型不匹配的协议");
+    result = invoke(&fixture, &memory, &fault, 198, AF_INET_,
+            SOCK_DGRAM_ | SOCK_CLOEXEC_ | SOCK_NONBLOCK_, 0, 0);
+    struct fd *flagged_socket = f_get_task(&fixture.task, 2);
+    CHECK(result == 2 && flagged_socket != NULL &&
+                    bit_test(2, fixture.task.files->cloexec) &&
+                    (fcntl(flagged_socket->real_fd, F_GETFL) &
+                            O_NONBLOCK) != 0,
+            "socket 同时落实 CLOEXEC 与 NONBLOCK 标志");
+    CHECK(f_close_task(&fixture.task, 2) == 0,
+            "socket 标志回归 fd 清理成功");
 
     const size_t socket_address_offset = 0x80;
     struct sockaddr_ invalid_socket_address = {
@@ -1151,20 +1177,36 @@ int main(void) {
     result = invoke(&fixture, &memory, &fault, 203, 0,
             USER_BASE + socket_address_offset,
             sizeof(invalid_socket_address), 0);
-    CHECK(result == encoded_error(_ENOTSOCK) && memory.read_calls == 0,
-            "connect 在访问地址前拒绝稳定存在的非套接字 fd");
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1,
+            "connect 为稳定非套接字仍先复制 sockaddr");
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 203, 0,
+            USER_BASE + socket_address_offset,
+            sizeof(invalid_socket_address), 0);
+    CHECK(result == encoded_error(_ENOTSOCK) && memory.read_calls == 1 &&
+            memory.read_bytes == sizeof(invalid_socket_address),
+            "connect 在复制有效 sockaddr 后拒绝稳定非套接字 fd");
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 203, 1,
+            UINT64_MAX, 1, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 0 &&
+            fault.address == UINT64_MAX,
+            "connect 的一字节 sockaddr 仍先校验 guest 地址");
     result = invoke(&fixture, &memory, &fault, 203, 1,
             USER_BASE + socket_address_offset, 1, 0);
-    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,
-            "connect 在访问地址前拒绝过短 sockaddr");
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+            memory.read_bytes == 1,
+            "connect 复制一字节 sockaddr 后由协议返回 EINVAL");
 
     reset_user_access(&memory);
     result = invoke(&fixture, &memory, &fault, 203, 1,
             USER_BASE + socket_address_offset,
             sizeof(invalid_socket_address), 0);
-    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 1 &&
+    CHECK(result == encoded_error(_EAFNOSUPPORT) &&
+            memory.read_calls == 1 &&
             memory.read_bytes == sizeof(invalid_socket_address),
-            "connect 复制固定宽度 sockaddr 后拒绝未知地址族");
+            "connect 完整复制 sockaddr 后以 EAFNOSUPPORT 拒绝未知地址族");
 
     reset_user_access(&memory);
     memory.fail_read_at = USER_BASE + socket_address_offset + 3;

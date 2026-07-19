@@ -115,7 +115,11 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETGID = 176,
     AARCH64_LINUX_SYS_GETEGID = 177,
     AARCH64_LINUX_SYS_SOCKET = 198,
+    AARCH64_LINUX_SYS_BIND = 200,
     AARCH64_LINUX_SYS_CONNECT = 203,
+    AARCH64_LINUX_SYS_SENDTO = 206,
+    AARCH64_LINUX_SYS_RECVFROM = 207,
+    AARCH64_LINUX_SYS_SETSOCKOPT = 208,
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO = 240,
@@ -761,31 +765,375 @@ static qword_t dispatch_connect(
         const struct guest_linux_syscall *syscall,
         struct task *task, struct guest_linux_user_fault *fault) {
     fd_t socket_fd = syscall_fd(syscall->arguments[0]);
-    struct socket_ref socket;
-    int error = socket_ref_get_task(task, socket_fd, &socket);
-    if (error < 0)
-        return syscall_result(error);
+    struct fd *fd = f_get_task_retain(task, socket_fd);
+    if (fd == NULL)
+        return syscall_result(_EBADF);
     qword_t result;
     dword_t length = (dword_t) syscall->arguments[2];
-    if (length < 2 || length > sizeof(struct sockaddr_max_)) {
+    if (length > sizeof(struct sockaddr_storage)) {
         result = syscall_result(_EINVAL);
         goto out;
     }
     qword_t address = syscall->arguments[1];
-    if (!aarch64_user_range_fits(address, length)) {
+    if (length != 0 && !aarch64_user_range_fits(address, length)) {
         result = user_range_error(
                 fault, address, GUEST_MEMORY_READ);
         goto out;
     }
-    struct sockaddr_max_ socket_address = {0};
+    struct sockaddr_storage socket_address = {0};
+    if (length != 0) {
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                address, &socket_address, length, fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+    }
+    result = syscall_result(socket_connect_retained_task(
+            task, fd, &socket_address, length));
+out:
+    fd_close(fd);
+    return result;
+}
+
+static int copy_socket_address_from_user(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, sdword_t length,
+        struct sockaddr_storage *socket_address,
+        struct guest_linux_user_fault *fault) {
+    if (length < 0 ||
+            (size_t) length > sizeof(*socket_address))
+        return _EINVAL;
+    *socket_address = (struct sockaddr_storage) {0};
+    if (length == 0)
+        return 0;
+    if (!aarch64_user_range_fits(address, (dword_t) length)) {
+        (void) user_range_error(fault, address, GUEST_MEMORY_READ);
+        return _EFAULT;
+    }
     assert(context->user.read != NULL);
     if (!context->user.read(context->user.opaque,
-            address, &socket_address, length, fault)) {
-        result = syscall_result(_EFAULT);
+            address, socket_address, (dword_t) length, fault))
+        return _EFAULT;
+    return 0;
+}
+
+static qword_t dispatch_bind(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    struct sockaddr_storage address;
+    sdword_t length = (sdword_t) (dword_t) syscall->arguments[2];
+    error = copy_socket_address_from_user(context,
+            syscall->arguments[1], length, &address, fault);
+    qword_t result = error < 0 ? syscall_result(error) :
+            syscall_result(socket_bind_ref_task(
+                    task, &socket, &address, (size_t) length));
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_sendto(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t requested = syscall->arguments[2];
+    size_t length = requested < AARCH64_LINUX_MAX_RW_COUNT ?
+            (size_t) requested : (size_t) AARCH64_LINUX_MAX_RW_COUNT;
+    qword_t buffer_address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(buffer_address, length))
+        return user_range_error(
+                fault, buffer_address, GUEST_MEMORY_READ);
+
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    qword_t result;
+    struct sockaddr_storage guest_address = {0};
+    sdword_t address_length = 0;
+    bool has_destination = syscall->arguments[4] != 0;
+    struct socket_address destination;
+    struct socket_address *destination_pointer = NULL;
+    byte_t *buffer = NULL;
+    if (has_destination) {
+        address_length =
+                (sdword_t) (dword_t) syscall->arguments[5];
+        error = copy_socket_address_from_user(context,
+                syscall->arguments[4], address_length,
+                &guest_address, fault);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+
+    dword_t flags = (dword_t) syscall->arguments[3];
+    error = socket_sendto_validate(&socket, length, flags);
+    if (error < 0) {
+        result = syscall_result(error);
         goto out;
     }
-    result = syscall_result(socket_connect_ref_task(
-            task, &socket, &socket_address, length));
+    byte_t prefix[8];
+    size_t prefix_size = socket_sendto_prefix_size(&socket);
+    if (prefix_size != 0) {
+        assert(prefix_size <= sizeof(prefix) && context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                buffer_address, prefix, (dword_t) prefix_size, fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+        error = socket_sendto_prefix_validate(
+                &socket, prefix, prefix_size);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+    bool defer_unix_lookup = has_destination &&
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    if (has_destination) {
+        error = socket_address_validate_for_socket(&socket,
+                &guest_address, (size_t) address_length);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        if (!defer_unix_lookup) {
+            error = socket_address_prepare_task(task,
+                    &socket, &guest_address, (size_t) address_length,
+                    &destination);
+            if (error < 0) {
+                result = syscall_result(error);
+                goto out;
+            }
+            destination_pointer = &destination;
+        }
+    }
+
+    error = socket_sendto_transaction_validate(&socket, length);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    error = socket_sendto_destination_validate(
+            &socket, destination_pointer);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    size_t transaction_length = socket_sendto_transaction_size(
+            &socket, length, flags);
+    buffer = transaction_length == 0 ? NULL : malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = syscall_result(_ENOMEM);
+        goto out;
+    }
+    if (transaction_length != 0) {
+        assert(context->user.read != NULL);
+        memcpy(buffer, prefix, prefix_size);
+        size_t remaining = transaction_length - prefix_size;
+        if (remaining != 0 && !context->user.read(context->user.opaque,
+                buffer_address + prefix_size, buffer + prefix_size,
+                (dword_t) remaining, fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+    }
+    if (defer_unix_lookup) {
+        error = socket_address_prepare_task(task,
+                &socket, &guest_address, (size_t) address_length,
+                &destination);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+        destination_pointer = &destination;
+    }
+    result = syscall_result(socket_sendto_ref(&socket,
+            buffer, transaction_length, flags, destination_pointer));
+out:
+    free(buffer);
+    if (destination_pointer != NULL)
+        socket_address_release(destination_pointer);
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_recvfrom(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t requested = syscall->arguments[2];
+    size_t length = requested < AARCH64_LINUX_MAX_RW_COUNT ?
+            (size_t) requested : (size_t) AARCH64_LINUX_MAX_RW_COUNT;
+    qword_t buffer_address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(buffer_address, length))
+        return user_range_error(
+                fault, buffer_address, GUEST_MEMORY_WRITE);
+
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+    qword_t result;
+    dword_t flags = (dword_t) syscall->arguments[3];
+    bool full_datagram_length = (flags & MSG_TRUNC_) != 0 &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    size_t transaction_length = full_datagram_length ?
+            SOCKET_IO_TRANSACTION_LIMIT :
+            (length < SOCKET_IO_TRANSACTION_LIMIT ?
+                    length : SOCKET_IO_TRANSACTION_LIMIT);
+    byte_t *buffer = transaction_length == 0 ? NULL :
+            malloc(transaction_length);
+    if (transaction_length != 0 && buffer == NULL) {
+        result = syscall_result(_ENOMEM);
+        goto out;
+    }
+
+    bool wants_address = syscall->arguments[4] != 0;
+    struct socket_address source;
+    ssize_t received = socket_recvfrom_ref(&socket,
+            buffer, transaction_length,
+            flags,
+            wants_address ? &source : NULL);
+    if (received < 0) {
+        free(buffer);
+        result = syscall_result(received);
+        goto out;
+    }
+
+    size_t payload_size = (size_t) received < length ?
+            (size_t) received : length;
+    // MSG_TRUNC 的返回值可以大于内部事务缓冲区。
+    if (payload_size > transaction_length)
+        payload_size = transaction_length;
+    if ((socket.fd->socket.domain == AF_INET_ ||
+            socket.fd->socket.domain == AF_INET6_) &&
+            socket.fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_TRUNC_))
+        payload_size = 0;
+    if (payload_size != 0) {
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                buffer_address, buffer,
+                (dword_t) payload_size, fault)) {
+            free(buffer);
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+    }
+    free(buffer);
+
+    if (wants_address) {
+        qword_t length_address = syscall->arguments[5];
+        if (!aarch64_user_range_fits(
+                length_address, sizeof(sdword_t))) {
+            result = user_range_error(
+                    fault, length_address, GUEST_MEMORY_READ);
+            goto out;
+        }
+        sdword_t capacity;
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                length_address, &capacity,
+                sizeof(capacity), fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+        if (capacity < 0) {
+            result = syscall_result(_EINVAL);
+            goto out;
+        }
+
+        dword_t true_length = (dword_t) source.length;
+        if (!aarch64_user_range_fits(
+                length_address, sizeof(true_length))) {
+            result = user_range_error(
+                    fault, length_address, GUEST_MEMORY_WRITE);
+            goto out;
+        }
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                length_address, &true_length,
+                sizeof(true_length), fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+
+        dword_t copied = (dword_t) capacity < true_length ?
+                (dword_t) capacity : true_length;
+        qword_t address = syscall->arguments[4];
+        if (copied != 0 && !aarch64_user_range_fits(address, copied)) {
+            result = user_range_error(
+                    fault, address, GUEST_MEMORY_WRITE);
+            goto out;
+        }
+        if (copied != 0 && !context->user.write(
+                context->user.opaque, address,
+                &source.storage, copied, fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+    }
+    result = (qword_t) received;
+out:
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_setsockopt(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    sdword_t level = (sdword_t) (dword_t) syscall->arguments[1];
+    sdword_t option = (sdword_t) (dword_t) syscall->arguments[2];
+    sdword_t value_length =
+            (sdword_t) (dword_t) syscall->arguments[4];
+    ssize_t copied = socket_setsockopt_value_size(
+            level, option, value_length, SOCKET_GUEST_AARCH64);
+    qword_t result;
+    if (copied < 0) {
+        result = syscall_result(copied);
+        goto out;
+    }
+    byte_t value[32] = {0};
+    assert((size_t) copied <= sizeof(value));
+    qword_t value_address = syscall->arguments[3];
+    if (copied != 0 &&
+            !aarch64_user_range_fits(value_address, (qword_t) copied)) {
+        result = user_range_error(
+                fault, value_address, GUEST_MEMORY_READ);
+        goto out;
+    }
+    if (copied != 0) {
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                value_address, value, (dword_t) copied, fault)) {
+            result = syscall_result(_EFAULT);
+            goto out;
+        }
+    }
+    result = syscall_result(socket_setsockopt_ref(
+            &socket, level, option, value, value_length,
+            SOCKET_GUEST_AARCH64));
 out:
     socket_ref_release(&socket);
     return result;
@@ -2331,8 +2679,20 @@ static qword_t dispatch_syscall(
                     (dword_t) syscall->arguments[0],
                     (dword_t) syscall->arguments[1],
                     (dword_t) syscall->arguments[2]));
+        case AARCH64_LINUX_SYS_BIND:
+            return dispatch_bind(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CONNECT:
             return dispatch_connect(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SENDTO:
+            return dispatch_sendto(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_RECVFROM:
+            return dispatch_recvfrom(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SETSOCKOPT:
+            return dispatch_setsockopt(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLONE:
             // 旧 clone ABI 的高 32 位不参与 flags。

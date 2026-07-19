@@ -346,6 +346,24 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_syscall_service', aarch64_syscall_service_test)
 
+        aarch64_socket_syscall_test = executable(
+            'aarch64_socket_syscall_test',
+            'kernel/aarch64-socket-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_socket_syscall', aarch64_socket_syscall_test)
+
+        aarch64_socket_ipv6_test = executable(
+            'aarch64_socket_ipv6_test',
+            'kernel/aarch64-socket-ipv6-test.c',
+            dependencies: ish)
+        test('aarch64_socket_ipv6', aarch64_socket_ipv6_test)
+
+        aarch64_socket_ping_test = executable(
+            'aarch64_socket_ping_test',
+            'kernel/aarch64-socket-ping-test.c',
+            dependencies: ish)
+        test('aarch64_socket_ping', aarch64_socket_ping_test)
+
         aarch64_file_syscall_test = executable(
             'aarch64_file_syscall_test',
             'kernel/aarch64-file-syscall-test.c',
