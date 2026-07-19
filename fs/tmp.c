@@ -71,8 +71,10 @@ struct tmp_dirent {
 DEFINE_REFCOUNT_STATIC(tmp_dirent)
 
 static void tmp_dirent_cleanup(struct tmp_dirent *dirent) {
-    list_remove(&dirent->dir); // TODO locking thinking emoji
+    list_remove_safe(&dirent->dir);
     tmp_inode_release(dirent->inode);
+    if (dirent->parent != NULL)
+        tmp_dirent_release(dirent->parent);
     free(dirent);
 }
 
@@ -83,8 +85,7 @@ static void tmp_dirent_init(struct tmp_dirent *dirent) {
     lock_init(&dirent->lock);
 }
 
-// Frees the child inode on failure, so you don't need to! But be careful you don't free it yourself.
-// In other words: Takes ownership of `child`
+// 无论成功或失败都消费 child 的所有权。
 static int tmpfs_dir_link(struct tmp_dirent *dir, const char *name, struct tmp_inode *child, struct tmp_dirent **dirent_out) {
     if (!S_ISDIR(dir->inode->stat.mode)) {
         tmp_inode_release(child);
@@ -106,6 +107,7 @@ static int tmpfs_dir_link(struct tmp_dirent *dir, const char *name, struct tmp_i
     new_dirent->index = dir->next_index++;
     new_dirent->parent = tmp_dirent_retain(dir);
     list_add_tail(&dir->children, &new_dirent->dir);
+    tmp_inode_release(child);
 
     if (dirent_out)
         *dirent_out = tmp_dirent_retain(new_dirent);
@@ -180,7 +182,7 @@ static struct tmp_dirent *tmpfs_lookup(struct mount *mount, const char *path) {
     return __tmpfs_lookup(mount, path, false, NULL);
 }
 static struct tmp_dirent *tmpfs_lookup_parent(struct mount *mount, const char *path, const char **filename_out) {
-    if (strcmp(path, "/") == 0)
+    if (path[0] == '\0' || strcmp(path, "/") == 0)
         return NULL;
     return __tmpfs_lookup(mount, path, true, filename_out);
 }
@@ -279,6 +281,12 @@ static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, i
         struct tmp_dirent *parent = tmpfs_lookup_parent(mount, path, &filename);
         if (IS_ERR(parent))
             return ERR_PTR(PTR_ERR(parent));
+        if (parent == NULL) {
+            if (flags & O_EXCL_)
+                return ERR_PTR(_EEXIST);
+            dirent = tmpfs_lookup(mount, path);
+            goto opened;
+        }
         lock(&parent->lock);
         int err = 0;
 
@@ -294,8 +302,8 @@ static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, i
                 err = _ENOMEM;
                 goto out_creat;
             }
+            dirent = NULL;
             err = tmpfs_dir_link(parent, filename, inode, &dirent);
-            tmp_inode_release(inode);
             if (err < 0) {
                 goto out_creat;
             }
@@ -304,7 +312,8 @@ static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, i
 
 out_creat:
         if (err < 0) {
-            tmp_dirent_release(dirent);
+            if (dirent != NULL && !IS_ERR(dirent))
+                tmp_dirent_release(dirent);
             dirent = ERR_PTR(err);
         }
         unlock(&parent->lock);
@@ -312,6 +321,7 @@ out_creat:
     } else {
         dirent = tmpfs_lookup(mount, path);
     }
+opened:
     if (IS_ERR(dirent))
         return ERR_PTR(PTR_ERR(dirent));
 
@@ -366,6 +376,7 @@ static int tmpfs_setattr(struct mount *mount,
 
 static int tmpfs_close(struct fd *fd) {
     // shouldn't need locking as this is the last reference to the fd
+    tmpfs_fd_seekdir(fd, NULL);
     tmp_dirent_release(fd->tmpfs.dirent);
     fd->tmpfs.dirent = NULL;
     return 0;
@@ -376,6 +387,8 @@ static int tmpfs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
     struct tmp_dirent *parent = tmpfs_lookup_parent(mount, path, &filename);
     if (IS_ERR(parent))
         return PTR_ERR(parent);
+    if (parent == NULL)
+        return _EEXIST;
     lock(&parent->lock);
 
     int err = tmpfs_dir_lookup_existence(parent, filename);
@@ -392,6 +405,112 @@ out:
     unlock(&parent->lock);
     tmp_dirent_release(parent);
     return err;
+}
+
+static int tmpfs_mknod_identity(struct mount *mount, const char *path,
+        mode_t_ mode, dev_t_ dev, qword_t *host_device,
+        qword_t *host_inode, qword_t *inode_number) {
+    const char *filename;
+    struct tmp_dirent *parent = tmpfs_lookup_parent(
+            mount, path, &filename);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return _EEXIST;
+    lock(&parent->lock);
+    int error = tmpfs_dir_lookup_existence(parent, filename);
+    if (error < 0)
+        goto out;
+    struct tmp_inode *inode = tmp_inode_new(mode);
+    if (inode == NULL) {
+        error = _ENOMEM;
+        goto out;
+    }
+    inode->stat.rdev = dev;
+    *host_device = inode->stat.inode_device;
+    *host_inode = inode->stat.inode;
+    *inode_number = inode->stat.inode;
+    error = tmpfs_dir_link(parent, filename, inode, NULL);
+out:
+    unlock(&parent->lock);
+    tmp_dirent_release(parent);
+    return error;
+}
+
+static int tmpfs_mknod(struct mount *mount, const char *path,
+        mode_t_ mode, dev_t_ dev) {
+    qword_t host_device;
+    qword_t host_inode;
+    qword_t inode;
+    return tmpfs_mknod_identity(mount, path, mode, dev,
+            &host_device, &host_inode, &inode);
+}
+
+static int tmpfs_unlink_common(struct mount *mount, const char *path,
+        bool match_identity, qword_t host_device,
+        qword_t host_inode, qword_t inode_number) {
+    if (path[0] == '\0' || strcmp(path, "/") == 0) {
+        if (!match_identity)
+            return _EISDIR;
+        struct tmp_dirent *root = mount->data;
+        struct tmp_inode *inode = root->inode;
+        lock(&inode->lock);
+        bool matches = inode->stat.inode_device == host_device &&
+                inode->stat.inode == host_inode &&
+                inode->stat.inode == inode_number;
+        unlock(&inode->lock);
+        return matches ? _EISDIR : 0;
+    }
+    const char *filename;
+    struct tmp_dirent *parent = tmpfs_lookup_parent(
+            mount, path, &filename);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    assert(parent != NULL);
+    lock(&parent->lock);
+    struct tmp_dirent *dirent = tmpfs_dir_lookup(parent, filename);
+    if (IS_ERR(dirent)) {
+        int error = PTR_ERR(dirent);
+        unlock(&parent->lock);
+        tmp_dirent_release(parent);
+        return match_identity && error == _ENOENT ? 0 : error;
+    }
+    struct tmp_inode *inode = dirent->inode;
+    lock(&inode->lock);
+    bool matches = inode->stat.inode_device == host_device &&
+            inode->stat.inode == host_inode &&
+            inode->stat.inode == inode_number;
+    bool directory = S_ISDIR(inode->stat.mode);
+    unlock(&inode->lock);
+    if (match_identity && !matches) {
+        tmp_dirent_release(dirent);
+        unlock(&parent->lock);
+        tmp_dirent_release(parent);
+        return 0;
+    }
+    if (directory) {
+        tmp_dirent_release(dirent);
+        unlock(&parent->lock);
+        tmp_dirent_release(parent);
+        return _EISDIR;
+    }
+    list_remove(&dirent->dir);
+    unlock(&parent->lock);
+    // 依次释放目录树所有权与本次 lookup 的临时引用。
+    tmp_dirent_release(dirent);
+    tmp_dirent_release(dirent);
+    tmp_dirent_release(parent);
+    return 0;
+}
+
+static int tmpfs_unlink(struct mount *mount, const char *path) {
+    return tmpfs_unlink_common(mount, path, false, 0, 0, 0);
+}
+
+static int tmpfs_unlink_if_identity(struct mount *mount, const char *path,
+        qword_t host_device, qword_t host_inode, qword_t inode) {
+    return tmpfs_unlink_common(mount, path, true,
+            host_device, host_inode, inode);
 }
 
 // ========================
@@ -597,13 +716,28 @@ static int tmpfs_readdir(struct fd *fd, struct dir_entry *entry) {
         res = 0;
         goto out;
     }
+    if (list_null(&dirent->dir)) {
+        off_t_ removed_index = dirent->index;
+        dirent = NULL;
+        struct tmp_dirent *candidate;
+        list_for_each_entry(&parent->children, candidate, dir) {
+            if (candidate->index > removed_index) {
+                dirent = candidate;
+                break;
+            }
+        }
+        if (dirent == NULL) {
+            tmpfs_fd_seekdir(fd, NULL);
+            res = 0;
+            goto out;
+        }
+    }
     struct tmp_dirent *next_dirent = list_next_entry(dirent, dir);
     if (&next_dirent->dir == &parent->children) // end of list
         next_dirent = NULL;
-    tmpfs_fd_seekdir(fd, next_dirent);
-
     entry->inode = dirent->inode->stat.inode;
     strcpy(entry->name, dirent->name);
+    tmpfs_fd_seekdir(fd, next_dirent);
     res = 1;
 
 out:
@@ -643,6 +777,10 @@ const struct fs_ops tmpfs = {
     .setattr = tmpfs_setattr,
     .fsetattr = tmpfs_fsetattr,
     .getpath = tmpfs_getpath,
+    .unlink = tmpfs_unlink,
+    .mknod = tmpfs_mknod,
+    .mknod_identity = tmpfs_mknod_identity,
+    .unlink_if_identity = tmpfs_unlink_if_identity,
     .mkdir = tmpfs_mkdir,
 };
 

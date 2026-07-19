@@ -19,6 +19,7 @@ int main(void) {
     int status = 1;
     struct mount *mount = NULL;
     struct fd *fd = NULL;
+    struct fd *directory_fd = NULL;
     struct task task = {
         .euid = 1000,
         .egid = 1000,
@@ -145,12 +146,106 @@ int main(void) {
             memcmp(final, "\0\0\0\0", 4) == 0,
             "从零增长的文件内容全部零填充");
 
+    CHECK(fd->mount->fs->mknod_identity != NULL &&
+            fd->mount->fs->unlink_if_identity != NULL,
+            "tmpfs 提供 socket 节点的事务身份操作");
+    qword_t unused_device = 0;
+    qword_t unused_host_inode = 0;
+    qword_t unused_inode = 0;
+    CHECK(fd->mount->fs->mknod_identity(fd->mount, "/",
+                    S_IFSOCK | 0700, 0, &unused_device,
+                    &unused_host_inode, &unused_inode) == _EEXIST &&
+            fd->mount->fs->mknod_identity(fd->mount, "",
+                    S_IFSOCK | 0700, 0, &unused_device,
+                    &unused_host_inode, &unused_inode) == _EEXIST,
+            "tmpfs 拒绝在根路径和裁剪后的精确挂载点创建节点");
+    CHECK(fd->mount->fs->unlink(fd->mount, "/") == _EISDIR &&
+            fd->mount->fs->unlink(fd->mount, "") == _EISDIR,
+            "tmpfs 删除根路径和精确挂载点时返回 EISDIR");
+    CHECK(fd->mount->fs->unlink_if_identity(fd->mount, "",
+                    (qword_t) -1, (qword_t) -1, (qword_t) -1) == 0,
+            "tmpfs 身份不匹配时不会删除精确挂载点");
+    CHECK(fd->mount->fs->stat(fd->mount, "", &stat) == 0 &&
+            fd->mount->fs->unlink_if_identity(fd->mount, "",
+                    stat.inode_device, stat.inode, stat.inode) == _EISDIR,
+            "tmpfs 身份匹配的根目录仍按目录拒绝删除");
+    qword_t first_device;
+    qword_t first_host_inode;
+    qword_t first_inode;
+    CHECK(fd->mount->fs->mknod_identity(fd->mount, "/socket-node",
+                    S_IFSOCK | 0700, 0, &first_device,
+                    &first_host_inode, &first_inode) == 0 &&
+            fd->mount->fs->stat(
+                    fd->mount, "/socket-node", &stat) == 0 &&
+            S_ISSOCK(stat.mode) && stat.inode == first_inode,
+            "tmpfs 原子创建并报告 Unix socket 节点身份");
+    CHECK(fd->mount->fs->unlink(fd->mount, "/socket-node") == 0,
+            "tmpfs 删除首个 socket 节点");
+    qword_t replacement_device;
+    qword_t replacement_host_inode;
+    qword_t replacement_inode;
+    CHECK(fd->mount->fs->mknod_identity(fd->mount, "/socket-node",
+                    S_IFSOCK | 0700, 0, &replacement_device,
+                    &replacement_host_inode, &replacement_inode) == 0 &&
+            replacement_inode != first_inode,
+            "tmpfs 同名重建取得不同身份");
+    CHECK(fd->mount->fs->unlink_if_identity(fd->mount, "/socket-node",
+                    first_device, first_host_inode, first_inode) == 0 &&
+            fd->mount->fs->stat(
+                    fd->mount, "/socket-node", &stat) == 0 &&
+            stat.inode == replacement_inode,
+            "tmpfs 回滚不会误删同名替换节点");
+    CHECK(fd->mount->fs->unlink_if_identity(fd->mount, "/socket-node",
+                    replacement_device, replacement_host_inode,
+                    replacement_inode) == 0 &&
+            fd->mount->fs->stat(
+                    fd->mount, "/socket-node", &stat) == _ENOENT,
+            "tmpfs 按匹配身份原子删除最终 socket 节点");
+    CHECK(fd->mount->fs->mkdir(
+                    fd->mount, "/socket-node", 0700) == 0 &&
+            fd->mount->fs->unlink_if_identity(fd->mount, "/socket-node",
+                    replacement_device, replacement_host_inode,
+                    replacement_inode) == 0 &&
+            fd->mount->fs->stat(
+                    fd->mount, "/socket-node", &stat) == 0 &&
+            S_ISDIR(stat.mode),
+            "tmpfs 身份不匹配的同名目录替换保持不变");
+
+    CHECK(fd->mount->fs->mkdir(
+                    fd->mount, "/cursor-directory", 0700) == 0 &&
+            fd->mount->fs->mknod(fd->mount,
+                    "/cursor-directory/first", S_IFREG | 0600, 0) == 0 &&
+            fd->mount->fs->mknod(fd->mount,
+                    "/cursor-directory/second", S_IFREG | 0600, 0) == 0,
+            "创建目录游标删除回归夹具");
+    directory_fd = fd->mount->fs->open(
+            fd->mount, "/cursor-directory", O_RDONLY_, 0);
+    CHECK(!IS_ERR(directory_fd), "在删除子项前打开 tmpfs 目录");
+    CHECK(fd->mount->fs->unlink(
+                    fd->mount, "/cursor-directory/first") == 0,
+            "删除已被打开目录游标引用的首个子项");
+    struct dir_entry entry = {};
+    lock(&directory_fd->lock);
+    int readdir_result = directory_fd->ops->readdir(directory_fd, &entry);
+    unlock(&directory_fd->lock);
+    CHECK(readdir_result == 1 && strcmp(entry.name, "second") == 0,
+            "目录游标跳过已删除子项并继续读取后继项");
+    lock(&directory_fd->lock);
+    readdir_result = directory_fd->ops->readdir(directory_fd, &entry);
+    unlock(&directory_fd->lock);
+    CHECK(readdir_result == 0,
+            "目录游标读取后继项后稳定到达目录末尾");
+    CHECK(fd_close(directory_fd) == 0, "关闭目录游标回归描述符");
+    directory_fd = NULL;
+
     int close_error = fd_close(fd);
     fd = NULL;
     CHECK(close_error == 0, "关闭测试文件");
     status = 0;
 
 out:
+    if (directory_fd != NULL && !IS_ERR(directory_fd))
+        fd_close(directory_fd);
     if (fd != NULL && !IS_ERR(fd))
         fd_close(fd);
     if (mount != NULL)

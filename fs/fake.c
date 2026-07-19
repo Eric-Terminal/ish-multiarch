@@ -186,6 +186,83 @@ static int fakefs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev
     return err;
 }
 
+static int fakefs_mknod_identity(struct mount *mount, const char *path,
+        mode_t_ mode, dev_t_ dev,
+        qword_t *host_device, qword_t *host_inode, qword_t *inode) {
+    if (!S_ISSOCK(mode))
+        return _EINVAL;
+    struct fakefs_db *fs = &mount->fakefs;
+    db_begin_write(fs);
+    int host_fd = openat(mount->root_fd, fix_path(path),
+            O_CREAT | O_EXCL | O_RDONLY | O_CLOEXEC, 0666);
+    if (host_fd < 0) {
+        db_rollback(fs);
+        return errno_map();
+    }
+    struct stat host_stat;
+    if (fstat(host_fd, &host_stat) < 0) {
+        int saved_errno = errno;
+        close(host_fd);
+        unlinkat(mount->root_fd, fix_path(path), 0);
+        db_rollback(fs);
+        return err_map(saved_errno);
+    }
+
+    struct ish_stat stat = {
+        .mode = mode,
+        .uid = current->euid,
+        .gid = current->egid,
+        .rdev = dev,
+    };
+    inode_t created_inode = path_create(fs, path, &stat);
+    db_commit(fs);
+    close(host_fd);
+    *host_device = (qword_t) host_stat.st_dev;
+    *host_inode = (qword_t) host_stat.st_ino;
+    *inode = (qword_t) created_inode;
+    return 0;
+}
+
+static int fakefs_unlink_if_identity(struct mount *mount, const char *path,
+        qword_t host_device, qword_t host_inode, qword_t inode) {
+    struct fakefs_db *fs = &mount->fakefs;
+    db_begin_write(fs);
+    struct ish_stat ishstat;
+    ino_t current_inode;
+    if (!path_read_stat(fs, path, &ishstat, &current_inode)) {
+        db_rollback(fs);
+        return 0;
+    }
+    struct statbuf host_stat = {0};
+    int error = realfs.stat(mount, path, &host_stat);
+    if (error < 0) {
+        if (error != _ENOENT || (qword_t) current_inode != inode) {
+            db_rollback(fs);
+            return error == _ENOENT ? 0 : error;
+        }
+        // host 节点已不存在时同步清掉本事务所指向的陈旧 DB 路径。
+        ino_t removed = path_unlink(fs, path);
+        db_commit(fs);
+        inode_check_orphaned(mount, removed);
+        return 0;
+    }
+    if (host_stat.inode_device != host_device ||
+            host_stat.inode != host_inode ||
+            (qword_t) current_inode != inode) {
+        db_rollback(fs);
+        return 0;
+    }
+    error = realfs.unlink(mount, path);
+    if (error < 0) {
+        db_rollback(fs);
+        return error;
+    }
+    ino_t removed = path_unlink(fs, path);
+    db_commit(fs);
+    inode_check_orphaned(mount, removed);
+    return 0;
+}
+
 static int fakefs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat) {
     struct fakefs_db *fs = &mount->fakefs;
     db_begin_read(fs);
@@ -409,6 +486,8 @@ const struct fs_ops fakefs = {
     .rename = fakefs_rename,
     .symlink = fakefs_symlink,
     .mknod = fakefs_mknod,
+    .mknod_identity = fakefs_mknod_identity,
+    .unlink_if_identity = fakefs_unlink_if_identity,
 
     .close = realfs_close,
     .stat = fakefs_stat,

@@ -239,6 +239,13 @@ struct fs_ops {
     int (*rename)(struct mount *mount, const char *src, const char *dst);
     int (*symlink)(struct mount *mount, const char *target, const char *link);
     int (*mknod)(struct mount *mount, const char *path, mode_t_ mode, dev_t_ dev);
+    // 在 filesystem 自身的写事务内创建节点并返回其稳定身份。
+    int (*mknod_identity)(struct mount *mount, const char *path,
+            mode_t_ mode, dev_t_ dev,
+            qword_t *host_device, qword_t *host_inode, qword_t *inode);
+    // 在 filesystem 自身的写事务内按身份条件删除，避免内部并发回滚误删替换项。
+    int (*unlink_if_identity)(struct mount *mount, const char *path,
+            qword_t host_device, qword_t host_inode, qword_t inode);
     int (*mkdir)(struct mount *mount, const char *path, mode_t_ mode);
 
     // There's a close function in both the fs and fd to handle device files
