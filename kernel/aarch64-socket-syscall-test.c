@@ -1089,7 +1089,13 @@ int main(void) {
     };
     struct guest_linux_user_fault fault = {0};
     CHECK(memory.bytes != NULL, "guest 测试内存分配成功");
-    CHECK(fixture_init(&fixture), "socket syscall 测试夹具初始化成功");
+    if (!fixture_init(&fixture)) {
+        fprintf(stderr,
+                "AArch64 socket syscall 测试失败：socket syscall 测试夹具初始化成功（第 %d 行）\n",
+                __LINE__);
+        free(memory.bytes);
+        return 1;
+    }
 
     int result = test_bind(&fixture, &memory, &fault);
     if (result == 0)

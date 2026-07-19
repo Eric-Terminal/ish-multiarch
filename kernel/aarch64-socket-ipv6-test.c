@@ -729,6 +729,13 @@ static int test_udp_disconnect_family(struct fixture *fixture,
     if (family == AF_INET_) {
         first_receiver = host_udp4_listener(&first4);
         second_receiver = host_udp4_listener(&second4);
+        if (first_receiver < 0 || second_receiver < 0) {
+            if (first_receiver >= 0)
+                close(first_receiver);
+            if (second_receiver >= 0)
+                close(second_receiver);
+            CHECK(false, "UDP 断连测试 host 接收端创建成功");
+        }
         struct linux_sockaddr_in guest_first =
                 linux_loopback4(first4.sin_port);
         struct linux_sockaddr_in guest_second =
@@ -739,6 +746,13 @@ static int test_udp_disconnect_family(struct fixture *fixture,
     } else {
         first_receiver = host_udp6_listener(&first6);
         second_receiver = host_udp6_listener(&second6);
+        if (first_receiver < 0 || second_receiver < 0) {
+            if (first_receiver >= 0)
+                close(first_receiver);
+            if (second_receiver >= 0)
+                close(second_receiver);
+            CHECK(false, "UDP 断连测试 host 接收端创建成功");
+        }
         struct linux_sockaddr_in6 guest_first =
                 linux_loopback6(first6.sin6_port);
         struct linux_sockaddr_in6 guest_second =
@@ -747,9 +761,6 @@ static int test_udp_disconnect_family(struct fixture *fixture,
         memcpy(second_peer, &guest_second, sizeof(guest_second));
         peer_size = sizeof(guest_first);
     }
-    CHECK(first_receiver >= 0 && second_receiver >= 0,
-            "UDP 断连测试 host 接收端创建成功");
-
     int socket_fd = create_guest_socket(fixture, memory, fault,
             family, SOCK_DGRAM_, 0);
     CHECK(socket_fd >= 0, "UDP 断连测试 guest socket 创建成功");
