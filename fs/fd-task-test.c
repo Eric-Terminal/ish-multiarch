@@ -26,6 +26,31 @@ static const struct fd_ops test_fd_ops = {
     .close = count_close,
 };
 
+struct receive_writer_context {
+    struct task *task;
+    struct fd *nested;
+    int result;
+    fd_t number;
+    fd_t nested_number;
+    fd_t duplicate_result;
+    bool published_early;
+};
+
+static int receive_number_writer(void *opaque, fd_t number) {
+    struct receive_writer_context *context = opaque;
+    context->number = number;
+    context->published_early =
+            f_get_task(context->task, number) != NULL;
+    if (context->nested != NULL) {
+        context->nested_number = f_install_task(
+                context->task, context->nested, 0);
+        context->nested = NULL;
+        context->duplicate_result = f_dup2_task(
+                context->task, context->nested_number, number);
+    }
+    return context->result;
+}
+
 static void init_task(struct task *task, struct tgroup *group, rlim_t_ nofile, int table_size) {
     memset(task, 0, sizeof(*task));
     memset(group, 0, sizeof(*group));
@@ -164,6 +189,60 @@ int main(void) {
     CHECK(f_get_task(&target_task, 0) == target_fds[0],
             "当前任务关闭不得影响目标任务");
 
+    struct task receive_task;
+    struct tgroup receive_group;
+    init_task(&receive_task, &receive_group, 3, 1);
+    CHECK(!IS_ERR(receive_task.files), "接收事务表创建成功");
+    struct fd *received_fd = fd_create(&test_fd_ops);
+    struct receive_writer_context receive_context = {
+        .task = &receive_task,
+        .nested = fd_create(&test_fd_ops),
+        .result = 0,
+        .number = -1,
+        .nested_number = -1,
+        .duplicate_result = -1,
+    };
+    CHECK(received_fd != NULL && receive_context.nested != NULL,
+            "接收事务对象创建成功");
+    CHECK(f_receive_task(&receive_task, received_fd,
+                    O_CLOEXEC_ | O_NONBLOCK_,
+                    receive_number_writer, &receive_context) == 0 &&
+            receive_context.number == 0 &&
+            !receive_context.published_early,
+            "接收事务在锁外写号且写号前不发布对象");
+    CHECK(receive_context.nested_number == 1 &&
+            receive_context.duplicate_result == _EBUSY,
+            "重入安装跳过预留槽且精确复制不得覆盖预留项");
+    CHECK(f_get_task(&receive_task, 0) == received_fd &&
+            f_getfd_task(&receive_task, 0) == FD_CLOEXEC_ &&
+            (fd_getflags(received_fd) & O_NONBLOCK_) != 0,
+            "写号成功后原子发布对象及接收标志");
+    CHECK(f_close_task(&receive_task, 1) == 0 &&
+            f_close_task(&receive_task, 0) == 0,
+            "接收事务成功项可独立关闭");
+
+    struct fd *rejected_receive = fd_create(&test_fd_ops);
+    struct receive_writer_context rejected_context = {
+        .task = &receive_task,
+        .result = _EFAULT,
+        .number = -1,
+        .nested_number = -1,
+        .duplicate_result = -1,
+    };
+    CHECK(rejected_receive != NULL, "接收失败对象创建成功");
+    before_close = closed_fds;
+    CHECK(f_receive_task(&receive_task, rejected_receive, 0,
+                    receive_number_writer, &rejected_context) == _EFAULT &&
+            rejected_context.number == 0 &&
+            f_get_task(&receive_task, 0) == NULL &&
+            closed_fds == before_close + 1,
+            "写号失败取消预留并释放未发布对象");
+    struct fd *replacement = fd_create(&test_fd_ops);
+    CHECK(replacement != NULL &&
+            f_install_task(&receive_task, replacement, 0) == 0,
+            "取消预留后最低编号可立即复用");
+    fdtable_release(receive_task.files);
+
     struct task pair_task;
     struct tgroup pair_group;
     init_task(&pair_task, &pair_group, 2, 1);
@@ -212,6 +291,6 @@ int main(void) {
     fdtable_release(current_task.files);
     fdtable_release(target_task.files);
     fdtable_release(small_task.files);
-    CHECK(closed_fds == 11, "清理阶段恰好释放全部十一个测试 fd");
+    CHECK(closed_fds == 15, "清理阶段恰好释放全部十五个测试 fd");
     return 0;
 }

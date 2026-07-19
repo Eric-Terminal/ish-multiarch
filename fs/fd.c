@@ -62,6 +62,7 @@ struct fdtable *fdtable_new(int size) {
     fdt->size = 0;
     fdt->files = NULL;
     fdt->cloexec = NULL;
+    fdt->reserved = NULL;
     fdt->generations = NULL;
     lock_init(&fdt->lock);
     int err = fdtable_resize(fdt, size);
@@ -82,6 +83,7 @@ void fdtable_release(struct fdtable *table) {
             fdtable_close(table, f);
         free(table->files);
         free(table->cloexec);
+        free(table->reserved);
         free(table->generations);
         unlock(&table->lock);
         free(table);
@@ -110,8 +112,19 @@ static int fdtable_resize(struct fdtable *table, unsigned size) {
     if (table->cloexec)
         memcpy(cloexec, table->cloexec, BITS_SIZE(table->size));
 
+    bits_t *reserved = malloc(BITS_SIZE(size));
+    if (reserved == NULL) {
+        free(cloexec);
+        free(files);
+        return _ENOMEM;
+    }
+    memset(reserved, 0, BITS_SIZE(size));
+    if (table->reserved)
+        memcpy(reserved, table->reserved, BITS_SIZE(table->size));
+
     qword_t *generations = calloc(size, sizeof(*generations));
     if (generations == NULL) {
+        free(reserved);
         free(cloexec);
         free(files);
         return _ENOMEM;
@@ -124,6 +137,8 @@ static int fdtable_resize(struct fdtable *table, unsigned size) {
     table->files = files;
     free(table->cloexec);
     table->cloexec = cloexec;
+    free(table->reserved);
+    table->reserved = reserved;
     free(table->generations);
     table->generations = generations;
     table->size = size;
@@ -187,8 +202,7 @@ struct fd *f_get(fd_t f) {
     return f_get_task(current, f);
 }
 
-static fd_t f_install_start(struct task *task, struct fd *fd,
-        fd_t start, qword_t *generation) {
+static fd_t f_install_find(struct task *task, fd_t start) {
     assert(start >= 0);
     struct fdtable *table = task->files;
     unsigned size = rlimit_task(task, RLIMIT_NOFILE_);
@@ -197,23 +211,35 @@ static fd_t f_install_start(struct task *task, struct fd *fd,
 
     fd_t f;
     for (f = start; (unsigned) f < size; f++)
-        if (table->files[f] == NULL)
+        if (table->files[f] == NULL &&
+                !bit_test(f, table->reserved))
             break;
     if ((unsigned) f >= size) {
         int err = fdtable_expand(task, f);
         if (err < 0)
             f = err;
     }
+    return f;
+}
 
-    if (f >= 0) {
-        table->files[f] = fd;
-        bit_clear(f, table->cloexec);
-        table->generations[f]++;
-        if (generation != NULL)
-            *generation = table->generations[f];
-    } else {
+static void f_install_publish(struct fdtable *table,
+        fd_t f, struct fd *fd, qword_t *generation) {
+    assert(f >= 0 && (unsigned) f < table->size &&
+            table->files[f] == NULL);
+    table->files[f] = fd;
+    bit_clear(f, table->cloexec);
+    table->generations[f]++;
+    if (generation != NULL)
+        *generation = table->generations[f];
+}
+
+static fd_t f_install_start(struct task *task, struct fd *fd,
+        fd_t start, qword_t *generation) {
+    fd_t f = f_install_find(task, start);
+    if (f >= 0)
+        f_install_publish(task->files, f, fd, generation);
+    else
         fd_close(fd);
-    }
     return f;
 }
 
@@ -236,6 +262,41 @@ fd_t f_install_task_tracked(struct task *task, struct fd *fd,
         f_install_finish(table, f, fd, flags);
     unlock(&table->lock);
     return f;
+}
+
+fd_t f_receive_task(struct task *task, struct fd *fd,
+        int flags, fd_receive_number_writer_t write_number,
+        void *opaque) {
+    assert(task != NULL && fd != NULL && write_number != NULL);
+    struct fdtable *table = task->files;
+    lock(&table->lock);
+    fd_t number = f_install_find(task, 0);
+    if (number >= 0)
+        bit_set(number, table->reserved);
+    unlock(&table->lock);
+    if (number < 0)
+        goto reject;
+
+    int error = write_number(opaque, number);
+    lock(&table->lock);
+    assert((unsigned) number < table->size &&
+            table->files[number] == NULL &&
+            bit_test(number, table->reserved));
+    bit_clear(number, table->reserved);
+    if (error >= 0) {
+        f_install_publish(table, number, fd, NULL);
+        f_install_finish(table, number, fd, flags);
+    }
+    unlock(&table->lock);
+    if (error < 0) {
+        number = error;
+        goto reject;
+    }
+    return number;
+
+reject:
+    fd_close(fd);
+    return number;
 }
 
 int f_install_pair_task_tracked(struct task *task,
@@ -387,6 +448,10 @@ static fd_t f_dup_to_task(struct task *task, fd_t old_fd,
     if (error < 0) {
         unlock(&table->lock);
         return error;
+    }
+    if (bit_test(new_fd, table->reserved)) {
+        unlock(&table->lock);
+        return _EBUSY;
     }
     fd_retain(fd);
     if (fdtable_get(table, new_fd) != NULL)

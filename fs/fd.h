@@ -217,6 +217,8 @@ struct fdtable {
     unsigned size;
     struct fd **files;
     bits_t *cloexec;
+    // 接收 SCM_RIGHTS 时，槽位可先预留而不向 guest 发布文件对象。
+    bits_t *reserved;
     qword_t *generations;
     lock_t lock;
 };
@@ -239,6 +241,11 @@ fd_t f_install_task(struct task *task, struct fd *fd, int flags);
 // tracked 版本额外返回本次安装的槽位代数，供跨回调的精确失败回滚使用。
 fd_t f_install_task_tracked(struct task *task, struct fd *fd,
         int flags, qword_t *generation);
+typedef int (*fd_receive_number_writer_t)(void *opaque, fd_t number);
+// 先预留编号，锁外写入 guest，成功后才发布接收的 fd。
+fd_t f_receive_task(struct task *task, struct fd *fd,
+        int flags, fd_receive_number_writer_t write_number,
+        void *opaque);
 // 在同一 fdtable 临界区选择并发布两个互异槽位；无论成败都接管两个引用。
 int f_install_pair_task_tracked(struct task *task,
         struct fd *fds[2], int flags, fd_t installed[2],
