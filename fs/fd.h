@@ -51,6 +51,8 @@ struct fd {
             int type;
             int protocol;
             bool inet_explicitly_bound;
+            // 非阻塞 TCP connect 尚未由成功或 SO_ERROR 终结。
+            bool inet_connect_pending;
 
             // These are only used as strong references, to keep the inode
             // alive while there is a listener.
@@ -81,11 +83,17 @@ struct fd {
                 uid_t_ uid;
                 uid_t_ gid;
             } unix_peer_cred;
-            // Queue of struct scm for sending file descriptors
-            // locked by fd->lock
+            // SCM 队列由 socket 层的全局顺序锁保护，确保与 host dummy 同序。
             struct list unix_scm;
             // connect 已完成而 accept 尚未发生时暂存发送的 SCM_RIGHTS。
             struct list unix_pending_scm;
+            // host 消息与内部 SCM 队列必须按同一个接收顺序配对。
+            lock_t unix_recv_lock;
+            // Darwin 在读 shutdown 后把数据报接收表现为永久 EOF，
+            // close 不得再次排空。
+            bool unix_read_shutdown;
+            // 记录写方向以保持重复 SHUT_RDWR 的幂等语义。
+            bool unix_write_shutdown;
             struct ucred_ unix_cred;
         } socket;
 
@@ -140,6 +148,8 @@ typedef sdword_t fd_t;
 
 struct fd *fd_create(const struct fd_ops *ops);
 struct fd *fd_retain(struct fd *fd);
+// 弱注册表只能在对象尚未进入最终关闭时获取强引用。
+struct fd *fd_try_retain(struct fd *fd);
 int fd_close(struct fd *fd);
 
 int fd_getflags(struct fd *fd);

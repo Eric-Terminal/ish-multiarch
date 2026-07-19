@@ -9,6 +9,8 @@
 #include "misc.h"
 #include "debug.h"
 
+extern const struct fd_ops socket_fdops;
+
 int_t sys_socketcall(dword_t call_num, addr_t args_addr);
 
 int_t sys_socket(dword_t domain, dword_t type, dword_t protocol);
@@ -21,6 +23,7 @@ struct socket_ref {
 struct socket_address;
 struct inode_data;
 struct unix_abstract;
+struct scm;
 
 // 强引用跨越 guest 回调与 host I/O，成功获取后必须配对 release。
 int socket_ref_get_task(struct task *task, fd_t sock_fd,
@@ -50,14 +53,22 @@ size_t socket_sendto_transaction_size(const struct socket_ref *socket,
         size_t length, dword_t flags);
 int socket_sendto_transaction_validate(const struct socket_ref *socket,
         size_t length);
-int socket_sendto_destination_validate(const struct socket_ref *socket,
-        const struct socket_address *address);
+int socket_sendto_destination_check(const struct socket_ref *socket,
+        const struct socket_address *address, dword_t flags);
 ssize_t socket_sendto_ref(const struct socket_ref *socket,
         const void *buffer, size_t length, dword_t flags,
         const struct socket_address *address);
 ssize_t socket_recvfrom_ref(const struct socket_ref *socket,
         void *buffer, size_t length, dword_t flags,
         struct socket_address *address);
+// send 成功后接管并清空 scm；recv 返回的 scm 由调用方释放或安装。
+ssize_t socket_sendmsg_ref(const struct socket_ref *socket,
+        const void *buffer, size_t length, dword_t flags,
+        const struct socket_address *address, struct scm **scm);
+ssize_t socket_recvmsg_ref(const struct socket_ref *socket,
+        void *buffer, size_t length, dword_t flags,
+        struct socket_address *address, dword_t *message_flags,
+        struct scm **scm);
 
 enum socket_guest_abi {
     SOCKET_GUEST_I386,
@@ -145,6 +156,12 @@ struct scm {
     unsigned num_fds;
     struct fd *fds[];
 };
+
+#define SOCKET_SCM_MAX_FDS UINT32_C(253)
+
+int socket_scm_create_task(struct task *task,
+        const fd_t *numbers, unsigned count, struct scm **scm);
+void socket_scm_release(struct scm *scm);
 
 #define PF_LOCAL_ 1
 #define PF_INET_ 2

@@ -11,22 +11,28 @@
 #include "fs/fd.h"
 #include "fs/inode.h"
 #include "fs/path.h"
+#include "fs/poll.h"
 #include "fs/real.h"
 #include "fs/sock.h"
+#include "util/timer.h"
 #include "debug.h"
 
 #define SOCKET_TYPE_MASK 0xf
 #define I386_LINUX_MAX_RW_COUNT UINT32_C(0x7ffff000)
 #define I386_LINUX_IOV_MAX UINT32_C(1024)
 #define I386_SOCKET_CONTROL_LIMIT UINT32_C(2048)
-#define I386_SCM_MAX_FDS UINT32_C(253)
+#define I386_SCM_MAX_FDS SOCKET_SCM_MAX_FDS
+#define I386_LINUX_MSG_CMSG_CLOEXEC UINT32_C(0x40000000)
+#define I386_LINUX_MSG_CMSG_COMPAT UINT32_C(0x80000000)
 
 const struct fd_ops socket_fdops;
 
 static lock_t peer_lock = LOCK_INITIALIZER;
 static lock_t unix_bound_lock = LOCK_INITIALIZER;
-// host dummy fd 与内部 SCM 队列按同一顺序发布，但不得占用接收端 fd 锁等待 I/O。
+// 数据报发送、读关闭、host dummy 与 SCM 队列共享同一线性化顺序。
 static lock_t unix_scm_io_lock = LOCK_INITIALIZER;
+static lock_t unix_scm_dummy_lock = LOCK_INITIALIZER;
+static int unix_scm_dummy_fd = -1;
 static struct list unix_bound_sockets;
 
 struct unix_pending_peer {
@@ -51,6 +57,7 @@ struct unix_bound_name {
     bool closing;
     bool listener_cred_valid;
     struct ucred_ listener_cred;
+    struct fd *owner;
     uint8_t name_length;
     char name[SOCKADDR_DATA_MAX + 1];
     char backing_path[sizeof(((struct sockaddr_un *) 0)->sun_path)];
@@ -58,9 +65,32 @@ struct unix_bound_name {
     cond_t connects_drained;
 };
 
+struct unix_scm_receiver {
+    struct fd *owner;
+    bool pending;
+};
+
 static void unix_socket_finish_peer_handshake(
         struct fd *peer, struct fd *accepted);
-static void scm_free(struct scm *scm);
+void socket_scm_release(struct scm *scm);
+static int unix_scm_receiver_retain(struct fd *sender,
+        const struct socket_address *address,
+        struct unix_scm_receiver *receiver);
+static bool socket_message_may_wait(struct fd *socket, dword_t flags);
+static bool socket_message_send_would_block(
+        struct fd *socket, int host_error);
+static const struct timer_time *socket_message_deadline(
+        struct fd *socket, bool receive,
+        struct timer_time *deadline);
+static int socket_message_wait(struct fd *socket, int events,
+        const struct timer_time *deadline);
+static int socket_message_send_error(int error, dword_t flags);
+static int socket_message_send_host_error(
+        struct fd *socket, int host_error, dword_t flags);
+static bool close_host_scm_rights(struct msghdr *message);
+static int unix_bound_drain_messages_locked(
+        struct fd *fd, struct list *discarded_scm);
+static void socket_scm_release_list(struct list *scm_list);
 
 static struct fd *sock_fd_allocate(
         int domain, int type, int protocol) {
@@ -74,6 +104,7 @@ static struct fd *sock_fd_allocate(
     if (domain == AF_LOCAL_) {
         list_init(&fd->socket.unix_scm);
         list_init(&fd->socket.unix_pending_scm);
+        lock_init(&fd->socket.unix_recv_lock);
     }
     return fd;
 }
@@ -86,6 +117,15 @@ static void sock_configure_host_fd(int sock_fd) {
 #else
     (void) sock_fd;
 #endif
+}
+
+static int unix_scm_dummy_get(void) {
+    lock(&unix_scm_dummy_lock);
+    if (unix_scm_dummy_fd < 0)
+        unix_scm_dummy_fd = open(".", O_RDONLY | O_CLOEXEC);
+    int result = unix_scm_dummy_fd < 0 ? errno_map() : unix_scm_dummy_fd;
+    unlock(&unix_scm_dummy_lock);
+    return result;
 }
 
 static struct fd *sock_fd_wrap(
@@ -151,18 +191,6 @@ int_t sys_socket(dword_t domain, dword_t type, dword_t protocol) {
 static void inode_release_if_exist(struct inode_data *inode) {
     if (inode != NULL)
         inode_release(inode);
-}
-
-static struct fd *sock_getfd_task(
-        struct task *task, fd_t sock_fd) {
-    struct fd *sock = f_get_task(task, sock_fd);
-    if (sock == NULL || sock->ops != &socket_fdops)
-        return NULL;
-    return sock;
-}
-
-static struct fd *sock_getfd(fd_t sock_fd) {
-    return sock_getfd_task(current, sock_fd);
 }
 
 int socket_ref_get_task(struct task *task, fd_t sock_fd,
@@ -464,6 +492,7 @@ static void unix_bind_commit(struct unix_bind_transaction *transaction,
     memcpy(socket->socket.unix_name,
             transaction->name, transaction->name_length);
     socket->socket.unix_bound_name = transaction->bound_name;
+    transaction->bound_name->owner = socket;
     transaction->bound_name->owner_open = true;
     list_add(&unix_bound_sockets, &transaction->bound_name->links);
     unlock(&unix_bound_lock);
@@ -549,6 +578,7 @@ static void unix_bound_owner_finish_close(struct fd *socket) {
             list_add_tail(&canceled_peers, &pending->links);
         }
         name->owner_open = false;
+        name->owner = NULL;
         unix_bound_maybe_free_locked(name);
     }
     unlock(&unix_bound_lock);
@@ -1401,10 +1431,9 @@ static void unix_socket_finish_peer_handshake(
         return;
     struct list rejected_scm;
     list_init(&rejected_scm);
+    lock(&unix_scm_io_lock);
     lock(&peer_lock);
-    lock(&peer->lock);
     if (accepted != NULL) {
-        lock(&accepted->lock);
         accepted->socket.unix_peer = peer;
         peer->socket.unix_peer = accepted;
         accepted->socket.unix_peer_name_valid = true;
@@ -1434,7 +1463,6 @@ static void unix_socket_finish_peer_handshake(
             list_remove(&scm->queue);
             list_add_tail(&accepted->socket.unix_scm, &scm->queue);
         }
-        unlock(&accepted->lock);
     } else {
         peer->socket.unix_peer_handshake_pending = false;
         peer->socket.unix_peer_handshake_rejected = true;
@@ -1446,14 +1474,14 @@ static void unix_socket_finish_peer_handshake(
             list_add_tail(&rejected_scm, &scm->queue);
         }
     }
-    unlock(&peer->lock);
     unlock(&peer_lock);
+    unlock(&unix_scm_io_lock);
 
     while (!list_empty(&rejected_scm)) {
         struct scm *scm = list_first_entry(
                 &rejected_scm, struct scm, queue);
         list_remove(&scm->queue);
-        scm_free(scm);
+        socket_scm_release(scm);
     }
     // 待 accept 注册表携带一份强引用，由成功、拒绝或 listener 关闭消费。
     fd_close(peer);
@@ -1526,15 +1554,27 @@ static int socket_connect_prepared(
         }
     }
 
-    bool serialize_inet = sock->socket.domain == AF_INET_ ||
+    bool serialize_connect = sock->socket.domain == AF_INET_ ||
             sock->socket.domain == AF_INET6_;
-    if (serialize_inet)
+    bool serialize_unix_datagram =
+            sock->socket.domain == AF_LOCAL_ &&
+            sock->socket.type != SOCK_STREAM_;
+    if (serialize_connect)
         lock(&sock->lock);
+    // AF_UNIX 数据报 connect 只更新对端关联，不进入可阻塞的传输等待。
+    if (serialize_unix_datagram)
+        lock(&unix_scm_io_lock);
     int err = connect(sock->real_fd,
             (const struct sockaddr *) &address->storage,
             address->length);
     int host_error = errno;
-    if (serialize_inet)
+    if (serialize_connect && sock->socket.type == SOCK_STREAM_)
+        sock->socket.inet_connect_pending = err < 0 &&
+                (host_error == EINPROGRESS || host_error == EALREADY ||
+                host_error == EINTR);
+    if (serialize_unix_datagram)
+        unlock(&unix_scm_io_lock);
+    if (serialize_connect)
         unlock(&sock->lock);
     bool asynchronous = err < 0 &&
             (host_error == EINPROGRESS || host_error == EALREADY);
@@ -1743,6 +1783,8 @@ static int socket_disconnect_inet(struct fd *socket) {
     if (connect(socket->real_fd, &address, sizeof(address)) < 0)
         error = errno_map();
 #endif
+    if (error == 0)
+        socket->socket.inet_connect_pending = false;
     unlock(&socket->lock);
     if (error < 0)
         return error;
@@ -2224,17 +2266,86 @@ int socket_sendto_transaction_validate(const struct socket_ref *socket,
             length > SOCKET_IO_TRANSACTION_LIMIT ? _EMSGSIZE : 0;
 }
 
-int socket_sendto_destination_validate(const struct socket_ref *socket,
-        const struct socket_address *address) {
+static int socket_inet_stream_destination_check(
+        const struct socket_ref *socket, dword_t flags) {
+    bool may_wait = socket_message_may_wait(socket->fd, flags);
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer = may_wait ?
+            socket_message_deadline(
+                    socket->fd, false, &wait_deadline) : NULL;
+    bool readiness_observed = false;
+    for (;;) {
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        lock(&socket->fd->lock);
+        if (getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &peer_length) == 0) {
+            socket->fd->socket.inet_connect_pending = false;
+            unlock(&socket->fd->lock);
+            return 0;
+        }
+
+        bool pending = socket->fd->socket.inet_connect_pending;
+        int host_error = 0;
+        socklen_t error_length = sizeof(host_error);
+        if (getsockopt(socket->fd->real_fd, SOL_SOCKET, SO_ERROR,
+                &host_error, &error_length) < 0) {
+            int error = errno_map();
+            unlock(&socket->fd->lock);
+            return error;
+        }
+        if (host_error != 0 || readiness_observed)
+            socket->fd->socket.inet_connect_pending = false;
+        unlock(&socket->fd->lock);
+
+        if (host_error != 0)
+            return err_map(host_error);
+        if (!pending || readiness_observed)
+            return _EPIPE;
+        if (!may_wait)
+            return _EAGAIN;
+
+        int error = socket_message_wait(socket->fd, POLL_WRITE,
+                wait_deadline_pointer);
+        if (error < 0)
+            return error;
+        readiness_observed = true;
+    }
+}
+
+static int socket_sendto_destination_validate(
+        const struct socket_ref *socket,
+        const struct socket_address *address, dword_t flags) {
     assert(socket != NULL && socket->fd != NULL);
+    if ((socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_STREAM_)
+        return socket_inet_stream_destination_check(socket, flags);
     if (socket->fd->socket.domain == AF_LOCAL_ &&
-            socket->fd->socket.type == SOCK_STREAM_ &&
+            socket->fd->socket.type != SOCK_STREAM_ &&
             (address == NULL || address->length == 0)) {
         struct sockaddr_storage peer;
         socklen_t peer_length = sizeof(peer);
         return getpeername(socket->fd->real_fd,
                 (struct sockaddr *) &peer, &peer_length) == 0 ?
                 0 : _ENOTCONN;
+    }
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_STREAM_) {
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        if (address != NULL && address->length != 0)
+            return getpeername(socket->fd->real_fd,
+                    (struct sockaddr *) &peer, &peer_length) == 0 ?
+                    _EISCONN : _EOPNOTSUPP;
+        if (getpeername(socket->fd->real_fd,
+                (struct sockaddr *) &peer, &peer_length) == 0)
+            return 0;
+        lock(&peer_lock);
+        bool connected_before =
+                socket->fd->socket.unix_peer_name_valid;
+        unlock(&peer_lock);
+        return connected_before ? _EPIPE : _ENOTCONN;
     }
     bool requires_destination = socket->fd->socket.type == SOCK_RAW_ ||
             socket_sendto_prefix_size(socket) != 0 ||
@@ -2253,6 +2364,13 @@ int socket_sendto_destination_validate(const struct socket_ref *socket,
             0 : _EDESTADDRREQ;
 }
 
+int socket_sendto_destination_check(const struct socket_ref *socket,
+        const struct socket_address *address, dword_t flags) {
+    int error = socket_sendto_destination_validate(
+            socket, address, flags);
+    return error < 0 ? socket_message_send_error(error, flags) : 0;
+}
+
 ssize_t socket_sendto_ref(const struct socket_ref *socket,
         const void *buffer, size_t length, dword_t flags,
         const struct socket_address *address) {
@@ -2269,40 +2387,81 @@ ssize_t socket_sendto_ref(const struct socket_ref *socket,
     error = socket_sendto_transaction_validate(socket, length);
     if (error < 0)
         return error;
-    error = socket_sendto_destination_validate(socket, address);
+    error = socket_sendto_destination_check(socket, address, flags);
     if (error < 0)
         return error;
     int real_flags = sock_flags_to_real(flags);
-    if (socket->fd->socket.domain == AF_LOCAL_ &&
-            socket->fd->socket.type != SOCK_STREAM_ &&
-            (address == NULL || address->length == 0)) {
-        struct sockaddr_storage peer;
-        socklen_t peer_length = sizeof(peer);
-        if (getpeername(socket->fd->real_fd,
-                (struct sockaddr *) &peer, &peer_length) < 0)
-            return _ENOTCONN;
+    bool serialize_unix_datagram =
+            socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type != SOCK_STREAM_;
+    bool may_wait = socket_message_may_wait(socket->fd, flags);
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer =
+            serialize_unix_datagram && may_wait ?
+            socket_message_deadline(
+                    socket->fd, false, &wait_deadline) : NULL;
+    struct unix_scm_receiver receiver = {0};
+    if (serialize_unix_datagram) {
+        lock(&unix_scm_io_lock);
+        error = unix_scm_receiver_retain(
+                socket->fd, address, &receiver);
+        if (error < 0)
+            goto out;
     }
-    struct unix_bound_name *queued_name =
-            unix_bound_message_begin(socket->fd);
+
     byte_t empty = 0;
     bool has_address = address != NULL && address->length != 0;
-    ssize_t result = sendto(socket->fd->real_fd,
-            length != 0 ? buffer : &empty, length,
-            real_flags,
-            has_address ?
-                    (const struct sockaddr *) &address->storage : NULL,
-            has_address ? address->length : 0);
-    if (result < 0)
-        unix_bound_message_cancel(queued_name);
-    if (result < 0 && errno == ENOENT && address != NULL &&
-            (address->lookup_inode != NULL ||
-            address->lookup_abstract != NULL))
-        return _ECONNREFUSED;
-    if (result < 0 && errno == EPIPE && (flags & MSG_NOSIGNAL_))
-        return err_map(errno);
-    if (result < 0)
-        return errno_map();
-    return result;
+    for (;;) {
+        bool receiver_discards = serialize_unix_datagram &&
+                receiver.owner->socket.unix_read_shutdown;
+        if (receiver_discards) {
+            error = socket_message_send_error(_EPIPE, flags);
+            break;
+        }
+        struct unix_bound_name *queued_name =
+                unix_bound_message_begin(socket->fd);
+        ssize_t sent = sendto(socket->fd->real_fd,
+                length != 0 ? buffer : &empty, length,
+                serialize_unix_datagram ?
+                        real_flags | MSG_DONTWAIT : real_flags,
+                has_address ?
+                        (const struct sockaddr *) &address->storage : NULL,
+                has_address ? address->length : 0);
+        int host_error = errno;
+        if (sent < 0)
+            unix_bound_message_cancel(queued_name);
+        if (sent >= 0) {
+            error = (int) sent;
+            break;
+        }
+        if (serialize_unix_datagram && may_wait &&
+                socket_message_send_would_block(
+                        socket->fd, host_error)) {
+            unlock(&unix_scm_io_lock);
+            error = socket_message_wait(socket->fd, POLL_WRITE,
+                    wait_deadline_pointer);
+            if (error < 0)
+                goto release_receiver;
+            lock(&unix_scm_io_lock);
+            continue;
+        }
+        if (host_error == ENOENT && address != NULL &&
+                (address->lookup_inode != NULL ||
+                address->lookup_abstract != NULL))
+            error = _ECONNREFUSED;
+        else
+            error = socket_message_send_host_error(
+                    socket->fd, host_error, flags);
+        break;
+    }
+
+out:
+    if (serialize_unix_datagram)
+        unlock(&unix_scm_io_lock);
+release_receiver:
+    if (receiver.owner != NULL)
+        fd_close(receiver.owner);
+    return error;
 }
 
 ssize_t socket_recvfrom_ref(const struct socket_ref *socket,
@@ -2310,6 +2469,16 @@ ssize_t socket_recvfrom_ref(const struct socket_ref *socket,
         struct socket_address *address) {
     assert(socket != NULL && socket->fd != NULL &&
             socket->fd->ops == &socket_fdops);
+    if (socket->fd->socket.domain == AF_LOCAL_) {
+        dword_t message_flags;
+        struct scm *scm = NULL;
+        ssize_t result = socket_recvmsg_ref(socket,
+                buffer, length, flags, address,
+                &message_flags, &scm);
+        if (scm != NULL)
+            socket_scm_release(scm);
+        return result;
+    }
     int real_flags = sock_flags_to_real(flags);
     if (real_flags < 0)
         return _EINVAL;
@@ -2419,10 +2588,12 @@ int_t sys_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len,
     result = socket_sendto_transaction_validate(&socket, length);
     if (result < 0)
         goto out;
-    result = socket_sendto_destination_validate(
-            &socket, address_pointer);
-    if (result < 0)
-        goto out;
+    if (!defer_unix_lookup) {
+        result = socket_sendto_destination_check(
+                &socket, address_pointer, flags);
+        if (result < 0)
+            goto out;
+    }
     size_t transaction_length = socket_sendto_transaction_size(
             &socket, length, flags);
     buffer = transaction_length == 0 ? NULL : malloc(transaction_length);
@@ -2550,13 +2721,60 @@ int_t sys_recv(fd_t sock_fd, addr_t buf, dword_t len, int_t flags) {
 
 int_t sys_shutdown(fd_t sock_fd, dword_t how) {
     STRACE("shutdown(%d, %d)", sock_fd, how);
-    struct fd *sock = sock_getfd(sock_fd);
-    if (sock == NULL)
-        return _EBADF;
-    int err = shutdown(sock->real_fd, how);
-    if (err < 0)
-        return errno_map();
-    return 0;
+    struct socket_ref socket;
+    int_t result = socket_ref_get_task(current, sock_fd, &socket);
+    if (result < 0)
+        return result;
+
+    struct list discarded_scm;
+    list_init(&discarded_scm);
+    bool darwin_unix_datagram_shutdown = false;
+#ifdef __APPLE__
+    darwin_unix_datagram_shutdown =
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_ &&
+            how <= SHUT_RDWR;
+#endif
+    if (darwin_unix_datagram_shutdown) {
+        bool request_read = how == SHUT_RD || how == SHUT_RDWR;
+        bool request_write = how == SHUT_WR || how == SHUT_RDWR;
+        lock(&socket.fd->socket.unix_recv_lock);
+        lock(&unix_scm_io_lock);
+        int error = 0;
+        if (request_read &&
+                !socket.fd->socket.unix_read_shutdown) {
+            struct sockaddr_storage peer;
+            socklen_t peer_length = sizeof(peer);
+            if (getpeername(socket.fd->real_fd,
+                    (struct sockaddr *) &peer, &peer_length) == 0)
+                error = unix_bound_drain_messages_locked(
+                        socket.fd, &discarded_scm);
+        }
+        bool need_read = request_read &&
+                !socket.fd->socket.unix_read_shutdown;
+        bool need_write = request_write &&
+                !socket.fd->socket.unix_write_shutdown;
+        int effective_how = need_read ?
+                (need_write ? SHUT_RDWR : SHUT_RD) : SHUT_WR;
+        if (error == 0 && (need_read || need_write) &&
+                shutdown(socket.fd->real_fd, effective_how) < 0)
+            error = errno_map();
+        if (error == 0) {
+            if (request_read)
+                socket.fd->socket.unix_read_shutdown = true;
+            if (request_write)
+                socket.fd->socket.unix_write_shutdown = true;
+        }
+        unlock(&unix_scm_io_lock);
+        unlock(&socket.fd->socket.unix_recv_lock);
+        result = error;
+    } else {
+        int error = shutdown(socket.fd->real_fd, (int) how);
+        result = error == 0 ? 0 : errno_map();
+    }
+    socket_scm_release_list(&discarded_scm);
+    socket_ref_release(&socket);
+    return result;
 }
 
 #define DEFAULT_TCP_CONGESTION "cubic"
@@ -2849,6 +3067,8 @@ static int_t socket_getsockopt_ref(const struct socket_ref *socket,
     } else if (level == SOL_SOCKET_ && option == SO_ERROR_) {
         if (value_len != sizeof(dword_t))
             return _EINVAL;
+        bool inet_socket = sock->socket.domain == AF_INET_ ||
+                sock->socket.domain == AF_INET6_;
         uint64_t connect_generation = 0;
         enum unix_connect_error_phase error_phase =
                 unix_bound_connect_error_snapshot(
@@ -2862,10 +3082,19 @@ static int_t socket_getsockopt_ref(const struct socket_ref *socket,
                 (error_phase == UNIX_CONNECT_ERROR_NONE &&
                 !handshake_pending)) {
             socklen_t real_error_len = sizeof(real_error);
+            if (inet_socket)
+                lock(&sock->lock);
             int err = getsockopt(sock->real_fd, SOL_SOCKET, SO_ERROR,
                     &real_error, &real_error_len);
-            if (err < 0)
+            if (err < 0) {
+                if (inet_socket)
+                    unlock(&sock->lock);
                 return errno_map();
+            }
+            if (inet_socket && real_error != 0)
+                sock->socket.inet_connect_pending = false;
+            if (inet_socket)
+                unlock(&sock->lock);
         }
         if (real_error != 0 &&
                 error_phase == UNIX_CONNECT_ERROR_ASYNC)
@@ -2962,11 +3191,49 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option,
     return result;
 }
 
-static void scm_free(struct scm *scm) {
+void socket_scm_release(struct scm *scm) {
     for (unsigned i = 0; i < scm->num_fds; i++)
         if (scm->fds[i] != NULL)
             fd_close(scm->fds[i]);
     free(scm);
+}
+
+int socket_scm_create_task(struct task *task,
+        const fd_t *numbers, unsigned count, struct scm **scm_pointer) {
+    assert(task != NULL && scm_pointer != NULL &&
+            count <= SOCKET_SCM_MAX_FDS);
+    *scm_pointer = NULL;
+    if (count == 0)
+        return 0;
+    struct scm *scm = calloc(1,
+            sizeof(*scm) + count * sizeof(*scm->fds));
+    if (scm == NULL)
+        return _ENOMEM;
+    list_init(&scm->queue);
+    for (unsigned index = 0; index < count; index++) {
+        struct fd *transferred =
+                f_get_task_retain(task, numbers[index]);
+        if (transferred == NULL) {
+            socket_scm_release(scm);
+            return _EBADF;
+        }
+        scm->fds[scm->num_fds++] = transferred;
+    }
+    *scm_pointer = scm;
+    return 0;
+}
+
+static struct scm *socket_scm_clone(const struct scm *source) {
+    struct scm *clone = calloc(1,
+            sizeof(*clone) +
+            source->num_fds * sizeof(*clone->fds));
+    if (clone == NULL)
+        return NULL;
+    list_init(&clone->queue);
+    for (unsigned index = 0; index < source->num_fds; index++)
+        clone->fds[clone->num_fds++] =
+                fd_retain(source->fds[index]);
+    return clone;
 }
 
 struct i386_message_iov {
@@ -3080,8 +3347,6 @@ static int i386_scm_rights_count(const uint8_t *control,
             if (header.type != SCM_RIGHTS_)
                 return _EINVAL;
             size_t payload_length = header.len - sizeof(header);
-            if (payload_length % sizeof(fd_t) != 0)
-                return _EINVAL;
             size_t message_count = payload_length / sizeof(fd_t);
             if (message_count > I386_SCM_MAX_FDS - *count)
                 return _EINVAL;
@@ -3130,42 +3395,90 @@ static int i386_scm_retain_rights(const uint8_t *control,
     return 0;
 }
 
-static int unix_scm_sender_validate(struct fd *sender) {
-    lock(&peer_lock);
-    bool connected = sender->socket.unix_peer != NULL ||
-            (sender->socket.type == SOCK_STREAM_ &&
-            sender->socket.unix_peer_handshake_pending &&
-            !sender->socket.unix_peer_handshake_rejected);
-    unlock(&peer_lock);
-    if (connected)
-        return 0;
-    return sender->socket.type == SOCK_STREAM_ ? _EPIPE : _ENOTCONN;
+static int unix_scm_receiver_retain(struct fd *sender,
+        const struct socket_address *address,
+        struct unix_scm_receiver *receiver) {
+    *receiver = (struct unix_scm_receiver) {0};
+    bool explicit_destination =
+            address != NULL && address->length != 0;
+    if (sender->socket.type == SOCK_STREAM_ ||
+            !explicit_destination) {
+        lock(&peer_lock);
+        if (sender->socket.unix_peer != NULL)
+            receiver->owner =
+                    fd_try_retain(sender->socket.unix_peer);
+        if (receiver->owner == NULL &&
+                sender->socket.type == SOCK_STREAM_ &&
+                sender->socket.unix_peer_handshake_pending &&
+                !sender->socket.unix_peer_handshake_rejected) {
+            receiver->owner = fd_retain(sender);
+            receiver->pending = true;
+        }
+        unlock(&peer_lock);
+        if (receiver->owner != NULL)
+            return 0;
+        if (sender->socket.type == SOCK_STREAM_)
+            return _EPIPE;
+    }
+
+    {
+        struct sockaddr_storage peer = {0};
+        socklen_t peer_length = 0;
+        if (explicit_destination) {
+            peer = address->storage;
+            peer_length = address->length;
+        } else {
+            peer_length = sizeof(peer);
+            if (getpeername(sender->real_fd,
+                    (struct sockaddr *) &peer, &peer_length) < 0)
+                return _ENOTCONN;
+        }
+        if (peer_length <= offsetof(struct sockaddr_un, sun_path) ||
+                ((struct sockaddr *) &peer)->sa_family != AF_UNIX)
+            return _EINVAL;
+        const struct sockaddr_un *unix_peer =
+                (const struct sockaddr_un *) &peer;
+        lock(&unix_bound_lock);
+        if (!list_null(&unix_bound_sockets)) {
+            struct unix_bound_name *name;
+            list_for_each_entry(&unix_bound_sockets, name, links) {
+                if (name->owner_open && !name->closing &&
+                        name->owner != NULL &&
+                        strcmp(name->backing_path,
+                                unix_peer->sun_path) == 0) {
+                    receiver->owner = fd_try_retain(name->owner);
+                    break;
+                }
+            }
+        }
+        unlock(&unix_bound_lock);
+        return receiver->owner != NULL ? 0 : _ECONNREFUSED;
+    }
 }
 
-// unix_scm_io_lock 保证接收者看到 dummy 时，内部队列已经按 host 顺序发布。
-static bool unix_scm_queue_delivered(
-        struct fd *sender, struct scm *scm) {
-    struct fd *owner = NULL;
-    bool pending = false;
-    lock(&peer_lock);
-    if (sender->socket.unix_peer != NULL) {
-        owner = fd_retain(sender->socket.unix_peer);
-    } else if (sender->socket.type == SOCK_STREAM_ &&
-            sender->socket.unix_peer_handshake_pending &&
-            !sender->socket.unix_peer_handshake_rejected) {
-        owner = fd_retain(sender);
-        pending = true;
+// 调用方持有 unix_scm_io_lock 和 receiver 强引用，host dummy 与队列同序发布。
+static bool unix_scm_receiver_queue(
+        const struct unix_scm_receiver *receiver, struct scm *scm) {
+    assert(receiver->owner != NULL);
+    if (receiver->pending) {
+        bool queued = false;
+        lock(&peer_lock);
+        struct fd *accepted =
+                receiver->owner->socket.unix_peer;
+        if (accepted != NULL) {
+            list_add_tail(&accepted->socket.unix_scm, &scm->queue);
+            queued = true;
+        } else if (receiver->owner->socket.unix_peer_handshake_pending &&
+                !receiver->owner->socket.unix_peer_handshake_rejected) {
+            list_add_tail(&receiver->owner->socket.unix_pending_scm,
+                    &scm->queue);
+            queued = true;
+        }
+        unlock(&peer_lock);
+        return queued;
     }
-    if (owner != NULL) {
-        lock(&owner->lock);
-        list_add_tail(pending ? &owner->socket.unix_pending_scm :
-                &owner->socket.unix_scm, &scm->queue);
-        unlock(&owner->lock);
-    }
-    unlock(&peer_lock);
-    if (owner != NULL)
-        fd_close(owner);
-    return owner != NULL;
+    list_add_tail(&receiver->owner->socket.unix_scm, &scm->queue);
+    return true;
 }
 
 static bool close_host_scm_rights(struct msghdr *message) {
@@ -3190,6 +3503,458 @@ static bool close_host_scm_rights(struct msghdr *message) {
     return found;
 }
 
+static dword_t socket_recvmsg_output_flags(int host_flags) {
+    // Linux 只回传协议产生的状态位；Apple 会把 MSG_PEEK 等输入位带回来。
+    return (dword_t) sock_flags_from_real(host_flags) &
+            (MSG_OOB_ | MSG_CTRUNC_ | MSG_TRUNC_ |
+            MSG_EOR_ | MSG_ERRQUEUE_);
+}
+
+static bool socket_message_may_wait(struct fd *socket, dword_t flags) {
+    return !(flags & MSG_DONTWAIT_) &&
+            !(fd_getflags(socket) & O_NONBLOCK_);
+}
+
+static bool socket_message_would_block(int host_error) {
+    return host_error == EAGAIN
+#if EWOULDBLOCK != EAGAIN
+            || host_error == EWOULDBLOCK
+#endif
+            ;
+}
+
+static bool socket_message_apple_local_enobufs(
+        struct fd *socket, int host_error) {
+#ifdef __APPLE__
+    // Darwin 用 ENOBUFS 表示本地 socket 发送队列暂时无空间。
+    return socket->socket.domain == AF_LOCAL_ && host_error == ENOBUFS;
+#else
+    (void) socket;
+    (void) host_error;
+    return false;
+#endif
+}
+
+static bool socket_message_apple_stream_scm_backpressure(
+        struct fd *socket, int host_error) {
+#ifdef __APPLE__
+    // Darwin 的本地 stream 在满队列附带 SCM_RIGHTS 时会返回 EMSGSIZE。
+    return socket->socket.domain == AF_LOCAL_ &&
+            socket->socket.type == SOCK_STREAM_ &&
+            host_error == EMSGSIZE;
+#else
+    (void) socket;
+    (void) host_error;
+    return false;
+#endif
+}
+
+static bool socket_message_send_would_block(
+        struct fd *socket, int host_error) {
+    return socket_message_would_block(host_error) ||
+            socket_message_apple_local_enobufs(socket, host_error) ||
+            socket_message_apple_stream_scm_backpressure(
+                    socket, host_error);
+}
+
+static const struct timer_time *socket_message_deadline(
+        struct fd *socket, bool receive,
+        struct timer_time *deadline) {
+    struct timeval timeout = {0};
+    socklen_t length = sizeof(timeout);
+    int option = receive ? SO_RCVTIMEO : SO_SNDTIMEO;
+    if (getsockopt(socket->real_fd, SOL_SOCKET,
+            option, &timeout, &length) < 0 ||
+            (timeout.tv_sec == 0 && timeout.tv_usec == 0))
+        return NULL;
+    struct timer_time duration = {
+        .sec = timeout.tv_sec,
+        .nsec = (int64_t) timeout.tv_usec * INT64_C(1000),
+    };
+    *deadline = timer_time_add(
+            timer_time_from_timespec(timespec_now(CLOCK_MONOTONIC)),
+            duration);
+    return deadline;
+}
+
+static int socket_message_wait_ready(
+        void *context, int types, union poll_fd_info info) {
+    (void) info;
+    int requested = *(const int *) context;
+    return (types & (requested | POLL_ERR | POLL_HUP)) != 0;
+}
+
+static int socket_message_wait(struct fd *socket, int events,
+        const struct timer_time *deadline) {
+    struct poll *wait = poll_create();
+    if (IS_ERR(wait))
+        return PTR_ERR(wait);
+    int result = poll_add_fd(wait, socket, events,
+            (union poll_fd_info) {.ptr = socket});
+    if (result == 0) {
+        result = deadline != NULL ?
+                poll_wait_until_signal_safe(wait,
+                        socket_message_wait_ready, &events, deadline) :
+                poll_wait_signal_safe(wait,
+                        socket_message_wait_ready, &events, NULL);
+        if (result > 0)
+            result = 0;
+        else if (result == 0)
+            result = _EAGAIN;
+    }
+    poll_destroy(wait);
+    return result;
+}
+
+static int socket_message_send_error(int error, dword_t flags) {
+    if (error == _EPIPE && !(flags & MSG_NOSIGNAL_))
+        send_signal(current, SIGPIPE_, SIGINFO_NIL);
+    return error;
+}
+
+static int socket_message_send_host_error(
+        struct fd *socket, int host_error, dword_t flags) {
+    int error = socket_message_apple_local_enobufs(socket, host_error) ?
+            _EAGAIN : err_map(host_error);
+    return socket_message_send_error(error, flags);
+}
+
+static int socket_message_scm_send_host_error(
+        struct fd *socket, int host_error, dword_t flags) {
+    if (socket_message_apple_stream_scm_backpressure(
+            socket, host_error))
+        return _EAGAIN;
+    return socket_message_send_host_error(socket, host_error, flags);
+}
+
+ssize_t socket_sendmsg_ref(const struct socket_ref *socket,
+        const void *buffer, size_t length, dword_t flags,
+        const struct socket_address *address, struct scm **scm_pointer) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
+    struct scm *scm = scm_pointer != NULL ? *scm_pointer : NULL;
+    int error = socket_sendto_validate(socket, length, flags);
+    if (error < 0)
+        return error;
+    size_t prefix_size = socket_sendto_prefix_size(socket);
+    if (prefix_size != 0) {
+        error = socket_sendto_prefix_validate(
+                socket, buffer, prefix_size);
+        if (error < 0)
+            return error;
+    }
+    error = socket_sendto_transaction_validate(socket, length);
+    if (error < 0)
+        return error;
+    error = socket_sendto_destination_check(socket, address, flags);
+    if (error < 0)
+        return error;
+    if (scm != NULL && socket->fd->socket.domain != AF_LOCAL_)
+        return _EINVAL;
+
+    int real_flags = sock_flags_to_real(flags);
+    if (real_flags < 0)
+        return _EINVAL;
+    bool serialize_unix_datagram =
+            socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type != SOCK_STREAM_;
+    bool may_wait = socket_message_may_wait(socket->fd, flags);
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer =
+            (scm != NULL || serialize_unix_datagram) && may_wait ?
+            socket_message_deadline(
+                    socket->fd, false, &wait_deadline) : NULL;
+    byte_t empty = 0;
+    struct iovec vector = {
+        .iov_base = length != 0 ? (void *) buffer : &empty,
+        .iov_len = length,
+    };
+    struct msghdr message = {
+        .msg_iov = &vector,
+        .msg_iovlen = 1,
+    };
+    bool has_address = address != NULL && address->length != 0;
+    if (has_address) {
+        message.msg_name = (void *) &address->storage;
+        message.msg_namelen = address->length;
+    }
+
+    int dummy_fd = -1;
+    if (scm != NULL && !(socket->fd->socket.type == SOCK_STREAM_ &&
+            length == 0)) {
+        dummy_fd = unix_scm_dummy_get();
+        if (dummy_fd < 0)
+            return dummy_fd;
+    }
+    bool scm_locked = false;
+    struct scm *rejected_scm = NULL;
+    struct unix_scm_receiver receiver = {0};
+    char host_control[CMSG_SPACE(sizeof(int))] = {0};
+    if (scm != NULL || serialize_unix_datagram) {
+        lock(&unix_scm_io_lock);
+        scm_locked = true;
+        error = unix_scm_receiver_retain(
+                socket->fd, address, &receiver);
+        if (error < 0) {
+            error = socket_message_send_error(error, flags);
+            goto out;
+        }
+    }
+    if (scm != NULL) {
+        if (socket->fd->socket.type == SOCK_STREAM_ && length == 0) {
+            ssize_t checked = sendmsg(
+                    socket->fd->real_fd, &message, real_flags);
+            if (checked < 0) {
+                error = socket_message_scm_send_host_error(
+                        socket->fd, errno, flags);
+                goto out;
+            }
+            rejected_scm = scm;
+            *scm_pointer = NULL;
+            error = (int) checked;
+            goto out;
+        }
+        assert(dummy_fd >= 0);
+        message.msg_control = host_control;
+        message.msg_controllen = sizeof(host_control);
+        struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(dummy_fd));
+        memcpy(CMSG_DATA(header), &dummy_fd, sizeof(dummy_fd));
+    }
+
+    for (;;) {
+        bool receiver_discards = serialize_unix_datagram &&
+                receiver.owner->socket.unix_read_shutdown;
+        if (receiver_discards) {
+            error = socket_message_send_error(_EPIPE, flags);
+            break;
+        }
+        struct unix_bound_name *queued_name =
+                unix_bound_message_begin(socket->fd);
+        int attempt_flags = scm_locked ?
+                real_flags | MSG_DONTWAIT : real_flags;
+        ssize_t sent = sendmsg(
+                socket->fd->real_fd, &message, attempt_flags);
+        int host_error = errno;
+        if (sent < 0)
+            unix_bound_message_cancel(queued_name);
+        if (sent >= 0 && scm != NULL) {
+            if (!unix_scm_receiver_queue(&receiver, scm))
+                rejected_scm = scm;
+            *scm_pointer = NULL;
+        }
+        if (sent >= 0) {
+            error = (int) sent;
+            break;
+        }
+        if (scm_locked && may_wait &&
+                socket_message_send_would_block(
+                        socket->fd, host_error)) {
+            unlock(&unix_scm_io_lock);
+            scm_locked = false;
+            error = socket_message_wait(socket->fd, POLL_WRITE,
+                    wait_deadline_pointer);
+            if (error < 0)
+                goto out;
+            lock(&unix_scm_io_lock);
+            scm_locked = true;
+            continue;
+        }
+        if (host_error == ENOENT && address != NULL &&
+                (address->lookup_inode != NULL ||
+                address->lookup_abstract != NULL))
+            error = _ECONNREFUSED;
+        else
+            error = scm != NULL ?
+                    socket_message_scm_send_host_error(
+                            socket->fd, host_error, flags) :
+                    socket_message_send_host_error(
+                            socket->fd, host_error, flags);
+        break;
+    }
+
+out:
+    if (scm_locked)
+        unlock(&unix_scm_io_lock);
+    if (rejected_scm != NULL)
+        socket_scm_release(rejected_scm);
+    if (receiver.owner != NULL)
+        fd_close(receiver.owner);
+    return error;
+}
+
+ssize_t socket_recvmsg_ref(const struct socket_ref *socket,
+        void *buffer, size_t length, dword_t flags,
+        struct socket_address *address, dword_t *message_flags,
+        struct scm **scm_pointer) {
+    assert(socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops &&
+            message_flags != NULL && scm_pointer != NULL);
+    *message_flags = 0;
+    *scm_pointer = NULL;
+    int real_flags = sock_flags_to_real(flags);
+    if (real_flags < 0)
+        return _EINVAL;
+    bool may_wait = socket_message_may_wait(socket->fd, flags);
+    if ((socket->fd->socket.domain == AF_INET_ ||
+            socket->fd->socket.domain == AF_INET6_) &&
+            socket->fd->socket.type == SOCK_STREAM_ &&
+            (flags & MSG_TRUNC_))
+        real_flags &= ~MSG_TRUNC;
+
+    bool unix_socket = socket->fd->socket.domain == AF_LOCAL_;
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer =
+            unix_socket && may_wait ?
+            socket_message_deadline(
+                    socket->fd, true, &wait_deadline) : NULL;
+    bool unix_recv_locked = false;
+    if (unix_socket) {
+        lock(&socket->fd->socket.unix_recv_lock);
+        unix_recv_locked = true;
+    }
+
+    bool track_unix_source = unix_socket &&
+            socket->fd->socket.type != SOCK_STREAM_;
+    struct socket_address discarded_address;
+    struct socket_address *received_address = address != NULL ?
+            address : (track_unix_source ? &discarded_address : NULL);
+    if (received_address != NULL) {
+        *received_address = (struct socket_address) {0};
+        received_address->length = sizeof(received_address->storage);
+    }
+
+    byte_t empty = 0;
+    struct iovec vector = {
+        .iov_base = length != 0 ? buffer : &empty,
+        .iov_len = length,
+    };
+    struct msghdr message = {
+        .msg_iov = &vector,
+        .msg_iovlen = 1,
+    };
+    if (received_address != NULL) {
+        message.msg_name = &received_address->storage;
+        message.msg_namelen = sizeof(received_address->storage);
+    }
+    // AF_UNIX 必须接收并关闭 host dummy，才能与内部 SCM 队列保持一一对应。
+    char host_control[CMSG_SPACE(sizeof(int))] = {0};
+    if (unix_socket) {
+        message.msg_control = host_control;
+        message.msg_controllen = sizeof(host_control);
+    }
+
+    ssize_t result;
+    ssize_t received;
+retry_receive:
+    if (received_address != NULL)
+        message.msg_namelen = sizeof(received_address->storage);
+    if (unix_socket) {
+        memset(host_control, 0, sizeof(host_control));
+        message.msg_controllen = sizeof(host_control);
+        message.msg_flags = 0;
+    }
+    received = recvmsg(socket->fd->real_fd, &message,
+            unix_socket ? real_flags | MSG_DONTWAIT : real_flags);
+    if (received < 0) {
+        int host_error = errno;
+        if (unix_socket && may_wait &&
+                socket_message_would_block(host_error)) {
+            unlock(&socket->fd->socket.unix_recv_lock);
+            unix_recv_locked = false;
+            int wait_error =
+                    socket_message_wait(socket->fd, POLL_READ,
+                            wait_deadline_pointer);
+            if (wait_error < 0) {
+                result = wait_error;
+                goto out;
+            }
+            lock(&socket->fd->socket.unix_recv_lock);
+            unix_recv_locked = true;
+            goto retry_receive;
+        }
+        result = err_map(host_error);
+        goto out;
+    }
+
+    // host fd 必须先关闭；即使后续地址转换失败，也不能破坏 dummy 与队列的对应。
+    bool host_rights = unix_socket && close_host_scm_rights(&message);
+    if (host_rights) {
+        bool found = false;
+        lock(&unix_scm_io_lock);
+        if (!list_empty(&socket->fd->socket.unix_scm)) {
+            struct scm *queued = list_first_entry(
+                    &socket->fd->socket.unix_scm, struct scm, queue);
+            found = true;
+            if (flags & MSG_PEEK_)
+                *scm_pointer = socket_scm_clone(queued);
+            else {
+                list_remove(&queued->queue);
+                *scm_pointer = queued;
+            }
+        }
+        unlock(&unix_scm_io_lock);
+        if (!found) {
+            result = _EIO;
+            goto out;
+        }
+        if (*scm_pointer == NULL) {
+            result = _ENOMEM;
+            goto out;
+        }
+    }
+
+    bool copied_unix_stream_name = false;
+    if (unix_socket && socket->fd->socket.type == SOCK_STREAM_ &&
+            received > 0 && address != NULL &&
+            message.msg_namelen == 0) {
+        lock(&peer_lock);
+        if (socket->fd->socket.unix_peer_name_valid &&
+                socket->fd->socket.unix_peer_name_len != 0) {
+            struct sockaddr_ *guest =
+                    (struct sockaddr_ *) &received_address->storage;
+            guest->family = AF_LOCAL_;
+            memcpy(guest->data,
+                    socket->fd->socket.unix_peer_name,
+                    socket->fd->socket.unix_peer_name_len);
+            received_address->length =
+                    offsetof(struct sockaddr_, data) +
+                    socket->fd->socket.unix_peer_name_len;
+            copied_unix_stream_name = true;
+        }
+        unlock(&peer_lock);
+    }
+    if (!copied_unix_stream_name &&
+            received_address != NULL && received_address->length != 0) {
+        uint_t address_length = (uint_t) message.msg_namelen;
+        int error = sockaddr_from_real(&received_address->storage,
+                sizeof(received_address->storage), &address_length,
+                track_unix_source && !(flags & MSG_PEEK_));
+        if (error < 0) {
+            result = error;
+            goto out;
+        }
+        received_address->length = (socklen_t) address_length;
+    }
+    if (unix_recv_locked) {
+        unlock(&socket->fd->socket.unix_recv_lock);
+        unix_recv_locked = false;
+    }
+    *message_flags = socket_recvmsg_output_flags(message.msg_flags);
+    result = received;
+
+out:
+    if (unix_recv_locked)
+        unlock(&socket->fd->socket.unix_recv_lock);
+    if (result < 0 && *scm_pointer != NULL) {
+        socket_scm_release(*scm_pointer);
+        *scm_pointer = NULL;
+    }
+    return result;
+}
+
 struct scm_delivery {
     unsigned count;
     fd_t numbers[I386_SCM_MAX_FDS];
@@ -3198,14 +3963,14 @@ struct scm_delivery {
 };
 
 static int scm_delivery_install(struct task *task, struct scm *scm,
-        unsigned count, struct scm_delivery *delivery) {
+        unsigned count, int flags, struct scm_delivery *delivery) {
     for (unsigned index = 0; index < count; index++) {
         struct fd *object = scm->fds[index];
         struct fd *rollback_reference = fd_retain(object);
         scm->fds[index] = NULL;
         qword_t generation = 0;
         fd_t number = f_install_task_tracked(
-                task, object, 0, &generation);
+                task, object, flags, &generation);
         if (number < 0) {
             fd_close(rollback_reference);
             return number;
@@ -3231,6 +3996,9 @@ static void scm_delivery_finish(
 
 int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     STRACE("sendmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
+    dword_t guest_flags = (dword_t) flags;
+    if (guest_flags & I386_LINUX_MSG_CMSG_COMPAT)
+        return _EINVAL;
     struct socket_ref socket;
     int_t result = socket_ref_get_task(current, sock_fd, &socket);
     if (result < 0)
@@ -3241,7 +4009,9 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     struct i386_message_iov iov = {0};
     uint8_t *guest_control = NULL;
     struct scm *scm = NULL;
+    struct scm *rejected_scm = NULL;
     bool scm_io_locked = false;
+    struct unix_scm_receiver scm_receiver = {0};
     if (user_get(msghdr_addr, msg_fake)) {
         result = _EFAULT;
         goto out;
@@ -3287,32 +4057,71 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
                     msg_fake.msg_controllen, scm);
             if (result < 0)
                 goto out;
-            result = unix_scm_sender_validate(socket.fd);
-            if (result < 0)
-                goto out;
         }
     }
 
-    msg.msg_flags = sock_flags_to_real(msg_fake.msg_flags);
-    int real_flags = sock_flags_to_real(flags);
-    if (msg.msg_flags < 0 || real_flags < 0) {
+    int real_flags = sock_flags_to_real(
+            guest_flags & ~I386_LINUX_MSG_CMSG_CLOEXEC);
+    if (real_flags < 0) {
         result = _EINVAL;
         goto out;
     }
+    bool serialize_unix_datagram =
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    bool may_wait = socket_message_may_wait(socket.fd, guest_flags);
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer =
+            (scm != NULL || serialize_unix_datagram) && may_wait ?
+            socket_message_deadline(
+                    socket.fd, false, &wait_deadline) : NULL;
 
     // 只传一个 host dummy fd；真实 guest 引用由内部 SCM 容器携带。
     char real_msg_control[CMSG_SPACE(sizeof(int))] = {0};
-    if (scm != NULL) {
+    int dummy_fd = -1;
+    if (scm != NULL && !(socket.fd->socket.type == SOCK_STREAM_ &&
+            iov.transaction_size == 0)) {
+        dummy_fd = unix_scm_dummy_get();
+        if (dummy_fd < 0) {
+            result = dummy_fd;
+            goto out;
+        }
+    }
+    if (scm != NULL || serialize_unix_datagram) {
         lock(&unix_scm_io_lock);
         scm_io_locked = true;
-        static int dummy_fd = -1;
-        if (dummy_fd < 0) {
-            dummy_fd = open(".", O_RDONLY);
-            if (dummy_fd < 0) {
-                result = errno_map();
+        struct socket_address destination = {0};
+        const struct socket_address *destination_pointer = NULL;
+        if (msg.msg_name != NULL && msg.msg_namelen != 0) {
+            memcpy(&destination.storage,
+                    msg.msg_name, msg.msg_namelen);
+            destination.length = msg.msg_namelen;
+            destination_pointer = &destination;
+        }
+        result = unix_scm_receiver_retain(socket.fd,
+                destination_pointer, &scm_receiver);
+        if (result < 0) {
+            result = socket_message_send_error(
+                    result, guest_flags);
+            goto out;
+        }
+    }
+    if (scm != NULL) {
+        if (socket.fd->socket.type == SOCK_STREAM_ &&
+                iov.transaction_size == 0) {
+            ssize_t checked = sendmsg(
+                    socket.fd->real_fd, &msg, real_flags);
+            if (checked < 0) {
+                result = socket_message_scm_send_host_error(
+                        socket.fd, errno, guest_flags);
                 goto out;
             }
+            rejected_scm = scm;
+            scm = NULL;
+            result = (int_t) checked;
+            goto out;
         }
+        assert(dummy_fd >= 0);
         msg.msg_control = real_msg_control;
         msg.msg_controllen = sizeof(real_msg_control);
         struct cmsghdr *real_cmsg = CMSG_FIRSTHDR(&msg);
@@ -3322,28 +4131,61 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
         memcpy(CMSG_DATA(real_cmsg), &dummy_fd, sizeof(dummy_fd));
     }
 
-    struct unix_bound_name *queued_name =
-            unix_bound_message_begin(socket.fd);
-    ssize_t sent = sendmsg(socket.fd->real_fd, &msg, real_flags);
-    if (sent < 0) {
-        unix_bound_message_cancel(queued_name);
-        result = errno_map();
-        goto out;
-    }
-    result = (int_t) sent;
-    if (scm != NULL) {
-        if (!unix_scm_queue_delivered(socket.fd, scm))
-            scm_free(scm);
-        scm = NULL;
-        unlock(&unix_scm_io_lock);
-        scm_io_locked = false;
+    for (;;) {
+        bool receiver_discards = serialize_unix_datagram &&
+                scm_receiver.owner->socket.unix_read_shutdown;
+        if (receiver_discards) {
+            result = socket_message_send_error(
+                    _EPIPE, guest_flags);
+            break;
+        }
+        struct unix_bound_name *queued_name =
+                unix_bound_message_begin(socket.fd);
+        ssize_t sent = sendmsg(socket.fd->real_fd, &msg,
+                scm_io_locked ?
+                        real_flags | MSG_DONTWAIT : real_flags);
+        int host_error = errno;
+        if (sent < 0)
+            unix_bound_message_cancel(queued_name);
+        if (sent >= 0) {
+            result = (int_t) sent;
+            if (scm != NULL) {
+                if (!unix_scm_receiver_queue(&scm_receiver, scm))
+                    rejected_scm = scm;
+                scm = NULL;
+            }
+            break;
+        }
+        if (scm_io_locked && may_wait &&
+                socket_message_send_would_block(
+                        socket.fd, host_error)) {
+            unlock(&unix_scm_io_lock);
+            scm_io_locked = false;
+            result = socket_message_wait(socket.fd, POLL_WRITE,
+                    wait_deadline_pointer);
+            if (result < 0)
+                goto out;
+            lock(&unix_scm_io_lock);
+            scm_io_locked = true;
+            continue;
+        }
+        result = scm != NULL ?
+                socket_message_scm_send_host_error(
+                        socket.fd, host_error, guest_flags) :
+                socket_message_send_host_error(
+                        socket.fd, host_error, guest_flags);
+        break;
     }
 
 out:
     if (scm_io_locked)
         unlock(&unix_scm_io_lock);
+    if (rejected_scm != NULL)
+        socket_scm_release(rejected_scm);
+    if (scm_receiver.owner != NULL)
+        fd_close(scm_receiver.owner);
     if (scm != NULL)
-        scm_free(scm);
+        socket_scm_release(scm);
     free(guest_control);
     i386_message_iov_destroy(&iov);
     socket_ref_release(&socket);
@@ -3352,6 +4194,9 @@ out:
 
 int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     STRACE("recvmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
+    dword_t guest_flags = (dword_t) flags;
+    if (guest_flags & I386_LINUX_MSG_CMSG_COMPAT)
+        return _EINVAL;
     struct socket_ref socket;
     int_t result = socket_ref_get_task(current, sock_fd, &socket);
     if (result < 0)
@@ -3363,6 +4208,7 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     struct scm_delivery delivery = {0};
     struct scm *received_scm = NULL;
     uint8_t *guest_control_wire = NULL;
+    bool unix_recv_locked = false;
     if (user_get(msghdr_addr, msg_fake)) {
         result = _EFAULT;
         goto out;
@@ -3387,12 +4233,19 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
         msg.msg_controllen = sizeof(real_msg_control);
     }
 
-    int real_flags = sock_flags_to_real(flags);
+    int real_flags = sock_flags_to_real(
+            guest_flags & ~I386_LINUX_MSG_CMSG_CLOEXEC);
     if (real_flags < 0) {
         result = _EINVAL;
         goto out;
     }
 
+    bool may_wait = socket_message_may_wait(socket.fd, guest_flags);
+    struct timer_time wait_deadline;
+    const struct timer_time *wait_deadline_pointer =
+            socket.fd->socket.domain == AF_LOCAL_ && may_wait ?
+            socket_message_deadline(
+                    socket.fd, true, &wait_deadline) : NULL;
     result = i386_message_iov_prepare(&socket, msg_fake.msg_iov,
             msg_fake.msg_iovlen, (dword_t) flags, false, &iov);
     if (result < 0)
@@ -3400,21 +4253,98 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     msg.msg_iov = iov.host;
     msg.msg_iovlen = iov.count;
 
-    ssize_t received = recvmsg(socket.fd->real_fd, &msg, real_flags);
+    if (socket.fd->socket.domain == AF_LOCAL_) {
+        lock(&socket.fd->socket.unix_recv_lock);
+        unix_recv_locked = true;
+    }
+    ssize_t received;
+retry_i386_receive:
+    if (msg.msg_name != NULL)
+        msg.msg_namelen = sizeof(msg_name);
+    if (socket.fd->socket.domain == AF_LOCAL_) {
+        memset(real_msg_control, 0, sizeof(real_msg_control));
+        msg.msg_controllen = sizeof(real_msg_control);
+        msg.msg_flags = 0;
+    }
+    received = recvmsg(socket.fd->real_fd, &msg,
+            socket.fd->socket.domain == AF_LOCAL_ ?
+                    real_flags | MSG_DONTWAIT : real_flags);
     if (received < 0) {
-        result = errno_map();
+        int host_error = errno;
+        if (socket.fd->socket.domain == AF_LOCAL_ && may_wait &&
+                socket_message_would_block(host_error)) {
+            unlock(&socket.fd->socket.unix_recv_lock);
+            unix_recv_locked = false;
+            result = socket_message_wait(socket.fd, POLL_READ,
+                    wait_deadline_pointer);
+            if (result < 0)
+                goto out;
+            lock(&socket.fd->socket.unix_recv_lock);
+            unix_recv_locked = true;
+            goto retry_i386_receive;
+        }
+        result = err_map(host_error);
         goto out;
     }
     result = (int_t) received;
 
     int post_receive_error = 0;
-    if (msg.msg_name != NULL) {
+    bool copied_unix_stream_name = false;
+    if (socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type == SOCK_STREAM_ &&
+            received > 0 && wants_name && msg.msg_namelen == 0) {
+        lock(&peer_lock);
+        if (socket.fd->socket.unix_peer_name_valid &&
+                socket.fd->socket.unix_peer_name_len != 0) {
+            struct sockaddr_ *guest =
+                    (struct sockaddr_ *) &msg_name;
+            guest->family = AF_LOCAL_;
+            memcpy(guest->data,
+                    socket.fd->socket.unix_peer_name,
+                    socket.fd->socket.unix_peer_name_len);
+            msg.msg_namelen = (socklen_t) (
+                    offsetof(struct sockaddr_, data) +
+                    socket.fd->socket.unix_peer_name_len);
+            copied_unix_stream_name = true;
+        }
+        unlock(&peer_lock);
+    }
+    if (msg.msg_name != NULL && !copied_unix_stream_name) {
         uint_t returned_length = (uint_t) msg.msg_namelen;
         post_receive_error = sockaddr_from_real(msg.msg_name,
                 sizeof(msg_name), &returned_length,
                 track_unix_source && !(flags & MSG_PEEK_));
         if (post_receive_error == 0)
             msg.msg_namelen = (socklen_t) returned_length;
+    }
+
+    // host 消息一旦消费，就先完成 dummy 与内部队列的配对，再释放接收顺序锁。
+    bool host_rights = socket.fd->socket.domain == AF_LOCAL_ &&
+            close_host_scm_rights(&msg);
+    if (host_rights) {
+        bool found = false;
+        lock(&unix_scm_io_lock);
+        if (!list_empty(&socket.fd->socket.unix_scm)) {
+            struct scm *queued = list_first_entry(
+                    &socket.fd->socket.unix_scm, struct scm, queue);
+            found = true;
+            if (flags & MSG_PEEK_)
+                received_scm = socket_scm_clone(queued);
+            else {
+                list_remove(&queued->queue);
+                received_scm = queued;
+            }
+        }
+        unlock(&unix_scm_io_lock);
+        if (!found && post_receive_error == 0)
+            post_receive_error = _EIO;
+        else if (found && received_scm == NULL &&
+                post_receive_error == 0)
+            post_receive_error = _ENOMEM;
+    }
+    if (unix_recv_locked) {
+        unlock(&socket.fd->socket.unix_recv_lock);
+        unix_recv_locked = false;
     }
 
     // msg_iovec (changed)
@@ -3436,27 +4366,9 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
             msg_fake.msg_controllen : 0;
     msg_fake.msg_controllen = 0;
     bool guest_control_truncated = false;
-    bool host_rights = socket.fd->socket.domain == AF_LOCAL_ &&
-            close_host_scm_rights(&msg);
-    if (host_rights && (flags & MSG_PEEK_)) {
-        // PEEK 不消费内部所有权；后续正式接收仍与同一个 dummy 对齐。
-        guest_control_truncated = true;
-    } else if (host_rights) {
-        lock(&unix_scm_io_lock);
-        lock(&socket.fd->lock);
-        if (!list_empty(&socket.fd->socket.unix_scm)) {
-            received_scm = list_first_entry(
-                    &socket.fd->socket.unix_scm, struct scm, queue);
-            list_remove(&received_scm->queue);
-        }
-        unlock(&socket.fd->lock);
-        unlock(&unix_scm_io_lock);
-
-        if (received_scm == NULL) {
-            if (post_receive_error == 0)
-                post_receive_error = _EIO;
-        } else if (post_receive_error < 0) {
-            scm_free(received_scm);
+    if (received_scm != NULL) {
+        if (post_receive_error < 0) {
+            socket_scm_release(received_scm);
             received_scm = NULL;
         } else {
             unsigned deliverable = 0;
@@ -3481,8 +4393,11 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
                     guest_header->len = (dword_t) wire_length;
                     guest_header->level = SOL_SOCKET_;
                     guest_header->type = SCM_RIGHTS_;
+                    int install_flags = (guest_flags &
+                            I386_LINUX_MSG_CMSG_CLOEXEC) ? O_CLOEXEC_ : 0;
                     post_receive_error = scm_delivery_install(current,
-                            received_scm, deliverable, &delivery);
+                            received_scm, deliverable,
+                            install_flags, &delivery);
                     for (unsigned index = 0;
                             index < delivery.count; index++) {
                         STRACE(" receiving fd %d",
@@ -3499,7 +4414,7 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
                         msg_fake.msg_controllen = (dword_t) wire_length;
                 }
             }
-            scm_free(received_scm);
+            socket_scm_release(received_scm);
             received_scm = NULL;
         }
     }
@@ -3520,7 +4435,9 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     msg_fake.msg_namelen = wants_name ? msg.msg_namelen : 0;
 
     // msg_flags (changed)
-    msg_fake.msg_flags = sock_flags_from_real(msg.msg_flags);
+    msg_fake.msg_flags = socket_recvmsg_output_flags(msg.msg_flags);
+    msg_fake.msg_flags |= guest_flags &
+            I386_LINUX_MSG_CMSG_CLOEXEC;
     if (guest_control_truncated)
         msg_fake.msg_flags |= MSG_CTRUNC_;
 
@@ -3533,10 +4450,12 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
 
     scm_delivery_finish(current, &delivery, false);
 out:
+    if (unix_recv_locked)
+        unlock(&socket.fd->socket.unix_recv_lock);
     if (delivery.count != 0)
         scm_delivery_finish(current, &delivery, true);
     if (received_scm != NULL)
-        scm_free(received_scm);
+        socket_scm_release(received_scm);
     free(guest_control_wire);
     i386_message_iov_destroy(&iov);
     socket_ref_release(&socket);
@@ -3591,8 +4510,7 @@ static void sock_translate_err(struct fd *fd, int *err) {
 
 static ssize_t sock_read(struct fd *fd, void *buf, size_t size) {
     int err;
-    if (fd->socket.domain == AF_LOCAL_ &&
-            fd->socket.type != SOCK_STREAM_) {
+    if (fd->socket.domain == AF_LOCAL_) {
         struct socket_ref socket = {.fd = fd};
         err = (int) socket_recvfrom_ref(
                 &socket, buf, size, 0, NULL);
@@ -3604,33 +4522,70 @@ static ssize_t sock_read(struct fd *fd, void *buf, size_t size) {
 }
 
 static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
-    struct unix_bound_name *queued_name =
-            unix_bound_message_begin(fd);
-    int err = realfs_write(fd, buf, size);
-    if (err < 0)
-        unix_bound_message_cancel(queued_name);
+    int err;
+    if (fd->socket.domain == AF_LOCAL_ &&
+            fd->socket.type != SOCK_STREAM_) {
+        const struct socket_ref socket = {.fd = fd};
+        err = (int) socket_sendto_ref(
+                &socket, buf, size, 0, NULL);
+    } else {
+        err = realfs_write(fd, buf, size);
+    }
     sock_translate_err(fd, &err);
     return err;
 }
 
-static void unix_bound_drain_messages(struct fd *fd) {
-    if (fd->socket.domain != AF_LOCAL_ ||
-            fd->socket.type == SOCK_STREAM_)
-        return;
+// 调用方按 unix_recv_lock -> unix_scm_io_lock 持锁；host I/O 必须非阻塞。
+static int unix_bound_drain_messages_locked(
+        struct fd *fd, struct list *discarded_scm) {
+    assert(fd->socket.domain == AF_LOCAL_ &&
+            fd->socket.type != SOCK_STREAM_);
     for (;;) {
         byte_t discarded;
+        struct iovec vector = {
+            .iov_base = &discarded,
+            .iov_len = sizeof(discarded),
+        };
         struct sockaddr_storage source = {0};
-        socklen_t source_length = sizeof(source);
-        ssize_t result = recvfrom(fd->real_fd, &discarded, sizeof(discarded),
-                MSG_DONTWAIT | MSG_TRUNC,
-                (struct sockaddr *) &source, &source_length);
-        if (result < 0)
-            break;
-        if (source_length != 0) {
-            uint_t converted_length = (uint_t) source_length;
+        char control[CMSG_SPACE(sizeof(int))] = {0};
+        struct msghdr message = {
+            .msg_name = &source,
+            .msg_namelen = sizeof(source),
+            .msg_iov = &vector,
+            .msg_iovlen = 1,
+            .msg_control = control,
+            .msg_controllen = sizeof(control),
+        };
+        ssize_t result = recvmsg(fd->real_fd, &message,
+                MSG_DONTWAIT | MSG_TRUNC);
+        if (result < 0) {
+            int host_error = errno;
+            if (host_error == EINTR)
+                continue;
+            return socket_message_would_block(host_error) ?
+                    0 : err_map(host_error);
+        }
+        if (close_host_scm_rights(&message) &&
+                !list_empty(&fd->socket.unix_scm)) {
+            struct scm *scm = list_first_entry(
+                    &fd->socket.unix_scm, struct scm, queue);
+            list_remove(&scm->queue);
+            list_add_tail(discarded_scm, &scm->queue);
+        }
+        if (message.msg_namelen != 0) {
+            uint_t converted_length = (uint_t) message.msg_namelen;
             (void) sockaddr_from_real(&source, sizeof(source),
                     &converted_length, true);
         }
+    }
+}
+
+static void socket_scm_release_list(struct list *scm_list) {
+    while (!list_empty(scm_list)) {
+        struct scm *scm = list_first_entry(
+                scm_list, struct scm, queue);
+        list_remove(&scm->queue);
+        socket_scm_release(scm);
     }
 }
 
@@ -3643,7 +4598,35 @@ static int sock_close(struct fd *fd) {
             close_result = errno_map();
         fd->real_fd = -1;
     }
-    unix_bound_drain_messages(fd);
+    struct list discarded_scm;
+    list_init(&discarded_scm);
+    bool unix_datagram = fd->socket.domain == AF_LOCAL_ &&
+            fd->socket.type != SOCK_STREAM_;
+    if (unix_datagram)
+        lock(&fd->socket.unix_recv_lock);
+    if (fd->socket.domain == AF_LOCAL_)
+        lock(&unix_scm_io_lock);
+    if (unix_datagram && !fd->socket.unix_read_shutdown)
+        (void) unix_bound_drain_messages_locked(
+                fd, &discarded_scm);
+    if (fd->socket.domain == AF_LOCAL_) {
+        while (!list_empty(&fd->socket.unix_scm)) {
+            struct scm *scm = list_first_entry(
+                    &fd->socket.unix_scm, struct scm, queue);
+            list_remove(&scm->queue);
+            list_add_tail(&discarded_scm, &scm->queue);
+        }
+        while (!list_empty(&fd->socket.unix_pending_scm)) {
+            struct scm *scm = list_first_entry(
+                    &fd->socket.unix_pending_scm,
+                    struct scm, queue);
+            list_remove(&scm->queue);
+            list_add_tail(&discarded_scm, &scm->queue);
+        }
+        unlock(&unix_scm_io_lock);
+    }
+    if (unix_datagram)
+        unlock(&fd->socket.unix_recv_lock);
     unix_bound_owner_finish_close(fd);
     inode_release_if_exist(fd->socket.unix_name_inode);
     if (fd->socket.unix_name_abstract != NULL)
@@ -3662,20 +4645,7 @@ static int sock_close(struct fd *fd) {
     if (peer != NULL)
         peer->socket.unix_peer = NULL;
     unlock(&peer_lock);
-    if (fd->socket.domain == AF_LOCAL_) {
-        lock(&fd->lock);
-        struct scm *scm, *tmp;
-        list_for_each_entry_safe(&fd->socket.unix_scm, scm, tmp, queue) {
-            list_remove(&scm->queue);
-            scm_free(scm);
-        }
-        list_for_each_entry_safe(
-                &fd->socket.unix_pending_scm, scm, tmp, queue) {
-            list_remove(&scm->queue);
-            scm_free(scm);
-        }
-        unlock(&fd->lock);
-    }
+    socket_scm_release_list(&discarded_scm);
     if (fd->real_fd >= 0)
         return realfs_close(fd);
     return close_result;

@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -40,6 +42,10 @@
 #define USER_READONLY_HEADER UINT32_C(0x2100)
 #define USER_UNMAPPED UINT32_C(0x3000)
 #define DISCARD_STRESS_ITERATIONS 64
+#ifdef __APPLE__
+#define SHUTDOWN_RACE_ITERATIONS 64
+#endif
+#define MSG_CMSG_CLOEXEC_ UINT32_C(0x40000000)
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -71,6 +77,17 @@ struct guest_rights {
     int_t type;
     fd_t fd;
 };
+
+#ifdef __APPLE__
+struct shutdown_send_call {
+    struct fixture *fixture;
+    struct socket_ref sender;
+    struct scm *scm;
+    atomic_bool ready;
+    atomic_bool start;
+    ssize_t result;
+};
+#endif
 
 _Static_assert(sizeof(struct guest_rights) ==
         sizeof(struct cmsghdr_) + sizeof(fd_t),
@@ -242,6 +259,20 @@ static int bind_unix_socket(struct fixture *fixture, fd_t number,
     return error;
 }
 
+#ifdef __APPLE__
+static int connect_unix_socket(struct fixture *fixture, fd_t number,
+        const struct guest_unix_address *address) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(&fixture->task, number, &socket);
+    if (error < 0)
+        return error;
+    error = socket_connect_ref_task(&fixture->task, &socket,
+            &address->storage, address->length);
+    socket_ref_release(&socket);
+    return error;
+}
+#endif
+
 static ssize_t send_unix_datagram(struct fixture *fixture, fd_t sender,
         const struct guest_unix_address *destination,
         const void *payload, size_t payload_length) {
@@ -262,6 +293,21 @@ static ssize_t send_unix_datagram(struct fixture *fixture, fd_t sender,
     socket_ref_release(&socket);
     return result;
 }
+
+#ifdef __APPLE__
+static ssize_t send_connected_unix_datagram(
+        struct fixture *fixture, fd_t sender,
+        const void *payload, size_t payload_length, dword_t flags) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(&fixture->task, sender, &socket);
+    if (error < 0)
+        return error;
+    ssize_t result = socket_sendto_ref(
+            &socket, payload, payload_length, flags, NULL);
+    socket_ref_release(&socket);
+    return result;
+}
+#endif
 
 static ssize_t receive_unix_datagram(struct fixture *fixture,
         fd_t receiver, dword_t flags, void *payload, size_t payload_length,
@@ -444,6 +490,25 @@ static bool close_socket(struct fixture *fixture, fd_t *number) {
     *number = -1;
     return error == 0;
 }
+
+#ifdef __APPLE__
+static void *send_during_shutdown(void *opaque) {
+    struct shutdown_send_call *call = opaque;
+    current = &call->fixture->task;
+    atomic_store_explicit(&call->ready, true, memory_order_release);
+    while (!atomic_load_explicit(&call->start, memory_order_acquire))
+        sched_yield();
+    const byte_t payload = 0x73;
+    call->result = socket_sendmsg_ref(&call->sender,
+            &payload, sizeof(payload), MSG_NOSIGNAL_, NULL, &call->scm);
+    if (call->scm != NULL) {
+        socket_scm_release(call->scm);
+        call->scm = NULL;
+    }
+    current = NULL;
+    return NULL;
+}
+#endif
 
 static bool test_abstract_type_namespaces(struct fixture *fixture) {
     static const byte_t name[] = {
@@ -831,6 +896,40 @@ static bool test_recvmsg_scm_container_lifetime(struct fixture *fixture) {
                     &passed->refcount, memory_order_relaxed) == 2,
             "发送后仅有一个 SCM 容器和一份传递引用");
 
+    struct guest_rights peek_cleared = {0};
+    CHECK(user_write(USER_RECV_CONTROL,
+                    &peek_cleared, sizeof(peek_cleared)) == 0 &&
+            prepare_recvmsg(USER_RECV_HEADER,
+                    USER_RECV_PAYLOAD, 0,
+                    USER_RECV_CONTROL, sizeof(peek_cleared)) &&
+            sys_recvmsg(pair[1], USER_RECV_HEADER,
+                    MSG_PEEK_ | MSG_CMSG_CLOEXEC_) == 3,
+            "i386 MSG_PEEK 克隆并交付 SCM_RIGHTS");
+    struct guest_rights peek_rights = {0};
+    struct msghdr_ peek_header = {0};
+    CHECK(user_read(USER_RECV_CONTROL,
+                    &peek_rights, sizeof(peek_rights)) == 0 &&
+            user_read(USER_RECV_HEADER,
+                    &peek_header, sizeof(peek_header)) == 0 &&
+            peek_rights.length == sizeof(peek_rights) &&
+            peek_rights.level == SOL_SOCKET_ &&
+            peek_rights.type == SCM_RIGHTS_ &&
+            peek_rights.fd >= 0 &&
+            f_get_task(&fixture->task, peek_rights.fd) == passed &&
+            f_getfd_task(&fixture->task, peek_rights.fd) == FD_CLOEXEC_ &&
+            peek_header.msg_flags == MSG_CMSG_CLOEXEC_ &&
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 3,
+            "MSG_PEEK 返回独立 fd 且不回显输入标志");
+    lock(&receiver->lock);
+    bool queued_after_peek = !list_empty(&receiver->socket.unix_scm);
+    unlock(&receiver->lock);
+    CHECK(queued_after_peek &&
+            f_close_task(&fixture->task, peek_rights.fd) == 0 &&
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 2,
+            "关闭 PEEK fd 后原 SCM 队列仍供正式接收");
+
     struct guest_rights cleared_rights = {0};
     CHECK(user_write(USER_RECV_CONTROL,
                     &cleared_rights, sizeof(cleared_rights)) == 0 &&
@@ -1012,6 +1111,17 @@ static bool test_recvmsg_scm_truncation_and_rollback(
                     &unexpected, sizeof(unexpected), NULL) == _EAGAIN,
             "截断与写回失败的两条 SCM 报文均只消费一次");
 
+    CHECK(prepare_sendmsg_rights(passed_number) &&
+            sys_sendmsg(pair[0], USER_SEND_HEADER, 0) == 3 &&
+            sys_recvfrom(pair[1], USER_RECV_PAYLOAD, 3, 0, 0, 0) == 3,
+            "不请求 ancillary 的 recv 仍消费携带 SCM_RIGHTS 的 payload");
+    lock(&receiver->lock);
+    queue_empty = list_empty(&receiver->socket.unix_scm);
+    unlock(&receiver->lock);
+    CHECK(queue_empty && atomic_load_explicit(&passed->refcount,
+                    memory_order_relaxed) == 1,
+            "recv 丢弃未请求的 fd 并保持下一次 recvmsg 队列对齐");
+
     CHECK(f_close_task(&fixture->task, passed_number) == 0 &&
             fixture->scm_probe.close_calls == 1,
             "SCM 截断与回滚后底层对象恰好析构一次");
@@ -1020,6 +1130,227 @@ static bool test_recvmsg_scm_truncation_and_rollback(
             "清理 SCM 截断与回滚测试 socketpair");
     return true;
 }
+
+#ifdef __APPLE__
+static bool test_datagram_shutdown_drain(struct fixture *fixture) {
+    static const byte_t receiver_name[] = {
+        0, 's', 'h', 'u', 't', '-', 'r', 'x',
+    };
+    static const byte_t sender_name[] = {
+        0, 's', 'h', 'u', 't', '-', 't', 'x',
+    };
+    struct guest_unix_address receiver_address =
+            unix_address(receiver_name, sizeof(receiver_name));
+    struct guest_unix_address sender_address =
+            unix_address(sender_name, sizeof(sender_name));
+    fd_t receiver = create_unix_socket(fixture, SOCK_DGRAM_);
+    fd_t sender = create_unix_socket(fixture, SOCK_DGRAM_);
+    CHECK(receiver >= 0 && sender >= 0 &&
+            bind_unix_socket(fixture, receiver, &receiver_address) == 0 &&
+            bind_unix_socket(fixture, sender, &sender_address) == 0 &&
+            connect_unix_socket(fixture, receiver, &sender_address) == 0 &&
+            connect_unix_socket(fixture, sender, &receiver_address) == 0,
+            "创建双向连接的 shutdown 数据报两端");
+
+    fixture->scm_probe.close_calls = 0;
+    struct fd *passed = fd_create(&scm_probe_ops);
+    CHECK(passed != NULL, "创建 shutdown SCM 引用探针");
+    passed->data = fixture;
+    fd_t passed_number = f_install_task(&fixture->task, passed, 0);
+    CHECK(passed_number >= 0, "安装 shutdown SCM 引用探针");
+
+    const byte_t ordinary[] = {0x44, 0x52};
+    CHECK(send_connected_unix_datagram(
+                    fixture, sender, NULL, 0, 0) == 0,
+            "shutdown 前排入零长度数据报");
+    CHECK(send_connected_unix_datagram(fixture, sender,
+                    ordinary, sizeof(ordinary), 0) == sizeof(ordinary),
+            "shutdown 前排入普通数据报");
+    CHECK(prepare_sendmsg_rights(passed_number) &&
+            sys_sendmsg(sender, USER_SEND_HEADER, 0) == 3,
+            "shutdown 前排入 SCM 数据报");
+    CHECK(
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 2,
+            "shutdown 前 SCM 容器持有一份传递引用");
+
+    CHECK(sys_shutdown(receiver, SHUT_RD) == 0,
+            "连接的数据报接收端成功执行 SHUT_RD");
+    struct fd *receiver_fd = f_get_task(&fixture->task, receiver);
+    CHECK(receiver_fd != NULL &&
+            receiver_fd->socket.unix_read_shutdown &&
+            list_empty(&receiver_fd->socket.unix_scm) &&
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 1,
+            "SHUT_RD 排空零长度之后的报文并释放 SCM 引用");
+
+    const byte_t rejected = 0x65;
+    CHECK(send_connected_unix_datagram(fixture, sender,
+                    &rejected, sizeof(rejected), MSG_NOSIGNAL_) == _EPIPE &&
+            prepare_sendmsg_rights(passed_number) &&
+            sys_sendmsg(sender, USER_SEND_HEADER, MSG_NOSIGNAL_) == _EPIPE &&
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 1 &&
+            list_empty(&receiver_fd->socket.unix_scm),
+            "读 shutdown 后普通与 SCM 发送按 Linux 语义返回 EPIPE 且不再入队");
+
+    CHECK(sys_shutdown(receiver, SHUT_RD) == 0 &&
+            sys_shutdown(receiver, SHUT_RDWR) == 0 &&
+            sys_shutdown(receiver, SHUT_RDWR) == 0,
+            "重复 SHUT_RD 与 SHUT_RDWR 幂等且不再次进入 Darwin EOF 排空循环");
+    CHECK(f_close_task(&fixture->task, passed_number) == 0 &&
+            fixture->scm_probe.close_calls == 1,
+            "shutdown 丢弃的 SCM 对象恰好析构一次");
+    CHECK(close_socket(fixture, &sender),
+            "关闭 shutdown 数据报发送端");
+    fd_t rebound = create_unix_socket(fixture, SOCK_DGRAM_);
+    CHECK(rebound >= 0 &&
+            bind_unix_socket(fixture, rebound, &sender_address) == 0,
+            "shutdown 排空了每条报文的反向名称计数");
+    CHECK(close_socket(fixture, &rebound) &&
+            close_socket(fixture, &receiver),
+            "关闭已读 shutdown 的数据报端不会永久循环");
+    return true;
+}
+
+static bool test_unconnected_shutdown_preserves_queue(
+        struct fixture *fixture) {
+    static const byte_t receiver_name[] = {
+        0, 's', 'h', 'u', 't', '-', 'u', 'n', '-', 'r', 'x',
+    };
+    static const byte_t sender_name[] = {
+        0, 's', 'h', 'u', 't', '-', 'u', 'n', '-', 't', 'x',
+    };
+    struct guest_unix_address receiver_address =
+            unix_address(receiver_name, sizeof(receiver_name));
+    struct guest_unix_address sender_address =
+            unix_address(sender_name, sizeof(sender_name));
+    fd_t receiver = create_unix_socket(fixture, SOCK_DGRAM_);
+    fd_t sender = create_unix_socket(fixture, SOCK_DGRAM_);
+    CHECK(receiver >= 0 && sender >= 0 &&
+            bind_unix_socket(fixture, receiver, &receiver_address) == 0 &&
+            bind_unix_socket(fixture, sender, &sender_address) == 0 &&
+            connect_unix_socket(fixture, sender, &receiver_address) == 0,
+            "创建接收端未连接的 shutdown 数据报队列");
+
+    fixture->scm_probe.close_calls = 0;
+    struct fd *passed = fd_create(&scm_probe_ops);
+    CHECK(passed != NULL, "创建未连接 shutdown SCM 探针");
+    passed->data = fixture;
+    fd_t passed_number = f_install_task(&fixture->task, passed, 0);
+    CHECK(passed_number >= 0, "安装未连接 shutdown SCM 探针");
+    const byte_t ordinary = 0x51;
+    CHECK(send_connected_unix_datagram(fixture, sender,
+                    &ordinary, sizeof(ordinary), 0) == sizeof(ordinary),
+            "未连接接收端预先排入普通数据报");
+    CHECK(prepare_sendmsg_rights(passed_number) &&
+            sys_sendmsg(sender, USER_SEND_HEADER, 0) == 3,
+            "未连接接收端预先排入 SCM 数据报");
+
+    CHECK(sys_shutdown(receiver, SHUT_RD) == _ENOTCONN,
+            "未连接数据报 shutdown 保留 Darwin 的 ENOTCONN");
+    struct fd *receiver_fd = f_get_task(&fixture->task, receiver);
+    CHECK(receiver_fd != NULL &&
+            !receiver_fd->socket.unix_read_shutdown &&
+            !list_empty(&receiver_fd->socket.unix_scm) &&
+            atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 2,
+            "失败的 shutdown 未提前消费 host 队列或 SCM 引用");
+
+    byte_t received = 0;
+    CHECK(receive_unix_datagram(fixture, receiver, 0,
+                    &received, sizeof(received), NULL) == sizeof(received) &&
+            received == ordinary,
+            "失败的 shutdown 后普通数据报仍可读取");
+    struct socket_ref receiver_ref;
+    CHECK(socket_ref_get_task(
+                    &fixture->task, receiver, &receiver_ref) == 0,
+            "取得未连接 shutdown 接收端强引用");
+    byte_t scm_payload[3] = {0};
+    dword_t message_flags = 0;
+    struct scm *received_scm = NULL;
+    ssize_t received_length = socket_recvmsg_ref(&receiver_ref,
+            scm_payload, sizeof(scm_payload), 0, NULL,
+            &message_flags, &received_scm);
+    socket_ref_release(&receiver_ref);
+    CHECK(received_length == sizeof(scm_payload) &&
+            memcmp(scm_payload, "SCM", sizeof(scm_payload)) == 0 &&
+            received_scm != NULL && received_scm->num_fds == 1 &&
+            received_scm->fds[0] == passed,
+            "失败的 shutdown 后 SCM 数据报仍保持配对");
+    socket_scm_release(received_scm);
+    CHECK(atomic_load_explicit(
+                    &passed->refcount, memory_order_relaxed) == 1 &&
+            f_close_task(&fixture->task, passed_number) == 0 &&
+            fixture->scm_probe.close_calls == 1,
+            "读取保留的 SCM 后引用恰好释放一次");
+    CHECK(close_socket(fixture, &sender) &&
+            close_socket(fixture, &receiver),
+            "清理未连接 shutdown 数据报两端");
+    return true;
+}
+
+static bool test_send_shutdown_atomicity(struct fixture *fixture) {
+    fixture->scm_probe.close_calls = 0;
+    for (unsigned iteration = 0;
+            iteration < SHUTDOWN_RACE_ITERATIONS; iteration++) {
+        fd_t pair[2] = {-1, -1};
+        CHECK(sys_socketpair(AF_LOCAL_, SOCK_DGRAM_, 0,
+                        USER_SOCKETPAIR) == 0 &&
+                user_read(USER_SOCKETPAIR, pair, sizeof(pair)) == 0,
+                "并发轮次创建 AF_UNIX DGRAM socketpair");
+
+        struct fd *passed = fd_create(&scm_probe_ops);
+        CHECK(passed != NULL, "并发轮次创建 SCM 引用探针");
+        passed->data = fixture;
+        fd_t passed_number = f_install_task(
+                &fixture->task, passed, 0);
+        CHECK(passed_number >= 0, "并发轮次安装 SCM 引用探针");
+
+        struct shutdown_send_call call = {
+            .fixture = fixture,
+        };
+        atomic_init(&call.ready, false);
+        atomic_init(&call.start, false);
+        CHECK(socket_ref_get_task(
+                        &fixture->task, pair[0], &call.sender) == 0 &&
+                socket_scm_create_task(&fixture->task,
+                        &passed_number, 1, &call.scm) == 0,
+                "并发轮次准备发送端与 SCM 容器");
+        pthread_t thread;
+        CHECK(pthread_create(&thread, NULL,
+                        send_during_shutdown, &call) == 0,
+                "并发轮次启动发送线程");
+        while (!atomic_load_explicit(
+                &call.ready, memory_order_acquire))
+            sched_yield();
+        atomic_store_explicit(&call.start, true, memory_order_release);
+        if ((iteration & 1) != 0)
+            sched_yield();
+        dword_t how = (iteration & 2) != 0 ? SHUT_RDWR : SHUT_RD;
+        int_t shutdown_result = sys_shutdown(pair[1], how);
+        CHECK(pthread_join(thread, NULL) == 0,
+                "并发轮次回收发送线程");
+        socket_ref_release(&call.sender);
+
+        struct fd *receiver = f_get_task(&fixture->task, pair[1]);
+        CHECK(shutdown_result == 0 &&
+                (call.result == 1 || call.result == _EPIPE) &&
+                receiver != NULL &&
+                receiver->socket.unix_read_shutdown &&
+                list_empty(&receiver->socket.unix_scm) &&
+                atomic_load_explicit(
+                        &passed->refcount, memory_order_relaxed) == 1,
+                "并发 send 与 shutdown 在线性化点两侧均不遗留 SCM");
+        CHECK(f_close_task(&fixture->task, passed_number) == 0 &&
+                fixture->scm_probe.close_calls == iteration + 1 &&
+                close_socket(fixture, &pair[1]) &&
+                close_socket(fixture, &pair[0]),
+                "并发轮次关闭已 shutdown socket 与探针");
+    }
+    return true;
+}
+#endif
 
 static bool test_receiver_discard_stress(struct fixture *fixture) {
     static const byte_t receiver_name[] = {
@@ -1097,6 +1428,11 @@ int main(void) {
             test_sendmsg_input_boundaries(&fixture) &&
             test_recvmsg_scm_truncation_and_rollback(&fixture) &&
             test_recvmsg_scm_container_lifetime(&fixture) &&
+#ifdef __APPLE__
+            test_datagram_shutdown_drain(&fixture) &&
+            test_unconnected_shutdown_preserves_queue(&fixture) &&
+            test_send_shutdown_atomicity(&fixture) &&
+#endif
             test_receiver_discard_stress(&fixture);
     fixture_destroy(&fixture);
     if (!passed)

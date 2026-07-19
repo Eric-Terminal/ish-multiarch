@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "fs/fd.h"
@@ -141,6 +142,27 @@ _Static_assert(sizeof(struct pollfd_) == 8 &&
 
 static qword_t syscall_result(sqword_t result) {
     return (qword_t) result;
+}
+
+static bool socket_timeout_enabled(
+        struct fd *socket, bool receive) {
+    if (socket == NULL || socket->ops != &socket_fdops)
+        return false;
+    struct timeval timeout = {0};
+    socklen_t length = sizeof(timeout);
+    int option = receive ? SO_RCVTIMEO : SO_SNDTIMEO;
+    return getsockopt(socket->real_fd, SOL_SOCKET,
+            option, &timeout, &length) == 0 &&
+            (timeout.tv_sec != 0 || timeout.tv_usec != 0);
+}
+
+static void complete_socket_interrupt(
+        const struct guest_linux_syscall_context *context,
+        bool timeout_enabled, sqword_t result) {
+    if (result == _EINTR && timeout_enabled &&
+            context->completion != NULL)
+        context->completion->restart =
+                GUEST_LINUX_SYSCALL_RESTART_NEVER;
 }
 
 static fd_t syscall_fd(qword_t argument) {
@@ -403,11 +425,16 @@ static qword_t dispatch_readv_at(
         fd_close(target);
         return syscall_result(_ENOMEM);
     }
+    bool timeout_enabled = !positioned &&
+            socket_timeout_enabled(target, true);
     ssize_t read = positioned ?
             file_pread_fd(target, buffer, (size_t) total, offset) :
             file_read_fd(target, buffer, (size_t) total);
     assert(read < 0 || (qword_t) read <= total);
     if (read <= 0) {
+        if (!positioned)
+            complete_socket_interrupt(
+                    context, timeout_enabled, read);
         free(buffer);
         free(vectors);
         fd_close(target);
@@ -789,8 +816,11 @@ static qword_t dispatch_connect(
             goto out;
         }
     }
+    bool timeout_enabled = socket_timeout_enabled(fd, false);
     result = syscall_result(socket_connect_retained_task(
             task, fd, &socket_address, length));
+    complete_socket_interrupt(
+            context, timeout_enabled, (sqword_t) result);
 out:
     fd_close(fd);
     return result;
@@ -901,7 +931,22 @@ static qword_t dispatch_sendto(
     bool defer_unix_lookup = has_destination &&
             socket.fd->socket.domain == AF_LOCAL_ &&
             socket.fd->socket.type != SOCK_STREAM_;
-    if (has_destination) {
+    bool defer_unix_destination =
+            socket.fd->socket.domain == AF_LOCAL_ &&
+            socket.fd->socket.type != SOCK_STREAM_;
+    bool stream_socket = socket.fd->socket.type == SOCK_STREAM_;
+    if (has_destination && stream_socket &&
+            socket.fd->socket.domain == AF_LOCAL_) {
+        const struct socket_address supplied_name = {
+            .length = (socklen_t) address_length,
+        };
+        error = socket_sendto_destination_check(
+                &socket, &supplied_name, flags);
+        assert(error < 0);
+        result = syscall_result(error);
+        goto out;
+    }
+    if (has_destination && !stream_socket) {
         error = socket_address_validate_for_socket(&socket,
                 &guest_address, (size_t) address_length);
         if (error < 0) {
@@ -925,11 +970,17 @@ static qword_t dispatch_sendto(
         result = syscall_result(error);
         goto out;
     }
-    error = socket_sendto_destination_validate(
-            &socket, destination_pointer);
-    if (error < 0) {
-        result = syscall_result(error);
-        goto out;
+    if (!defer_unix_destination) {
+        bool destination_timeout_enabled =
+                socket_timeout_enabled(socket.fd, false);
+        error = socket_sendto_destination_check(
+                &socket, destination_pointer, flags);
+        if (error < 0) {
+            complete_socket_interrupt(context,
+                    destination_timeout_enabled, error);
+            result = syscall_result(error);
+            goto out;
+        }
     }
 
     size_t transaction_length = socket_sendto_transaction_size(
@@ -960,8 +1011,11 @@ static qword_t dispatch_sendto(
         }
         destination_pointer = &destination;
     }
-    result = syscall_result(socket_sendto_ref(&socket,
-            buffer, transaction_length, flags, destination_pointer));
+    bool timeout_enabled = socket_timeout_enabled(socket.fd, false);
+    ssize_t sent = socket_sendto_ref(&socket,
+            buffer, transaction_length, flags, destination_pointer);
+    complete_socket_interrupt(context, timeout_enabled, sent);
+    result = syscall_result(sent);
 out:
     free(buffer);
     if (destination_pointer != NULL)
@@ -1004,11 +1058,14 @@ static qword_t dispatch_recvfrom(
 
     bool wants_address = syscall->arguments[4] != 0;
     struct socket_address source;
+    bool timeout_enabled = socket_timeout_enabled(socket.fd, true);
     ssize_t received = socket_recvfrom_ref(&socket,
             buffer, transaction_length,
             flags,
             wants_address ? &source : NULL);
     if (received < 0) {
+        complete_socket_interrupt(
+                context, timeout_enabled, received);
         free(buffer);
         result = syscall_result(received);
         goto out;
@@ -1666,7 +1723,9 @@ static qword_t dispatch_read(
             syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
     byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
     qword_t result;
+    bool timeout_enabled = false;
     if (remaining == 0) {
+        timeout_enabled = socket_timeout_enabled(target, true);
         result = syscall_result(file_read_fd(target, buffer, 0));
         goto out;
     }
@@ -1675,6 +1734,7 @@ static qword_t dispatch_read(
     while (remaining != 0) {
         size_t chunk = remaining < sizeof(buffer) ?
                 (size_t) remaining : sizeof(buffer);
+        timeout_enabled = socket_timeout_enabled(target, true);
         ssize_t read = file_read_fd(target, buffer, chunk);
         if (read < 0) {
             result = completed != 0 ? completed : syscall_result(read);
@@ -1718,6 +1778,8 @@ static qword_t dispatch_read(
     }
     result = completed;
 out:
+    complete_socket_interrupt(
+            context, timeout_enabled, (sqword_t) result);
     fd_close(target);
     return result;
 }
@@ -1741,7 +1803,9 @@ static qword_t dispatch_write(
             syscall->arguments[2] : AARCH64_LINUX_MAX_RW_COUNT;
     byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
     qword_t result;
+    bool timeout_enabled = false;
     if (remaining == 0) {
+        timeout_enabled = socket_timeout_enabled(target, false);
         result = syscall_result(file_write_fd(target, buffer, 0));
         goto out;
     }
@@ -1763,6 +1827,7 @@ static qword_t dispatch_write(
                     completed : syscall_result(_EFAULT);
             goto out;
         }
+        timeout_enabled = socket_timeout_enabled(target, false);
         ssize_t written = file_write_fd(target, buffer, chunk);
         if (written < 0) {
             result = completed != 0 ?
@@ -1789,6 +1854,8 @@ static qword_t dispatch_write(
     }
     result = completed;
 out:
+    complete_socket_interrupt(
+            context, timeout_enabled, (sqword_t) result);
     fd_close(target);
     return result;
 }
@@ -2040,10 +2107,15 @@ static qword_t dispatch_writev_at(
         copied += length;
     }
     assert(copied == total);
+    bool timeout_enabled = !positioned &&
+            socket_timeout_enabled(target, false);
     ssize_t written = positioned ?
             file_pwrite_fd(target, buffer, (size_t) total, offset) :
             file_write_fd(target, buffer, (size_t) total);
     assert(written < 0 || (qword_t) written <= total);
+    if (!positioned)
+        complete_socket_interrupt(
+                context, timeout_enabled, written);
     free(buffer);
     free(vectors);
     fd_close(target);

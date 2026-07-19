@@ -279,6 +279,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('socket_unix_address', socket_unix_address_test)
 
+        socket_scm_concurrency_test = executable(
+            'socket_scm_concurrency_test',
+            'fs/socket-scm-concurrency-test.c',
+            dependencies: ish)
+        test('socket_scm_concurrency', socket_scm_concurrency_test)
+
         tmpfs_pread_test = executable(
             'tmpfs_pread_test', 'fs/tmp-pread-test.c', dependencies: ish)
         test('tmpfs_pread', tmpfs_pread_test)

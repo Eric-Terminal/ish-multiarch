@@ -15,6 +15,7 @@
 #include "kernel/fs.h"
 #include "kernel/mm.h"
 #include "kernel/resource.h"
+#include "kernel/signal.h"
 #include "kernel/task.h"
 
 #define GUEST_PAGE UINT32_C(0x1000)
@@ -80,6 +81,13 @@ static void fixture_destroy(struct fixture *fixture) {
         mm_release(fixture->task.mm);
     if (fixture->task.fs != NULL)
         fs_info_release(fixture->task.fs);
+    if (fixture->task.sighand != NULL) {
+        lock(&fixture->task.sighand->lock);
+        signal_discard_pending_locked(&fixture->task, SIGPIPE_);
+        unlock(&fixture->task.sighand->lock);
+        sighand_release(fixture->task.sighand);
+    }
+    pthread_mutex_destroy(&fixture->task.ptrace.lock.m);
     pthread_mutex_destroy(&fixture->task.waiting_cond_lock.m);
     pthread_mutex_destroy(&fixture->group.lock.m);
     current = NULL;
@@ -92,9 +100,16 @@ static bool fixture_base_init(struct fixture *fixture,
     fixture->connector_number = -1;
     fixture->passed_number = -1;
     lock_init(&fixture->group.lock);
+    list_init(&fixture->group.threads);
+    signal_group_pending_init(&fixture->group);
     lock_init(&fixture->task.waiting_cond_lock);
+    lock_init(&fixture->task.ptrace.lock);
+    list_init(&fixture->task.queue);
     fixture->group.limits[RLIMIT_NOFILE_] = (struct rlimit_) {16, 16};
     fixture->task.group = &fixture->group;
+    fixture->task.sighand = sighand_new();
+    if (fixture->task.sighand == NULL)
+        return false;
     fixture->task.files = fdtable_new(4);
     if (IS_ERR(fixture->task.files)) {
         fixture->task.files = NULL;
@@ -246,6 +261,65 @@ static bool guest_name_query_matches(struct fixture *fixture,
                 returned_length != true_length)
             return false;
         size_t copied = capacity < true_length ? capacity : true_length;
+        if (memcmp(&returned, &expected, copied) != 0)
+            return false;
+        const byte_t *wire = (const byte_t *) &returned;
+        for (size_t offset = copied; offset < sizeof(returned); offset++)
+            if (wire[offset] != 0xa5)
+                return false;
+    }
+    return true;
+}
+
+static bool guest_recvmsg_name_matches(struct fixture *fixture,
+        fd_t sender, fd_t receiver, const void *name, size_t name_length) {
+    struct sockaddr_storage expected = {0};
+    ((struct sockaddr_ *) &expected)->family = AF_LOCAL_;
+    memcpy((byte_t *) &expected + offsetof(struct sockaddr_, data),
+            name, name_length);
+    dword_t true_length = (dword_t) (
+            offsetof(struct sockaddr_, data) + name_length);
+    dword_t capacities[2] = {
+        sizeof(struct sockaddr_storage),
+        true_length < 3 ? true_length : 3,
+    };
+
+    current = &fixture->task;
+    for (size_t index = 0; index < 2; index++) {
+        byte_t payload = (byte_t) (0x70 + index);
+        struct iovec_ vector = {
+            .base = RECEIVE_PAYLOAD,
+            .len = sizeof(payload),
+        };
+        struct msghdr_ header = {
+            .msg_name = QUERY_ADDRESS,
+            .msg_namelen = capacities[index],
+            .msg_iov = RECEIVE_IOV,
+            .msg_iovlen = 1,
+        };
+        struct sockaddr_storage returned;
+        memset(&returned, 0xa5, sizeof(returned));
+        if (user_write(SEND_PAYLOAD, &payload, sizeof(payload)) != 0 ||
+                sys_sendto(sender, SEND_PAYLOAD,
+                        sizeof(payload), 0, 0, 0) != sizeof(payload) ||
+                user_write(RECEIVE_IOV, &vector, sizeof(vector)) != 0 ||
+                user_write(RECEIVE_HEADER, &header, sizeof(header)) != 0 ||
+                user_write(QUERY_ADDRESS,
+                        &returned, sizeof(returned)) != 0 ||
+                sys_recvmsg(receiver,
+                        RECEIVE_HEADER, MSG_DONTWAIT_) != sizeof(payload) ||
+                user_read(RECEIVE_HEADER, &header, sizeof(header)) != 0 ||
+                user_read(QUERY_ADDRESS,
+                        &returned, sizeof(returned)) != 0)
+            return false;
+        byte_t received = 0;
+        if (user_read(RECEIVE_PAYLOAD,
+                    &received, sizeof(received)) != 0 ||
+                received != payload || header.msg_namelen != true_length ||
+                header.msg_flags != 0 || header.msg_controllen != 0)
+            return false;
+        size_t copied = capacities[index] < true_length ?
+                capacities[index] : true_length;
         if (memcmp(&returned, &expected, copied) != 0)
             return false;
         const byte_t *wire = (const byte_t *) &returned;
@@ -423,6 +497,10 @@ static void test_pathname_name_snapshots(void) {
     EXPECT(guest_name_query_matches(&fixture, fixture.connector_number,
                     false, connector_name, (size_t) connector_size + 1),
             "pathname connector getsockname 保留显式本地名");
+    EXPECT(guest_recvmsg_name_matches(&fixture,
+                    fixture.connector_number, accepted_number,
+                    connector_name, (size_t) connector_size + 1),
+            "pathname stream recvmsg 返回发送端绑定名并保留真实长度与截断边界");
 
     EXPECT(f_close_task(&fixture.task, fixture.listener_number) == 0,
             "关闭 pathname listener 成功");
@@ -541,6 +619,42 @@ static bool prepare_sendmsg(struct fixture *fixture) {
             user_write(SEND_HEADER, &header, sizeof(header)) == 0;
 }
 
+static bool prepare_zero_sendmsg(struct fixture *fixture) {
+    const struct iovec_ iov = {
+        .base = SEND_PAYLOAD,
+        .len = 0,
+    };
+    const struct guest_rights rights = {
+        .length = sizeof(rights),
+        .level = SOL_SOCKET_,
+        .type = SCM_RIGHTS_,
+        .fd = fixture->passed_number,
+    };
+    const struct msghdr_ header = {
+        .msg_iov = SEND_IOV,
+        .msg_iovlen = 1,
+        .msg_control = SEND_CONTROL,
+        .msg_controllen = sizeof(rights),
+    };
+    return user_write(SEND_IOV, &iov, sizeof(iov)) == 0 &&
+            user_write(SEND_CONTROL, &rights, sizeof(rights)) == 0 &&
+            user_write(SEND_HEADER, &header, sizeof(header)) == 0;
+}
+
+static bool sigpipe_pending(struct fixture *fixture) {
+    lock(&fixture->task.sighand->lock);
+    bool pending = (signal_pending_mask_locked(&fixture->task) &
+            sig_mask(SIGPIPE_)) != 0;
+    unlock(&fixture->task.sighand->lock);
+    return pending;
+}
+
+static void discard_sigpipe(struct fixture *fixture) {
+    lock(&fixture->task.sighand->lock);
+    signal_discard_pending_locked(&fixture->task, SIGPIPE_);
+    unlock(&fixture->task.sighand->lock);
+}
+
 static fd_t receive_rights(fd_t accepted_number) {
     const struct iovec_ iov = {
         .base = RECEIVE_PAYLOAD,
@@ -602,13 +716,8 @@ static void test_accept_failure_releases_transit_and_rights(void) {
     EXPECT(atomic_load_explicit(&fixture.connector->refcount,
                    memory_order_relaxed) == 1,
             "accept 安装失败消费 in_transit 引用");
-    lock(&fixture.connector->lock);
-    bool pending_empty = list_empty(
-            &fixture.connector->socket.unix_pending_scm);
-    unlock(&fixture.connector->lock);
-    EXPECT(pending_empty &&
-                    atomic_load_explicit(&fixture.passed->refcount,
-                            memory_order_relaxed) == 1,
+    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
+                    memory_order_relaxed) == 1,
             "accept 安装失败丢弃不可交付 SCM_RIGHTS 及其引用");
     fixture_destroy(&fixture);
     EXPECT(fixture.passed_close.calls == 1,
@@ -663,12 +772,6 @@ static void test_preaccept_rights_reach_accepted_peer(void) {
     EXPECT(atomic_load_explicit(&fixture.connector->refcount,
                    memory_order_relaxed) == 1,
             "成功 accept 消费 in_transit 引用");
-    lock(&fixture.connector->lock);
-    bool pending_empty = list_empty(
-            &fixture.connector->socket.unix_pending_scm);
-    unlock(&fixture.connector->lock);
-    EXPECT(pending_empty, "成功 accept 原子迁移 accept 前 SCM 队列");
-
     fd_t received_number = accepted_number >= 0 ?
             receive_rights(accepted_number) : -1;
     EXPECT(received_number == 4 &&
@@ -686,38 +789,69 @@ static void test_preaccept_rights_reach_accepted_peer(void) {
             "成功传递后底层对象仍只关闭一次");
 }
 
-struct close_call {
-    struct fixture *fixture;
-    fd_t fd;
-    atomic_bool started;
-    atomic_bool finished;
-    int_t result;
-};
+static void test_zero_payload_does_not_deliver_rights(void) {
+    struct fixture fixture;
+    if (!fixture_init(&fixture, true)) {
+        EXPECT(false, "零负载 SCM 夹具初始化成功");
+        fixture_destroy(&fixture);
+        return;
+    }
+    fd_t accepted = sys_accept(fixture.listener_number, 0, 0);
+    EXPECT(accepted >= 0, "零负载 SCM 建立 accepted 连接");
+    EXPECT(prepare_zero_sendmsg(&fixture) &&
+                    sys_sendmsg(fixture.connector_number,
+                            SEND_HEADER, 0) == 0,
+            "AF_UNIX stream 零负载不会发送 SCM_RIGHTS");
+    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
+                    memory_order_relaxed) == 1 &&
+                    sys_recvfrom(accepted, RECEIVE_PAYLOAD, 1,
+                            MSG_DONTWAIT_, 0, 0) == _EAGAIN,
+            "零负载未留下 host dummy 或内部 SCM 队列项");
 
-static void *run_close(void *opaque) {
-    struct close_call *call = opaque;
-    current = &call->fixture->task;
-    atomic_store_explicit(&call->started, true, memory_order_release);
-    call->result = f_close_task(&call->fixture->task, call->fd);
-    atomic_store_explicit(&call->finished, true, memory_order_release);
-    current = NULL;
-    return NULL;
+    EXPECT(sys_shutdown(fixture.connector_number, 1) == 0 &&
+                    prepare_zero_sendmsg(&fixture) &&
+                    sys_sendmsg(fixture.connector_number,
+                            SEND_HEADER, MSG_NOSIGNAL_) == _EPIPE,
+            "写方向 shutdown 后零负载 sendmsg 仍返回 EPIPE");
+    if (accepted >= 0)
+        EXPECT(f_close_task(&fixture.task, accepted) == 0,
+                "关闭零负载 SCM accepted fd");
+    fixture_destroy(&fixture);
+    EXPECT(fixture.passed_close.calls == 1,
+            "零负载与 shutdown 路径没有泄漏 SCM 引用");
 }
 
-struct alternate_send_call {
-    struct task *task;
-    fd_t socket;
-    atomic_bool finished;
-    int_t result;
-};
+static void test_peer_close_sigpipe_and_nosignal(void) {
+    struct fixture fixture;
+    if (!fixture_init(&fixture, true)) {
+        EXPECT(false, "SIGPIPE 夹具初始化成功");
+        fixture_destroy(&fixture);
+        return;
+    }
+    fd_t accepted = sys_accept(fixture.listener_number, 0, 0);
+    bool ready = accepted >= 0 && prepare_sendmsg(&fixture) &&
+            f_close_task(&fixture.task, accepted) == 0;
+    EXPECT(ready, "SIGPIPE 回归建立并关闭 stream peer");
+    if (!ready) {
+        fixture_destroy(&fixture);
+        return;
+    }
 
-static void *run_alternate_send(void *opaque) {
-    struct alternate_send_call *call = opaque;
-    current = call->task;
-    call->result = sys_sendmsg(call->socket, SEND_HEADER, 0);
-    atomic_store_explicit(&call->finished, true, memory_order_release);
-    current = NULL;
-    return NULL;
+    EXPECT(sys_sendmsg(fixture.connector_number,
+                    SEND_HEADER, 0) == _EPIPE && sigpipe_pending(&fixture),
+            "已关闭 stream peer 的 sendmsg 返回 EPIPE 并排队 SIGPIPE");
+    discard_sigpipe(&fixture);
+    EXPECT(prepare_sendmsg(&fixture) &&
+                    sys_sendmsg(fixture.connector_number,
+                            SEND_HEADER, MSG_NOSIGNAL_) == _EPIPE &&
+                    !sigpipe_pending(&fixture),
+            "MSG_NOSIGNAL 保留 EPIPE 但抑制 SIGPIPE");
+    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
+                    memory_order_relaxed) == 1,
+            "SIGPIPE 两条失败路径均释放临时 SCM 引用");
+    fixture_destroy(&fixture);
+    EXPECT(fixture.passed_close.calls == 1,
+            "SIGPIPE 回归最终只析构传递对象一次");
 }
 
 struct blocking_scm_send_call {
@@ -788,7 +922,7 @@ static void *run_concurrent_call(void *opaque) {
     return NULL;
 }
 
-static void test_peer_close_does_not_park_rights_as_preaccept(void) {
+static void test_peer_close_rejects_rights_without_pending_queue(void) {
     struct fixture fixture;
     if (!fixture_init(&fixture, true)) {
         EXPECT(false, "peer 关闭竞态夹具初始化成功");
@@ -796,16 +930,14 @@ static void test_peer_close_does_not_park_rights_as_preaccept(void) {
         return;
     }
     fd_t accepted_number = sys_accept(fixture.listener_number, 0, 0);
-    struct fd *accepted = accepted_number >= 0 ?
-            f_get_task(&fixture.task, accepted_number) : NULL;
-    if (accepted_number != 3 || accepted == NULL ||
+    if (accepted_number != 3 ||
             !prepare_sendmsg(&fixture)) {
         EXPECT(false, "peer 关闭竞态建立已 accept 连接");
         fixture_destroy(&fixture);
         return;
     }
 
-    // 使用独立 fd 表模拟 fork 后的共享 socket，使 send 不受 close 的表锁阻塞。
+    // 独立 fd 表保留发送端，但不保留 accepted 端。
     struct task sender = {0};
     sender.group = &fixture.group;
     sender.files = fdtable_copy(fixture.task.files);
@@ -819,64 +951,23 @@ static void test_peer_close_does_not_park_rights_as_preaccept(void) {
         return;
     }
 
-    // 让最后一个 close 在清除弱 peer 后停在队列清理点。
-    lock(&accepted->lock);
-    struct close_call close_call = {
-        .fixture = &fixture,
-        .fd = accepted_number,
-        .result = _EIO,
-    };
-    atomic_init(&close_call.started, false);
-    atomic_init(&close_call.finished, false);
-    pthread_t close_thread;
-    EXPECT(pthread_create(&close_thread, NULL,
-                    run_close, &close_call) == 0,
-            "peer 关闭线程启动成功");
-    EXPECT(wait_for_completion(&close_call.started, 1000),
-            "peer 关闭线程进入关闭路径");
-    const struct timespec close_interval = {.tv_nsec = 20000000};
-    nanosleep(&close_interval, NULL);
-
-    struct alternate_send_call send_call = {
-        .task = &sender,
-        .socket = fixture.connector_number,
-        .result = _EIO,
-    };
-    atomic_init(&send_call.finished, false);
-    pthread_t send_thread;
-    bool send_started = pthread_create(&send_thread, NULL,
-            run_alternate_send, &send_call) == 0;
-    EXPECT(send_started, "peer 关闭窗口的 sendmsg 线程启动成功");
-    bool send_finished = send_started &&
-            !atomic_load_explicit(&close_call.finished,
-                    memory_order_acquire) &&
-            wait_for_completion(&send_call.finished, 500);
-    if (send_finished) {
-        lock(&fixture.connector->lock);
-        bool pending_empty = list_empty(
-                &fixture.connector->socket.unix_pending_scm);
-        unlock(&fixture.connector->lock);
-        EXPECT(pending_empty &&
-                        atomic_load_explicit(&fixture.passed->refcount,
-                                memory_order_relaxed) == 2,
-                "已 accept peer 关闭竞态不把 SCM_RIGHTS 误存为待 accept");
-    }
-    unlock(&accepted->lock);
-    if (send_started)
-        EXPECT(pthread_join(send_thread, NULL) == 0,
-                "peer 关闭窗口 sendmsg 线程回收成功");
-    EXPECT(pthread_join(close_thread, NULL) == 0 &&
-                    close_call.result == 0,
-            "peer 关闭线程完成并回收成功");
-    EXPECT(send_finished,
-            "peer 清除后且 host fd 关闭前的 sendmsg 窗口可复现");
+    EXPECT(f_close_task(&fixture.task, accepted_number) == 0,
+            "关闭已建立连接的 accepted peer");
+    current = &sender;
+    int_t send_result = sys_sendmsg(
+            fixture.connector_number, SEND_HEADER, MSG_NOSIGNAL_);
+    current = &fixture.task;
+    EXPECT(send_result == _EPIPE &&
+                    atomic_load_explicit(&fixture.passed->refcount,
+                            memory_order_relaxed) == 2,
+            "已关闭 peer 拒绝 SCM_RIGHTS，且不会误存为 accept 前消息");
     fdtable_release(sender.files);
     fixture_destroy(&fixture);
     EXPECT(fixture.passed_close.calls == 1,
             "peer 关闭竞态后传递对象只关闭一次");
 }
 
-static void test_blocked_sendmsg_does_not_hold_peer_lock(void) {
+static void test_sendmsg_does_not_wait_for_peer_fd_lock(void) {
     struct fixture fixture;
     if (!fixture_init(&fixture, true)) {
         EXPECT(false, "阻塞 sendmsg 夹具初始化成功");
@@ -892,12 +983,7 @@ static void test_blocked_sendmsg_does_not_hold_peer_lock(void) {
         fixture_destroy(&fixture);
         return;
     }
-    int receiver_host_fd = receiver->real_fd;
-    EXPECT(f_close_task(&fixture.task, fixture.listener_number) == 0,
-            "锁序回归关闭已无用的 listener");
-    fixture.listener_number = -1;
-
-    // 人为占住接收端锁：新实现会先完成 host I/O，再在发布内部 SCM 时等待。
+    // SCM 队列不属于通用 fd 锁；偏移/flags 操作不能冻结无关消息发布。
     lock(&receiver->lock);
     struct blocking_scm_send_call send_call = {
         .fixture = &fixture,
@@ -910,75 +996,28 @@ static void test_blocked_sendmsg_does_not_hold_peer_lock(void) {
                     run_blocking_scm_send, &send_call) == 0;
     EXPECT(send_started && wait_for_completion(&send_call.started, 1000),
             "持有 peer 锁时启动 SCM sendmsg");
-    const struct timespec interval = {.tv_nsec = 20000000};
-    nanosleep(&interval, NULL);
-
-    byte_t peek_payload = 0;
-    struct iovec peek_iov = {
-        .iov_base = &peek_payload,
-        .iov_len = sizeof(peek_payload),
-    };
-    char peek_control[CMSG_SPACE(sizeof(int))] = {0};
-    struct msghdr peek_message = {
-        .msg_iov = &peek_iov,
-        .msg_iovlen = 1,
-        .msg_control = peek_control,
-        .msg_controllen = sizeof(peek_control),
-    };
-    ssize_t peeked = recvmsg(receiver_host_fd, &peek_message,
-            MSG_PEEK | MSG_DONTWAIT);
-    struct cmsghdr *peek_header = CMSG_FIRSTHDR(&peek_message);
-    bool host_visible = peeked == 1 && peek_payload == 0x5a &&
-            peek_header != NULL &&
-            peek_header->cmsg_level == SOL_SOCKET &&
-            peek_header->cmsg_type == SCM_RIGHTS &&
-            peek_header->cmsg_len >= CMSG_LEN(sizeof(int));
-    if (host_visible) {
-        int peek_fd;
-        memcpy(&peek_fd, CMSG_DATA(peek_header), sizeof(peek_fd));
-        close(peek_fd);
-    }
-    EXPECT(host_visible && !atomic_load_explicit(&send_call.finished,
-                    memory_order_acquire),
-            "sendmsg 不持 peer fd 锁完成 host I/O，再等待内部 SCM 发布");
-
-    struct close_call close_call = {
-        .fixture = &fixture,
-        .fd = accepted_number,
-        .result = _EIO,
-    };
-    atomic_init(&close_call.started, false);
-    atomic_init(&close_call.finished, false);
-    pthread_t close_thread;
-    bool close_started = host_visible &&
-            pthread_create(&close_thread, NULL,
-                    run_close, &close_call) == 0;
-    EXPECT(close_started && wait_for_completion(&close_call.started, 1000),
-            "host I/O 后、SCM 发布前启动并发 peer close");
+    bool completed_while_locked =
+            wait_for_completion(&send_call.finished, 500);
     unlock(&receiver->lock);
-
-    bool completed = send_started && close_started &&
-            wait_for_completion(&send_call.finished, 1000) &&
-            wait_for_completion(&close_call.finished, 1000);
-
-    if (!completed) {
-        // 诊断失败时解除 host 阻塞，确保回归自身不会遗留线程。
+    bool completed = send_started &&
+            wait_for_completion(&send_call.finished, 1000);
+    if (!completed)
         (void) shutdown(fixture.connector->real_fd, SHUT_RDWR);
-        (void) shutdown(receiver_host_fd, SHUT_RDWR);
-        (void) wait_for_completion(&send_call.finished, 1000);
-        (void) wait_for_completion(&close_call.finished, 1000);
-    }
     if (send_started)
         EXPECT(pthread_join(send_thread, NULL) == 0,
-                "回收阻塞 sendmsg 线程");
-    if (close_started)
-        EXPECT(pthread_join(close_thread, NULL) == 0,
-                "回收阻塞 sendmsg 的 peer close 线程");
-    EXPECT(completed && close_call.result == 0 && send_call.result == 1,
-            "SCM 发布与 peer close 在释放锁后完成且无锁序死锁");
-    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
-                    memory_order_relaxed) == 1,
-            "阻塞 sendmsg 失败回滚唯一 SCM 传递引用");
+                "回收 peer fd 锁并发 sendmsg 线程");
+    fd_t received_number = completed && send_call.result == 1 ?
+            receive_rights(accepted_number) : -1;
+    EXPECT(completed_while_locked && completed &&
+                    send_call.result == 1 && received_number >= 0 &&
+                    f_get_task(&fixture.task, received_number) ==
+                            fixture.passed,
+            "SCM 发布不取得 peer 通用 fd 锁，且消息与引用完整到达");
+    if (received_number >= 0)
+        EXPECT(f_close_task(&fixture.task, received_number) == 0,
+                "关闭 peer fd 锁回归接收的 SCM 描述符");
+    EXPECT(f_close_task(&fixture.task, accepted_number) == 0,
+            "关闭 peer fd 锁回归 accepted 描述符");
     fixture_destroy(&fixture);
     EXPECT(fixture.passed_close.calls == 1,
             "阻塞 sendmsg 竞态后传递对象只析构一次");
@@ -1008,20 +1047,26 @@ static void test_accept_sendmsg_lock_order(void) {
         atomic_init(&calls[0].finished, false);
         atomic_init(&calls[1].finished, false);
         pthread_t threads[2];
-        bool threads_started =
-                pthread_create(&threads[0], NULL,
-                        run_concurrent_call, &calls[0]) == 0 &&
-                pthread_create(&threads[1], NULL,
-                        run_concurrent_call, &calls[1]) == 0;
+        bool thread_started[2];
+        thread_started[0] = pthread_create(&threads[0], NULL,
+                run_concurrent_call, &calls[0]) == 0;
+        thread_started[1] = pthread_create(&threads[1], NULL,
+                run_concurrent_call, &calls[1]) == 0;
+        bool threads_started = thread_started[0] && thread_started[1];
         EXPECT(threads_started, "并发 sendmsg/accept 线程启动成功");
         if (!threads_started) {
             atomic_store_explicit(&start, true, memory_order_release);
+            if (thread_started[0])
+                (void) pthread_join(threads[0], NULL);
+            if (thread_started[1])
+                (void) pthread_join(threads[1], NULL);
             fixture_destroy(&fixture);
             return;
         }
         atomic_store_explicit(&start, true, memory_order_release);
-        EXPECT(pthread_join(threads[0], NULL) == 0 &&
-                        pthread_join(threads[1], NULL) == 0,
+        int first_join = pthread_join(threads[0], NULL);
+        int second_join = pthread_join(threads[1], NULL);
+        EXPECT(first_join == 0 && second_join == 0,
                 "并发 sendmsg/accept 无锁序死锁并及时返回");
         EXPECT(calls[0].result == 1 && calls[1].result == 3,
                 "并发 sendmsg/accept 均完成预期操作");
@@ -1076,13 +1121,19 @@ static void test_concurrent_connect_and_preaccept_close(void) {
                     .ready = &ready, .start = &start, .result = _EIO},
         };
         pthread_t threads[2];
-        bool started = pthread_create(&threads[0], NULL,
-                               run_connect_race, &calls[0]) == 0 &&
-                pthread_create(&threads[1], NULL,
-                        run_connect_race, &calls[1]) == 0;
+        bool thread_started[2];
+        thread_started[0] = pthread_create(&threads[0], NULL,
+                run_connect_race, &calls[0]) == 0;
+        thread_started[1] = pthread_create(&threads[1], NULL,
+                run_connect_race, &calls[1]) == 0;
+        bool started = thread_started[0] && thread_started[1];
         EXPECT(started, "两个并发 connect 线程启动成功");
         if (!started) {
             atomic_store_explicit(&start, true, memory_order_release);
+            if (thread_started[0])
+                (void) pthread_join(threads[0], NULL);
+            if (thread_started[1])
+                (void) pthread_join(threads[1], NULL);
             fixture_destroy(&fixture);
             return;
         }
@@ -1095,8 +1146,9 @@ static void test_concurrent_connect_and_preaccept_close(void) {
                 &ready, memory_order_acquire) == 2;
         EXPECT(both_ready, "两个并发 connect 均取得 retained socket");
         atomic_store_explicit(&start, true, memory_order_release);
-        EXPECT(pthread_join(threads[0], NULL) == 0 &&
-                        pthread_join(threads[1], NULL) == 0,
+        int first_join = pthread_join(threads[0], NULL);
+        int second_join = pthread_join(threads[1], NULL);
+        EXPECT(first_join == 0 && second_join == 0,
                 "两个并发 connect 均及时返回");
         unsigned successes = (calls[0].result == 0) +
                 (calls[1].result == 0);
@@ -1134,6 +1186,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--successful-paths") == 0) {
         test_preaccept_peercred_snapshots();
         test_preaccept_rights_reach_accepted_peer();
+        test_zero_payload_does_not_deliver_rights();
         test_accept_sendmsg_lock_order();
         return failures == 0 ? 0 : 1;
     }
@@ -1143,8 +1196,10 @@ int main(int argc, char **argv) {
     test_binary_abstract_anonymous_name_snapshots();
     test_preaccept_peercred_snapshots();
     test_preaccept_rights_reach_accepted_peer();
-    test_peer_close_does_not_park_rights_as_preaccept();
-    test_blocked_sendmsg_does_not_hold_peer_lock();
+    test_zero_payload_does_not_deliver_rights();
+    test_peer_close_sigpipe_and_nosignal();
+    test_peer_close_rejects_rights_without_pending_queue();
+    test_sendmsg_does_not_wait_for_peer_fd_lock();
     test_accept_sendmsg_lock_order();
     test_concurrent_connect_and_preaccept_close();
     if (failures != 0)

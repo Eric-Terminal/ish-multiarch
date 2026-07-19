@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "debug.h"
@@ -28,6 +29,17 @@ struct fd *fd_create(const struct fd_ops *ops) {
 struct fd *fd_retain(struct fd *fd) {
     fd->refcount++;
     return fd;
+}
+
+struct fd *fd_try_retain(struct fd *fd) {
+    unsigned references = atomic_load(&fd->refcount);
+    while (references != 0) {
+        assert(references != UINT_MAX);
+        if (atomic_compare_exchange_weak(
+                &fd->refcount, &references, references + 1))
+            return fd;
+    }
+    return NULL;
 }
 
 int fd_close(struct fd *fd) {
