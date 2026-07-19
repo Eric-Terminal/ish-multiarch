@@ -154,6 +154,14 @@ struct cmsghdr_ {
 
 struct scm {
     struct list queue;
+    // 成功发布后同时进入全局 inflight 队列；接收、丢弃与 GC 只摘除一次。
+    struct list inflight_queue;
+    // 弱引用仅在全局 SCM 锁下访问，物理队列保证接收 socket 的生命周期。
+    struct fd *receiver;
+    uid_t_ sender_uid;
+    qword_t sender_nofile;
+    bool sender_limit_exempt;
+    bool inflight;
     unsigned num_fds;
     struct fd *fds[];
 };

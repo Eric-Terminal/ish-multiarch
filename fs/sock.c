@@ -33,6 +33,8 @@ static lock_t unix_bound_lock = LOCK_INITIALIZER;
 static lock_t unix_scm_io_lock = LOCK_INITIALIZER;
 static lock_t unix_scm_dummy_lock = LOCK_INITIALIZER;
 static int unix_scm_dummy_fd = -1;
+static struct list unix_scm_inflight =
+        LIST_INITIALIZER(unix_scm_inflight);
 static struct list unix_bound_sockets;
 
 struct unix_pending_peer {
@@ -91,6 +93,7 @@ static bool close_host_scm_rights(struct msghdr *message);
 static int unix_bound_drain_messages_locked(
         struct fd *fd, struct list *discarded_scm);
 static void socket_scm_release_list(struct list *scm_list);
+static void socket_scm_unpublish_locked(struct scm *scm);
 
 static struct fd *sock_fd_allocate(
         int domain, int type, int protocol) {
@@ -1462,6 +1465,8 @@ static void unix_socket_finish_peer_handshake(
                     struct scm, queue);
             list_remove(&scm->queue);
             list_add_tail(&accepted->socket.unix_scm, &scm->queue);
+            assert(scm->inflight);
+            scm->receiver = accepted;
         }
     } else {
         peer->socket.unix_peer_handshake_pending = false;
@@ -1471,6 +1476,7 @@ static void unix_socket_finish_peer_handshake(
                     &peer->socket.unix_pending_scm,
                     struct scm, queue);
             list_remove(&scm->queue);
+            socket_scm_unpublish_locked(scm);
             list_add_tail(&rejected_scm, &scm->queue);
         }
     }
@@ -3191,7 +3197,65 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option,
     return result;
 }
 
+static struct scm *socket_scm_allocate_task(
+        struct task *task, unsigned count) {
+    struct scm *scm = calloc(1,
+            sizeof(*scm) + count * sizeof(*scm->fds));
+    if (scm == NULL)
+        return NULL;
+    list_init(&scm->queue);
+    list_init(&scm->inflight_queue);
+    if (task != NULL) {
+        struct task_credentials credentials;
+        task_credentials_snapshot(task, &credentials);
+        scm->sender_uid = credentials.uid;
+        scm->sender_nofile = rlimit_task(task, RLIMIT_NOFILE_);
+        // 项目尚未建模 capability；有效 uid 0 对应现有 superuser 语义。
+        scm->sender_limit_exempt = credentials.euid == 0;
+    }
+    return scm;
+}
+
+static qword_t socket_scm_inflight_for_uid_locked(uid_t_ uid) {
+    qword_t count = 0;
+    struct scm *scm;
+    list_for_each_entry(
+            &unix_scm_inflight, scm, inflight_queue) {
+        if (scm->sender_uid != uid)
+            continue;
+        if (UINT64_MAX - count < scm->num_fds)
+            return UINT64_MAX;
+        count += scm->num_fds;
+    }
+    return count;
+}
+
+static int socket_scm_send_check_locked(const struct scm *scm) {
+    assert(scm != NULL && !scm->inflight);
+    if (scm->sender_limit_exempt)
+        return 0;
+    qword_t inflight =
+            socket_scm_inflight_for_uid_locked(scm->sender_uid);
+    return inflight > scm->sender_nofile ? _ETOOMANYREFS : 0;
+}
+
+static void socket_scm_publish_locked(
+        struct scm *scm, struct fd *receiver) {
+    assert(scm != NULL && receiver != NULL && !scm->inflight);
+    scm->receiver = receiver;
+    scm->inflight = true;
+    list_add_tail(&unix_scm_inflight, &scm->inflight_queue);
+}
+
+static void socket_scm_unpublish_locked(struct scm *scm) {
+    assert(scm != NULL && scm->inflight);
+    list_remove(&scm->inflight_queue);
+    scm->receiver = NULL;
+    scm->inflight = false;
+}
+
 void socket_scm_release(struct scm *scm) {
+    assert(scm != NULL && !scm->inflight);
     for (unsigned i = 0; i < scm->num_fds; i++)
         if (scm->fds[i] != NULL)
             fd_close(scm->fds[i]);
@@ -3205,11 +3269,9 @@ int socket_scm_create_task(struct task *task,
     *scm_pointer = NULL;
     if (count == 0)
         return 0;
-    struct scm *scm = calloc(1,
-            sizeof(*scm) + count * sizeof(*scm->fds));
+    struct scm *scm = socket_scm_allocate_task(task, count);
     if (scm == NULL)
         return _ENOMEM;
-    list_init(&scm->queue);
     for (unsigned index = 0; index < count; index++) {
         struct fd *transferred =
                 f_get_task_retain(task, numbers[index]);
@@ -3224,12 +3286,10 @@ int socket_scm_create_task(struct task *task,
 }
 
 static struct scm *socket_scm_clone(const struct scm *source) {
-    struct scm *clone = calloc(1,
-            sizeof(*clone) +
-            source->num_fds * sizeof(*clone->fds));
+    struct scm *clone =
+            socket_scm_allocate_task(NULL, source->num_fds);
     if (clone == NULL)
         return NULL;
-    list_init(&clone->queue);
     for (unsigned index = 0; index < source->num_fds; index++)
         clone->fds[clone->num_fds++] =
                 fd_retain(source->fds[index]);
@@ -3467,17 +3527,20 @@ static bool unix_scm_receiver_queue(
                 receiver->owner->socket.unix_peer;
         if (accepted != NULL) {
             list_add_tail(&accepted->socket.unix_scm, &scm->queue);
+            socket_scm_publish_locked(scm, accepted);
             queued = true;
         } else if (receiver->owner->socket.unix_peer_handshake_pending &&
                 !receiver->owner->socket.unix_peer_handshake_rejected) {
             list_add_tail(&receiver->owner->socket.unix_pending_scm,
                     &scm->queue);
+            socket_scm_publish_locked(scm, receiver->owner);
             queued = true;
         }
         unlock(&peer_lock);
         return queued;
     }
     list_add_tail(&receiver->owner->socket.unix_scm, &scm->queue);
+    socket_scm_publish_locked(scm, receiver->owner);
     return true;
 }
 
@@ -3731,6 +3794,11 @@ ssize_t socket_sendmsg_ref(const struct socket_ref *socket,
             error = socket_message_send_error(_EPIPE, flags);
             break;
         }
+        if (scm != NULL) {
+            error = socket_scm_send_check_locked(scm);
+            if (error < 0)
+                break;
+        }
         struct unix_bound_name *queued_name =
                 unix_bound_message_begin(socket->fd);
         int attempt_flags = scm_locked ?
@@ -3892,6 +3960,7 @@ retry_receive:
                 *scm_pointer = socket_scm_clone(queued);
             else {
                 list_remove(&queued->queue);
+                socket_scm_unpublish_locked(queued);
                 *scm_pointer = queued;
             }
         }
@@ -4046,13 +4115,11 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
         if (result < 0)
             goto out;
         if (rights_count != 0) {
-            scm = calloc(1, sizeof(*scm) +
-                    rights_count * sizeof(*scm->fds));
+            scm = socket_scm_allocate_task(current, rights_count);
             if (scm == NULL) {
                 result = _ENOMEM;
                 goto out;
             }
-            list_init(&scm->queue);
             result = i386_scm_retain_rights(guest_control,
                     msg_fake.msg_controllen, scm);
             if (result < 0)
@@ -4138,6 +4205,11 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
             result = socket_message_send_error(
                     _EPIPE, guest_flags);
             break;
+        }
+        if (scm != NULL) {
+            result = socket_scm_send_check_locked(scm);
+            if (result < 0)
+                break;
         }
         struct unix_bound_name *queued_name =
                 unix_bound_message_begin(socket.fd);
@@ -4332,6 +4404,7 @@ retry_i386_receive:
                 received_scm = socket_scm_clone(queued);
             else {
                 list_remove(&queued->queue);
+                socket_scm_unpublish_locked(queued);
                 received_scm = queued;
             }
         }
@@ -4570,6 +4643,7 @@ static int unix_bound_drain_messages_locked(
             struct scm *scm = list_first_entry(
                     &fd->socket.unix_scm, struct scm, queue);
             list_remove(&scm->queue);
+            socket_scm_unpublish_locked(scm);
             list_add_tail(discarded_scm, &scm->queue);
         }
         if (message.msg_namelen != 0) {
@@ -4614,6 +4688,7 @@ static int sock_close(struct fd *fd) {
             struct scm *scm = list_first_entry(
                     &fd->socket.unix_scm, struct scm, queue);
             list_remove(&scm->queue);
+            socket_scm_unpublish_locked(scm);
             list_add_tail(&discarded_scm, &scm->queue);
         }
         while (!list_empty(&fd->socket.unix_pending_scm)) {
@@ -4621,6 +4696,7 @@ static int sock_close(struct fd *fd) {
                     &fd->socket.unix_pending_scm,
                     struct scm, queue);
             list_remove(&scm->queue);
+            socket_scm_unpublish_locked(scm);
             list_add_tail(&discarded_scm, &scm->queue);
         }
         unlock(&unix_scm_io_lock);
