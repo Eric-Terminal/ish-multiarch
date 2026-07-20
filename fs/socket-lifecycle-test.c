@@ -280,6 +280,40 @@ int main(void) {
             option_value == AF_INET_ &&
             option_length == sizeof(option_value),
             "getsockopt 从 retained socket 返回 guest domain");
+    byte_t short_domain[4] = {0xa5, 0xa5, 0xa5, 0xa5};
+    option_length = 1;
+    CHECK(user_write(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            user_write(ACCEPT_ADDRESS, short_domain,
+                    sizeof(short_domain)) == 0 &&
+            sys_getsockopt(socket_number, SOL_SOCKET_, SO_DOMAIN_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS, short_domain,
+                    sizeof(short_domain)) == 0 &&
+            user_read(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            short_domain[0] == AF_INET_ &&
+            short_domain[1] == 0xa5 && option_length == 1,
+            "i386 getsockopt 接受一字节 SOL_SOCKET 短缓冲");
+    option_length = 8;
+    CHECK(user_write(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            sys_getsockopt(socket_number, SOL_SOCKET_, SO_DOMAIN_,
+                    UNMAPPED_PAGE, LENGTH_PAGE) == _EFAULT &&
+            user_read(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            option_length == 8,
+            "i386 SOL_SOCKET 值 fault 时不得提前改写 optlen");
+    option_length = sizeof(option_value);
+    option_value = 0;
+    CHECK(user_write(LENGTH_PAGE, &option_length,
+                    sizeof(option_length)) == 0 &&
+            sys_getsockopt(socket_number, SOL_SOCKET_, SO_PROTOCOL_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS, &option_value,
+                    sizeof(option_value)) == 0 &&
+            option_value == IPPROTO_TCP,
+            "i386 SO_PROTOCOL 返回默认 stream 的 Linux TCP 协议号");
     char congestion = '\0';
     option_length = sizeof(congestion);
     CHECK(user_write(LENGTH_PAGE, &option_length,
@@ -623,6 +657,38 @@ int main(void) {
                     &host_timeout, &host_timeout_length) == 0 &&
             host_timeout.tv_sec == 1 && host_timeout.tv_usec == 250000,
             "i386 timeval32 已显式转换到 host timeval");
+    dword_t timeout_length = sizeof(i386_timeout);
+    struct {
+        int64_t seconds;
+        int64_t microseconds;
+    } i386_timeout_new = {0};
+    CHECK(user_write(LENGTH_PAGE, &timeout_length,
+                    sizeof(timeout_length)) == 0 &&
+            sys_getsockopt(unix_listener_number,
+                    SOL_SOCKET_, SO_RCVTIMEO_OLD_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS, &i386_timeout,
+                    sizeof(i386_timeout)) == 0 &&
+            user_read(LENGTH_PAGE, &timeout_length,
+                    sizeof(timeout_length)) == 0 &&
+            timeout_length == sizeof(i386_timeout) &&
+            i386_timeout.seconds == 1 &&
+            i386_timeout.microseconds == 250000,
+            "i386 OLD timeout getter 返回八字节 timeval32 wire");
+    timeout_length = sizeof(i386_timeout_new);
+    CHECK(user_write(LENGTH_PAGE, &timeout_length,
+                    sizeof(timeout_length)) == 0 &&
+            sys_getsockopt(unix_listener_number,
+                    SOL_SOCKET_, SO_RCVTIMEO_NEW_,
+                    ACCEPT_ADDRESS, LENGTH_PAGE) == 0 &&
+            user_read(ACCEPT_ADDRESS, &i386_timeout_new,
+                    sizeof(i386_timeout_new)) == 0 &&
+            user_read(LENGTH_PAGE, &timeout_length,
+                    sizeof(timeout_length)) == 0 &&
+            timeout_length == sizeof(i386_timeout_new) &&
+            i386_timeout_new.seconds == 1 &&
+            i386_timeout_new.microseconds == 250000,
+            "i386 NEW timeout getter 扩展为十六字节 timeval64 wire");
 
     struct sockaddr_max_ guest_unix_address = {
         .family = AF_LOCAL_,

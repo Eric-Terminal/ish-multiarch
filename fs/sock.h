@@ -83,6 +83,29 @@ int_t socket_setsockopt_ref(const struct socket_ref *socket,
         const void *value, sdword_t value_length,
         enum socket_guest_abi guest_abi);
 
+int_t socket_getname_ref(const struct socket_ref *socket, bool peer,
+        struct sockaddr_storage *address, dword_t *length);
+
+#define SOCKET_OPTION_VALUE_MAX 256
+
+enum socket_option_copy_order {
+    SOCKET_OPTION_VALUE_FIRST,
+    SOCKET_OPTION_LENGTH_FIRST,
+};
+
+struct socket_option_result {
+    byte_t value[SOCKET_OPTION_VALUE_MAX];
+    dword_t length;
+    enum socket_option_copy_order copy_order;
+};
+
+int_t socket_getsockopt_ref(const struct socket_ref *socket,
+        sdword_t level, sdword_t option, sdword_t capacity,
+        enum socket_guest_abi guest_abi,
+        struct socket_option_result *result);
+int_t socket_shutdown_ref(
+        const struct socket_ref *socket, sdword_t how);
+
 #define SOCKET_IO_TRANSACTION_LIMIT UINT32_C(0x100000)
 #define SOCKET_STREAM_NONBLOCK_TRANSACTION_LIMIT UINT32_C(0x10000)
 
@@ -329,6 +352,7 @@ static inline int sock_flags_from_real(int real) {
 #define SO_REUSEPORT_ 15
 #define SO_PEERCRED_ 17
 #define SO_TIMESTAMP_ 29
+#define SO_ACCEPTCONN_ 30
 #define SO_PROTOCOL_ 38
 #define SO_DOMAIN_ 39
 #define SO_RCVTIMEO_OLD_ 20

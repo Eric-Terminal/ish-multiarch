@@ -122,9 +122,13 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SOCKET = 198,
     AARCH64_LINUX_SYS_BIND = 200,
     AARCH64_LINUX_SYS_CONNECT = 203,
+    AARCH64_LINUX_SYS_GETSOCKNAME = 204,
+    AARCH64_LINUX_SYS_GETPEERNAME = 205,
     AARCH64_LINUX_SYS_SENDTO = 206,
     AARCH64_LINUX_SYS_RECVFROM = 207,
     AARCH64_LINUX_SYS_SETSOCKOPT = 208,
+    AARCH64_LINUX_SYS_GETSOCKOPT = 209,
+    AARCH64_LINUX_SYS_SHUTDOWN = 210,
     AARCH64_LINUX_SYS_SENDMSG = 211,
     AARCH64_LINUX_SYS_RECVMSG = 212,
     AARCH64_LINUX_SYS_CLONE = 220,
@@ -1957,6 +1961,147 @@ out:
     return result;
 }
 
+static qword_t dispatch_getname(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool peer) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    struct sockaddr_storage address;
+    dword_t true_length;
+    error = socket_getname_ref(
+            &socket, peer, &address, &true_length);
+    qword_t result;
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    qword_t length_address = syscall->arguments[2];
+    if (!aarch64_user_range_fits(
+            length_address, sizeof(sdword_t))) {
+        result = user_range_error(
+                fault, length_address, GUEST_MEMORY_READ);
+        goto out;
+    }
+    sdword_t capacity;
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            length_address, &capacity, sizeof(capacity), fault)) {
+        result = syscall_result(_EFAULT);
+        goto out;
+    }
+    if (capacity < 0) {
+        result = syscall_result(_EINVAL);
+        goto out;
+    }
+
+    error = write_socket_message_user(context,
+            length_address, &true_length,
+            sizeof(true_length), fault);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+    dword_t copied = (dword_t) capacity < true_length ?
+            (dword_t) capacity : true_length;
+    if (copied != 0) {
+        error = write_socket_message_user(context,
+                syscall->arguments[1], &address, copied, fault);
+        if (error < 0) {
+            result = syscall_result(error);
+            goto out;
+        }
+    }
+    result = 0;
+out:
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_getsockopt(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+
+    qword_t length_address = syscall->arguments[4];
+    qword_t result;
+    if (!aarch64_user_range_fits(
+            length_address, sizeof(sdword_t))) {
+        result = user_range_error(
+                fault, length_address, GUEST_MEMORY_READ);
+        goto out;
+    }
+    sdword_t capacity;
+    assert(context->user.read != NULL);
+    if (!context->user.read(context->user.opaque,
+            length_address, &capacity, sizeof(capacity), fault)) {
+        result = syscall_result(_EFAULT);
+        goto out;
+    }
+
+    struct socket_option_result option;
+    error = socket_getsockopt_ref(&socket,
+            (sdword_t) (dword_t) syscall->arguments[1],
+            (sdword_t) (dword_t) syscall->arguments[2],
+            capacity, SOCKET_GUEST_AARCH64, &option);
+    if (error < 0) {
+        result = syscall_result(error);
+        goto out;
+    }
+
+    if (option.copy_order == SOCKET_OPTION_VALUE_FIRST) {
+        if (option.length != 0) {
+            error = write_socket_message_user(context,
+                    syscall->arguments[3], option.value,
+                    option.length, fault);
+            if (error < 0) {
+                result = syscall_result(error);
+                goto out;
+            }
+        }
+        error = write_socket_message_user(context,
+                length_address, &option.length,
+                sizeof(option.length), fault);
+    } else {
+        error = write_socket_message_user(context,
+                length_address, &option.length,
+                sizeof(option.length), fault);
+        if (error == 0 && option.length != 0)
+            error = write_socket_message_user(context,
+                    syscall->arguments[3], option.value,
+                    option.length, fault);
+    }
+    result = syscall_result(error);
+out:
+    socket_ref_release(&socket);
+    return result;
+}
+
+static qword_t dispatch_shutdown(
+        const struct guest_linux_syscall *syscall,
+        struct task *task) {
+    struct socket_ref socket;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &socket);
+    if (error < 0)
+        return syscall_result(error);
+    error = socket_shutdown_ref(&socket,
+            (sdword_t) (dword_t) syscall->arguments[1]);
+    socket_ref_release(&socket);
+    return syscall_result(error);
+}
+
 static qword_t dispatch_chdir(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -3521,6 +3666,12 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_CONNECT:
             return dispatch_connect(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_GETSOCKNAME:
+            return dispatch_getname(
+                    context, syscall, task, fault, false);
+        case AARCH64_LINUX_SYS_GETPEERNAME:
+            return dispatch_getname(
+                    context, syscall, task, fault, true);
         case AARCH64_LINUX_SYS_SENDTO:
             return dispatch_sendto(
                     context, syscall, task, fault);
@@ -3530,6 +3681,11 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_SETSOCKOPT:
             return dispatch_setsockopt(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_GETSOCKOPT:
+            return dispatch_getsockopt(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SHUTDOWN:
+            return dispatch_shutdown(syscall, task);
         case AARCH64_LINUX_SYS_SENDMSG:
             return dispatch_sendmsg(
                     context, syscall, task, fault);

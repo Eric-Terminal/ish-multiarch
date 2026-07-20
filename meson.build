@@ -394,6 +394,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_socket_syscall', aarch64_socket_syscall_test)
 
+        aarch64_socket_query_test = executable(
+            'aarch64_socket_query_test',
+            'kernel/aarch64-socket-query-test.c',
+            dependencies: ish)
+        test('aarch64_socket_query', aarch64_socket_query_test)
+
         aarch64_socket_ipv6_test = executable(
             'aarch64_socket_ipv6_test',
             'kernel/aarch64-socket-ipv6-test.c',

@@ -256,6 +256,7 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 - 一般有限正数输入的 `log2` 仅承诺确定性近似，不承诺正确舍入。
 - i386→i386、i386→AArch64 与 AArch64→AArch64 的多线程 `exec` 已执行 Linux 风格的 de-thread、非 leader TGID 接管、`files`/`sighand` 私有化和安全点映像换代；AArch64→i386 的反向架构切换仍未实现，当前返回 `ENOEXEC` 且保留旧映像。
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
+- AArch64 已接入 204 `getsockname`、205 `getpeername`、209 `getsockopt` 与 210 `shutdown`。名称查询保持协议状态检查、完整长度回写与截断地址复制的 Linux 顺序；socket option 支持零长度和短缓冲，区分 SOL_SOCKET 的值优先 copyout 与 TCP/IP 的长度优先 copyout，并在 guest copyout 前消费 `SO_ERROR`。`SO_PROTOCOL` 返回 guest 的实际 TCP/UDP 协议号，`SO_ACCEPTCONN` 使用显式监听状态；AArch64 的 OLD/NEW timeout 都按固定 16 字节 wire 转换，watchOS `arm64_32` 的 host `timeval` 宽度不会泄漏。当前 Darwin host 仍不能完整表达 Linux shutdown 状态机：未连接 INET 调用失败时的方向副作用、未连接 AF_UNIX 的成功语义、Unix 数据报读关闭后的排队数据保留，以及 INET listener 的读关闭退监听，仍须在后续 listen/accept/shutdown 状态机切片中由 guest 状态统一模拟；本次 syscall 接入不把这些差异宣称为已完成。
 - 网络验证目前覆盖回环 TCP 客户端、基础 UDP DNS A 查询、并行 AAAA 的无数据响应、`getent`/`nslookup` 与主机名 HTTP；尚未覆盖 DNS 截断后的 TCP 回退、真实 Apple resolver、完整 IPv6 resolver、IP ancillary、UDP GSO 或全部 socket 选项。
 - Apple 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core、完整静态库的普通与全归档链接闭包、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest、不衡量后端性能，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
 - Alpine 冒烟是目标工作负载验证，不等价于完整发行版兼容认证。

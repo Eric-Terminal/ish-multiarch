@@ -54,10 +54,15 @@ struct fd {
         struct {
             int domain;
             int type;
+            // host 侧为兼容受限 socket 可能使用不同协议。
             int protocol;
+            // Linux guest 观察到的 sk_protocol，与 host 适配分离。
+            int guest_protocol;
             bool inet_explicitly_bound;
             // 非阻塞 TCP connect 尚未由成功或 SO_ERROR 终结。
             bool inet_connect_pending;
+            // Darwin 不支持可靠查询 SO_ACCEPTCONN，由 fd 锁保护。
+            bool listening;
 
             // These are only used as strong references, to keep the inode
             // alive while there is a listener.
