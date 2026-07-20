@@ -31,6 +31,7 @@
 #define USER_RETURNED_ADDRESS (USER_PAGE + UINT32_C(0x180))
 #define UNMAPPED_ADDRESS UINT32_C(0x3000)
 #define PEER_EVENT_TOKEN UINT64_C(0x7365717061636b65)
+#define SEQPACKET_STATE_EVENTS (POLL_READ | POLL_ERR | POLL_HUP)
 
 #ifndef __has_feature
 #define __has_feature(feature) 0
@@ -175,6 +176,47 @@ static bool create_guest_pair(
             user_read(USER_SOCKETPAIR, pair, sizeof(fd_t) * 2) == 0;
 }
 
+static ssize_t seqpacket_send(
+        struct fd *fd, const void *data, size_t length) {
+    const struct socket_ref socket = {.fd = fd};
+    return socket_sendto_ref(
+            &socket, data, length, MSG_NOSIGNAL_, NULL);
+}
+
+static ssize_t seqpacket_recv(
+        struct fd *fd, void *data, size_t length, dword_t flags) {
+    const struct socket_ref socket = {.fd = fd};
+    return socket_recvfrom_ref(
+            &socket, data, length, flags | MSG_DONTWAIT_, NULL);
+}
+
+static bool seqpacket_take_error(
+        struct fd *fd, sdword_t *error) {
+    const struct socket_ref socket = {.fd = fd};
+    struct socket_option_result result;
+    if (socket_getsockopt_ref(&socket,
+            SOL_SOCKET_, SO_ERROR_, sizeof(*error),
+            SOCKET_GUEST_I386, &result) != 0 ||
+            result.length != sizeof(*error))
+        return false;
+    memcpy(error, result.value, sizeof(*error));
+    return true;
+}
+
+static bool seqpacket_close_fd(struct fd **fd_pointer) {
+    if (*fd_pointer == NULL)
+        return true;
+    struct fd *fd = *fd_pointer;
+    *fd_pointer = NULL;
+    return fd_close(fd) == 0;
+}
+
+static bool seqpacket_close_pair(struct fd *pair[2]) {
+    bool first = seqpacket_close_fd(&pair[0]);
+    bool second = seqpacket_close_fd(&pair[1]);
+    return first && second;
+}
+
 static bool test_seqpacket_pair(struct task *task) {
     bool passed = true;
     struct fd *pair[2] = {NULL, NULL};
@@ -223,13 +265,34 @@ static bool test_seqpacket_pair(struct task *task) {
                     sizeof(complete_record)) == 0,
             "截断不会吞掉或拼接下一条记录");
 
-    REQUIRE(fd_close(pair[0]) == 0,
+    const byte_t final_record = 0x31;
+    REQUIRE(seqpacket_send(pair[0],
+                    &final_record, sizeof(final_record)) ==
+                    (ssize_t) sizeof(final_record),
+            "干净关闭前为存活端保留一条已发送记录");
+    REQUIRE(seqpacket_close_fd(&pair[0]),
             "关闭发送端");
-    pair[0] = NULL;
     int events = pair[1]->ops->poll(pair[1]);
-    REQUIRE((events & (POLL_READ | POLL_HUP)) ==
+    int repeated_events = pair[1]->ops->poll(pair[1]);
+    REQUIRE((events & SEQPACKET_STATE_EVENTS) ==
+                    (POLL_READ | POLL_HUP) &&
+                    (repeated_events & SEQPACKET_STATE_EVENTS) ==
                     (POLL_READ | POLL_HUP),
-            "对端关闭持续呈现可读与挂断");
+            "干净关闭持续呈现可读与挂断但不报告错误");
+
+    sdword_t socket_error = -1;
+    REQUIRE(seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0 &&
+                    seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0,
+            "干净关闭不会泄漏 host reset 到 SO_ERROR");
+
+    byte_t received_final_record = 0;
+    REQUIRE(seqpacket_recv(pair[1], &received_final_record,
+                    sizeof(received_final_record), 0) ==
+                    (ssize_t) sizeof(received_final_record) &&
+                    received_final_record == final_record,
+            "干净关闭保留存活端已经排队的记录");
 
     byte_t eof = 0;
     REQUIRE(pair[1]->ops->read(pair[1], &eof, sizeof(eof)) == 0 &&
@@ -245,14 +308,240 @@ static bool test_seqpacket_pair(struct task *task) {
     REQUIRE(socket_sendmsg_ref(&receiver,
                     &eof, sizeof(eof), MSG_NOSIGNAL_, NULL, NULL) == _EPIPE,
             "对端关闭后的写入返回 EPIPE");
+    REQUIRE(seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0,
+            "干净关闭后的 EPIPE 不会写入 SO_ERROR");
 
 cleanup:
     if (scm != NULL)
         socket_scm_release(scm);
-    if (pair[0] != NULL)
-        fd_close(pair[0]);
-    if (pair[1] != NULL)
-        fd_close(pair[1]);
+    seqpacket_close_pair(pair);
+    return passed;
+}
+
+static bool test_seqpacket_shutdown_semantics(struct task *task) {
+    bool passed = true;
+    struct fd *pair[2] = {NULL, NULL};
+    sdword_t socket_error = -1;
+
+    REQUIRE(socket_pair_create_task(task,
+                    AF_LOCAL_, SOCK_SEQPACKET_, 0, pair) == 0,
+            "为 SHUT_RD 创建有序记录对");
+    const byte_t read_queued = 0x41;
+    REQUIRE(seqpacket_send(pair[0],
+                    &read_queued, sizeof(read_queued)) ==
+                    (ssize_t) sizeof(read_queued),
+            "SHUT_RD 前排入接收记录");
+    const struct socket_ref read_shutdown = {.fd = pair[1]};
+    REQUIRE(socket_shutdown_ref(&read_shutdown, SHUT_RD) == 0,
+            "SEQPACKET 接收端执行 SHUT_RD");
+
+    byte_t received = 0;
+    REQUIRE(seqpacket_recv(pair[1], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == read_queued &&
+                    seqpacket_recv(pair[1], &received,
+                    sizeof(received), 0) == 0,
+            "SHUT_RD 保留已有记录并在排空后返回 EOF");
+    const byte_t rejected = 0x42;
+    REQUIRE(seqpacket_send(pair[0], &rejected, sizeof(rejected)) == _EPIPE,
+            "SHUT_RD 向对端传播写关闭");
+    const byte_t read_reverse = 0x43;
+    REQUIRE(seqpacket_send(pair[1],
+                    &read_reverse, sizeof(read_reverse)) ==
+                    (ssize_t) sizeof(read_reverse) &&
+                    seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == read_reverse,
+            "SHUT_RD 不关闭反向发送与接收");
+    int left_events = pair[0]->ops->poll(pair[0]);
+    int right_events = pair[1]->ops->poll(pair[1]);
+    REQUIRE((left_events & SEQPACKET_STATE_EVENTS) == 0 &&
+                    (right_events & SEQPACKET_STATE_EVENTS) == POLL_READ,
+            "SHUT_RD 只让本端 EOF 可读且不产生完整挂断");
+    REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0 &&
+                    seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0,
+            "SHUT_RD 不产生异步 socket 错误");
+    REQUIRE(seqpacket_close_pair(pair),
+            "清理 SHUT_RD 有序记录对");
+
+    REQUIRE(socket_pair_create_task(task,
+                    AF_LOCAL_, SOCK_SEQPACKET_, 0, pair) == 0,
+            "为 SHUT_WR 创建有序记录对");
+    const byte_t write_queued = 0x51;
+    REQUIRE(seqpacket_send(pair[1],
+                    &write_queued, sizeof(write_queued)) ==
+                    (ssize_t) sizeof(write_queued),
+            "SHUT_WR 前排入对端接收记录");
+    const struct socket_ref write_shutdown = {.fd = pair[1]};
+    REQUIRE(socket_shutdown_ref(&write_shutdown, SHUT_WR) == 0,
+            "SEQPACKET 发送端执行 SHUT_WR");
+    REQUIRE(seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == write_queued &&
+                    seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == 0,
+            "SHUT_WR 保留已发送记录并向对端交付 EOF");
+    REQUIRE(seqpacket_send(pair[1], &rejected, sizeof(rejected)) == _EPIPE,
+            "SHUT_WR 关闭本端后续发送");
+    const byte_t write_reverse = 0x53;
+    REQUIRE(seqpacket_send(pair[0],
+                    &write_reverse, sizeof(write_reverse)) ==
+                    (ssize_t) sizeof(write_reverse) &&
+                    seqpacket_recv(pair[1], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == write_reverse,
+            "SHUT_WR 不关闭反向发送与接收");
+    left_events = pair[0]->ops->poll(pair[0]);
+    right_events = pair[1]->ops->poll(pair[1]);
+    REQUIRE((left_events & SEQPACKET_STATE_EVENTS) == POLL_READ &&
+                    (right_events & SEQPACKET_STATE_EVENTS) == 0,
+            "SHUT_WR 只让对端 EOF 可读且不产生完整挂断");
+    REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0 &&
+                    seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0,
+            "SHUT_WR 不产生异步 socket 错误");
+    REQUIRE(seqpacket_close_pair(pair),
+            "清理 SHUT_WR 有序记录对");
+
+    REQUIRE(socket_pair_create_task(task,
+                    AF_LOCAL_, SOCK_SEQPACKET_, 0, pair) == 0,
+            "为 SHUT_RDWR 创建有序记录对");
+    const byte_t both_left = 0x61;
+    const byte_t both_right = 0x62;
+    REQUIRE(seqpacket_send(pair[0],
+                    &both_left, sizeof(both_left)) ==
+                    (ssize_t) sizeof(both_left) &&
+                    seqpacket_send(pair[1],
+                    &both_right, sizeof(both_right)) ==
+                    (ssize_t) sizeof(both_right),
+            "SHUT_RDWR 前为两个方向各排入一条记录");
+    const struct socket_ref both_shutdown = {.fd = pair[1]};
+    REQUIRE(socket_shutdown_ref(&both_shutdown, SHUT_RDWR) == 0,
+            "SEQPACKET 端点执行 SHUT_RDWR");
+    REQUIRE(seqpacket_recv(pair[1], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == both_left &&
+                    seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == both_right,
+            "SHUT_RDWR 保留两个方向已经排队的记录");
+    REQUIRE(seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == 0 &&
+                    seqpacket_recv(pair[1], &received,
+                    sizeof(received), 0) == 0 &&
+                    seqpacket_send(pair[0], &rejected,
+                    sizeof(rejected)) == _EPIPE &&
+                    seqpacket_send(pair[1], &rejected,
+                    sizeof(rejected)) == _EPIPE,
+            "SHUT_RDWR 在排空后向两端交付 EOF 与 EPIPE");
+    left_events = pair[0]->ops->poll(pair[0]);
+    right_events = pair[1]->ops->poll(pair[1]);
+    REQUIRE((left_events & SEQPACKET_STATE_EVENTS) ==
+                    (POLL_READ | POLL_HUP) &&
+                    (right_events & SEQPACKET_STATE_EVENTS) ==
+                    (POLL_READ | POLL_HUP),
+            "SHUT_RDWR 让两端持续呈现可读与完整挂断");
+    REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0 &&
+                    seqpacket_take_error(pair[1], &socket_error) &&
+                    socket_error == 0,
+            "SHUT_RDWR 不产生 ECONNRESET");
+    REQUIRE(seqpacket_close_pair(pair),
+            "清理 SHUT_RDWR 有序记录对");
+
+cleanup:
+    seqpacket_close_pair(pair);
+    return passed;
+}
+
+enum seqpacket_reset_consumer {
+    SEQPACKET_RESET_BY_RECV,
+    SEQPACKET_RESET_BY_SEND,
+    SEQPACKET_RESET_BY_SO_ERROR,
+};
+
+static bool test_seqpacket_unread_close_error(struct task *task,
+        enum seqpacket_reset_consumer consumer) {
+    bool passed = true;
+    struct fd *pair[2] = {NULL, NULL};
+
+    REQUIRE(socket_pair_create_task(task,
+                    AF_LOCAL_, SOCK_SEQPACKET_, 0, pair) == 0,
+            "为未读关闭创建有序记录对");
+    const byte_t unread_by_closer = 0x71;
+    const byte_t queued_for_survivor = 0x72;
+    REQUIRE(seqpacket_send(pair[0],
+                    &unread_by_closer, sizeof(unread_by_closer)) ==
+                    (ssize_t) sizeof(unread_by_closer) &&
+                    seqpacket_send(pair[1],
+                    &queued_for_survivor, sizeof(queued_for_survivor)) ==
+                    (ssize_t) sizeof(queued_for_survivor),
+            "关闭前让关闭端与存活端各有一条待读记录");
+    REQUIRE(seqpacket_close_fd(&pair[1]),
+            "关闭带未读记录的对端");
+
+    int first_events = pair[0]->ops->poll(pair[0]);
+    int repeated_events = pair[0]->ops->poll(pair[0]);
+    REQUIRE((first_events & SEQPACKET_STATE_EVENTS) ==
+                    SEQPACKET_STATE_EVENTS &&
+                    (repeated_events & SEQPACKET_STATE_EVENTS) ==
+                    SEQPACKET_STATE_EVENTS,
+            "未读关闭的 poll 重复观察错误但不会消费它");
+
+    sdword_t socket_error = -1;
+    byte_t attempted = 0xa5;
+    switch (consumer) {
+        case SEQPACKET_RESET_BY_RECV:
+            REQUIRE(seqpacket_recv(pair[0], &attempted,
+                            sizeof(attempted), MSG_PEEK_) == _ECONNRESET &&
+                            attempted == 0xa5,
+                    "MSG_PEEK recv 优先消费一次 ECONNRESET 且不读取记录");
+            break;
+        case SEQPACKET_RESET_BY_SEND:
+            REQUIRE(seqpacket_send(pair[0],
+                            &attempted, sizeof(attempted)) == _ECONNRESET,
+                    "send 优先消费一次 ECONNRESET");
+            break;
+        case SEQPACKET_RESET_BY_SO_ERROR:
+            REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                            socket_error == -_ECONNRESET,
+                    "SO_ERROR 返回并消费一次 ECONNRESET");
+            break;
+    }
+
+    int consumed_events = pair[0]->ops->poll(pair[0]);
+    REQUIRE((consumed_events & SEQPACKET_STATE_EVENTS) ==
+                    (POLL_READ | POLL_HUP),
+            "消费 reset 后 poll 只保留可读与挂断");
+    REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0 &&
+                    seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0,
+            "ECONNRESET 只能由一个接口消费一次");
+
+    byte_t received = 0;
+    REQUIRE(seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == (ssize_t) sizeof(received) &&
+                    received == queued_for_survivor,
+            "reset 不会销毁存活端已经排队的记录");
+    REQUIRE(seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == 0 &&
+                    seqpacket_recv(pair[0], &received,
+                    sizeof(received), 0) == 0,
+            "reset 消费且记录排空后稳定返回 EOF");
+    REQUIRE(seqpacket_send(pair[0],
+                    &attempted, sizeof(attempted)) == _EPIPE,
+            "reset 消费后的后续发送返回 EPIPE");
+    REQUIRE(seqpacket_take_error(pair[0], &socket_error) &&
+                    socket_error == 0,
+            "后续 EPIPE 不会重新写入 SO_ERROR");
+
+cleanup:
+    seqpacket_close_pair(pair);
     return passed;
 }
 
@@ -567,6 +856,13 @@ int main(void) {
                 "SEQPACKET socketpair 测试失败：初始化完整任务夹具\n");
     } else {
         passed = test_seqpacket_pair(&fixture.task) &&
+                test_seqpacket_shutdown_semantics(&fixture.task) &&
+                test_seqpacket_unread_close_error(&fixture.task,
+                        SEQPACKET_RESET_BY_RECV) &&
+                test_seqpacket_unread_close_error(&fixture.task,
+                        SEQPACKET_RESET_BY_SEND) &&
+                test_seqpacket_unread_close_error(&fixture.task,
+                        SEQPACKET_RESET_BY_SO_ERROR) &&
                 test_i386_message_addresses_and_eof() &&
                 test_project_peer_close_poll_wakeup(&fixture);
     }

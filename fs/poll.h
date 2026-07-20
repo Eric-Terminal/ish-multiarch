@@ -49,6 +49,11 @@ struct poll_fd {
     // returned its bits are set here, and those bits are ignored on the next
     // call to poll_wait. The bits are cleared by poll_wakeup.
     int triggered_types;
+    // accept 排空只等待宿主队列，同时仍接收显式状态变化通知。
+    bool host_only;
+    // 只接收 poll_wakeup 通知，不把 fd 登记到宿主 poll。
+    bool wake_only;
+    int forced_types;
     // 单次触发后保留登记对象但停止投递，直到 MOD 显式重置。
     bool enabled;
 
@@ -80,6 +85,14 @@ struct poll_event {
 struct poll *poll_create(void);
 bool poll_has_fd(struct poll *poll, struct fd *fd);
 int poll_add_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info info);
+// 只扫描宿主 fd；poll_wakeup 仍以一次性强制事件唤醒状态重检。
+int poll_add_fd_host(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info);
+// 只等待目标 fd 的显式状态通知，不扫描 guest 或宿主就绪状态。
+int poll_add_fd_wake(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info);
 // epoll ADD 使用该入口，在同一临界区内检查并建立唯一登记。
 int poll_add_fd_unique(
         struct poll *poll, struct fd *fd, int types,
@@ -90,6 +103,8 @@ int poll_del_fd(struct poll *poll, struct fd *fd);
 // generate a new edge-triggered notification.
 // please do not call this while holding any locks you would acquire in your poll operation
 void poll_wakeup(struct fd *fd, int events);
+// 只通知 host-only/wake-only 内部登记，不改变 guest edge-triggered 状态。
+void poll_wakeup_internal(struct fd *fd, int events);
 // real fd 被同号替换后，恢复仍启用的宿主登记并重新开放边沿通知。
 int poll_rearm_fd(struct fd *fd);
 // 仅供并发回归在首次 punt 消费与等待注销之间插入确定性动作。

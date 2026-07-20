@@ -94,6 +94,10 @@ static bool restart_socket_create(struct fd **fd, int *peer) {
     created->real_fd = sockets[0];
     // 测试只需要真实宿主套接字的 poll 与重启语义。
     created->socket.domain = AF_INET_;
+    atomic_init(&created->socket.guest_shutdown, 0);
+    atomic_init(&created->socket.unix_route_generation, 0);
+    atomic_init(&created->socket.unix_capacity_generation, 0);
+    atomic_init(&created->socket.guest_error, 0);
     *fd = created;
     *peer = sockets[1];
     return true;
@@ -554,6 +558,143 @@ static int test_registration_semantics(void) {
 
     poll_destroy(poll);
     CHECK(fd_close(fd) == 0, "释放测试文件对象");
+    return 0;
+}
+
+static int test_internal_wakeup_preserves_guest_edge_state(void) {
+    int readiness = POLL_READ;
+    struct fd *fd = fd_create(&fake_ops);
+    CHECK(fd != NULL, "创建内部唤醒边沿测试文件对象");
+    fd->data = &readiness;
+
+    struct poll *guest = poll_create();
+    struct poll *internal = poll_create();
+    CHECK(!IS_ERR(guest) && !IS_ERR(internal),
+            "创建 guest 与内部 poll 实例");
+    CHECK(poll_add_fd(guest, fd,
+            POLL_READ | POLL_EDGETRIGGERED,
+            (union poll_fd_info) {.num = 1}) == 0 &&
+            poll_add_fd_wake(internal, fd, POLL_READ,
+            (union poll_fd_info) {.num = 2}) == 0,
+            "登记 guest 边沿与内部唤醒事件");
+
+    struct timespec immediate = {0};
+    struct callback_result first_guest = {0};
+    CHECK(poll_wait(guest, record_event,
+            &first_guest, &immediate) == 1 &&
+            first_guest.calls == 1 &&
+            first_guest.types == POLL_READ,
+            "guest 首次读取边沿正常投递");
+
+    poll_wakeup_internal(fd, POLL_READ);
+    struct callback_result rejected = {0};
+    CHECK(poll_wait(internal, reject_event,
+            &rejected, &immediate) == 0 && rejected.calls == 1,
+            "内部显式事件允许回调暂时拒收");
+    struct callback_result internal_event = {0};
+    CHECK(poll_wait(internal, record_event,
+            &internal_event, &immediate) == 1 &&
+            internal_event.calls == 1 &&
+            internal_event.types == POLL_READ &&
+            internal_event.info == 2,
+            "被拒收的内部显式事件留待下一轮投递");
+
+    struct callback_result no_guest_edge = {0};
+    CHECK(poll_wait(guest, record_event,
+            &no_guest_edge, &immediate) == 0 &&
+            no_guest_edge.calls == 0,
+            "内部唤醒不会给 guest 制造伪边沿");
+
+    struct fd *host_fd = NULL;
+    int host_peer = -1;
+    CHECK(restart_socket_create(&host_fd, &host_peer),
+            "创建 host-only 内部唤醒测试套接字");
+    struct poll *host = poll_create();
+    CHECK(!IS_ERR(host) && poll_add_fd_host(host, host_fd, POLL_READ,
+            (union poll_fd_info) {.num = 3}) == 0,
+            "登记 host-only 内部唤醒事件");
+    struct callback_result host_before_wakeup = {0};
+    CHECK(poll_wait(host, record_event,
+            &host_before_wakeup, &immediate) == 0 &&
+            host_before_wakeup.calls == 0,
+            "宿主未就绪时 host-only 不会伪造事件");
+    poll_wakeup_internal(host_fd, POLL_READ);
+    struct callback_result host_event = {0};
+    CHECK(poll_wait(host, record_event,
+            &host_event, &immediate) == 1 &&
+            host_event.calls == 1 &&
+            host_event.types == POLL_READ &&
+            host_event.info == 3,
+            "路由变化能显式唤醒 host-only 发送等待");
+    poll_destroy(host);
+    CHECK(fd_close(host_fd) == 0 && close(host_peer) == 0,
+            "释放 host-only 内部唤醒测试套接字");
+
+    poll_wakeup(fd, POLL_READ);
+    struct callback_result rearmed_guest = {0};
+    CHECK(poll_wait(guest, record_event,
+            &rearmed_guest, &immediate) == 1 &&
+            rearmed_guest.calls == 1 &&
+            rearmed_guest.types == POLL_READ,
+            "普通唤醒仍能重新开放 guest 边沿");
+
+    poll_destroy(internal);
+    poll_destroy(guest);
+    CHECK(fd_close(fd) == 0, "释放内部唤醒边沿测试文件对象");
+    return 0;
+}
+
+static int test_wake_only_cleanup_leaves_safe_tombstone(void) {
+    int readiness = 0;
+    struct fd *closed = fd_create(&fake_ops);
+    CHECK(closed != NULL, "创建 wake-only 生命周期测试文件对象");
+    closed->data = &readiness;
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "创建 wake-only 生命周期 poll 实例");
+    CHECK(poll_add_fd_wake(poll, closed, POLL_WRITE,
+            (union poll_fd_info) {.num = 0xc10}) == 0,
+            "登记 wake-only 生命周期事件");
+
+    struct wait_context context = {.poll = poll};
+    init_task(&context.task, &context.sighand);
+    pthread_t waiter;
+    CHECK(pthread_create(&waiter, NULL,
+            wait_for_event, &context) == 0,
+            "启动 wake-only 生命周期等待线程");
+    CHECK(wait_until_blocked(poll),
+            "最终关闭前等待线程已进入宿主后端");
+    CHECK(fd_close(closed) == 0,
+            "最终关闭 wake-only 关联文件对象");
+    CHECK(pthread_join(waiter, NULL) == 0 &&
+            context.result == 1 && context.callback.calls == 1 &&
+            context.callback.types == POLL_HUP &&
+            context.callback.info == 0xc10,
+            "tombstone 安全投递最终关闭通知");
+
+    struct fd *unrelated = fd_create(&fake_ops);
+    CHECK(unrelated != NULL, "创建 tombstone 遍历测试文件对象");
+    unrelated->data = &readiness;
+    CHECK(!poll_has_fd(poll, unrelated) &&
+            poll_mod_fd(poll, unrelated, POLL_READ,
+            (union poll_fd_info) {.num = 1}) == _ENOENT &&
+            poll_del_fd(poll, unrelated) == _ENOENT,
+            "HAS、MOD 与 DEL 安全跳过 tombstone");
+    CHECK(poll_add_fd_wake(poll, unrelated, POLL_READ,
+            (union poll_fd_info) {.num = 2}) == 0 &&
+            poll_has_fd(poll, unrelated),
+            "tombstone 不妨碍后续登记与查询");
+    CHECK(poll_mod_fd(poll, unrelated, POLL_WRITE,
+            (union poll_fd_info) {.num = 3}) == 0 &&
+            poll_del_fd(poll, unrelated) == 0 &&
+            !poll_has_fd(poll, unrelated),
+            "tombstone 不妨碍后续 MOD 与 DEL");
+
+    pthread_mutex_destroy(&context.task.waiting_cond_lock.m);
+    pthread_mutex_destroy(&context.sighand.lock.m);
+    poll_destroy(poll);
+    CHECK(fd_close(unrelated) == 0,
+            "释放 tombstone 遍历测试文件对象");
     return 0;
 }
 
@@ -1100,6 +1241,10 @@ int main(void) {
         result = test_notifications_preserve_deadline();
     if (result == 0)
         result = test_registration_semantics();
+    if (result == 0)
+        result = test_internal_wakeup_preserves_guest_edge_state();
+    if (result == 0)
+        result = test_wake_only_cleanup_leaves_safe_tombstone();
     if (result == 0)
         result = test_capacity_rejection_preserves_ready_event();
     if (result == 0)

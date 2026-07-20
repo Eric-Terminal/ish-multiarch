@@ -112,7 +112,8 @@ static void poll_real_fd_end(
 static struct poll_fd *poll_find_fd(struct poll *poll, struct fd *fd) {
     struct poll_fd *poll_fd, *tmp;
     list_for_each_entry_safe(&poll->poll_fds, poll_fd, tmp, fds) {
-        if (poll_fd->fd == fd)
+        // wake-only 目标最终关闭后会留下仅由 poll 持有的通知墓碑。
+        if (poll_fd->fd != NULL && poll_fd->fd == fd)
             return poll_fd;
     }
     return NULL;
@@ -154,7 +155,8 @@ bool poll_has_fd(struct poll *poll, struct fd *fd) {
 
 static int poll_add_fd_impl(
         struct poll *poll, struct fd *fd, int types,
-        union poll_fd_info info, bool unique) {
+        union poll_fd_info info, bool unique,
+        bool host_only, bool wake_only) {
     int err;
     lock(&fd->poll_lock);
     lock(&poll->lock);
@@ -185,10 +187,13 @@ static int poll_add_fd_impl(
     poll_fd->types = types;
     poll_fd->info = info;
     poll_fd->triggered_types = 0;
+    poll_fd->host_only = host_only;
+    poll_fd->wake_only = wake_only;
+    poll_fd->forced_types = 0;
     poll_fd->enabled = true;
 
     struct poll_real_fd real;
-    if (poll_real_fd_begin(fd, &real)) {
+    if (!wake_only && poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
                 &poll->real, real.number, types, poll_fd);
         poll_real_fd_end(fd, &real);
@@ -213,13 +218,29 @@ out:
 int poll_add_fd(
         struct poll *poll, struct fd *fd, int types,
         union poll_fd_info info) {
-    return poll_add_fd_impl(poll, fd, types, info, false);
+    return poll_add_fd_impl(
+            poll, fd, types, info, false, false, false);
+}
+
+int poll_add_fd_host(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info) {
+    return poll_add_fd_impl(
+            poll, fd, types, info, false, true, false);
+}
+
+int poll_add_fd_wake(
+        struct poll *poll, struct fd *fd, int types,
+        union poll_fd_info info) {
+    return poll_add_fd_impl(
+            poll, fd, types, info, false, false, true);
 }
 
 int poll_add_fd_unique(
         struct poll *poll, struct fd *fd, int types,
         union poll_fd_info info) {
-    return poll_add_fd_impl(poll, fd, types, info, true);
+    return poll_add_fd_impl(
+            poll, fd, types, info, true, false, false);
 }
 
 int poll_del_fd(struct poll *poll, struct fd *fd) {
@@ -237,7 +258,8 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
     }
 
     struct poll_real_fd real;
-    if (poll_fd->enabled && poll_real_fd_begin(fd, &real)) {
+    if (!poll_fd->wake_only && poll_fd->enabled &&
+            poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
                 &poll->real, real.number, 0, poll_fd);
         poll_real_fd_end(fd, &real);
@@ -273,7 +295,7 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     }
 
     struct poll_real_fd real;
-    if (poll_real_fd_begin(fd, &real)) {
+    if (!poll_fd->wake_only && poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
                 &poll->real, real.number, types, poll_fd);
         poll_real_fd_end(fd, &real);
@@ -286,6 +308,7 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     poll_fd->types = types;
     poll_fd->info = info;
     poll_fd->triggered_types = 0;
+    poll_fd->forced_types = 0;
     poll_fd->enabled = true;
     poll_notify_waiters_locked(poll);
 
@@ -302,8 +325,18 @@ void poll_cleanup_fd(struct fd *fd) {
     list_for_each_entry_safe(&fd->poll_fds, poll_fd, tmp, polls) {
         struct poll *poll = poll_fd->poll;
         lock(&poll->lock);
+        if (poll_fd->wake_only) {
+            // 生命周期通知必须先脱离即将释放的 fd，再由 poll 自身交付 HUP。
+            list_remove(&poll_fd->polls);
+            poll_fd->fd = NULL;
+            poll_fd->forced_types |= POLL_HUP;
+            poll_notify_waiters_locked(poll);
+            unlock(&poll->lock);
+            continue;
+        }
         struct poll_real_fd real;
-        if (poll_fd->enabled && poll_real_fd_begin(fd, &real)) {
+        if (!poll_fd->wake_only && poll_fd->enabled &&
+                poll_real_fd_begin(fd, &real)) {
             real_poll_update(&poll->real, real.number, 0, poll_fd);
             poll_real_fd_end(fd, &real);
         }
@@ -315,22 +348,38 @@ void poll_cleanup_fd(struct fd *fd) {
     unlock(&fd->poll_lock);
 }
 
-void poll_wakeup(struct fd *fd, int events) {
+static void poll_wakeup_impl(
+        struct fd *fd, int events, bool internal_only) {
     struct poll_fd *poll_fd;
     lock(&fd->poll_lock);
     list_for_each_entry(&fd->poll_fds, poll_fd, polls) {
+        if (internal_only &&
+                !poll_fd->host_only && !poll_fd->wake_only)
+            continue;
         struct poll *poll = poll_fd->poll;
         lock(&poll->lock);
         if (!poll_fd->enabled) {
             unlock(&poll->lock);
             continue;
         }
-        if (poll_fd->types & POLL_EDGETRIGGERED)
+        if (poll_fd->host_only || poll_fd->wake_only)
+            poll_fd->forced_types |= events &
+                    (poll_fd->types | POLL_HUP | POLL_ERR);
+        if (!internal_only &&
+                poll_fd->types & POLL_EDGETRIGGERED)
             poll_fd->triggered_types &= ~events;
         poll_notify_waiters_locked(poll);
         unlock(&poll->lock);
     }
     unlock(&fd->poll_lock);
+}
+
+void poll_wakeup(struct fd *fd, int events) {
+    poll_wakeup_impl(fd, events, false);
+}
+
+void poll_wakeup_internal(struct fd *fd, int events) {
+    poll_wakeup_impl(fd, events, true);
 }
 
 int poll_rearm_fd(struct fd *fd) {
@@ -341,7 +390,8 @@ int poll_rearm_fd(struct fd *fd) {
         struct poll *poll = poll_fd->poll;
         lock(&poll->lock);
         struct poll_real_fd real;
-        if (!poll->destroying && poll_fd->enabled &&
+        if (!poll_fd->wake_only && !poll->destroying &&
+                poll_fd->enabled &&
                 poll_real_fd_begin(fd, &real)) {
             int result;
             do {
@@ -462,9 +512,20 @@ static int poll_wait_deadline(struct poll *poll_,
             if (!poll_fd->enabled)
                 continue;
             struct fd *fd = poll_fd->fd;
-            int poll_types = 0;
-            if (fd->ops->poll)
-                poll_types = fd->ops->poll(fd);
+            int poll_types = poll_fd->forced_types;
+            if (poll_fd->wake_only) {
+                // forced_types 已经携带本轮显式通知。
+            } else if (poll_fd->host_only) {
+                struct poll_real_fd real;
+                if (poll_real_fd_begin(fd, &real)) {
+                    poll_types |= realfs_poll(fd);
+                    poll_real_fd_end(fd, &real);
+                } else if (fd->ops == &socket_fdops) {
+                    poll_types |= POLL_ERR | POLL_HUP;
+                }
+            } else if (fd->ops->poll) {
+                poll_types |= fd->ops->poll(fd);
+            }
             poll_types &= poll_fd->types | POLL_HUP | POLL_ERR;
             if (poll_fd->types & POLL_EDGETRIGGERED) {
                 poll_types &= ~poll_fd->triggered_types;
@@ -474,12 +535,16 @@ static int poll_wait_deadline(struct poll *poll_,
                         context, poll_types, poll_fd->info) == 1;
                 if (delivered)
                     res++;
+                if (delivered &&
+                        (poll_fd->host_only || poll_fd->wake_only))
+                    poll_fd->forced_types &= ~poll_types;
 
                 // 宿主后端不直接使用 oneshot；持有 poll 锁可确保只有一个等待者
                 // 消费本次事件。登记对象必须保留，MOD 才能按 Linux 语义重置它。
                 if (delivered && poll_fd->types & POLL_ONESHOT) {
                     struct poll_real_fd real;
-                    if (poll_real_fd_begin(fd, &real)) {
+                    if (!poll_fd->wake_only &&
+                            poll_real_fd_begin(fd, &real)) {
                         real_poll_update(&poll_->real,
                                 real.number, 0, poll_fd);
                         poll_real_fd_end(fd, &real);
@@ -515,7 +580,8 @@ static int poll_wait_deadline(struct poll *poll_,
         // 期间的 DEL 与最终关闭无法让 end 访问已释放的 fd。
         size_t listen_wait_capacity = 0;
         list_for_each_entry(&poll_->poll_fds, poll_fd, fds) {
-            if (poll_fd->fd->ops == &socket_fdops)
+            if (!poll_fd->wake_only &&
+                    poll_fd->fd->ops == &socket_fdops)
                 listen_wait_capacity++;
         }
         struct fd **listen_waits = NULL;
@@ -529,7 +595,8 @@ static int poll_wait_deadline(struct poll *poll_,
         }
         size_t listen_wait_count = 0;
         list_for_each_entry(&poll_->poll_fds, poll_fd, fds) {
-            if (poll_fd->fd->ops != &socket_fdops)
+            if (poll_fd->wake_only ||
+                    poll_fd->fd->ops != &socket_fdops)
                 continue;
             if (!poll_fd_try_retain(poll_fd->fd))
                 continue;
@@ -700,6 +767,11 @@ void poll_destroy(struct poll *poll) {
     while (!list_empty(&poll->poll_fds)) {
         struct poll_fd *poll_fd = list_first_entry(
                 &poll->poll_fds, struct poll_fd, fds);
+        if (poll_fd->fd == NULL) {
+            list_remove(&poll_fd->fds);
+            free(poll_fd);
+            continue;
+        }
         if (trylock(&poll_fd->fd->poll_lock) != 0) {
             unlock(&poll->lock);
             sched_yield();

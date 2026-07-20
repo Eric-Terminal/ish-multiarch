@@ -106,6 +106,12 @@ int_t socket_getsockopt_ref(const struct socket_ref *socket,
 int_t socket_shutdown_ref(
         const struct socket_ref *socket, sdword_t how);
 
+// 仅供串行回归为 AF_UNIX 数据报排空注入宿主接收结果。
+typedef ssize_t (*socket_unix_drain_recvmsg_test_hook_t)(
+        int fd, struct msghdr *message, int flags, void *opaque);
+void socket_set_unix_drain_recvmsg_test_hook(
+        socket_unix_drain_recvmsg_test_hook_t hook, void *opaque);
+
 // socketpair 在创建协议对象前先由调用方完成 fd 预留与编号写回。
 int socket_pair_flags_validate(dword_t type);
 int socket_pair_create_task(struct task *task,

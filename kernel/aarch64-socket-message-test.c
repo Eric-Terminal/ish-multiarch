@@ -2319,6 +2319,10 @@ static int install_host_stream_pair(
     // host socketpair 提供确定的背压。
     sender->socket.domain = AF_INET_;
     sender->socket.type = SOCK_STREAM_;
+    atomic_init(&sender->socket.guest_shutdown, 0);
+    atomic_init(&sender->socket.unix_route_generation, 0);
+    atomic_init(&sender->socket.unix_capacity_generation, 0);
+    atomic_init(&sender->socket.guest_error, 0);
     int number = f_install_task(&fixture->task, sender, 0);
     if (number < 0) {
         close(sockets[1]);

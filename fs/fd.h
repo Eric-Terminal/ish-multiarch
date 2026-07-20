@@ -78,16 +78,26 @@ struct fd {
             bool unix_backing_owned;
             uint64_t unix_backing_device;
             uint64_t unix_backing_inode;
+            uint32_t unix_backing_socket_id;
             char unix_backing_path[108];
             // 反向名称对象会被已排队的数据报保活，源 fd 关闭后仍可回报名称。
             struct unix_bound_name *unix_bound_name;
             struct fd *unix_peer; // locked by peer_lock, for simplicity
+            // DGRAM 路由允许非对称 connect；目标维护弱反向链并在最终关闭时拆除。
+            struct fd *unix_dgram_peer;
+            struct list unix_dgram_senders;
+            struct list unix_dgram_peer_link;
             // 对端关闭后，本地查询仍必须返回建连时确认的 Unix 名称。
             bool unix_peer_name_valid;
             uint8_t unix_peer_name_len;
             char unix_peer_name[109];
+            // DGRAM 的 guest 名称可能同名重绑，实际路由身份另存 host 后备路径。
+            bool unix_peer_transport_valid;
+            char unix_peer_transport_path[108];
             bool unix_peer_handshake_pending;
             bool unix_peer_handshake_rejected;
+            // 只传播 connect 成功后、accept 前发生的 shutdown 调用。
+            unsigned unix_pending_peer_shutdown;
             uint64_t unix_connect_generation;
             struct unix_pending_peer *unix_pending_connect;
             bool unix_peer_cred_valid;
@@ -100,6 +110,9 @@ struct fd {
             struct list unix_scm;
             // connect 已完成而 accept 尚未发生时暂存发送的 SCM_RIGHTS。
             struct list unix_pending_scm;
+            // hidden transport 在 guest bind 前发送的匿名源地址逐记录保序。
+            struct unix_anonymous_source *unix_anonymous_sources_head;
+            struct unix_anonymous_source *unix_anonymous_sources_tail;
             // host 消息与内部 SCM 队列必须按同一个接收顺序配对。
             lock_t unix_recv_lock;
             // 只有 SCM 强引用存在时进入 vertex 链，链本身不持有引用。
@@ -107,11 +120,19 @@ struct fd {
             atomic_uint unix_scm_incoming;
             bool unix_scm_gc_live;
             bool unix_scm_gc_collect;
-            // Darwin 在读 shutdown 后把数据报接收表现为永久 EOF，
-            // close 不得再次排空。
-            bool unix_read_shutdown;
-            // 记录写方向以保持重复 SHUT_RDWR 的幂等语义。
-            bool unix_write_shutdown;
+            // 位 0/1 分别记录 Linux guest 的读/写关闭；32 位原子在
+            // arm64 与 arm64_32 上都能直接参与并发收发状态机。
+            atomic_uint guest_shutdown;
+            // 非流式 Unix connect 每次成功后递增，使阻塞 send 能发现换 peer。
+            atomic_uint unix_route_generation;
+            // 每次实际消费一条记录后递增，封住 ENOBUFS 到 poll 登记的窗口。
+            atomic_uint unix_capacity_generation;
+            // 正数 Linux errno；recv/send/SO_ERROR 中只能有一个消费者。
+            atomic_int guest_error;
+            // DGRAM 已连接对端死亡只由下一次无地址发送消费，不进入 SO_ERROR。
+            atomic_int unix_send_error;
+            // host 路由无法恢复且也无法安全断开时，永久禁止继续 Unix I/O。
+            atomic_bool unix_transport_failed;
             struct ucred_ unix_cred;
         } socket;
 

@@ -310,6 +310,18 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('socket_stream_handshake', socket_stream_handshake_test)
 
+        socket_stream_shutdown_test = executable(
+            'socket_stream_shutdown_test',
+            'fs/socket-stream-shutdown-test.c',
+            dependencies: ish)
+        test('socket_stream_shutdown', socket_stream_shutdown_test)
+
+        socket_listener_shutdown_test = executable(
+            'socket_listener_shutdown_test',
+            'fs/socket-listener-shutdown-test.c',
+            dependencies: ish)
+        test('socket_listener_shutdown', socket_listener_shutdown_test)
+
         socket_unix_address_test = executable(
             'socket_unix_address_test',
             'fs/socket-unix-address-test.c',

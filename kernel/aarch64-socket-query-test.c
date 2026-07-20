@@ -895,6 +895,10 @@ static int install_connected_stream(struct fixture *fixture, int *peer) {
     // 使用确定的 host pair，只向核心声明本测试需要的 INET stream 语义。
     socket->socket.domain = AF_INET_;
     socket->socket.type = SOCK_STREAM_;
+    atomic_init(&socket->socket.guest_shutdown, 0);
+    atomic_init(&socket->socket.unix_route_generation, 0);
+    atomic_init(&socket->socket.unix_capacity_generation, 0);
+    atomic_init(&socket->socket.guest_error, 0);
     int number = f_install_task(&fixture->task, socket, 0);
     if (number < 0) {
         close(sockets[1]);

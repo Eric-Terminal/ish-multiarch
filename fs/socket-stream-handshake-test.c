@@ -29,6 +29,7 @@
 #define RECEIVE_HEADER (GUEST_PAGE + UINT32_C(0x280))
 #define QUERY_LENGTH (GUEST_PAGE + UINT32_C(0x300))
 #define QUERY_ADDRESS (GUEST_PAGE + UINT32_C(0x340))
+#define UNMAPPED_ADDRESS UINT32_C(0x2000)
 
 static int failures;
 static atomic_uint unique_name;
@@ -886,6 +887,56 @@ static void test_accept_full_table_preserves_pending_connection(void) {
             "accept 失败夹具最终只关闭传递对象一次");
 }
 
+static void test_accept_copyout_failure_closes_linked_peer(void) {
+    struct fixture fixture;
+    if (!fixture_init(&fixture, true)) {
+        EXPECT(false, "accept copyout 失败夹具初始化成功");
+        fixture_destroy(&fixture);
+        return;
+    }
+    EXPECT(prepare_sendmsg(&fixture) &&
+                    sys_sendmsg(fixture.connector_number,
+                            SEND_HEADER, 0) == 1 &&
+                    atomic_load_explicit(&fixture.passed->refcount,
+                            memory_order_relaxed) == 2,
+            "accept copyout 前在 embryo 排入 payload 与 SCM_RIGHTS");
+    dword_t capacity = sizeof(struct sockaddr_storage);
+    EXPECT(user_write(QUERY_LENGTH,
+                    &capacity, sizeof(capacity)) == 0 &&
+            sys_accept(fixture.listener_number,
+                    UNMAPPED_ADDRESS, QUERY_LENGTH) == _EFAULT,
+            "host accept 后地址 copyout fault 返回 EFAULT");
+    EXPECT(fixture.connector->socket.unix_peer == NULL &&
+                    atomic_load_explicit(&fixture.passed->refcount,
+                            memory_order_relaxed) == 1,
+            "失败 accepted close 拆除 peer 并释放 pending SCM 引用");
+    EXPECT(sys_recvfrom(fixture.connector_number,
+                    RECEIVE_PAYLOAD, 1, MSG_DONTWAIT_, 0, 0) ==
+                    _ECONNRESET &&
+            sys_recvfrom(fixture.connector_number,
+                    RECEIVE_PAYLOAD, 1, MSG_DONTWAIT_, 0, 0) == 0,
+            "失败 accepted 含未读记录时先交付一次 ECONNRESET 再 EOF");
+    fixture_destroy(&fixture);
+    EXPECT(fixture.passed_close.calls == 1,
+            "accept copyout 失败后传递对象只关闭一次");
+
+    if (!fixture_init(&fixture, false)) {
+        EXPECT(false, "clean accept copyout 失败夹具初始化成功");
+        fixture_destroy(&fixture);
+        return;
+    }
+    capacity = sizeof(struct sockaddr_storage);
+    EXPECT(user_write(QUERY_LENGTH,
+                    &capacity, sizeof(capacity)) == 0 &&
+            sys_accept(fixture.listener_number,
+                    UNMAPPED_ADDRESS, QUERY_LENGTH) == _EFAULT,
+            "clean host accept 后地址 copyout fault 返回 EFAULT");
+    EXPECT(sys_recvfrom(fixture.connector_number,
+                    RECEIVE_PAYLOAD, 1, MSG_DONTWAIT_, 0, 0) == 0,
+            "失败 accepted 没有未读记录时只向 connector 交付 EOF");
+    fixture_destroy(&fixture);
+}
+
 static void test_listener_close_releases_unaccepted_transit(void) {
     struct fixture fixture;
     if (!fixture_init(&fixture, false)) {
@@ -1354,6 +1405,7 @@ int main(int argc, char **argv) {
         return failures == 0 ? 0 : 1;
     }
     test_accept_full_table_preserves_pending_connection();
+    test_accept_copyout_failure_closes_linked_peer();
     test_listener_close_releases_unaccepted_transit();
     test_pathname_name_snapshots();
     test_binary_abstract_anonymous_name_snapshots();
