@@ -258,6 +258,24 @@ if get_option('kernel') == 'ish'
     if not meson.is_cross_build()
         executable('ish', ['main.c'], dependencies: ish)
 
+        if host_machine.system() == 'darwin'
+            aarch64_dns_redirect = shared_library(
+                'ish_aarch64_e2e_dns_redirect',
+                'tests/aarch64/dns-port-redirect.c')
+            aarch64_dns_redirect_probe = executable(
+                'aarch64_dns_redirect_probe',
+                'tests/aarch64/dns-port-redirect-probe.c')
+            aarch64_dns_redirect_runner = find_program(
+                'tests/aarch64/dns-port-redirect-test.bash')
+            test('aarch64_dns_redirect',
+                aarch64_dns_redirect_runner,
+                args: [
+                    aarch64_dns_redirect,
+                    aarch64_dns_redirect_probe,
+                    files('tests/aarch64/local-network-fixture.py'),
+                ], timeout: 30)
+        endif
+
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 

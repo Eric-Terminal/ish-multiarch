@@ -4,7 +4,7 @@
 
 本分支基于官方 iSH 历史继续开发，保留原有 i386 guest，并增加独立的 AArch64 Linux guest 执行路径。当前目标是逐步形成可嵌入 iOS 与 watchOS 应用的可移植核心，而不是替代完整的 iSH 应用层。现阶段生成的静态库和 XCFramework 是构建、ABI 与最终链接验证产物，并非已经发布的公共 SDK。
 
-该实现仍处于实验阶段。真实 Alpine AArch64 环境已经验证 shell、基础文件操作、进程创建与等待、信号投递以及本机 TCP 连接，但尚未覆盖完整的 AArch64 指令集与 Linux 系统调用集合。
+该实现仍处于实验阶段。真实 Alpine AArch64 环境已经验证 shell、基础文件操作、进程创建与等待、信号投递、本机 TCP 连接，以及完全本地的 UDP DNS 解析与主机名 HTTP 获取，但尚未覆盖完整的 AArch64 指令集与 Linux 系统调用集合。
 
 ## 架构边界
 
@@ -213,16 +213,17 @@ xcodebuild \
 build/tools/fakefsify \
     /tmp/alpine-minirootfs-3.24.1-aarch64.tar.gz \
     /tmp/ish-a64-alpine
-tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
+tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
+    build/libish_aarch64_e2e_dns_redirect.dylib
 ```
 
-冒烟脚本不会下载或提交 rootfs。它会拒绝与已有 `ish` 进程重叠运行，并为每个 guest 命令设置硬超时；退出时会清理自己启动的服务和残留进程。
+冒烟脚本不会下载或提交 rootfs。macOS 普通进程不能监听 UDP 53，因此测试专用动态库只在该次 `ish` 子进程中把 guest 可见的 `127.0.0.53:53` 映射到本地夹具随机选择的高位端口，并把响应来源恢复为 guest 看到的 53 端口；生产 socket 实现不含测试重定向。DNS 阶段会先把 fakefs 复制到宿主临时目录，resolver 只写入隔离副本，不会改动输入 rootfs 的 resolver；顶层存储或 `data` 树含真实宿主符号链接的非规范 fakefs 会被拒绝。脚本会拒绝与已有 `ish` 进程或同一 rootfs 的另一份验收重叠运行，并为每个 guest 命令设置硬超时；正常退出或收到可捕获信号时会清理隔离副本和自己启动的 DNS/HTTP 服务。若宿主直接以 `SIGKILL` 终止脚本，夹具会监测父进程并自行退出，带硬上限的 guest 子进程也会释放锁，但随机命名的临时 fakefs 副本可能留在磁盘上，需要人工删除。
 
 本次发布候选在开发使用的 macOS 与 Xcode 环境中完成了以下门禁：
 
 - 默认非交叉 `kernel=ish` 配置当前登记的 Meson 测试，在常规、ASan+UBSan 与 TSan 配置中均通过。
 - iOS device `arm64`，watchOS device `arm64_32`/`arm64` 与 Simulator `arm64`/`x86_64` 的 core、完整静态库、普通消费者、全归档消费者、ABI 和二进制元数据门禁通过，并成功生成包含 device/Simulator 变体的三份 XCFramework。
-- Alpine AArch64 的动态 `/bin/sh`、文件操作、子进程等待、信号终止和本机 HTTP 获取通过；冒烟结束后没有残留 `ish` 进程。
+- Alpine AArch64 的动态 `/bin/sh`、文件操作、子进程等待、信号终止、数字地址 HTTP、musl `getent`、BusyBox `nslookup` 与主机名 HTTP 获取通过；查询日志证明三条工作负载都实际经过本地 UDP DNS responder，冒烟结束后没有残留 `ish` 进程。
 
 ## 来源、许可与独立实现边界
 
@@ -255,6 +256,6 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine
 - 一般有限正数输入的 `log2` 仅承诺确定性近似，不承诺正确舍入。
 - i386→i386、i386→AArch64 与 AArch64→AArch64 的多线程 `exec` 已执行 Linux 风格的 de-thread、非 leader TGID 接管、`files`/`sighand` 私有化和安全点映像换代；AArch64→i386 的反向架构切换仍未实现，当前返回 `ENOEXEC` 且保留旧映像。
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
-- 网络验证目前只覆盖基础 TCP 客户端路径，不代表 UDP、IPv6 或全部 socket 选项均已实现。
+- 网络验证目前覆盖回环 TCP 客户端、基础 UDP DNS A 查询、并行 AAAA 的无数据响应、`getent`/`nslookup` 与主机名 HTTP；尚未覆盖 DNS 截断后的 TCP 回退、真实 Apple resolver、完整 IPv6 resolver、IP ancillary、UDP GSO 或全部 socket 选项。
 - Apple 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core、完整静态库的普通与全归档链接闭包、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest、不衡量后端性能，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
 - Alpine 冒烟是目标工作负载验证，不等价于完整发行版兼容认证。
