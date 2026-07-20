@@ -120,7 +120,10 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETGID = 176,
     AARCH64_LINUX_SYS_GETEGID = 177,
     AARCH64_LINUX_SYS_SOCKET = 198,
+    AARCH64_LINUX_SYS_SOCKETPAIR = 199,
     AARCH64_LINUX_SYS_BIND = 200,
+    AARCH64_LINUX_SYS_LISTEN = 201,
+    AARCH64_LINUX_SYS_ACCEPT = 202,
     AARCH64_LINUX_SYS_CONNECT = 203,
     AARCH64_LINUX_SYS_GETSOCKNAME = 204,
     AARCH64_LINUX_SYS_GETPEERNAME = 205,
@@ -134,6 +137,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_CLONE = 220,
     AARCH64_LINUX_SYS_EXECVE = 221,
     AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO = 240,
+    AARCH64_LINUX_SYS_ACCEPT4 = 242,
     AARCH64_LINUX_SYS_WAIT4 = 260,
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
     AARCH64_LINUX_SYS_PREADV2 = 286,
@@ -1632,6 +1636,154 @@ static qword_t dispatch_bind(
                     task, &socket, &address, (size_t) length));
     socket_ref_release(&socket);
     return result;
+}
+
+static qword_t dispatch_socketpair(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t type = (dword_t) syscall->arguments[1];
+    int error = socket_pair_flags_validate(type);
+    if (error < 0)
+        return syscall_result(error);
+
+    struct fd_reservation reservation = {};
+    error = f_reserve_task(task, 2, &reservation);
+    if (error < 0)
+        return syscall_result(error);
+    fd_t first = reservation.numbers[0];
+    fd_t second = reservation.numbers[1];
+    qword_t pair_address = syscall->arguments[3];
+    error = write_socket_message_user(context,
+            pair_address, &first, sizeof(first), fault);
+    if (error == 0)
+        error = write_socket_message_user(context,
+                pair_address + sizeof(first),
+                &second, sizeof(second), fault);
+    if (error < 0) {
+        f_reservation_cancel(&reservation);
+        return syscall_result(error);
+    }
+
+    struct fd *pair[FD_RESERVATION_MAX];
+    error = socket_pair_create_task(task,
+            (dword_t) syscall->arguments[0], type,
+            (dword_t) syscall->arguments[2], pair);
+    if (error < 0) {
+        f_reservation_cancel(&reservation);
+        return syscall_result(error);
+    }
+    error = f_reservation_publish(&reservation, pair,
+            type & (SOCK_NONBLOCK_ | SOCK_CLOEXEC_), NULL);
+    return syscall_result(error);
+}
+
+static qword_t dispatch_listen(
+        const struct guest_linux_syscall *syscall,
+        struct task *task) {
+    struct socket_ref listener;
+    int error = socket_ref_get_task(
+            task, syscall_fd(syscall->arguments[0]), &listener);
+    if (error < 0)
+        return syscall_result(error);
+    error = socket_listen_ref_task(task, &listener,
+            (sdword_t) (dword_t) syscall->arguments[1]);
+    socket_ref_release(&listener);
+    return syscall_result(error);
+}
+
+static qword_t dispatch_accept(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool has_flags) {
+    struct fd *listener = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (listener == NULL)
+        return syscall_result(_EBADF);
+
+    dword_t flags = has_flags ?
+            (dword_t) syscall->arguments[3] : 0;
+    int error = socket_accept_flags_validate(flags);
+    if (error < 0) {
+        fd_close(listener);
+        return syscall_result(error);
+    }
+
+    struct fd_reservation reservation = {};
+    error = f_reserve_task(task, 1, &reservation);
+    if (error < 0) {
+        fd_close(listener);
+        return syscall_result(error);
+    }
+    fd_t accepted_number = reservation.numbers[0];
+
+    bool timeout_enabled =
+            socket_timeout_enabled(listener, true);
+    struct socket_accept_result accepted;
+    error = socket_accept_retained_task(
+            task, listener, syscall->arguments[1] != 0, &accepted);
+    complete_socket_interrupt(
+            context, timeout_enabled, error);
+    if (error < 0)
+        goto cancel_reservation;
+
+    qword_t address = syscall->arguments[1];
+    if (address != 0) {
+        qword_t length_address = syscall->arguments[2];
+        if (!aarch64_user_range_fits(
+                length_address, sizeof(sdword_t))) {
+            error = _EFAULT;
+            (void) user_range_error(
+                    fault, length_address, GUEST_MEMORY_READ);
+            goto reject_client;
+        }
+        sdword_t capacity;
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                length_address, &capacity,
+                sizeof(capacity), fault)) {
+            error = _EFAULT;
+            goto reject_client;
+        }
+        if (capacity < 0) {
+            error = _EINVAL;
+            goto reject_client;
+        }
+        error = write_socket_message_user(context,
+                length_address, &accepted.address_length,
+                sizeof(accepted.address_length), fault);
+        if (error < 0)
+            goto reject_client;
+        dword_t copied = (dword_t) capacity <
+                accepted.address_length ?
+                (dword_t) capacity : accepted.address_length;
+        if (copied != 0) {
+            error = write_socket_message_user(context,
+                    address, &accepted.address, copied, fault);
+            if (error < 0)
+                goto reject_client;
+        }
+    }
+
+    socket_accept_finish(&accepted);
+    struct fd *published[FD_RESERVATION_MAX] = {
+        accepted.fd,
+        NULL,
+    };
+    error = f_reservation_publish(
+            &reservation, published, (int) flags, NULL);
+    accepted.fd = NULL;
+    fd_close(listener);
+    return error < 0 ? syscall_result(error) :
+            (qword_t) accepted_number;
+
+reject_client:
+    socket_accept_reject(&accepted);
+cancel_reservation:
+    f_reservation_cancel(&reservation);
+    fd_close(listener);
+    return syscall_result(error);
 }
 
 static qword_t dispatch_sendto(
@@ -3660,9 +3812,17 @@ static qword_t dispatch_syscall_inner(
                     (dword_t) syscall->arguments[0],
                     (dword_t) syscall->arguments[1],
                     (dword_t) syscall->arguments[2]));
+        case AARCH64_LINUX_SYS_SOCKETPAIR:
+            return dispatch_socketpair(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_BIND:
             return dispatch_bind(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_LISTEN:
+            return dispatch_listen(syscall, task);
+        case AARCH64_LINUX_SYS_ACCEPT:
+            return dispatch_accept(
+                    context, syscall, task, fault, false);
         case AARCH64_LINUX_SYS_CONNECT:
             return dispatch_connect(
                     context, syscall, task, fault);
@@ -3692,6 +3852,9 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RECVMSG:
             return dispatch_recvmsg(
                     context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_ACCEPT4:
+            return dispatch_accept(
+                    context, syscall, task, fault, true);
         case AARCH64_LINUX_SYS_CLONE:
             // 旧 clone ABI 的高 32 位不参与 flags。
             if (!task_has_aarch64_process(task))

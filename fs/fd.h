@@ -61,8 +61,11 @@ struct fd {
             bool inet_explicitly_bound;
             // 非阻塞 TCP connect 尚未由成功或 SO_ERROR 终结。
             bool inet_connect_pending;
-            // Darwin 不支持可靠查询 SO_ACCEPTCONN，由 fd 锁保护。
-            bool listening;
+            // host 与 guest 的 listener 生命周期会在 shutdown 时分离。
+            bool host_listening;
+            bool guest_listening;
+            dword_t listen_backlog;
+            uint64_t listen_generation;
 
             // These are only used as strong references, to keep the inode
             // alive while there is a listener.
@@ -246,10 +249,19 @@ struct fdtable {
     unsigned size;
     struct fd **files;
     bits_t *cloexec;
-    // 接收 SCM_RIGHTS 时，槽位可先预留而不向 guest 发布文件对象。
+    // 安装事务可先预留槽位而不向 guest 发布文件对象。
     bits_t *reserved;
     qword_t *generations;
     lock_t lock;
+};
+
+#define FD_RESERVATION_MAX 2
+
+// 事务持有原 fdtable；numbers 在事务结束前可于锁外只读。
+struct fd_reservation {
+    struct fdtable *table;
+    fd_t numbers[FD_RESERVATION_MAX];
+    unsigned count;
 };
 
 struct fdtable *fdtable_new(int size);
@@ -265,6 +277,16 @@ struct fd *f_get_task(struct task *task, fd_t f);
 // 返回独立引用；调用方完成操作后必须 fd_close。
 struct fd *f_get_task_retain(struct task *task, fd_t f);
 struct fd *f_get(fd_t f);
+// 原子预留一或两个最低空槽；预留项对 guest 不可见。
+// 调用方必须拥有活跃 task，并与该 task 的 exec/退出生命周期串行。
+int f_reserve_task(struct task *task, unsigned count,
+        struct fd_reservation *reservation);
+// 只撤销本事务仍拥有的预留，不处理任何 fd 引用。
+void f_reservation_cancel(struct fd_reservation *reservation);
+// 接管 count 个 fd 引用并原子发布；flags 同时作用于全部发布项。
+int f_reservation_publish(struct fd_reservation *reservation,
+        struct fd *fds[FD_RESERVATION_MAX], int flags,
+        qword_t generations[FD_RESERVATION_MAX]);
 // 接管 fd 引用：成功时交给目标表，失败时销毁；flags 只处理 O_CLOEXEC 与 O_NONBLOCK。
 fd_t f_install_task(struct task *task, struct fd *fd, int flags);
 // tracked 版本额外返回本次安装的槽位代数，供跨回调的精确失败回滚使用。

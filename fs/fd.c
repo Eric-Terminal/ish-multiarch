@@ -228,6 +228,72 @@ struct fd *f_get(fd_t f) {
     return f_get_task(current, f);
 }
 
+// pids_lock 将 task->files 的取值与引用提升组成同一生命周期动作。
+static struct fdtable *fdtable_retain_task(
+        struct task *task, rlim_t_ *nofile) {
+    lock(&pids_lock);
+    struct fdtable *table = task->files;
+    assert(table != NULL);
+    *nofile = rlimit_task(task, RLIMIT_NOFILE_);
+    unsigned previous = atomic_fetch_add_explicit(
+            &table->refcount, 1, memory_order_relaxed);
+    assert(previous != 0 && previous != UINT_MAX);
+    unlock(&pids_lock);
+    return table;
+}
+
+int f_reserve_task(struct task *task, unsigned count,
+        struct fd_reservation *reservation) {
+    assert(task != NULL && reservation != NULL);
+    *reservation = (struct fd_reservation) {};
+    if (count == 0 || count > FD_RESERVATION_MAX)
+        return _EINVAL;
+
+    rlim_t_ limit;
+    struct fdtable *table = fdtable_retain_task(task, &limit);
+    if (limit > INT_MAX)
+        limit = INT_MAX;
+
+    fd_t numbers[FD_RESERVATION_MAX] = {-1, -1};
+    unsigned found = 0;
+    lock(&table->lock);
+    for (fd_t number = 0;
+            (rlim_t_) number < limit && found < count;
+            number++) {
+        bool available = (unsigned) number >= table->size ||
+                (table->files[number] == NULL &&
+                        !bit_test(number, table->reserved));
+        if (available)
+            numbers[found++] = number;
+    }
+
+    int error = 0;
+    if (found != count) {
+        error = _EMFILE;
+    } else if ((unsigned) numbers[count - 1] >= table->size) {
+        error = fdtable_resize(table, numbers[count - 1] + 1);
+    }
+
+    if (error >= 0) {
+        for (unsigned i = 0; i < count; i++) {
+            fd_t number = numbers[i];
+            assert(table->files[number] == NULL &&
+                    !bit_test(number, table->reserved));
+            bit_set(number, table->reserved);
+        }
+    }
+    unlock(&table->lock);
+
+    if (error < 0) {
+        fdtable_release(table);
+        return error;
+    }
+    reservation->table = table;
+    memcpy(reservation->numbers, numbers, sizeof(numbers));
+    reservation->count = count;
+    return 0;
+}
+
 static fd_t f_install_find(struct task *task, fd_t start) {
     assert(start >= 0);
     struct fdtable *table = task->files;
@@ -277,6 +343,70 @@ static void f_install_finish(
         fd_setflags(fd, O_NONBLOCK_);
 }
 
+static bool f_reservation_slot_matches(
+        const struct fd_reservation *reservation, unsigned index) {
+    struct fdtable *table = reservation->table;
+    fd_t number = reservation->numbers[index];
+    return number >= 0 && (unsigned) number < table->size &&
+            table->files[number] == NULL &&
+            bit_test(number, table->reserved);
+}
+
+static void f_reservation_clear_locked(
+        const struct fd_reservation *reservation) {
+    struct fdtable *table = reservation->table;
+    for (unsigned i = 0; i < reservation->count; i++) {
+        fd_t number = reservation->numbers[i];
+        assert(number >= 0 && (unsigned) number < table->size &&
+                table->files[number] == NULL &&
+                bit_test(number, table->reserved));
+        bit_clear(number, table->reserved);
+    }
+}
+
+void f_reservation_cancel(struct fd_reservation *reservation) {
+    assert(reservation != NULL);
+    struct fdtable *table = reservation->table;
+    if (table == NULL) {
+        *reservation = (struct fd_reservation) {};
+        return;
+    }
+
+    lock(&table->lock);
+    f_reservation_clear_locked(reservation);
+    unlock(&table->lock);
+    *reservation = (struct fd_reservation) {};
+    fdtable_release(table);
+}
+
+int f_reservation_publish(struct fd_reservation *reservation,
+        struct fd *fds[FD_RESERVATION_MAX], int flags,
+        qword_t generations[FD_RESERVATION_MAX]) {
+    assert(reservation != NULL && reservation->table != NULL &&
+            reservation->count > 0 &&
+            reservation->count <= FD_RESERVATION_MAX && fds != NULL);
+    for (unsigned i = 0; i < reservation->count; i++)
+        assert(fds[i] != NULL);
+
+    struct fdtable *table = reservation->table;
+    unsigned count = reservation->count;
+    lock(&table->lock);
+    for (unsigned i = 0; i < count; i++)
+        assert(f_reservation_slot_matches(reservation, i));
+    for (unsigned i = 0; i < count; i++) {
+        fd_t number = reservation->numbers[i];
+        bit_clear(number, table->reserved);
+        f_install_publish(table, number, fds[i],
+                generations == NULL ? NULL : &generations[i]);
+        f_install_finish(table, number, fds[i], flags);
+    }
+    unlock(&table->lock);
+
+    *reservation = (struct fd_reservation) {};
+    fdtable_release(table);
+    return 0;
+}
+
 static int fdtable_close(struct fdtable *table, fd_t f);
 
 fd_t f_install_task_tracked(struct task *task, struct fd *fd,
@@ -294,34 +424,25 @@ fd_t f_receive_task(struct task *task, struct fd *fd,
         int flags, fd_receive_number_writer_t write_number,
         void *opaque) {
     assert(task != NULL && fd != NULL && write_number != NULL);
-    struct fdtable *table = task->files;
-    lock(&table->lock);
-    fd_t number = f_install_find(task, 0);
-    if (number >= 0)
-        bit_set(number, table->reserved);
-    unlock(&table->lock);
-    if (number < 0)
-        goto reject;
-
-    int error = write_number(opaque, number);
-    lock(&table->lock);
-    assert((unsigned) number < table->size &&
-            table->files[number] == NULL &&
-            bit_test(number, table->reserved));
-    bit_clear(number, table->reserved);
-    if (error >= 0) {
-        f_install_publish(table, number, fd, NULL);
-        f_install_finish(table, number, fd, flags);
-    }
-    unlock(&table->lock);
+    struct fd_reservation reservation = {};
+    int error = f_reserve_task(task, 1, &reservation);
     if (error < 0) {
-        number = error;
-        goto reject;
+        fd_close(fd);
+        return error;
     }
-    return number;
+    fd_t number = reservation.numbers[0];
 
-reject:
-    fd_close(fd);
+    error = write_number(opaque, number);
+    if (error < 0) {
+        f_reservation_cancel(&reservation);
+        fd_close(fd);
+        return error;
+    }
+
+    struct fd *fds[FD_RESERVATION_MAX] = {fd, NULL};
+    error = f_reservation_publish(&reservation, fds, flags, NULL);
+    if (error < 0)
+        return error;
     return number;
 }
 
@@ -330,28 +451,21 @@ int f_install_pair_task_tracked(struct task *task,
         qword_t generations[2]) {
     assert(task != NULL && fds != NULL && fds[0] != NULL &&
             fds[1] != NULL && installed != NULL && generations != NULL);
-    struct fdtable *table = task->files;
-    lock(&table->lock);
-    fd_t first = f_install_start(
-            task, fds[0], 0, &generations[0]);
-    if (first < 0) {
-        unlock(&table->lock);
+    struct fd_reservation reservation = {};
+    int error = f_reserve_task(task, 2, &reservation);
+    if (error < 0) {
+        fd_close(fds[0]);
         fd_close(fds[1]);
-        return first;
+        return error;
     }
-    f_install_finish(table, first, fds[0], flags);
-
-    fd_t second = f_install_start(
-            task, fds[1], 0, &generations[1]);
-    if (second < 0) {
-        fdtable_close(table, first);
-        unlock(&table->lock);
-        return second;
-    }
-    f_install_finish(table, second, fds[1], flags);
+    fd_t first = reservation.numbers[0];
+    fd_t second = reservation.numbers[1];
+    error = f_reservation_publish(
+            &reservation, fds, flags, generations);
+    if (error < 0)
+        return error;
     installed[0] = first;
     installed[1] = second;
-    unlock(&table->lock);
     return 0;
 }
 

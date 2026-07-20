@@ -1,5 +1,8 @@
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "fs/fd.h"
 #include "kernel/errno.h"
@@ -25,6 +28,27 @@ static int count_close(struct fd *fd) {
 static const struct fd_ops test_fd_ops = {
     .close = count_close,
 };
+
+struct concurrent_reservation_call {
+    struct task *task;
+    atomic_uint *ready;
+    atomic_bool *release;
+    struct fd_reservation reservation;
+    int result;
+};
+
+static void *run_concurrent_reservation(void *opaque) {
+    struct concurrent_reservation_call *call = opaque;
+    call->result = f_reserve_task(
+            call->task, 2, &call->reservation);
+    atomic_fetch_add_explicit(call->ready, 1, memory_order_release);
+    const struct timespec interval = {.tv_nsec = 1000000};
+    while (!atomic_load_explicit(call->release, memory_order_acquire))
+        nanosleep(&interval, NULL);
+    if (call->result == 0)
+        f_reservation_cancel(&call->reservation);
+    return NULL;
+}
 
 struct receive_writer_context {
     struct task *task;
@@ -189,6 +213,241 @@ int main(void) {
     CHECK(f_get_task(&target_task, 0) == target_fds[0],
             "当前任务关闭不得影响目标任务");
 
+    struct task reservation_task;
+    struct tgroup reservation_group;
+    init_task(&reservation_task, &reservation_group, 4, 1);
+    CHECK(!IS_ERR(reservation_task.files), "单槽预留表创建成功");
+    struct fd *reservation_occupant = fd_create(&test_fd_ops);
+    CHECK(reservation_occupant != NULL &&
+            f_install_task(&reservation_task,
+                    reservation_occupant, 0) == 0,
+            "单槽预留前占用零号描述符");
+    struct fd_reservation single_reservation = {};
+    CHECK(f_reserve_task(&reservation_task, 1,
+                    &single_reservation) == 0 &&
+            single_reservation.numbers[0] == 1,
+            "单槽事务预留最低空槽");
+    CHECK(f_get_task(&reservation_task, 1) == NULL &&
+            f_getfd_task(&reservation_task, 1) == _EBADF &&
+            f_close_task(&reservation_task, 1) == _EBADF,
+            "预留槽对查询、标志读取与关闭保持不可见");
+    struct fd *reservation_nested = fd_create(&test_fd_ops);
+    CHECK(reservation_nested != NULL &&
+            f_install_task(&reservation_task,
+                    reservation_nested, 0) == 2,
+            "预留期间的嵌套安装跳过预留槽");
+    struct fd *reservation_published = fd_create(&test_fd_ops);
+    struct fd *single_fds[FD_RESERVATION_MAX] = {
+        reservation_published,
+        NULL,
+    };
+    qword_t single_generations[FD_RESERVATION_MAX] = {0, 0};
+    CHECK(reservation_published != NULL &&
+            f_reservation_publish(&single_reservation, single_fds,
+                    O_CLOEXEC_ | O_NONBLOCK_,
+                    single_generations) == 0 &&
+            single_reservation.table == NULL &&
+            f_get_task(&reservation_task, 1) ==
+                    reservation_published &&
+            f_getfd_task(&reservation_task, 1) == FD_CLOEXEC_ &&
+            (fd_getflags(reservation_published) & O_NONBLOCK_) != 0 &&
+            single_generations[0] == 1,
+            "单槽发布一次提交对象、代数与全部安装标志");
+    CHECK(f_close_task(&reservation_task, 2) == 0 &&
+            f_close_task(&reservation_task, 1) == 0 &&
+            f_close_task(&reservation_task, 0) == 0,
+            "单槽事务成功项可独立关闭");
+
+    CHECK(f_reserve_task(&reservation_task, 1,
+                    &single_reservation) == 0 &&
+            single_reservation.numbers[0] == 0,
+            "取消测试再次预留最低空槽");
+    f_reservation_cancel(&single_reservation);
+    f_reservation_cancel(&single_reservation);
+    struct fd *reservation_replacement = fd_create(&test_fd_ops);
+    CHECK(reservation_replacement != NULL &&
+            f_install_task(&reservation_task,
+                    reservation_replacement, 0) == 0,
+            "取消幂等且最低槽可立即复用");
+
+    fdtable_release(reservation_task.files);
+
+    struct task concurrent_reservation_task;
+    struct tgroup concurrent_reservation_group;
+    init_task(&concurrent_reservation_task,
+            &concurrent_reservation_group, 4, 1);
+    CHECK(!IS_ERR(concurrent_reservation_task.files),
+            "并发双槽预留表创建成功");
+    atomic_uint reservation_ready = 0;
+    atomic_bool release_reservations = false;
+    struct concurrent_reservation_call reservation_calls[2] = {
+        {
+            .task = &concurrent_reservation_task,
+            .ready = &reservation_ready,
+            .release = &release_reservations,
+            .result = _EIO,
+        },
+        {
+            .task = &concurrent_reservation_task,
+            .ready = &reservation_ready,
+            .release = &release_reservations,
+            .result = _EIO,
+        },
+    };
+    pthread_t reservation_threads[2];
+    CHECK(pthread_create(&reservation_threads[0], NULL,
+                    run_concurrent_reservation,
+                    &reservation_calls[0]) == 0 &&
+            pthread_create(&reservation_threads[1], NULL,
+                    run_concurrent_reservation,
+                    &reservation_calls[1]) == 0,
+            "两个并发双槽预留线程启动成功");
+    const struct timespec reservation_interval = {.tv_nsec = 1000000};
+    for (unsigned elapsed = 0;
+            elapsed < 1000 && atomic_load_explicit(
+                    &reservation_ready, memory_order_acquire) != 2;
+            elapsed++)
+        nanosleep(&reservation_interval, NULL);
+    CHECK(atomic_load_explicit(
+                    &reservation_ready, memory_order_acquire) == 2,
+            "两个并发预留都在释放门闩前完成");
+    fd_t concurrent_numbers[4] = {
+        reservation_calls[0].reservation.numbers[0],
+        reservation_calls[0].reservation.numbers[1],
+        reservation_calls[1].reservation.numbers[0],
+        reservation_calls[1].reservation.numbers[1],
+    };
+    bool numbers_seen[4] = {false, false, false, false};
+    bool unique_numbers = reservation_calls[0].result == 0 &&
+            reservation_calls[1].result == 0;
+    for (unsigned index = 0; index < 4 && unique_numbers; index++) {
+        fd_t number = concurrent_numbers[index];
+        unique_numbers = number >= 0 && number < 4 &&
+                !numbers_seen[number];
+        if (unique_numbers)
+            numbers_seen[number] = true;
+    }
+    CHECK(unique_numbers,
+            "并发扩容中的两个事务取得四个互异槽位");
+    atomic_store_explicit(
+            &release_reservations, true, memory_order_release);
+    CHECK(pthread_join(reservation_threads[0], NULL) == 0 &&
+            pthread_join(reservation_threads[1], NULL) == 0,
+            "两个并发预留线程完成取消");
+    struct fd_reservation after_concurrent = {};
+    CHECK(f_reserve_task(&concurrent_reservation_task, 2,
+                    &after_concurrent) == 0 &&
+            after_concurrent.numbers[0] == 0 &&
+            after_concurrent.numbers[1] == 1,
+            "并发取消后最低两个槽位可再次预留");
+    f_reservation_cancel(&after_concurrent);
+    fdtable_release(concurrent_reservation_task.files);
+
+    struct task zero_limit_task;
+    struct tgroup zero_limit_group;
+    init_task(&zero_limit_task, &zero_limit_group, 0, 4);
+    CHECK(!IS_ERR(zero_limit_task.files),
+            "零上限预留表创建成功");
+    struct fd_reservation zero_limit_reservation = {};
+    CHECK(f_reserve_task(&zero_limit_task, 1,
+                    &zero_limit_reservation) == _EMFILE &&
+            zero_limit_reservation.table == NULL,
+            "RLIMIT_NOFILE 为零时不预留表内空槽");
+    fdtable_release(zero_limit_task.files);
+
+    struct task double_reservation_task;
+    struct tgroup double_reservation_group;
+    init_task(&double_reservation_task,
+            &double_reservation_group, 4, 1);
+    CHECK(!IS_ERR(double_reservation_task.files),
+            "双槽预留表创建成功");
+    struct fd *double_occupant = fd_create(&test_fd_ops);
+    CHECK(double_occupant != NULL &&
+            f_install_task(&double_reservation_task,
+                    double_occupant, 0) == 0,
+            "双槽预留前占用零号描述符");
+    struct fd_reservation double_reservation = {};
+    CHECK(f_reserve_task(&double_reservation_task, 2,
+                    &double_reservation) == 0 &&
+            double_reservation.numbers[0] == 1 &&
+            double_reservation.numbers[1] == 2,
+            "双槽事务原子预留两个最低空槽");
+    struct fd *double_nested = fd_create(&test_fd_ops);
+    CHECK(double_nested != NULL &&
+            f_install_task(&double_reservation_task,
+                    double_nested, 0) == 3,
+            "普通安装同时跳过双槽预留");
+    struct fd *double_fds[FD_RESERVATION_MAX] = {
+        fd_create(&test_fd_ops),
+        fd_create(&test_fd_ops),
+    };
+    qword_t double_generations[FD_RESERVATION_MAX] = {0, 0};
+    CHECK(double_fds[0] != NULL && double_fds[1] != NULL &&
+            f_reservation_publish(&double_reservation, double_fds,
+                    O_CLOEXEC_, double_generations) == 0 &&
+            f_get_task(&double_reservation_task, 1) == double_fds[0] &&
+            f_get_task(&double_reservation_task, 2) == double_fds[1] &&
+            f_getfd_task(&double_reservation_task, 1) == FD_CLOEXEC_ &&
+            f_getfd_task(&double_reservation_task, 2) == FD_CLOEXEC_ &&
+            double_generations[0] == 1 &&
+            double_generations[1] == 1,
+            "双槽发布在同一事务中提交两个对象与标志");
+    fdtable_release(double_reservation_task.files);
+
+    struct task reservation_limit_task;
+    struct tgroup reservation_limit_group;
+    init_task(&reservation_limit_task,
+            &reservation_limit_group, 1, 1);
+    CHECK(!IS_ERR(reservation_limit_task.files),
+            "预留回滚表创建成功");
+    struct fd_reservation rejected_reservation = {};
+    CHECK(f_reserve_task(&reservation_limit_task, 2,
+                    &rejected_reservation) == _EMFILE &&
+            rejected_reservation.table == NULL,
+            "仅剩一槽时双槽预留整体失败");
+    struct fd *reservation_limit_fd = fd_create(&test_fd_ops);
+    CHECK(reservation_limit_fd != NULL &&
+            f_install_task(&reservation_limit_task,
+                    reservation_limit_fd, 0) == 0,
+            "双槽预留失败不遗留首槽预留");
+    fdtable_release(reservation_limit_task.files);
+
+    struct task reservation_lifetime_task;
+    struct tgroup reservation_lifetime_group;
+    init_task(&reservation_lifetime_task,
+            &reservation_lifetime_group, 1, 1);
+    CHECK(!IS_ERR(reservation_lifetime_task.files),
+            "生命周期预留表创建成功");
+    struct fd_reservation lifetime_reservation = {};
+    CHECK(f_reserve_task(&reservation_lifetime_task, 1,
+                    &lifetime_reservation) == 0 &&
+            atomic_load_explicit(
+                    &reservation_lifetime_task.files->refcount,
+                    memory_order_acquire) == 2,
+            "预留事务独立持有原 fdtable 引用");
+    struct fdtable *original_lifetime_table =
+            reservation_lifetime_task.files;
+    struct fdtable *replacement_lifetime_table = fdtable_new(1);
+    CHECK(!IS_ERR(replacement_lifetime_table),
+            "生命周期替代表创建成功");
+    lock(&pids_lock);
+    reservation_lifetime_task.files = replacement_lifetime_table;
+    unlock(&pids_lock);
+    fdtable_release(original_lifetime_table);
+    struct fd *lifetime_fd = fd_create(&test_fd_ops);
+    struct fd *lifetime_fds[FD_RESERVATION_MAX] = {
+        lifetime_fd,
+        NULL,
+    };
+    before_close = closed_fds;
+    CHECK(lifetime_fd != NULL &&
+            f_reservation_publish(&lifetime_reservation,
+                    lifetime_fds, 0, NULL) == 0 &&
+            lifetime_reservation.table == NULL &&
+            closed_fds == before_close + 1,
+            "任务换表后仍安全发布到原表并随最后引用释放");
+    fdtable_release(reservation_lifetime_task.files);
+
     struct task receive_task;
     struct tgroup receive_group;
     init_task(&receive_task, &receive_group, 3, 1);
@@ -291,6 +550,6 @@ int main(void) {
     fdtable_release(current_task.files);
     fdtable_release(target_task.files);
     fdtable_release(small_task.files);
-    CHECK(closed_fds == 15, "清理阶段恰好释放全部十五个测试 fd");
+    CHECK(closed_fds == 25, "清理阶段恰好释放全部二十五个测试 fd");
     return 0;
 }

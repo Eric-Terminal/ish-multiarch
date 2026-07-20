@@ -43,6 +43,16 @@ static atomic_uint_fast64_t unix_scm_edge_generation =
         ATOMIC_VAR_INIT(0);
 static struct list unix_bound_sockets;
 
+static bool unix_seqpacket_peer_closed(struct fd *socket) {
+    if (socket->socket.domain != AF_LOCAL_ ||
+            socket->socket.type != SOCK_SEQPACKET_)
+        return false;
+    lock(&peer_lock);
+    bool closed = socket->socket.unix_peer == NULL;
+    unlock(&peer_lock);
+    return closed;
+}
+
 struct unix_bound_name;
 
 struct unix_pending_peer {
@@ -119,6 +129,7 @@ static struct fd *sock_fd_allocate(
     fd->socket.type = type & SOCKET_TYPE_MASK;
     fd->socket.protocol = protocol;
     fd->socket.guest_protocol = guest_protocol;
+    fd->real_fd = -1;
     if (domain == AF_LOCAL_) {
         list_init(&fd->socket.unix_scm);
         list_init(&fd->socket.unix_pending_scm);
@@ -937,6 +948,15 @@ int socket_address_prepare_task(struct task *task,
     if (address_length == 0)
         return 0;
 
+    // 已连接 Unix SEQPACKET 只要求系统调用层完成用户内存复制；协议层
+    // 会忽略地址内容，不能在这里触发命名空间查找。
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_SEQPACKET_) {
+        memcpy(&prepared->storage, address, address_length);
+        prepared->length = (socklen_t) address_length;
+        return 0;
+    }
+
     // Linux 的 INET stream sendto 忽略 msg_name；connect 走原始转换入口。
     if ((socket->fd->socket.domain == AF_INET_ ||
             socket->fd->socket.domain == AF_INET6_) &&
@@ -1001,6 +1021,9 @@ int socket_address_validate_for_socket(const struct socket_ref *socket,
         return socket->fd->socket.domain == AF_INET_ &&
                 socket->fd->socket.type == SOCK_RAW_ ? 0 : _EINVAL;
     }
+    if (socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_SEQPACKET_)
+        return 0;
     if ((socket->fd->socket.domain == AF_INET_ ||
             socket->fd->socket.domain == AF_INET6_) &&
             socket->fd->socket.type == SOCK_STREAM_)
@@ -1906,31 +1929,35 @@ out:
     return result;
 }
 
-int_t sys_listen(fd_t sock_fd, int_t backlog) {
-    STRACE("listen(%d, %d)", sock_fd, backlog);
-    struct socket_ref listener;
-    int_t result = socket_ref_get_task(current, sock_fd, &listener);
-    if (result < 0)
-        return result;
-    struct fd *sock = listener.fd;
+#define LINUX_SOMAXCONN UINT32_C(4096)
+
+int_t socket_listen_ref_task(struct task *task,
+        const struct socket_ref *socket, sdword_t backlog) {
+    assert(task != NULL && socket != NULL && socket->fd != NULL &&
+            socket->fd->ops == &socket_fdops);
+    struct fd *sock = socket->fd;
+    dword_t effective_backlog = (dword_t) backlog;
+    if (effective_backlog > LINUX_SOMAXCONN)
+        effective_backlog = LINUX_SOMAXCONN;
+
     bool unix_socket = sock->socket.domain == AF_LOCAL_;
     struct ucred_ listener_cred = {0};
     if (unix_socket)
-        fill_cred_task(current, &listener_cred);
+        fill_cred_task(task, &listener_cred);
 
     lock(&sock->lock);
-    if (unix_socket) {
-        sock->socket.unix_cred = listener_cred;
+    if (unix_socket)
         lock(&unix_bound_lock);
-    }
-    if (listen(sock->real_fd, backlog) < 0) {
-        result = errno_map();
+    if (listen(sock->real_fd, (int) effective_backlog) < 0) {
+        int_t result = errno_map();
         if (unix_socket)
             unlock(&unix_bound_lock);
         unlock(&sock->lock);
-        goto out;
+        return result;
     }
+
     if (unix_socket) {
+        sock->socket.unix_cred = listener_cred;
         struct unix_bound_name *name = sock->socket.unix_bound_name;
         if (name != NULL && name->owner_open && !name->closing) {
             name->listener_cred = listener_cred;
@@ -1938,122 +1965,228 @@ int_t sys_listen(fd_t sock_fd, int_t backlog) {
         }
         unlock(&unix_bound_lock);
     }
-    if (!sock->socket.listening) {
+    if (!sock->socket.host_listening)
         sockrestart_begin_listen(sock);
-        sock->socket.listening = true;
+    if (!sock->socket.guest_listening) {
+        sock->socket.listen_generation++;
+        if (sock->socket.listen_generation == 0)
+            sock->socket.listen_generation++;
     }
+    sock->socket.host_listening = true;
+    sock->socket.guest_listening = true;
+    sock->socket.listen_backlog = effective_backlog;
     unlock(&sock->lock);
-    result = 0;
-out:
+    return 0;
+}
+
+int_t sys_listen(fd_t sock_fd, int_t backlog) {
+    STRACE("listen(%d, %d)", sock_fd, backlog);
+    struct socket_ref listener;
+    int_t result = socket_ref_get_task(current, sock_fd, &listener);
+    if (result < 0)
+        return result;
+    result = socket_listen_ref_task(
+            current, &listener, (sdword_t) backlog);
     socket_ref_release(&listener);
     return result;
 }
 
-int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
-    STRACE("accept(%d, 0x%x, 0x%x)", sock_fd, sockaddr_addr, sockaddr_len_addr);
-    struct socket_ref listener;
-    int_t result = socket_ref_get_task(
-            current, sock_fd, &listener);
-    if (result < 0)
-        return result;
-    sdword_t guest_sockaddr_len = 0;
+int socket_accept_flags_validate(dword_t flags) {
+    return (flags & ~(SOCK_NONBLOCK_ | SOCK_CLOEXEC_)) == 0 ?
+            0 : _EINVAL;
+}
 
-    struct sockaddr_storage sockaddr = {0};
-    socklen_t host_sockaddr_len = sizeof(sockaddr);
-    int client;
-    do {
-        host_sockaddr_len = sizeof(sockaddr);
-        sockrestart_begin_listen_wait(listener.fd);
-        errno = 0;
-        client = accept(listener.fd->real_fd,
-                (void *) &sockaddr, &host_sockaddr_len);
-        sockrestart_end_listen_wait(listener.fd);
-    } while (sockrestart_should_restart_listen_wait() && errno == EINTR);
-    if (client < 0) {
-        result = errno_map();
-        goto out_listener;
-    }
-    sock_configure_host_fd(client);
+void socket_accept_reject(struct socket_accept_result *accepted) {
+    assert(accepted != NULL);
+    unix_socket_finish_peer_handshake(
+            accepted->connecting_peer, NULL);
+    accepted->connecting_peer = NULL;
+    if (accepted->fd != NULL)
+        fd_close(accepted->fd);
+    *accepted = (struct socket_accept_result) {0};
+}
+
+void socket_accept_finish(struct socket_accept_result *accepted) {
+    assert(accepted != NULL && accepted->fd != NULL);
+    unix_socket_finish_peer_handshake(
+            accepted->connecting_peer, accepted->fd);
+    accepted->connecting_peer = NULL;
+}
+
+static void socket_accept_reject_raw_peer(struct fd *listener,
+        const struct sockaddr_storage *address,
+        socklen_t address_length) {
+    struct fd *peer = listener->socket.domain == AF_LOCAL_ ?
+            unix_bound_accept_peer(
+                    listener, address, address_length) : NULL;
+    unix_socket_finish_peer_handshake(peer, NULL);
+}
+
+int socket_accept_retained_task(struct task *task,
+        struct fd *listener, bool want_address,
+        struct socket_accept_result *accepted) {
+    assert(task != NULL && listener != NULL && accepted != NULL);
+    *accepted = (struct socket_accept_result) {0};
+    if (listener->ops != &socket_fdops)
+        return _ENOTSOCK;
+    if (listener->socket.type != SOCK_STREAM_ &&
+            listener->socket.type != SOCK_SEQPACKET_)
+        return _EOPNOTSUPP;
+
+    lock(&listener->lock);
+    bool listening = listener->socket.guest_listening;
+    uint64_t generation = listener->socket.listen_generation;
+    unlock(&listener->lock);
+    if (!listening)
+        return _EINVAL;
 
     struct fd *client_fd = sock_fd_allocate(
-            listener.fd->socket.domain, listener.fd->socket.type,
-            listener.fd->socket.protocol,
-            listener.fd->socket.guest_protocol);
-    if (client_fd == NULL) {
-        struct fd *peer = listener.fd->socket.domain == AF_LOCAL_ ?
-                unix_bound_accept_peer(listener.fd,
-                        &sockaddr, host_sockaddr_len) : NULL;
-        unix_socket_finish_peer_handshake(peer, NULL);
-        close(client);
-        result = _ENOMEM;
-        goto out_listener;
-    }
-    // 从这里起 wrapper 独占 raw client 的关闭责任。
-    client_fd->real_fd = client;
-    if (listener.fd->socket.domain == AF_LOCAL_) {
-        lock(&listener.fd->lock);
+            listener->socket.domain, listener->socket.type,
+            listener->socket.protocol,
+            listener->socket.guest_protocol);
+    if (client_fd == NULL)
+        return _ENOMEM;
+    if (listener->socket.domain == AF_LOCAL_) {
+        lock(&listener->lock);
         client_fd->socket.unix_name_len =
-                listener.fd->socket.unix_name_len;
+                listener->socket.unix_name_len;
         memcpy(client_fd->socket.unix_name,
-                listener.fd->socket.unix_name,
-                listener.fd->socket.unix_name_len);
-        unlock(&listener.fd->lock);
+                listener->socket.unix_name,
+                listener->socket.unix_name_len);
+        unlock(&listener->lock);
+        fill_cred_task(task, &client_fd->socket.unix_cred);
     }
-    struct fd *connecting_peer =
-            listener.fd->socket.domain == AF_LOCAL_ ?
-            unix_bound_accept_peer(listener.fd,
-                    &sockaddr, host_sockaddr_len) : NULL;
+
+    struct sockaddr_storage address = {0};
+    socklen_t address_length;
+    int client;
+    bool restart_wait;
+    do {
+        address_length = sizeof(address);
+        sockrestart_begin_listen_wait(task, listener);
+        errno = 0;
+        client = accept(listener->real_fd,
+                (struct sockaddr *) &address, &address_length);
+        int host_error = errno;
+        sockrestart_end_listen_wait(task, listener);
+        restart_wait =
+                sockrestart_should_restart_listen_wait(task);
+        errno = host_error;
+    } while (client < 0 && errno == EINTR && restart_wait);
+    if (client < 0) {
+        int error = errno_map();
+        fd_close(client_fd);
+        return error;
+    }
+
+    sock_configure_host_fd(client);
+    int status_flags = fcntl(client, F_GETFL);
+    if (status_flags >= 0) {
+        status_flags &= ~O_NONBLOCK;
+#ifdef O_ASYNC
+        status_flags &= ~O_ASYNC;
+#endif
+    }
+    if (status_flags < 0 ||
+            fcntl(client, F_SETFL, status_flags) < 0) {
+        int error = errno_map();
+        socket_accept_reject_raw_peer(
+                listener, &address, address_length);
+        close(client);
+        fd_close(client_fd);
+        return error;
+    }
+    client_fd->real_fd = client;
+
+    accepted->fd = client_fd;
+    accepted->connecting_peer =
+            listener->socket.domain == AF_LOCAL_ ?
+            unix_bound_accept_peer(
+                    listener, &address, address_length) : NULL;
+    if (want_address) {
+        accepted->address = address;
+        uint_t converted_length = (uint_t) address_length;
+        int error = sockaddr_from_real(&accepted->address,
+                sizeof(accepted->address),
+                &converted_length, false);
+        if (error < 0) {
+            socket_accept_reject(accepted);
+            return error;
+        }
+        accepted->address_length = converted_length;
+    }
+
+    lock(&listener->lock);
+    bool stale = !listener->socket.guest_listening ||
+            listener->socket.listen_generation != generation;
+    unlock(&listener->lock);
+    if (stale) {
+        socket_accept_reject(accepted);
+        return _EINVAL;
+    }
+    return 0;
+}
+
+int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr,
+        addr_t sockaddr_len_addr) {
+    STRACE("accept(%d, 0x%x, 0x%x)",
+            sock_fd, sockaddr_addr, sockaddr_len_addr);
+    struct fd *listener = f_get_task_retain(current, sock_fd);
+    if (listener == NULL)
+        return _EBADF;
+
+    struct fd_reservation reservation = {};
+    int_t result = f_reserve_task(current, 1, &reservation);
+    if (result < 0)
+        goto out_listener;
+
+    struct socket_accept_result accepted;
+    result = socket_accept_retained_task(
+            current, listener, sockaddr_addr != 0, &accepted);
+    if (result < 0)
+        goto cancel_reservation;
 
     if (sockaddr_addr != 0) {
-        if (user_get(sockaddr_len_addr, guest_sockaddr_len)) {
+        sdword_t capacity;
+        if (user_get(sockaddr_len_addr, capacity)) {
             result = _EFAULT;
             goto reject_client;
         }
-        if (guest_sockaddr_len < 0) {
+        if (capacity < 0) {
             result = _EINVAL;
             goto reject_client;
         }
-        uint_t returned_length = host_sockaddr_len;
-        int err = sockaddr_from_real(
-                &sockaddr, sizeof(sockaddr), &returned_length, false);
-        if (err < 0) {
-            result = err;
-            goto reject_client;
-        }
-        if (user_put(sockaddr_len_addr, returned_length)) {
+        if (user_put(sockaddr_len_addr,
+                accepted.address_length)) {
             result = _EFAULT;
             goto reject_client;
         }
-        err = sockaddr_copy_to_user(sockaddr_addr, &sockaddr,
-                sizeof(sockaddr), (uint_t) guest_sockaddr_len,
-                returned_length);
-        if (err < 0) {
-            result = err;
+        result = sockaddr_copy_to_user(sockaddr_addr,
+                &accepted.address, sizeof(accepted.address),
+                (dword_t) capacity, accepted.address_length);
+        if (result < 0)
             goto reject_client;
-        }
     }
 
-    if (listener.fd->socket.domain == AF_LOCAL_) {
-        fill_cred_task(current, &client_fd->socket.unix_cred);
-        unix_socket_finish_peer_handshake(
-                connecting_peer, client_fd);
-    }
-
-    fd_retain(client_fd);
-    result = f_install_task(current, client_fd, 0);
-    if (result < 0) {
-        fd_close(client_fd);
-        goto out_listener;
-    }
-
-    fd_close(client_fd);
+    socket_accept_finish(&accepted);
+    fd_t accepted_number = reservation.numbers[0];
+    struct fd *published[FD_RESERVATION_MAX] = {
+        accepted.fd,
+        NULL,
+    };
+    result = f_reservation_publish(
+            &reservation, published, 0, NULL);
+    accepted.fd = NULL;
+    if (result >= 0)
+        result = accepted_number;
     goto out_listener;
 
 reject_client:
-    unix_socket_finish_peer_handshake(connecting_peer, NULL);
-    fd_close(client_fd);
+    socket_accept_reject(&accepted);
+cancel_reservation:
+    f_reservation_cancel(&reservation);
 out_listener:
-    socket_ref_release(&listener);
+    fd_close(listener);
     return result;
 }
 
@@ -2169,78 +2302,131 @@ int_t sys_getpeername(fd_t sock_fd, addr_t sockaddr_addr,
             sock_fd, sockaddr_addr, sockaddr_len_addr, true);
 }
 
-int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sockets_addr) {
-    STRACE("socketpair(%d, %d, %d, 0x%x)", domain, type, protocol, sockets_addr);
+int socket_pair_flags_validate(dword_t type) {
+    dword_t flags = type & ~SOCKET_TYPE_MASK;
+    return (flags & ~(SOCK_NONBLOCK_ | SOCK_CLOEXEC_)) == 0 ?
+            0 : _EINVAL;
+}
+
+int socket_pair_create_task(struct task *task,
+        dword_t domain, dword_t type, dword_t protocol,
+        struct fd *pair[2]) {
+    assert(task != NULL && pair != NULL);
+    pair[0] = NULL;
+    pair[1] = NULL;
+
     int real_domain = sock_family_to_real(domain);
     if (real_domain < 0)
+        return _EAFNOSUPPORT;
+
+    dword_t guest_type = type & SOCKET_TYPE_MASK;
+    if (guest_type >= 11)
         return _EINVAL;
-    int real_type = sock_type_to_real(type, protocol);
-    if (real_type < 0)
-        return _EINVAL;
+    if (domain != AF_LOCAL_) {
+        if ((sdword_t) protocol < 0 || protocol >= UINT32_C(256))
+            return _EINVAL;
+        if (guest_type == SOCK_SEQPACKET_)
+            return _ESOCKTNOSUPPORT;
+        if (guest_type != SOCK_STREAM_ &&
+                guest_type != SOCK_DGRAM_ &&
+                guest_type != SOCK_RAW_)
+            return _ESOCKTNOSUPPORT;
+        // protocol 0 只命中 RAW 通配项但不会选定协议；非零协议才进入
+        // 不支持 socketpair 的 RAW 协议操作表。
+        if (guest_type == SOCK_RAW_)
+            return protocol == 0 ?
+                    _EPROTONOSUPPORT : _EOPNOTSUPP;
+        return sock_type_to_real((int) guest_type,
+                (int) protocol) < 0 ?
+                _EPROTONOSUPPORT : _EOPNOTSUPP;
+    }
+    if (protocol != 0 && protocol != PF_LOCAL_)
+        return _EPROTONOSUPPORT;
+
+    int real_type;
+    switch (guest_type) {
+        case SOCK_STREAM_:
+            real_type = SOCK_STREAM;
+            break;
+        case SOCK_DGRAM_:
+        case SOCK_RAW_:
+            guest_type = SOCK_DGRAM_;
+            real_type = SOCK_DGRAM;
+            break;
+        case SOCK_SEQPACKET_:
+            // 本地数据报后端提供可靠的已连接记录边界。
+            real_type = SOCK_DGRAM;
+            break;
+        default:
+            return _ESOCKTNOSUPPORT;
+    }
 
     int sockets[2];
-    int err = socketpair(real_domain, real_type, protocol, sockets);
-    if (err < 0)
+    if (socketpair(real_domain, real_type, 0, sockets) < 0)
         return errno_map();
 
-    struct fd *socket_fds[2];
-    socket_fds[0] = sock_fd_wrap(
-            sockets[0], domain, type, protocol, protocol);
-    if (socket_fds[0] == NULL) {
+    pair[0] = sock_fd_wrap(sockets[0], domain, guest_type,
+            0, 0);
+    if (pair[0] == NULL) {
         close(sockets[1]);
         return _ENOMEM;
     }
-    socket_fds[1] = sock_fd_wrap(
-            sockets[1], domain, type, protocol, protocol);
-    if (socket_fds[1] == NULL) {
-        fd_close(socket_fds[0]);
+    pair[1] = sock_fd_wrap(sockets[1], domain, guest_type,
+            0, 0);
+    if (pair[1] == NULL) {
+        fd_close(pair[0]);
+        pair[0] = NULL;
         return _ENOMEM;
     }
 
-    fill_cred_task(current, &socket_fds[0]->socket.unix_cred);
-    fill_cred_task(current, &socket_fds[1]->socket.unix_cred);
-    socket_fds[0]->socket.unix_peer_cred =
-            socket_fds[1]->socket.unix_cred;
-    socket_fds[1]->socket.unix_peer_cred =
-            socket_fds[0]->socket.unix_cred;
-    socket_fds[0]->socket.unix_peer_cred_valid = true;
-    socket_fds[1]->socket.unix_peer_cred_valid = true;
-    // 两端发布到 fdtable 前先完成 peer 关系，避免并发观察到半初始化对象。
+    fill_cred_task(task, &pair[0]->socket.unix_cred);
+    fill_cred_task(task, &pair[1]->socket.unix_cred);
+    pair[0]->socket.unix_peer_cred = pair[1]->socket.unix_cred;
+    pair[1]->socket.unix_peer_cred = pair[0]->socket.unix_cred;
+    pair[0]->socket.unix_peer_cred_valid = true;
+    pair[1]->socket.unix_peer_cred_valid = true;
+    // 两端在发布前形成完整 peer 关系，其他线程不会看到半初始化对象。
     lock(&peer_lock);
-    socket_fds[0]->socket.unix_peer = socket_fds[1];
-    socket_fds[1]->socket.unix_peer = socket_fds[0];
-    socket_fds[0]->socket.unix_peer_name_valid = true;
-    socket_fds[1]->socket.unix_peer_name_valid = true;
+    pair[0]->socket.unix_peer = pair[1];
+    pair[1]->socket.unix_peer = pair[0];
+    pair[0]->socket.unix_peer_name_valid = true;
+    pair[1]->socket.unix_peer_name_valid = true;
     unlock(&peer_lock);
+    return 0;
+}
 
-    int fake_sockets[2];
-    qword_t generations[2];
-    // 局部强引用与安装代数共同保护 guest 写回期间的 close/reuse 回滚。
-    struct fd *install_fds[2] = {
-        fd_retain(socket_fds[0]),
-        fd_retain(socket_fds[1]),
-    };
-    err = f_install_pair_task_tracked(current, install_fds,
-            type & ~SOCKET_TYPE_MASK, fake_sockets, generations);
-    if (err < 0) {
-        fd_close(socket_fds[1]);
-        fd_close(socket_fds[0]);
-        return err;
-    }
+int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol,
+        addr_t sockets_addr) {
+    STRACE("socketpair(%d, %d, %d, 0x%x)",
+            domain, type, protocol, sockets_addr);
+    int error = socket_pair_flags_validate(type);
+    if (error < 0)
+        return error;
 
-    if (user_put(sockets_addr, fake_sockets)) {
-        f_close_task_if_matches(current, fake_sockets[1],
-                socket_fds[1], generations[1]);
-        f_close_task_if_matches(current, fake_sockets[0],
-                socket_fds[0], generations[0]);
-        fd_close(socket_fds[1]);
-        fd_close(socket_fds[0]);
+    struct fd_reservation reservation = {};
+    error = f_reserve_task(current, 2, &reservation);
+    if (error < 0)
+        return error;
+    fd_t first = reservation.numbers[0];
+    fd_t second = reservation.numbers[1];
+    if (user_put(sockets_addr, first) ||
+            user_put(sockets_addr + sizeof(first), second)) {
+        f_reservation_cancel(&reservation);
         return _EFAULT;
     }
 
-    STRACE(" [%d, %d]", fake_sockets[0], fake_sockets[1]);
-    fd_close(socket_fds[1]);
-    fd_close(socket_fds[0]);
+    struct fd *pair[FD_RESERVATION_MAX];
+    error = socket_pair_create_task(
+            current, domain, type, protocol, pair);
+    if (error < 0) {
+        f_reservation_cancel(&reservation);
+        return error;
+    }
+    error = f_reservation_publish(&reservation, pair,
+            type & ~SOCKET_TYPE_MASK, NULL);
+    if (error < 0)
+        return error;
+    STRACE(" [%d, %d]", first, second);
     return 0;
 }
 
@@ -2368,12 +2554,16 @@ static int socket_sendto_destination_validate(
         const struct socket_ref *socket,
         const struct socket_address *address, dword_t flags) {
     assert(socket != NULL && socket->fd != NULL);
+    bool unix_connection_based =
+            socket->fd->socket.domain == AF_LOCAL_ &&
+            (socket->fd->socket.type == SOCK_STREAM_ ||
+            socket->fd->socket.type == SOCK_SEQPACKET_);
     if ((socket->fd->socket.domain == AF_INET_ ||
             socket->fd->socket.domain == AF_INET6_) &&
             socket->fd->socket.type == SOCK_STREAM_)
         return socket_inet_stream_destination_check(socket, flags);
     if (socket->fd->socket.domain == AF_LOCAL_ &&
-            socket->fd->socket.type != SOCK_STREAM_ &&
+            !unix_connection_based &&
             (address == NULL || address->length == 0)) {
         struct sockaddr_storage peer;
         socklen_t peer_length = sizeof(peer);
@@ -2381,11 +2571,11 @@ static int socket_sendto_destination_validate(
                 (struct sockaddr *) &peer, &peer_length) == 0 ?
                 0 : _ENOTCONN;
     }
-    if (socket->fd->socket.domain == AF_LOCAL_ &&
-            socket->fd->socket.type == SOCK_STREAM_) {
+    if (unix_connection_based) {
         struct sockaddr_storage peer;
         socklen_t peer_length = sizeof(peer);
-        if (address != NULL && address->length != 0)
+        if (socket->fd->socket.type == SOCK_STREAM_ &&
+                address != NULL && address->length != 0)
             return getpeername(socket->fd->real_fd,
                     (struct sockaddr *) &peer, &peer_length) == 0 ?
                     _EISCONN : _EOPNOTSUPP;
@@ -2461,7 +2651,9 @@ ssize_t socket_sendto_ref(const struct socket_ref *socket,
     }
 
     byte_t empty = 0;
-    bool has_address = address != NULL && address->length != 0;
+    bool has_address = address != NULL && address->length != 0 &&
+            !(socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_SEQPACKET_);
     for (;;) {
         bool receiver_discards = serialize_unix_datagram &&
                 receiver.owner->socket.unix_read_shutdown;
@@ -2826,9 +3018,11 @@ int_t socket_shutdown_ref(
         result = error == 0 ? 0 : errno_map();
 #if !defined(__APPLE__)
         if (inet_socket && result == 0 && how != SHUT_WR &&
-                socket->fd->socket.listening) {
+                socket->fd->socket.host_listening) {
             sockrestart_end_listen(socket->fd);
-            socket->fd->socket.listening = false;
+            socket->fd->socket.host_listening = false;
+            socket->fd->socket.guest_listening = false;
+            socket->fd->socket.listen_generation++;
         }
 #endif
         if (inet_socket)
@@ -3235,7 +3429,7 @@ int_t socket_getsockopt_ref(const struct socket_ref *socket,
         else if (option == SO_PROTOCOL_)
             integer = sock->socket.guest_protocol;
         else
-            integer = sock->socket.listening;
+            integer = sock->socket.guest_listening;
         unlock(&sock->lock);
         socket_option_store(
                 result, &integer, sizeof(integer), capacity);
@@ -3882,7 +4076,9 @@ static int unix_scm_receiver_retain(struct fd *sender,
     *receiver = (struct unix_scm_receiver) {0};
     bool explicit_destination =
             address != NULL && address->length != 0;
-    if (sender->socket.type == SOCK_STREAM_ ||
+    bool connection_based = sender->socket.type == SOCK_STREAM_ ||
+            sender->socket.type == SOCK_SEQPACKET_;
+    if (connection_based ||
             !explicit_destination) {
         bool pending = false;
         lock(&peer_lock);
@@ -3890,7 +4086,7 @@ static int unix_scm_receiver_retain(struct fd *sender,
             receiver->owner =
                     fd_try_retain(sender->socket.unix_peer);
         if (receiver->owner == NULL &&
-                sender->socket.type == SOCK_STREAM_ &&
+                connection_based &&
                 sender->socket.unix_peer_handshake_pending &&
                 !sender->socket.unix_peer_handshake_rejected)
             pending = true;
@@ -3911,7 +4107,7 @@ static int unix_scm_receiver_retain(struct fd *sender,
         }
         if (receiver->owner != NULL)
             return 0;
-        if (sender->socket.type == SOCK_STREAM_)
+        if (connection_based)
             return _EPIPE;
     }
 
@@ -4185,7 +4381,9 @@ ssize_t socket_sendmsg_ref(const struct socket_ref *socket,
         .msg_iov = &vector,
         .msg_iovlen = 1,
     };
-    bool has_address = address != NULL && address->length != 0;
+    bool has_address = address != NULL && address->length != 0 &&
+            !(socket->fd->socket.domain == AF_LOCAL_ &&
+            socket->fd->socket.type == SOCK_SEQPACKET_);
     if (has_address) {
         message.msg_name = (void *) &address->storage;
         message.msg_namelen = address->length;
@@ -4376,6 +4574,15 @@ retry_receive:
             unix_socket ? real_flags | MSG_DONTWAIT : real_flags);
     if (received < 0) {
         int host_error = errno;
+        if (unix_socket &&
+                (host_error == ECONNRESET ||
+                socket_message_would_block(host_error)) &&
+                unix_seqpacket_peer_closed(socket->fd)) {
+            if (received_address != NULL)
+                received_address->length = 0;
+            result = 0;
+            goto out;
+        }
         if (unix_socket && may_wait &&
                 socket_message_would_block(host_error)) {
             unlock(&socket->fd->socket.unix_recv_lock);
@@ -4535,14 +4742,34 @@ int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     }
 
     // msg_name
-    struct sockaddr_max_ msg_name;
+    struct sockaddr_storage msg_name;
     if (msg_fake.msg_name != 0) {
-        result = sockaddr_read(msg_fake.msg_name, socket.fd->socket.type,
-                &msg_name, &msg_fake.msg_namelen);
-        if (result < 0)
-            goto out;
-        msg.msg_name = &msg_name;
-        msg.msg_namelen = msg_fake.msg_namelen;
+        bool unix_seqpacket =
+                socket.fd->socket.domain == AF_LOCAL_ &&
+                socket.fd->socket.type == SOCK_SEQPACKET_;
+        if (unix_seqpacket) {
+            if ((sdword_t) msg_fake.msg_namelen < 0) {
+                result = _EINVAL;
+                goto out;
+            }
+            uint_t name_length = msg_fake.msg_namelen < sizeof(msg_name) ?
+                    msg_fake.msg_namelen : (uint_t) sizeof(msg_name);
+            if (name_length != 0 && user_read(
+                    msg_fake.msg_name, &msg_name,
+                    name_length)) {
+                result = _EFAULT;
+                goto out;
+            }
+            // Linux 在复制用户地址后把 SEQPACKET 的 msg_namelen 清零。
+        } else {
+            result = sockaddr_read(msg_fake.msg_name,
+                    socket.fd->socket.type,
+                    &msg_name, &msg_fake.msg_namelen);
+            if (result < 0)
+                goto out;
+            msg.msg_name = &msg_name;
+            msg.msg_namelen = msg_fake.msg_namelen;
+        }
     }
 
     result = i386_message_iov_prepare(&socket, msg_fake.msg_iov,
@@ -4790,7 +5017,15 @@ retry_i386_receive:
                     real_flags | MSG_DONTWAIT : real_flags);
     if (received < 0) {
         int host_error = errno;
-        if (socket.fd->socket.domain == AF_LOCAL_ && may_wait &&
+        if (socket.fd->socket.domain == AF_LOCAL_ &&
+                (host_error == ECONNRESET ||
+                socket_message_would_block(host_error)) &&
+                unix_seqpacket_peer_closed(socket.fd)) {
+            received = 0;
+            msg.msg_namelen = 0;
+            msg.msg_controllen = 0;
+            msg.msg_flags = 0;
+        } else if (socket.fd->socket.domain == AF_LOCAL_ && may_wait &&
                 socket_message_would_block(host_error)) {
             unlock(&socket.fd->socket.unix_recv_lock);
             unix_recv_locked = false;
@@ -4801,9 +5036,10 @@ retry_i386_receive:
             lock(&socket.fd->socket.unix_recv_lock);
             unix_recv_locked = true;
             goto retry_i386_receive;
+        } else {
+            result = err_map(host_error);
+            goto out;
         }
-        result = err_map(host_error);
-        goto out;
     }
     result = (int_t) received;
 
@@ -5055,6 +5291,16 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
     return err;
 }
 
+static int sock_poll(struct fd *fd) {
+    lock(&fd->lock);
+    int events = fd->real_fd < 0 ?
+            POLL_ERR | POLL_HUP : realfs_poll(fd);
+    unlock(&fd->lock);
+    if (unix_seqpacket_peer_closed(fd))
+        events |= POLL_READ | POLL_HUP;
+    return events;
+}
+
 // 调用方按 unix_recv_lock -> unix_scm_io_lock 持锁；host I/O 必须非阻塞。
 static int unix_bound_drain_messages_locked(
         struct fd *fd, struct list *discarded_scm) {
@@ -5167,11 +5413,17 @@ static int sock_close(struct fd *fd) {
                         fd->socket.unix_backing_inode)
             (void) unlink(fd->socket.unix_backing_path);
     }
+    struct fd *peer = NULL;
     lock(&peer_lock);
-    struct fd *peer = fd->socket.unix_peer;
-    if (peer != NULL)
-        peer->socket.unix_peer = NULL;
+    if (fd->socket.unix_peer != NULL) {
+        fd->socket.unix_peer->socket.unix_peer = NULL;
+        peer = fd_try_retain(fd->socket.unix_peer);
+    }
     unlock(&peer_lock);
+    if (peer != NULL) {
+        poll_wakeup(peer, POLL_READ | POLL_HUP);
+        fd_close(peer);
+    }
     socket_scm_release_list(&discarded_scm);
     if (fd->real_fd >= 0)
         return realfs_close(fd);
@@ -5182,7 +5434,7 @@ const struct fd_ops socket_fdops = {
     .read = sock_read,
     .write = sock_write,
     .close = sock_close,
-    .poll = realfs_poll,
+    .poll = sock_poll,
     .getflags = realfs_getflags,
     .setflags = realfs_setflags,
     .ioctl_size = realfs_ioctl_size,

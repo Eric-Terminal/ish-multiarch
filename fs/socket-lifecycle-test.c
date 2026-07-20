@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
@@ -158,34 +159,12 @@ static bool wait_for_listener(int listener, int timeout_ms) {
     return result == 1 && (event.revents & POLLIN) != 0;
 }
 
-static bool wait_for_accept_install_gate(
-        int listener, struct fdtable *table, unsigned timeout_ms) {
-    const struct timespec interval = {.tv_nsec = 1000000};
-    for (unsigned elapsed = 0; elapsed < timeout_ms; elapsed++) {
-        struct pollfd event = {
-            .fd = listener,
-            .events = POLLIN,
-        };
-        int poll_result = poll(&event, 1, 0);
-        if (poll_result == 0 || (event.revents & POLLIN) == 0) {
-            int lock_result = trylock(&table->lock);
-            if (lock_result == EBUSY)
-                return true;
-            if (lock_result == 0)
-                unlock(&table->lock);
-        }
-        nanosleep(&interval, NULL);
-    }
-    return false;
-}
-
 static int test_resume_releases_closed_listener(void) {
     struct task task;
     struct tgroup group;
     task_fixture_init(&task, &group);
     CHECK(!IS_ERR(task.files), "恢复回归 fd 表创建成功");
     current = &task;
-
     fd_t number = socket_create_task(
             &task, AF_INET_, SOCK_STREAM_, 0);
     struct fd *listener = f_get_task(&task, number);
@@ -202,7 +181,6 @@ static int test_resume_releases_closed_listener(void) {
             sys_listen(number, 1) == 0,
             "恢复回归监听 socket 启动成功");
     int host_fd = listener->real_fd;
-
     sockrestart_on_suspend();
     CHECK(f_close_task(&task, number) == 0 &&
                     fcntl(host_fd, F_GETFD) >= 0,
@@ -211,7 +189,45 @@ static int test_resume_releases_closed_listener(void) {
     errno = 0;
     CHECK(fcntl(host_fd, F_GETFD) < 0 && errno == EBADF,
             "恢复在锁外释放最终快照引用与 host socket");
-
+    number = socket_create_task(&task, AF_INET_, SOCK_STREAM_, 0);
+    listener = f_get_task(&task, number);
+    address.sin_port = 0;
+    CHECK(number == 0 && listener != NULL &&
+                    bind(listener->real_fd,
+                            (const struct sockaddr *) &address,
+                            sizeof(address)) == 0 &&
+                    sys_listen(number, 1) == 0,
+            "快照失败回归 listener 启动成功");
+    uint64_t generation = listener->socket.listen_generation;
+    struct rlimit original_limit;
+    CHECK(getrlimit(RLIMIT_NOFILE, &original_limit) == 0,
+            "读取宿主 fd 额度");
+    struct rlimit limited = original_limit;
+    if (limited.rlim_cur > 64)
+        limited.rlim_cur = 64;
+    CHECK(setrlimit(RLIMIT_NOFILE, &limited) == 0,
+            "临时收紧宿主 fd 额度");
+    int fillers[64];
+    int filler_count = 0;
+    while (filler_count < 64 &&
+            (fillers[filler_count] = open("/dev/null", O_RDONLY)) >= 0)
+        filler_count++;
+    bool host_limit_reached = errno == EMFILE;
+    sockrestart_on_suspend();
+    lock(&listener->lock);
+    bool failed_closed = listener->real_fd == -1 &&
+            !listener->socket.host_listening &&
+            !listener->socket.guest_listening &&
+            listener->socket.listen_generation != generation;
+    unlock(&listener->lock);
+    sockrestart_on_resume();
+    int restore_error = setrlimit(RLIMIT_NOFILE, &original_limit);
+    for (int index = 0; index < filler_count; index++)
+        close(fillers[index]);
+    CHECK(host_limit_reached && failed_closed && restore_error == 0,
+            "身份锚点遇宿主 EMFILE 时可观察地失败关闭");
+    CHECK(f_close_task(&task, number) == 0,
+            "关闭快照失败后的 guest listener");
     current = NULL;
     fdtable_release(task.files);
     pthread_mutex_destroy(&task.waiting_cond_lock.m);
@@ -222,7 +238,6 @@ static int test_resume_releases_closed_listener(void) {
 int main(void) {
     if (test_resume_releases_closed_listener() != 0)
         return 1;
-
     struct task task;
     struct tgroup group;
     task_fixture_init(&task, &group);
@@ -231,12 +246,10 @@ int main(void) {
     CHECK(task.mm != NULL && map_length_page(&task) == 0,
             "测试用户地址空间创建成功");
     current = &task;
-
     struct socket_ref retained = {0};
     CHECK(socket_ref_get_task(&task, 99, &retained) == _EBADF &&
             retained.fd == NULL,
             "缺失 fd 返回 EBADF 且不产生引用");
-
     struct close_probe ordinary_probe = {0};
     struct fd *ordinary = probe_fd_create(&ordinary_probe);
     CHECK(ordinary != NULL, "普通 fd 创建成功");
@@ -246,7 +259,6 @@ int main(void) {
             retained.fd == NULL && ordinary_probe.calls == 0 &&
             f_get_task(&task, 0) == ordinary,
             "非 socket 返回 ENOTSOCK 且不消耗表中引用");
-
     int_t socket_number = socket_create_task(
             &task, AF_INET_, SOCK_STREAM_, 0);
     CHECK(socket_number == 1, "测试 socket 安装到第二个槽位");
@@ -348,19 +360,16 @@ int main(void) {
             retained.fd != NULL,
             "socket retained 引用获取成功");
     int original_host_fd = retained.fd->real_fd;
-
     CHECK(f_close_task(&task, socket_number) == 0 &&
             f_get_task(&task, socket_number) == NULL &&
             fcntl(original_host_fd, F_GETFD) >= 0,
             "关闭表项后 retained 引用继续保持原 socket 存活");
-
     struct close_probe replacement_probe = {0};
     struct fd *replacement = probe_fd_create(&replacement_probe);
     CHECK(replacement != NULL, "替换 fd 创建成功");
     CHECK(f_install_task(&task, replacement, 0) == socket_number &&
             f_get_task(&task, socket_number) == replacement,
             "空槽位被普通 fd 以同号复用");
-
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     CHECK(listener >= 0, "host 回环监听 socket 创建成功");
     struct sockaddr_in listener_address = {
@@ -377,7 +386,6 @@ int main(void) {
                     (struct sockaddr *) &listener_address,
                     &listener_length) == 0,
             "host 回环监听地址查询成功");
-
     unsigned char guest_address[16] = {0};
     uint16_t guest_family = AF_INET_;
     memcpy(guest_address, &guest_family, sizeof(guest_family));
@@ -423,7 +431,7 @@ int main(void) {
     CHECK(bind(accept_listener->real_fd,
                     (const struct sockaddr *) &accept_address,
                     sizeof(accept_address)) == 0 &&
-            listen(accept_listener->real_fd, 1) == 0,
+            sys_listen(accept_listener_number, 1) == 0,
             "accept 回归监听 socket 启动成功");
     socklen_t accept_address_length = sizeof(accept_address);
     CHECK(getsockname(accept_listener->real_fd,
@@ -447,7 +455,7 @@ int main(void) {
     CHECK(accepted_host_fd >= 0 && close(accepted_host_fd) == 0,
             "探测 accept 将取得的 host fd");
     lock(&group.lock);
-    group.limits[RLIMIT_NOFILE_].cur = 3;
+    group.limits[RLIMIT_NOFILE_].cur = 4;
     unlock(&group.lock);
     CHECK(sys_accept(accept_listener_number,
                     UNMAPPED_PAGE, LENGTH_PAGE) == _EFAULT,
@@ -481,6 +489,10 @@ int main(void) {
             errno == EBADF,
             "accept 负长度失败关闭 accepted host fd");
     close(negative_length_client);
+
+    lock(&group.lock);
+    group.limits[RLIMIT_NOFILE_].cur = 3;
+    unlock(&group.lock);
 
     int created_host_fd = fcntl(
             accept_client, F_DUPFD_CLOEXEC, 0);
@@ -896,7 +908,7 @@ int main(void) {
     pthread_t connector_thread;
     pthread_t accept_thread;
 
-    // 卡住最终 fd 安装，验证 connect 不依赖应用层 accept 完成。
+    // 卡住 RLIMIT 快照，验证 connect 不依赖应用层 accept 完成。
     lock(&group.lock);
     CHECK(pthread_create(&connector_thread, NULL,
                     run_connect, &connect_call) == 0,
@@ -910,24 +922,33 @@ int main(void) {
     CHECK(pthread_create(&accept_thread, NULL,
                     run_accept, &accept_call) == 0,
             "启动 AF_UNIX accept 线程");
-    CHECK(wait_for_accept_install_gate(unix_listener->real_fd,
-                    task.files, 1000),
-            "AF_UNIX accept 在满表安装点等待门闩");
+    CHECK(wait_for_listener(unix_listener->real_fd, 1000) &&
+            !atomic_load_explicit(
+                    &accept_call.finished, memory_order_acquire),
+            "AF_UNIX accept 在预留前等待且未消费 pending 连接");
     unlock(&group.lock);
 
     CHECK(wait_for_completion(&accept_call.finished, 1000) &&
             pthread_join(accept_thread, NULL) == 0,
-            "AF_UNIX accept 取消路径及时返回");
+            "AF_UNIX accept 满表路径及时返回");
     CHECK(accept_call.result == _EMFILE &&
-            unix_connector.fd->socket.unix_peer == NULL,
-            "AF_UNIX 满表取消释放在途 peer 引用");
-    errno = 0;
-    CHECK(fcntl(unix_accepted_host_fd, F_GETFD) == -1 &&
-            errno == EBADF,
-            "AF_UNIX accept 满表失败关闭 accepted host fd");
+            unix_connector.fd->socket.unix_peer == NULL &&
+            wait_for_listener(unix_listener->real_fd, 1000),
+            "AF_UNIX 满表失败保留 pending 连接与在途 peer 引用");
     lock(&group.lock);
     group.limits[RLIMIT_NOFILE_].cur = 8;
     unlock(&group.lock);
+    fd_t unix_accepted_number =
+            sys_accept(unix_listener_number, 0, 0);
+    CHECK(unix_accepted_number >= 0 &&
+            unix_connector.fd->socket.unix_peer != NULL,
+            "放宽 fd 上限后接受原 pending 连接");
+    CHECK(f_close_task(&task, unix_accepted_number) == 0,
+            "AF_UNIX 满表回归 accepted socket 清理成功");
+    errno = 0;
+    CHECK(fcntl(unix_accepted_host_fd, F_GETFD) == -1 &&
+            errno == EBADF,
+            "AF_UNIX accepted host fd 随 guest close 释放");
     struct socket_address retained_abstract_name;
     struct socket_ref listener_name_socket;
     CHECK(socket_ref_get_task(&task, unix_listener_number,

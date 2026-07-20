@@ -285,6 +285,25 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('socket_lifecycle', socket_lifecycle_test)
 
+        socket_seqpacket_test = executable(
+            'socket_seqpacket_test',
+            'fs/socket-seqpacket-test.c',
+            dependencies: ish)
+        test('socket_seqpacket', socket_seqpacket_test)
+
+        socket_listen_restart_test = executable(
+            'socket_listen_restart_test',
+            'fs/socket-listen-restart-test.c',
+            dependencies: ish)
+        test('socket_listen_restart', socket_listen_restart_test)
+
+        socket_listen_rearm_failure_test = executable(
+            'socket_listen_rearm_failure_test',
+            'fs/socket-listen-rearm-failure-test.c',
+            dependencies: ish)
+        test('socket_listen_rearm_failure',
+            socket_listen_rearm_failure_test)
+
         socket_stream_handshake_test = executable(
             'socket_stream_handshake_test',
             'fs/socket-stream-handshake-test.c',
@@ -399,6 +418,12 @@ if get_option('kernel') == 'ish'
             'kernel/aarch64-socket-query-test.c',
             dependencies: ish)
         test('aarch64_socket_query', aarch64_socket_query_test)
+
+        aarch64_socket_listen_test = executable(
+            'aarch64_socket_listen_test',
+            'kernel/aarch64-socket-listen-test.c',
+            dependencies: ish)
+        test('aarch64_socket_listen', aarch64_socket_listen_test)
 
         aarch64_socket_ipv6_test = executable(
             'aarch64_socket_ipv6_test',

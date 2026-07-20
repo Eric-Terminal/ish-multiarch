@@ -90,6 +90,13 @@ int poll_del_fd(struct poll *poll, struct fd *fd);
 // generate a new edge-triggered notification.
 // please do not call this while holding any locks you would acquire in your poll operation
 void poll_wakeup(struct fd *fd, int events);
+// real fd 被同号替换后，恢复仍启用的宿主登记并重新开放边沿通知。
+int poll_rearm_fd(struct fd *fd);
+// 仅供并发回归在首次 punt 消费与等待注销之间插入确定性动作。
+// 调用方只能在没有活跃 poll wait 时安装或移除钩子。
+typedef void (*poll_listen_wait_exit_test_hook_t)(void *opaque);
+void poll_set_listen_wait_exit_test_hook(
+        poll_listen_wait_exit_test_hook_t hook, void *opaque);
 // Waits for events on the fds in this poll, and calls the callback for each one found.
 // Returns the number of times the callback returned 1, or negative for error.
 typedef int (*poll_callback_t)(void *context, int types, union poll_fd_info info);

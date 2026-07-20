@@ -40,7 +40,18 @@ static int rpe_events(struct real_poll_event *rpe);
 static int real_poll_wait(struct real_poll *real, struct real_poll_event *events, int max, struct timespec *timeout);
 static int real_poll_update(struct real_poll *real, int fd, int types, void *data);
 
-// lock order: fd, then poll
+static poll_listen_wait_exit_test_hook_t
+        listen_wait_exit_test_hook;
+static void *listen_wait_exit_test_opaque;
+
+void poll_set_listen_wait_exit_test_hook(
+        poll_listen_wait_exit_test_hook_t hook, void *opaque) {
+    listen_wait_exit_test_hook = hook;
+    listen_wait_exit_test_opaque = opaque;
+}
+
+// 阻塞锁序：fd->poll_lock → poll->lock → socket fd->lock。
+// poll_destroy 反向遍历时只 trylock fd->poll_lock，失败即释放 poll 锁退让。
 
 struct poll *poll_create(void) {
     struct poll *poll = malloc(sizeof(struct poll));
@@ -66,8 +77,35 @@ error:
     return ERR_PTR(err);
 }
 
-static inline bool poll_fd_is_real(struct poll_fd *pollfd) {
-    return pollfd->fd->ops->poll == realfs_poll;
+struct poll_real_fd {
+    int number;
+    bool socket_locked;
+};
+
+// poll 锁先于 socket 锁。恢复流程发布或撤销 raw fd 时持有 socket 锁，
+// 因而宿主登记与一次就绪扫描不会跨越 fd 替换窗口。
+static bool poll_real_fd_begin(
+        struct fd *fd, struct poll_real_fd *real) {
+    *real = (struct poll_real_fd) {0};
+    if (fd->ops == &socket_fdops) {
+        lock(&fd->lock);
+        real->socket_locked = true;
+        if (fd->real_fd < 0) {
+            unlock(&fd->lock);
+            real->socket_locked = false;
+            return false;
+        }
+    } else if (fd->ops->poll != realfs_poll) {
+        return false;
+    }
+    real->number = fd->real_fd;
+    return true;
+}
+
+static void poll_real_fd_end(
+        struct fd *fd, const struct poll_real_fd *real) {
+    if (real->socket_locked)
+        unlock(&fd->lock);
 }
 
 // does not do its own locking
@@ -149,8 +187,11 @@ static int poll_add_fd_impl(
     poll_fd->triggered_types = 0;
     poll_fd->enabled = true;
 
-    if (poll_fd_is_real(poll_fd)) {
-        err = real_poll_update(&poll->real, fd->real_fd, types, poll_fd);
+    struct poll_real_fd real;
+    if (poll_real_fd_begin(fd, &real)) {
+        err = real_poll_update(
+                &poll->real, real.number, types, poll_fd);
+        poll_real_fd_end(fd, &real);
         if (err < 0) {
             poll_fd_free(poll_fd);
             err = errno_map();
@@ -195,8 +236,11 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
         goto out;
     }
 
-    if (poll_fd->enabled && poll_fd_is_real(poll_fd)) {
-        err = real_poll_update(&poll->real, fd->real_fd, 0, poll_fd);
+    struct poll_real_fd real;
+    if (poll_fd->enabled && poll_real_fd_begin(fd, &real)) {
+        err = real_poll_update(
+                &poll->real, real.number, 0, poll_fd);
+        poll_real_fd_end(fd, &real);
         if (err < 0) {
             err = errno_map();
             goto out;
@@ -228,8 +272,11 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
         goto out;
     }
 
-    if (poll_fd_is_real(poll_fd)) {
-        err = real_poll_update(&poll->real, fd->real_fd, types, poll_fd);
+    struct poll_real_fd real;
+    if (poll_real_fd_begin(fd, &real)) {
+        err = real_poll_update(
+                &poll->real, real.number, types, poll_fd);
+        poll_real_fd_end(fd, &real);
         if (err < 0) {
             err = errno_map();
             goto out;
@@ -255,8 +302,11 @@ void poll_cleanup_fd(struct fd *fd) {
     list_for_each_entry_safe(&fd->poll_fds, poll_fd, tmp, polls) {
         struct poll *poll = poll_fd->poll;
         lock(&poll->lock);
-        if (poll_fd->enabled && poll_fd_is_real(poll_fd))
-            real_poll_update(&poll->real, fd->real_fd, 0, poll_fd);
+        struct poll_real_fd real;
+        if (poll_fd->enabled && poll_real_fd_begin(fd, &real)) {
+            real_poll_update(&poll->real, real.number, 0, poll_fd);
+            poll_real_fd_end(fd, &real);
+        }
         list_remove(&poll_fd->polls);
         list_remove(&poll_fd->fds);
         poll_fd_free(poll_fd);
@@ -281,6 +331,37 @@ void poll_wakeup(struct fd *fd, int events) {
         unlock(&poll->lock);
     }
     unlock(&fd->poll_lock);
+}
+
+int poll_rearm_fd(struct fd *fd) {
+    int error = 0;
+    struct poll_fd *poll_fd;
+    lock(&fd->poll_lock);
+    list_for_each_entry(&fd->poll_fds, poll_fd, polls) {
+        struct poll *poll = poll_fd->poll;
+        lock(&poll->lock);
+        struct poll_real_fd real;
+        if (!poll->destroying && poll_fd->enabled &&
+                poll_real_fd_begin(fd, &real)) {
+            int result;
+            do {
+                result = real_poll_update(&poll->real,
+                        real.number, poll_fd->types, poll_fd);
+            } while (result < 0 && errno == EINTR);
+            poll_real_fd_end(fd, &real);
+            if (result == 0) {
+                poll_fd->triggered_types = 0;
+                poll_notify_waiters_locked(poll);
+            } else if (error == 0) {
+                error = errno_map();
+            }
+        }
+        unlock(&poll->lock);
+        if (error < 0)
+            break;
+    }
+    unlock(&fd->poll_lock);
+    return error;
 }
 
 static bool poll_timeout_valid(const struct timespec *timeout) {
@@ -397,8 +478,12 @@ static int poll_wait_deadline(struct poll *poll_,
                 // 宿主后端不直接使用 oneshot；持有 poll 锁可确保只有一个等待者
                 // 消费本次事件。登记对象必须保留，MOD 才能按 Linux 语义重置它。
                 if (delivered && poll_fd->types & POLL_ONESHOT) {
-                    if (poll_fd_is_real(poll_fd))
-                        real_poll_update(&poll_->real, fd->real_fd, 0, poll_fd);
+                    struct poll_real_fd real;
+                    if (poll_real_fd_begin(fd, &real)) {
+                        real_poll_update(&poll_->real,
+                                real.number, 0, poll_fd);
+                        poll_real_fd_end(fd, &real);
+                    }
                     poll_fd->enabled = false;
                 }
 
@@ -449,7 +534,7 @@ static int poll_wait_deadline(struct poll *poll_,
             if (!poll_fd_try_retain(poll_fd->fd))
                 continue;
             listen_waits[listen_wait_count++] = poll_fd->fd;
-            sockrestart_begin_listen_wait(poll_fd->fd);
+            sockrestart_begin_listen_wait(current, poll_fd->fd);
         }
         unlock(&poll_->lock);
         int err;
@@ -461,7 +546,10 @@ static int poll_wait_deadline(struct poll *poll_,
                     has_deadline ? &wait_slice : NULL);
             wait_errno = errno;
             bool restart_listen_wait =
-                    sockrestart_should_restart_listen_wait();
+                    sockrestart_should_restart_listen_wait(current);
+            if (listen_wait_exit_test_hook != NULL)
+                listen_wait_exit_test_hook(
+                        listen_wait_exit_test_opaque);
             if (!(err < 0 && wait_errno == EINTR && restart_listen_wait))
                 break;
             if (has_deadline &&
@@ -472,7 +560,10 @@ static int poll_wait_deadline(struct poll *poll_,
             }
         }
         for (size_t index = 0; index < listen_wait_count; index++)
-            sockrestart_end_listen_wait(listen_waits[index]);
+            sockrestart_end_listen_wait(current, listen_waits[index]);
+        // resume 可能落在上一次消费与最后一次注销之间；注销后不会再产生
+        // 本轮恢复 punt，因此这里必须清掉晚到标志，避免吞掉下一次普通 EINTR。
+        (void) sockrestart_should_restart_listen_wait(current);
         lock(&poll_->lock);
 
         bool stop_waiting = false;

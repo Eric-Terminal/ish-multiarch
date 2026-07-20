@@ -106,6 +106,29 @@ int_t socket_getsockopt_ref(const struct socket_ref *socket,
 int_t socket_shutdown_ref(
         const struct socket_ref *socket, sdword_t how);
 
+// socketpair 在创建协议对象前先由调用方完成 fd 预留与编号写回。
+int socket_pair_flags_validate(dword_t type);
+int socket_pair_create_task(struct task *task,
+        dword_t domain, dword_t type, dword_t protocol,
+        struct fd *pair[2]);
+
+int_t socket_listen_ref_task(struct task *task,
+        const struct socket_ref *socket, sdword_t backlog);
+int socket_accept_flags_validate(dword_t flags);
+
+struct socket_accept_result {
+    struct fd *fd;
+    struct fd *connecting_peer;
+    struct sockaddr_storage address;
+    dword_t address_length;
+};
+
+int socket_accept_retained_task(struct task *task,
+        struct fd *listener, bool want_address,
+        struct socket_accept_result *accepted);
+void socket_accept_finish(struct socket_accept_result *accepted);
+void socket_accept_reject(struct socket_accept_result *accepted);
+
 #define SOCKET_IO_TRANSACTION_LIMIT UINT32_C(0x100000)
 #define SOCKET_STREAM_NONBLOCK_TRANSACTION_LIMIT UINT32_C(0x10000)
 
@@ -237,6 +260,7 @@ static inline int sock_family_from_real(int fake) {
 #define SOCK_STREAM_ 1
 #define SOCK_DGRAM_ 2
 #define SOCK_RAW_ 3
+#define SOCK_SEQPACKET_ 5
 #define SOCK_NONBLOCK_ 0x800
 #define SOCK_CLOEXEC_ 0x80000
 

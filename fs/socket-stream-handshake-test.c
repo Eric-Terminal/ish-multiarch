@@ -834,7 +834,7 @@ static bool wait_for_completion(atomic_bool *finished, unsigned timeout_ms) {
     return atomic_load_explicit(finished, memory_order_acquire);
 }
 
-static void test_accept_failure_releases_transit_and_rights(void) {
+static void test_accept_full_table_preserves_pending_connection(void) {
     struct fixture fixture;
     if (!fixture_init(&fixture, true)) {
         EXPECT(false, "accept 失败夹具初始化成功");
@@ -856,13 +856,31 @@ static void test_accept_failure_releases_transit_and_rights(void) {
     fixture.group.limits[RLIMIT_NOFILE_].cur = 3;
     unlock(&fixture.group.lock);
     EXPECT(sys_accept(fixture.listener_number, 0, 0) == _EMFILE,
-            "满 fd 表拒绝 accept 安装");
+            "满 fd 表在消费 pending 连接前拒绝 accept");
+    EXPECT(atomic_load_explicit(&fixture.connector->refcount,
+                   memory_order_relaxed) == 2,
+            "满表失败保留 connector 的 in_transit 引用");
+    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
+                    memory_order_relaxed) == 2,
+            "满表失败保留 pending SCM_RIGHTS 引用");
+
+    lock(&fixture.group.lock);
+    fixture.group.limits[RLIMIT_NOFILE_].cur = 4;
+    unlock(&fixture.group.lock);
+    fd_t accepted = sys_accept(fixture.listener_number, 0, 0);
+    EXPECT(accepted == 3,
+            "释放一个返回槽位后接受同一 pending 连接");
     EXPECT(atomic_load_explicit(&fixture.connector->refcount,
                    memory_order_relaxed) == 1,
-            "accept 安装失败消费 in_transit 引用");
+            "成功 accept 消费 connector 的 in_transit 引用");
+    EXPECT(atomic_load_explicit(&fixture.passed->refcount,
+                    memory_order_relaxed) == 2,
+            "成功 accept 把 SCM_RIGHTS 转移到 accepted 队列");
+    EXPECT(f_close_task(&fixture.task, accepted) == 0,
+            "关闭 accepted socket 丢弃尚未接收的 SCM_RIGHTS");
     EXPECT(atomic_load_explicit(&fixture.passed->refcount,
                     memory_order_relaxed) == 1,
-            "accept 安装失败丢弃不可交付 SCM_RIGHTS 及其引用");
+            "关闭 accepted socket 释放 pending SCM_RIGHTS 引用");
     fixture_destroy(&fixture);
     EXPECT(fixture.passed_close.calls == 1,
             "accept 失败夹具最终只关闭传递对象一次");
@@ -1335,7 +1353,7 @@ int main(int argc, char **argv) {
         test_accept_sendmsg_lock_order();
         return failures == 0 ? 0 : 1;
     }
-    test_accept_failure_releases_transit_and_rights();
+    test_accept_full_table_preserves_pending_connection();
     test_listener_close_releases_unaccepted_transit();
     test_pathname_name_snapshots();
     test_binary_abstract_anonymous_name_snapshots();
