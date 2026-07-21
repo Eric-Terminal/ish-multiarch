@@ -324,7 +324,8 @@ int_t socket_create_task(struct task *task,
         return errno_map();
 
 #ifdef __APPLE__
-    if (domain == AF_INET_ && type == SOCK_DGRAM_) {
+    if (domain == AF_INET_ &&
+            (type & SOCKET_TYPE_MASK) == SOCK_DGRAM_) {
         // in some cases, such as ICMP, datagram sockets on mac can default to
         // including the IP header like raw sockets
         int one = 1;

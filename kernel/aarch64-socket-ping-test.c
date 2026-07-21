@@ -272,6 +272,34 @@ static int create_ping_socket(struct fixture *fixture,
     return (int) result;
 }
 
+static int test_flagged_datagram_socket(struct fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault) {
+    reset_access(memory);
+#ifdef __APPLE__
+    dword_t protocol = IPPROTO_ICMP;
+#else
+    dword_t protocol = 0;
+#endif
+    qword_t result = invoke(fixture, memory, fault, SYS_SOCKET,
+            AF_INET_, SOCK_DGRAM_ | SOCK_NONBLOCK_ | SOCK_CLOEXEC_,
+            protocol, 0, 0, 0);
+    CHECK((sqword_t) result >= 0,
+            "带 NONBLOCK/CLOEXEC 创建 IPv4 数据报 socket");
+
+    struct fd *socket = f_get_task(&fixture->task, (fd_t) result);
+    CHECK(socket != NULL, "取得带标志数据报 socket");
+
+#ifdef __APPLE__
+    int strip_header = 0;
+    socklen_t option_length = sizeof(strip_header);
+    CHECK(getsockopt(socket->real_fd, IPPROTO_IP, IP_STRIPHDR,
+                    &strip_header, &option_length) == 0 &&
+                    strip_header != 0,
+            "带创建标志的 IPv4 数据报 socket 仍启用 IP_STRIPHDR");
+#endif
+    return 0;
+}
+
 static bool attach_connected_host_pair(
         struct fixture *fixture, fd_t socket_number) {
     if (fixture->connected_peer_count >=
@@ -573,6 +601,7 @@ int main(void) {
         const char *name;
         test_function function;
     } tests[] = {
+        {"带创建标志的数据报宿主选项", test_flagged_datagram_socket},
         {"ICMP/ICMPv6 公共错误顺序", test_common_errors},
         {"ICMP/ICMPv6 头部与地址顺序", test_address_order},
         {"ICMP/ICMPv6 目的连接状态", test_destination_state},
