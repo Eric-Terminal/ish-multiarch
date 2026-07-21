@@ -103,6 +103,31 @@ device 通用归档包含 `arm64_32` 与 `arm64`，Simulator 通用归档包含 
 
 这个门禁会交叉构建并链接最小 Mach-O 消费者，并静态检查后端选择、归档符号与 `arm64e` 指针认证指令，但不会启动这些消费者、watchOS Simulator 或 guest。它不衡量 threaded-code 的运行性能，也不验证应用生命周期、界面、签名、沙箱、entitlement、真机运行或 App Store 交付。
 
+### AArch64 rootfs 种子与首次安装
+
+`tools/apple-aarch64-rootfs.sh` 在构建机上把固定版本、固定 SHA-256 的官方 Alpine
+AArch64 minirootfs 转换为 fakefs 种子。输出目录只有 `meta.db`、`data/`、
+`rootfs-manifest.txt` 与 `rootfs-hardlinks.tsv` 四项；归档本身和生成的 rootfs 都不进入
+仓库。hardlink 清单用于弥补 App bundle 复制过程中可能丢失的宿主链接关系。
+
+Apple 端的 `ish_apple_rootfs_seed_install` 只负责把上述只读 bundle 资源首次安装到调用者
+提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、BusyBox ELF、
+SQLite schema 与完整性、hardlink 清单和数据树类型，再在未发布的 staging 中重建链接、
+更新 `meta.db` 的真实 inode，并以排他 rename 发布 final root。安装过程使用长期 lock、
+随机 staging 和与该目录 dev/inode 绑定的原子 owner 记录；在文件系统支持目录 fsync 时，
+目录项删除与发布分别通过两阶段 fsync 保留掉电恢复顺序。未知 owner、错配目录和符号链接
+不会被自动删除。
+
+已经存在且带有效安装 receipt、且 canonical owner 状态可安全收敛的 root 会直接复用。
+复用检查只确认 final 顶层目录、`meta.db` 与 `data/` 的所有权和类型，不会重新读取新
+seed、重放初始 hardlink 或拒绝 guest 后来创建的 FIFO、WAL/SHM 与用户文件，因此 App
+更新不会隐式重置用户 Linux 环境。
+
+该接口成功时通过结果枚举区分“本次安装”和“已经存在”，失败返回正数 POSIX errno。
+它不 mount fakefs、不创建 PID 1、不配置 TTY，也不执行 guest ELF；这些仍属于后续公共
+runtime adapter 与真实 iPhone/Watch 产品 Target。安全边界假定 seed 来自签名 App bundle、
+持久父目录位于应用私有容器，且没有绕过 installer lock 的同 UID 写者。
+
 ### Xcode Scheme 验收
 
 工程提供两个共享 Scheme：

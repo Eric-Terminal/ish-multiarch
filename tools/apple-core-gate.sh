@@ -218,6 +218,13 @@ build_slice() {
         -DEXPECTED_AARCH64_THREADED_DEFAULT="$expected_backend_value" \
         -c "$ROOT/tools/apple-aarch64-backend-probe.c" -o "$backend_probe"
 
+    local rootfs_seed_object="$full_build_dir/apple-rootfs-seed-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-rootfs-seed.c" \
+        -o "$rootfs_seed_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -226,7 +233,32 @@ build_slice() {
     file "$full_build_dir/darwin_platform_link_smoke" \
         "$full_build_dir/apple_runtime_link_smoke" \
         "$full_build_dir/apple_runtime_force_link_smoke" \
-        "$abi_probe" "$backend_probe"
+        "$abi_probe" "$backend_probe" "$rootfs_seed_object"
+
+    local fakefs_members
+    local fakefs_symbols
+    local runtime_symbols
+    fakefs_members=$("$AR" -t "$full_build_dir/libfakefs.a")
+    if ! grep -Fqx 'platform_apple-rootfs-seed.c.o' \
+            <<< "$fakefs_members"; then
+        echo "错误：${name} 的 libfakefs.a 缺少 Apple rootfs 安装器对象。" >&2
+        exit 1
+    fi
+    fakefs_symbols=$(xcrun nm -g "$full_build_dir/libfakefs.a")
+    if ! grep -Eq \
+            '[[:space:]]T[[:space:]]+_ish_apple_rootfs_seed_install$' \
+            <<< "$fakefs_symbols"; then
+        echo "错误：${name} 的 libfakefs.a 未导出 Apple rootfs 安装器。" >&2
+        exit 1
+    fi
+    runtime_symbols=$(xcrun nm -g \
+        "$full_build_dir/apple_runtime_link_smoke")
+    if ! grep -Eq \
+            '[[:space:]]T[[:space:]]+_ish_apple_rootfs_seed_install$' \
+            <<< "$runtime_symbols"; then
+        echo "错误：${name} 的普通 runtime consumer 未抽取 rootfs 安装器。" >&2
+        exit 1
+    fi
 
     local archive_members
     archive_members=$("$AR" -t "$full_build_dir/libish.a")
