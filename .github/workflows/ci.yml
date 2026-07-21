@@ -63,7 +63,7 @@ jobs:
             pty_read_lifecycle tty_real_lifecycle \
             session_tty_lifecycle tty_open_lifecycle \
             tty_echo_lifecycle fork_tty_lock_lifecycle \
-            pty_handoff_lifecycle \
+            pty_handoff_lifecycle ioctl_lifecycle \
             --print-errorlogs
       - name: Build
         if: matrix.kernel == 'ish'

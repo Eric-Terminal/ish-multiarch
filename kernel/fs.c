@@ -458,21 +458,25 @@ static int set_nonblock(struct fd *fd, addr_t nb_addr) {
 
 dword_t sys_ioctl(fd_t f, dword_t cmd, dword_t arg) {
     STRACE("ioctl(%d, 0x%x, 0x%x)", f, cmd, arg);
-    struct fd *fd = f_get(f);
+    struct fd *fd = f_get_task_retain(current, f);
     if (fd == NULL)
         return _EBADF;
 
+    dword_t result;
     switch (cmd) {
         case FIONBIO_:
-            return set_nonblock(fd, arg);
+            result = set_nonblock(fd, arg);
+            break;
         case FIOCLEX_:
-            bit_set(f, current->files->cloexec);
-            return 0;
         case FIONCLEX_:
-            bit_clear(f, current->files->cloexec);
-            return 0;
+            result = file_ioctl_fd_task(current, f, fd, cmd, NULL, arg);
+            break;
+        default:
+            result = fd_ioctl(fd, cmd, arg);
+            break;
     }
-    return fd_ioctl(fd, cmd, arg);
+    fd_close(fd);
+    return result;
 }
 
 dword_t sys_getcwd(addr_t buf_addr, dword_t size) {

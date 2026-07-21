@@ -742,10 +742,7 @@ int file_ioctl_fd_task(struct task *task, fd_t fd_number, struct fd *fd,
     if (command == FIOCLEX_ || command == FIONCLEX_) {
         struct fdtable *table = task->files;
         lock(&table->lock);
-        if (fdtable_get(table, fd_number) != fd) {
-            unlock(&table->lock);
-            return _EBADF;
-        }
+        // Linux 在 fdget 后按描述符编号修改当前槽位；并发复用也遵循该语义。
         if (command == FIOCLEX_)
             bit_set((size_t) fd_number, table->cloexec);
         else

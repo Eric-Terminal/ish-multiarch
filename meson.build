@@ -348,6 +348,12 @@ if get_option('kernel') == 'ish'
         test('pty_handoff_lifecycle',
             pty_handoff_lifecycle_test, timeout: 30)
 
+        ioctl_lifecycle_test = executable(
+            'ioctl_lifecycle_test',
+            'kernel/ioctl-lifecycle-test.c',
+            dependencies: ish)
+        test('ioctl_lifecycle', ioctl_lifecycle_test, timeout: 30)
+
         socket_lifecycle_test = executable(
             'socket_lifecycle_test',
             'fs/socket-lifecycle-test.c',
