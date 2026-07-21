@@ -196,7 +196,8 @@ void task_credentials_snapshot(
         const struct task *task, struct task_credentials *credentials);
 void vfork_notify(struct task *task);
 pid_t_ task_setsid(struct task *task);
-void task_leave_session(struct task *task);
+// 调用方持有 pids_lock；返回值转移一份 controlling-tty 引用，必须在解锁后释放。
+struct tty *task_leave_session(struct task *task);
 
 struct posix_timer {
     struct timer *timer;

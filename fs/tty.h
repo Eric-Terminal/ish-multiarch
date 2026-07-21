@@ -83,12 +83,15 @@ struct tty_driver {
     const struct tty_driver_ops *ops;
     int major;
     struct tty **ttys;
+    bool *reserved;
     unsigned limit;
 };
 
 #define DEFINE_TTY_DRIVER(name, driver_ops, _major, size) \
     static struct tty *name##_ttys[size]; \
-    struct tty_driver name = {.ops = driver_ops, .major = _major, .ttys = name##_ttys, .limit = size}
+    static bool name##_reserved[size]; \
+    struct tty_driver name = {.ops = driver_ops, .major = _major, \
+        .ttys = name##_ttys, .reserved = name##_reserved, .limit = size}
 
 struct tty_driver_ops {
     int (*init)(struct tty *tty);
@@ -105,6 +108,8 @@ extern struct tty_driver real_tty_driver;
 
 struct tty {
     unsigned refcount;
+    // 仅统计已打开或正在打开的 tty 文件对象，不包含 controlling-tty 等内部引用。
+    unsigned open_count;
     struct tty_driver *driver;
     bool hung_up;
     bool ever_opened;
@@ -131,7 +136,10 @@ struct tty {
     // only locks fds, to keep the lock order
     lock_t fds_lock;
 
-    // this never nests with itself, except in pty_is_half_closed_master
+    // 串行化一次完整的行规输入事务；宿主回显期间仍可临时释放 tty 锁。
+    lock_t input_lock;
+
+    // 跨 PTY 端只允许 slave→master；master 访问 slave 前必须先释放本锁。
     lock_t lock;
 
     union {
@@ -142,6 +150,7 @@ struct tty {
             uid_t_ uid;
             uid_t_ gid;
             bool locked;
+            bool visible;
             bool packet_mode;
         } pty;
         void *data;
@@ -152,10 +161,14 @@ struct tty {
 ssize_t tty_input(struct tty *tty, const char *input, size_t len, bool blocking);
 void tty_set_winsize(struct tty *tty, struct winsize_ winsize);
 void tty_hangup(struct tty *tty);
+// 调用方持有 tty 锁；仅通知读端观察对端关闭，不修改永久挂断状态或唤醒写端。
+void tty_notify_peer_closed(struct tty *tty);
 
 // public for the benefit of ptys
 struct tty *tty_get(struct tty_driver *driver, int type, int num);
 struct tty *tty_alloc(struct tty_driver *driver, int type, int num);
+// 仅销毁尚未发布、且 driver init 已自行回滚失败副作用的对象。
+void tty_destroy_unpublished(struct tty *tty);
 int tty_open(struct tty *tty, struct fd *fd);
 extern lock_t ttys_lock;
 void tty_release(struct tty *tty); // must be called with ttys_lock

@@ -35,6 +35,14 @@
     unlock(&pids_lock);
     self.terminal = [Terminal createPseudoTerminal:&self->_tty];
     current = NULL;
+    if (self.terminal == nil) {
+        int err = (int) PTR_ERR(self.tty);
+        self.tty = NULL;
+        self.upgradeButton.enabled = NO;
+        [self showAlertWithTitle:@"无法打开终端"
+                         message:@"错误代码 %d", err];
+        return;
+    }
     
     self.terminalView.terminal = self.terminal;
 #endif
@@ -132,8 +140,14 @@
 
 - (void)dealloc {
     [self.terminal destroy];
-    if (self.tty != NULL)
+#if !ISH_LINUX
+    if (self.tty != NULL) {
+        lock(&ttys_lock);
         tty_release(self.tty);
+        unlock(&ttys_lock);
+        self.tty = NULL;
+    }
+#endif
 }
 
 @end

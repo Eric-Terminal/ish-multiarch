@@ -54,6 +54,11 @@ static inline bool lock_owned_by_current(const lock_t *lock) {
             &lock->owner, memory_order_relaxed);
     return pthread_equal(owner, pthread_self());
 }
+static inline void lock_destroy(lock_t *lock) {
+    assert(!lock_owned_by_current(lock));
+    if (pthread_mutex_destroy(&lock->m) != 0)
+        __builtin_trap();
+}
 static inline void __lock(lock_t *lock, __attribute__((unused)) const char *file, __attribute__((unused)) int line) {
     pthread_mutex_lock(&lock->m);
     lock_owner_acquired(lock);

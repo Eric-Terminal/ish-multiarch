@@ -77,34 +77,40 @@ pid_t_ sys_getpgrp(void) {
     return sys_getpgid(0);
 }
 
-// Must lock pids_lock and task->group->lock
-void task_leave_session(struct task *task) {
+// 调用方持有 pids_lock；tty 引用转交给调用方，避免在进程表锁内同步析构 driver。
+struct tty *task_leave_session(struct task *task) {
     struct tgroup *group = task->group;
+    // 先保住 SID 槽；摘除最后一个 session 成员后 pid_get 会把它视为空槽。
+    struct pid *session_pid = pid_get(group->sid);
+    assert(session_pid != NULL);
     list_remove_safe(&group->session);
-    if (group->tty) {
-        lock(&ttys_lock);
-        if (list_empty(&pid_get(group->sid)->session)) {
-            lock(&group->tty->lock);
-            group->tty->session = 0;
-            unlock(&group->tty->lock);
+    lock(&group->lock);
+    struct tty *tty = group->tty;
+    group->tty = NULL;
+    unlock(&group->lock);
+    if (tty != NULL) {
+        if (list_empty(&session_pid->session)) {
+            lock(&tty->lock);
+            tty->session = 0;
+            unlock(&tty->lock);
         }
-        tty_release(group->tty);
-        group->tty = NULL;
-        unlock(&ttys_lock);
     }
+    return tty;
 }
 
 pid_t_ task_setsid(struct task *task) {
     lock(&pids_lock);
     struct tgroup *group = task->group;
     pid_t_ new_sid = group->leader->pid;
-    if (group->pgid == new_sid || group->sid == new_sid) {
+    struct pid *pid = pid_get(new_sid);
+    assert(pid != NULL);
+    if (group->pgid == new_sid || group->sid == new_sid ||
+            !list_empty(&pid->pgroup)) {
         unlock(&pids_lock);
         return _EPERM;
     }
 
-    task_leave_session(task);
-    struct pid *pid = pid_get(task->pid);
+    struct tty *tty = task_leave_session(task);
     list_add(&pid->session, &group->session);
     group->sid = new_sid;
 
@@ -113,6 +119,11 @@ pid_t_ task_setsid(struct task *task) {
     group->pgid = new_sid;
 
     unlock(&pids_lock);
+    if (tty != NULL) {
+        lock(&ttys_lock);
+        tty_release(tty);
+        unlock(&ttys_lock);
+    }
     return new_sid;
 }
 

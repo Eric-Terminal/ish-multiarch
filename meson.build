@@ -295,6 +295,59 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        pty_lifecycle_test = executable(
+            'pty_lifecycle_test',
+            'fs/pty-lifecycle-test.c',
+            dependencies: ish)
+        test('pty_lifecycle', pty_lifecycle_test, timeout: 30)
+
+        pty_read_lifecycle_test = executable(
+            'pty_read_lifecycle_test',
+            'fs/pty-read-lifecycle-test.c',
+            dependencies: ish)
+        test('pty_read_lifecycle', pty_read_lifecycle_test, timeout: 30)
+
+        tty_real_lifecycle_test = executable(
+            'tty_real_lifecycle_test',
+            'fs/tty-real-lifecycle-test.c',
+            dependencies: ish)
+        test('tty_real_lifecycle', tty_real_lifecycle_test, timeout: 30)
+
+        session_tty_lifecycle_test = executable(
+            'session_tty_lifecycle_test',
+            'kernel/session-tty-lifecycle-test.c',
+            dependencies: ish)
+        test('session_tty_lifecycle',
+            session_tty_lifecycle_test, timeout: 30)
+
+        tty_open_lifecycle_test = executable(
+            'tty_open_lifecycle_test',
+            'fs/tty-open-lifecycle-test.c',
+            dependencies: ish)
+        test('tty_open_lifecycle',
+            tty_open_lifecycle_test, timeout: 30)
+
+        tty_echo_lifecycle_test = executable(
+            'tty_echo_lifecycle_test',
+            'fs/tty-echo-lifecycle-test.c',
+            dependencies: ish)
+        test('tty_echo_lifecycle',
+            tty_echo_lifecycle_test, timeout: 30)
+
+        fork_tty_lock_lifecycle_test = executable(
+            'fork_tty_lock_lifecycle_test',
+            'kernel/fork-tty-lock-lifecycle-test.c',
+            dependencies: ish)
+        test('fork_tty_lock_lifecycle',
+            fork_tty_lock_lifecycle_test, timeout: 30)
+
+        pty_handoff_lifecycle_test = executable(
+            'pty_handoff_lifecycle_test',
+            'fs/pty-handoff-lifecycle-test.c',
+            dependencies: ish)
+        test('pty_handoff_lifecycle',
+            pty_handoff_lifecycle_test, timeout: 30)
+
         socket_lifecycle_test = executable(
             'socket_lifecycle_test',
             'fs/socket-lifecycle-test.c',

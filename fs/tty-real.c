@@ -15,6 +15,12 @@
 
 void real_tty_reset_term(void);
 
+static void real_tty_cancel_input(void *opaque) {
+    struct tty *tty = opaque;
+    assert(lock_owned_by_current(&tty->input_lock));
+    unlock(&tty->input_lock);
+}
+
 static void *real_tty_read_thread(void *_tty) {
     struct tty *tty = _tty;
     char ch;
@@ -31,7 +37,22 @@ static void *real_tty_read_thread(void *_tty) {
             real_tty_reset_term();
             raise(SIGINT);
         }
+        int cancel_error = pthread_setcancelstate(
+                PTHREAD_CANCEL_DISABLE, NULL);
+        if (cancel_error != 0)
+            die("无法保护真实终端输入临界区：%s",
+                    strerror(cancel_error));
+        // real_tty_write 会在无 tty 锁的宿主 write 窗口恢复可取消；取消时归还输入事务锁。
+        pthread_cleanup_push(real_tty_cancel_input, tty);
         tty_input(tty, &ch, 1, 0);
+        pthread_cleanup_pop(0);
+        cancel_error = pthread_setcancelstate(
+                PTHREAD_CANCEL_ENABLE, NULL);
+        if (cancel_error != 0)
+            die("无法恢复真实终端读取线程取消状态：%s",
+                    strerror(cancel_error));
+        // 某些宿主不会仅因重新启用 deferred cancel 就立刻交付挂起请求。
+        pthread_testcancel();
     }
     return NULL;
 }
@@ -82,7 +103,9 @@ static struct termios_ termios_from_real(struct termios real) {
 
 static struct termios old_termios;
 static bool real_tty_is_open;
+static bool real_tty_term_changed;
 static int real_tty_init(struct tty *tty) {
+    int create_error;
     if (tty->num != REAL_TTY_NUM)
         return 0;
 
@@ -108,25 +131,50 @@ static int real_tty_init(struct tty *tty) {
     termios.c_oflag |= OPOST | ONLCR;
 #endif
     if (tcsetattr(STDIN_FILENO, TCSANOW, &termios) < 0)
-        ERRNO_DIE("failed to set terminal to raw mode");
+        return errno_map();
+    real_tty_term_changed = true;
 notty:
 
-    if (pthread_create(&tty->thread, NULL,  real_tty_read_thread, tty) < 0)
-        // ok if this actually happened it would be weird AF
-        return _EIO;
-    pthread_detach(tty->thread);
+    create_error = pthread_create(
+            &tty->thread, NULL, real_tty_read_thread, tty);
+    if (create_error != 0) {
+        if (real_tty_term_changed &&
+                tcsetattr(STDIN_FILENO, TCSANOW, &old_termios) < 0 &&
+                errno != ENOTTY) {
+            int restore_error = errno;
+            die("创建真实终端读取线程失败，且无法恢复终端：%s",
+                    strerror(restore_error));
+        }
+        real_tty_term_changed = false;
+        return err_map(create_error);
+    }
     real_tty_is_open = true;
     return 0;
 }
 
-static int real_tty_write(struct tty *tty, const void *buf, size_t len, bool UNUSED(blocking)) {
+static int real_tty_write(struct tty *tty, const void *buf, size_t len, bool blocking) {
     if (tty->num != REAL_TTY_NUM)
         return len;
-    return write(STDOUT_FILENO, buf, len);
+    int previous_cancel_state = PTHREAD_CANCEL_ENABLE;
+    if (!blocking) {
+        int cancel_error = pthread_setcancelstate(
+                PTHREAD_CANCEL_ENABLE, &previous_cancel_state);
+        if (cancel_error != 0)
+            return err_map(cancel_error);
+    }
+    int result = (int) write(STDOUT_FILENO, buf, len);
+    if (!blocking) {
+        int cancel_error = pthread_setcancelstate(
+                previous_cancel_state, NULL);
+        if (cancel_error != 0)
+            die("无法恢复真实终端写入线程取消状态：%s",
+                    strerror(cancel_error));
+    }
+    return result;
 }
 
 void real_tty_reset_term(void) {
-    if (!real_tty_is_open) return;
+    if (!real_tty_is_open || !real_tty_term_changed) return;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &old_termios) < 0 && errno != ENOTTY) {
         printk("failed to reset terminal: %s\n", strerror(errno));
         abort();
@@ -136,8 +184,21 @@ void real_tty_reset_term(void) {
 static void real_tty_cleanup(struct tty *tty) {
     if (tty->num != REAL_TTY_NUM)
         return;
+    assert(!lock_owned_by_current(&pids_lock));
+    int cancel_error = pthread_cancel(tty->thread);
+    if (cancel_error != 0)
+        die("无法取消真实终端读取线程：%s", strerror(cancel_error));
+
+    // reader 可能仍在 tty_input；等待时释放全局锁，由 reservation 阻止同槽复用。
+    unlock(&ttys_lock);
+    int join_error = pthread_join(tty->thread, NULL);
+    lock(&ttys_lock);
+    if (join_error != 0)
+        die("无法回收真实终端读取线程：%s", strerror(join_error));
+
     real_tty_reset_term();
-    pthread_cancel(tty->thread);
+    real_tty_is_open = false;
+    real_tty_term_changed = false;
 }
 
 struct tty_driver_ops real_tty_ops = {

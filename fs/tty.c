@@ -19,7 +19,7 @@ struct tty_driver *tty_drivers[256] = {
 lock_t ttys_lock = LOCK_INITIALIZER;
 
 struct tty *tty_alloc(struct tty_driver *driver, int type, int num) {
-    struct tty *tty = malloc(sizeof(struct tty));
+    struct tty *tty = calloc(1, sizeof(struct tty));
     if (tty == NULL)
         return NULL;
 
@@ -27,10 +27,6 @@ struct tty *tty_alloc(struct tty_driver *driver, int type, int num) {
     tty->driver = driver;
     tty->type = type;
     tty->num = num;
-    tty->hung_up = false;
-    tty->ever_opened = false;
-    tty->session = 0;
-    tty->fg_group = 0;
     list_init(&tty->fds);
 
     tty->termios.iflags = ICRNL_ | IXON_;
@@ -39,53 +35,102 @@ struct tty *tty_alloc(struct tty_driver *driver, int type, int num) {
     tty->termios.lflags = ISIG_ | ICANON_ | ECHO_ | ECHOE_ | ECHOK_ | ECHOCTL_ | ECHOKE_ | IEXTEN_;
     // from include/asm-generic/termios.h
     memcpy(tty->termios.cc, "\003\034\177\025\004\0\1\0\021\023\032\0\022\017\027\026\0\0\0", 19);
-    memset(&tty->winsize, 0, sizeof(tty->winsize));
-
     lock_init(&tty->lock);
     lock_init(&tty->fds_lock);
+    lock_init(&tty->input_lock);
     cond_init(&tty->produced);
     cond_init(&tty->consumed);
-    memset(tty->buf_flag, false, sizeof(tty->buf_flag));
-    tty->bufsize = 0;
-    tty->packet_flags = 0;
+    return tty;
+}
 
+void tty_destroy_unpublished(struct tty *tty) {
+    cond_destroy(&tty->produced);
+    cond_destroy(&tty->consumed);
+    lock_destroy(&tty->input_lock);
+    lock_destroy(&tty->fds_lock);
+    lock_destroy(&tty->lock);
+    free(tty);
+}
+
+// 调用方持有 ttys_lock。
+static struct tty *tty_get_locked(
+        struct tty_driver *driver, int type, int num) {
+    if (num < 0 || (unsigned) num >= driver->limit ||
+            driver->ttys == NULL || driver->reserved == NULL)
+        return ERR_PTR(_ENXIO);
+    if (driver->reserved[num])
+        return ERR_PTR(_EAGAIN);
+    struct tty *tty = driver->ttys[num];
+    // master 只能由 /dev/ptmx 的预留事务创建，普通字符设备不得抢占空槽。
+    if (driver == &pty_master && tty == NULL)
+        return ERR_PTR(_ENXIO);
+    if (tty == NULL) {
+        driver->reserved[num] = true;
+        tty = tty_alloc(driver, type, num);
+        if (tty == NULL) {
+            driver->reserved[num] = false;
+            return ERR_PTR(_ENOMEM);
+        }
+
+        tty->refcount = 1;
+
+        if (driver->ops->init) {
+            int err = driver->ops->init(tty);
+            if (err < 0) {
+                tty_destroy_unpublished(tty);
+                driver->reserved[num] = false;
+                return ERR_PTR(err);
+            }
+        }
+        assert(driver->ttys[num] == NULL);
+        driver->ttys[num] = tty;
+        driver->reserved[num] = false;
+    } else {
+        lock(&tty->lock);
+        tty->refcount++;
+        unlock(&tty->lock);
+    }
     return tty;
 }
 
 struct tty *tty_get(struct tty_driver *driver, int type, int num) {
     lock(&ttys_lock);
-    struct tty *tty = driver->ttys[num];
-    // pty_reserve_next stores 1 to avoid races on the same tty
-    if (tty == NULL || tty == (void *) 1 /* ew */) {
-        tty = tty_alloc(driver, type, num);
-        if (tty == NULL) {
-            unlock(&ttys_lock);
-            return ERR_PTR(_ENOMEM);
-        }
-
-        if (driver->ops->init) {
-            int err = driver->ops->init(tty);
-            if (err < 0) {
-                unlock(&ttys_lock);
-                return ERR_PTR(err);
-            }
-        }
-        driver->ttys[num] = tty;
-    }
-    lock(&tty->lock);
-    tty->refcount++;
-    tty->ever_opened = true;
-    unlock(&tty->lock);
+    struct tty *tty = tty_get_locked(driver, type, num);
     unlock(&ttys_lock);
     return tty;
 }
 
-static struct tty *get_slave_side_tty(struct tty *tty) {
-  if (tty->type == TTY_PSEUDO_MASTER_MAJOR) {
-      return tty->pty.other;
-  } else {
-      return tty;
-  }
+static struct tty *tty_get_for_open(
+        struct tty_driver *driver, int type, int num) {
+    lock(&ttys_lock);
+    struct tty *tty = tty_get_locked(driver, type, num);
+    if (!IS_ERR(tty)) {
+        lock(&tty->lock);
+        tty->open_count++;
+        unlock(&tty->lock);
+    }
+    unlock(&ttys_lock);
+    return tty;
+}
+
+// 调用方持有 tty 锁；master 路径会切换到 slave 锁，避免 master→slave 嵌套。
+static struct tty *tty_lock_slave_side(struct tty *tty) {
+    if (tty->driver != &pty_master)
+        return tty;
+    struct tty *slave = tty->pty.other;
+    assert(slave != NULL);
+    unlock(&tty->lock);
+    lock(&slave->lock);
+    return slave;
+}
+
+static void tty_unlock_slave_side(struct tty *tty, struct tty *slave) {
+    if (slave == tty)
+        return;
+    // slave 状态快照与 master 上的后续等待必须原子交接，避免 close/reopen
+    // 落在两把锁都未持有的窗口并丢失 produced 通知。
+    lock(&tty->lock);
+    unlock(&slave->lock);
 }
 
 static void tty_poll_wakeup(struct tty *tty, int events) {
@@ -100,15 +145,31 @@ static void tty_poll_wakeup(struct tty *tty, int events) {
 }
 
 void tty_release(struct tty *tty) {
+    assert(lock_owned_by_current(&ttys_lock));
     lock(&tty->lock);
+    assert(tty->refcount > 0);
     if (--tty->refcount == 0) {
+        assert(tty->open_count == 0);
         struct tty_driver *driver = tty->driver;
+        assert(driver->ttys[tty->num] == tty);
+        assert(!driver->reserved[tty->num]);
+        // 先使阻塞输入退出，再撤销发布；对端 write 不会在满缓冲区永久卡住 cleanup。
+        tty->hung_up = true;
+        notify(&tty->produced);
+        notify(&tty->consumed);
+        driver->ttys[tty->num] = NULL;
+        // cleanup 可能临时交出全局锁；在它完全退出前禁止复用同一槽。
+        driver->reserved[tty->num] = true;
+        unlock(&tty->lock);
         if (driver->ops->cleanup)
             driver->ops->cleanup(tty);
-        driver->ttys[tty->num] = NULL;
-        unlock(&tty->lock);
-        cond_destroy(&tty->produced);
-        free(tty);
+        assert(lock_owned_by_current(&ttys_lock));
+        assert(driver->reserved[tty->num]);
+        driver->reserved[tty->num] = false;
+        lock(&tty->fds_lock);
+        assert(list_empty(&tty->fds));
+        unlock(&tty->fds_lock);
+        tty_destroy_unpublished(tty);
     } else {
         unlock(&tty->lock);
     }
@@ -131,19 +192,26 @@ int console_major = TTY_CONSOLE_MAJOR;
 int console_minor = 1;
 
 int tty_open(struct tty *tty, struct fd *fd) {
+    lock(&tty->lock);
+    assert(tty->open_count > 0);
+    tty->ever_opened = true;
+    unlock(&tty->lock);
     fd->tty = tty;
 
     lock(&tty->fds_lock);
     list_add(&tty->fds, &fd->tty_other_fds);
     unlock(&tty->fds_lock);
 
-    if (!(fd->flags & O_NOCTTY_)) {
+    // Linux 不会因 open(/dev/ptmx) 自动把 master 设为 controlling tty；
+    // session leader 仍可随后用 TIOCSCTTY 显式选择它。
+    if (!(fd->flags & O_NOCTTY_) && tty->driver != &pty_master) {
         // Make this our controlling terminal if:
         // - the terminal doesn't already have a session
         // - we're a session leader
         lock(&pids_lock);
         lock(&tty->lock);
-        if (tty->session == 0 && current->group->sid == current->pid)
+        if (tty->session == 0 && current->group->sid ==
+                current->group->leader->pid)
             tty_set_controlling(current->group, tty);
         unlock(&tty->lock);
         unlock(&pids_lock);
@@ -161,8 +229,14 @@ static int tty_device_open(int major, int minor, struct fd *fd) {
             tty = current->group->tty;
             unlock(&current->group->lock);
             if (tty != NULL) {
+                // PTY master 只有 /dev/ptmx 能创建成功文件；不要让必失败 open 污染在途计数。
+                if (tty->driver == &pty_master) {
+                    unlock(&ttys_lock);
+                    return _EIO;
+                }
                 lock(&tty->lock);
                 tty->refcount++;
+                tty->open_count++;
                 unlock(&tty->lock);
             }
             unlock(&ttys_lock);
@@ -178,7 +252,9 @@ static int tty_device_open(int major, int minor, struct fd *fd) {
     } else {
         struct tty_driver *driver = tty_drivers[major];
         assert(driver != NULL);
-        tty = tty_get(driver, major, minor);
+        if (driver == &pty_master)
+            return _EIO;
+        tty = tty_get_for_open(driver, major, minor);
         if (IS_ERR(tty))
             return PTR_ERR(tty);
     }
@@ -187,6 +263,14 @@ static int tty_device_open(int major, int minor, struct fd *fd) {
         int err = tty->driver->ops->open(tty);
         if (err < 0) {
             lock(&ttys_lock);
+            lock(&tty->lock);
+            assert(tty->open_count > 0);
+            tty->open_count--;
+            bool lost_last_open = tty->open_count == 0 &&
+                    tty->ever_opened;
+            unlock(&tty->lock);
+            if (lost_last_open && tty->driver->ops->close)
+                tty->driver->ops->close(tty);
             tty_release(tty);
             unlock(&ttys_lock);
             return err;
@@ -203,6 +287,10 @@ static int tty_close(struct fd *fd) {
         list_remove_safe(&fd->tty_other_fds);
         unlock(&tty->fds_lock);
         lock(&ttys_lock);
+        lock(&tty->lock);
+        assert(tty->open_count > 0);
+        tty->open_count--;
+        unlock(&tty->lock);
         if (tty->driver->ops->close)
             tty->driver->ops->close(tty);
         tty_release(tty);
@@ -218,24 +306,33 @@ static void tty_input_wakeup(struct tty *tty) {
 
 static int tty_push_char(struct tty *tty, char ch, bool flag, int blocking) {
     while (tty->bufsize >= sizeof(tty->buf)) {
+        if (tty->hung_up)
+            return _EIO;
         if (!blocking)
             return _EAGAIN;
         if (wait_for(&tty->consumed, &tty->lock, NULL))
             return _EINTR;
     }
+    if (tty->hung_up)
+        return _EIO;
     tty->buf[tty->bufsize] = ch;
     tty->buf_flag[tty->bufsize++] = flag;
     return 0;
 }
 
 static void tty_echo(struct tty *tty, const char *data, size_t size) {
+    // 宿主输出可能永久阻塞；driver write 期间不能阻挡 hangup/cleanup 取得 tty 锁。
+    assert(lock_owned_by_current(&tty->lock));
+    unlock(&tty->lock);
     tty->driver->ops->write(tty, data, size, false);
+    lock(&tty->lock);
 }
 
-static bool tty_send_input_signal(struct tty *tty, char ch, sigset_t_ *queue) {
-    if (!(tty->termios.lflags & ISIG_))
+static bool tty_send_input_signal(struct tty *tty, char ch,
+        dword_t lflags, const unsigned char *cc,
+        pid_t_ signal_group, sigset_t_ *queue) {
+    if (!(lflags & ISIG_))
         return false;
-    unsigned char *cc = tty->termios.cc;
     int sig;
     if (ch == '\0')
         return false; // '\0' is used to disable cc entries
@@ -248,8 +345,8 @@ static bool tty_send_input_signal(struct tty *tty, char ch, sigset_t_ *queue) {
     else
         return false;
 
-    if (tty->fg_group != 0) {
-        if (!(tty->termios.lflags & NOFLSH_))
+    if (signal_group != 0) {
+        if (!(lflags & NOFLSH_))
             tty->bufsize = 0;
         sigset_add(queue, sig);
     }
@@ -261,10 +358,19 @@ ssize_t tty_input(struct tty *tty, const char *input, size_t size, bool blocking
     size_t done_size = 0;
     sigset_t_ queue = 0; // to prevent having to lock tty->lock and pids_lock at the same time
 
+    // 回显会临时释放 tty 锁；独立事务锁防止另一输入在半条行规操作中插入。
+    lock(&tty->input_lock);
     lock(&tty->lock);
+    if (tty->hung_up) {
+        unlock(&tty->lock);
+        unlock(&tty->input_lock);
+        return _EIO;
+    }
     dword_t lflags = tty->termios.lflags;
     dword_t iflags = tty->termios.iflags;
-    unsigned char *cc = tty->termios.cc;
+    unsigned char cc[sizeof(tty->termios.cc)];
+    memcpy(cc, tty->termios.cc, sizeof(cc));
+    pid_t_ signal_group = tty->fg_group;
 
 #define SHOULD_ECHOCTL(ch) \
     (lflags & ECHOCTL_ && \
@@ -273,6 +379,10 @@ ssize_t tty_input(struct tty *tty, const char *input, size_t size, bool blocking
 
     if (lflags & ICANON_) {
         for (size_t i = 0; i < size; i++) {
+            if (tty->hung_up) {
+                err = _EIO;
+                break;
+            }
             done_size++;
             char ch = input[i];
             bool echo = lflags & ECHO_;
@@ -300,12 +410,14 @@ ssize_t tty_input(struct tty *tty, const char *input, size_t size, bool blocking
                     echo = false;
                 for (int i = 0; i < count; i++) {
                     // don't delete past a flag
-                    if (tty->buf_flag[tty->bufsize - 1])
+                    if (tty->bufsize == 0 ||
+                            tty->buf_flag[tty->bufsize - 1])
                         break;
                     tty->bufsize--;
+                    char erased = tty->buf[tty->bufsize];
                     if (echo) {
                         tty_echo(tty, "\b \b", 3);
-                        if (SHOULD_ECHOCTL(tty->buf[tty->bufsize]))
+                        if (SHOULD_ECHOCTL(erased))
                             tty_echo(tty, "\b \b", 3);
                     }
                 }
@@ -326,7 +438,8 @@ canon_wake:
                 echo = false;
                 tty_input_wakeup(tty);
             } else {
-                if (!tty_send_input_signal(tty, ch, &queue)) {
+                if (!tty_send_input_signal(tty, ch,
+                        lflags, cc, signal_group, &queue)) {
 no_special:
                     err = tty_push_char(tty, ch, /*flag*/false, blocking);
                     if (err < 0) {
@@ -347,9 +460,14 @@ no_special:
     } else {
         for (size_t i = 0; i < size; i++) {
             done_size++;
-            if (tty_send_input_signal(tty, input[i], &queue))
+            if (tty_send_input_signal(tty, input[i],
+                    lflags, cc, signal_group, &queue))
                 continue;
             while (tty->bufsize >= sizeof(tty->buf)) {
+                if (tty->hung_up) {
+                    err = _EIO;
+                    break;
+                }
                 err = _EAGAIN;
                 if (!blocking)
                     break;
@@ -368,20 +486,18 @@ no_special:
             tty_input_wakeup(tty);
     }
 
-    pid_t_ fg_group = tty->fg_group;
     assert(tty->bufsize <= sizeof(tty->buf));
     unlock(&tty->lock);
 
-    if (fg_group != 0) {
+    if (signal_group != 0) {
         for (int sig = 1; sig <= NUM_SIGS; sig++) {
             if (sigset_has(queue, sig))
-                send_group_signal(fg_group, sig, SIGINFO_NIL);
+                send_group_signal(signal_group, sig, SIGINFO_NIL);
         }
     }
 
-    if (done_size > 0)
-        return done_size;
-    return err;
+    unlock(&tty->input_lock);
+    return done_size > 0 ? (ssize_t) done_size : err;
 }
 
 // expects bufsize <= tty->bufsize
@@ -405,12 +521,25 @@ static bool pty_is_half_closed_master(struct tty *tty) {
     if (tty->driver != &pty_master)
         return false;
 
-    struct tty *slave = tty->pty.other;
-    // only time one tty lock is nested in another
-    lock(&slave->lock);
-    bool half_closed = slave->ever_opened && (slave->refcount == 1 || slave->hung_up);
-    unlock(&slave->lock);
-    return half_closed;
+    struct tty *slave = tty_lock_slave_side(tty);
+    bool half_closed = slave->ever_opened &&
+            (slave->open_count == 0 || slave->hung_up);
+    tty_unlock_slave_side(tty, slave);
+    // 检查 slave 时曾临时释放 master；合并窗口内发生的 master hangup。
+    return half_closed || tty->hung_up;
+}
+
+// 调用方持有 tty 锁。PTY master 的对端关闭终态是 EIO，其他 hangup 是 EOF。
+static bool tty_read_terminal_result(struct tty *tty, int *result) {
+    if (pty_is_half_closed_master(tty)) {
+        *result = _EIO;
+        return true;
+    }
+    if (tty->hung_up) {
+        *result = 0;
+        return true;
+    }
+    return false;
 }
 
 static bool tty_is_current(struct tty *tty) {
@@ -418,21 +547,6 @@ static bool tty_is_current(struct tty *tty) {
     bool is_current = current->group->tty == tty;
     unlock(&current->group->lock);
     return is_current;
-}
-
-static int tty_signal_if_background(struct tty *tty, pid_t_ current_pgid, int sig) {
-    // you can apparently access a terminal that's not your controlling
-    // terminal all you want
-    if (!tty_is_current(tty))
-        return 0;
-    // check if we're in the foreground
-    if (tty->fg_group == 0 || current_pgid == tty->fg_group)
-        return 0;
-
-    if (!try_self_signal(sig))
-        return _EIO;
-    else
-        return _EINTR;
 }
 
 static ssize_t tty_read(struct fd *fd, void *buf, size_t bufsize) {
@@ -444,16 +558,26 @@ static ssize_t tty_read(struct fd *fd, void *buf, size_t bufsize) {
     struct tty *tty = fd->tty;
     lock(&pids_lock);
     lock(&tty->lock);
-    if (tty->hung_up || pty_is_half_closed_master(tty)) {
+    bool terminal = tty_read_terminal_result(tty, &err);
+    bool master_has_pending = tty->driver == &pty_master &&
+            (tty->bufsize > 0 ||
+            (tty->pty.packet_mode && tty->packet_flags != 0));
+    if (terminal && !master_has_pending) {
         unlock(&pids_lock);
         goto error;
     }
 
     pid_t_ current_pgid = current->group->pgid;
+    bool background = !terminal && tty_is_current(tty) &&
+            tty->fg_group != 0 &&
+            current_pgid != tty->fg_group;
+    if (background) {
+        // 信号路径会取得 pids_lock；先按 pids→tty 的全局锁序完整退出临界区。
+        unlock(&tty->lock);
+        unlock(&pids_lock);
+        return try_self_signal(SIGTTIN_) ? _EINTR : _EIO;
+    }
     unlock(&pids_lock);
-    err = tty_signal_if_background(tty, current_pgid, SIGTTIN_);
-    if (err < 0)
-        goto error;
 
     int bufsize_extra = 0;
     if (tty->driver == &pty_master && tty->pty.packet_mode) {
@@ -476,8 +600,7 @@ static ssize_t tty_read(struct fd *fd, void *buf, size_t bufsize) {
     if (tty->termios.lflags & ICANON_) {
         size_t canon_size;
         while ((canon_size = tty_canon_size(tty)) == (size_t) -1) {
-            err = _EIO;
-            if (pty_is_half_closed_master(tty))
+            if (tty_read_terminal_result(tty, &err))
                 goto error;
             err = _EAGAIN;
             if (fd->flags & O_NONBLOCK_)
@@ -505,9 +628,12 @@ static ssize_t tty_read(struct fd *fd, void *buf, size_t bufsize) {
             timeout_ptr = NULL;
 
         while (tty->bufsize < min) {
-            err = _EIO;
-            if (pty_is_half_closed_master(tty))
+            if (tty_read_terminal_result(tty, &err)) {
+                // Linux 会先排空 slave→master 的既有数据，再对 master 返回 EIO。
+                if (tty->driver == &pty_master && tty->bufsize > 0)
+                    break;
                 goto error;
+            }
             err = _EAGAIN;
             if (fd->flags & O_NONBLOCK_)
                 goto error;
@@ -540,7 +666,7 @@ error:
 static ssize_t tty_write(struct fd *fd, const void *buf, size_t bufsize) {
     struct tty *tty = fd->tty;
     lock(&tty->lock);
-    if (tty->hung_up || pty_is_half_closed_master(tty)) {
+    if (tty->hung_up) {
         unlock(&tty->lock);
         return _EIO;
     }
@@ -625,11 +751,16 @@ static int tiocsctty(struct tty *tty, int force) {
     // locking is ***hard**
     lock(&pids_lock);
     lock(&tty->lock);
+    struct tgroup *group = current->group;
+    if (group->sid != group->leader->pid) {
+        err = _EPERM;
+        goto out;
+    }
     // do nothing if this is already our controlling tty
-    if (current->group->sid == current->pid && current->group->sid == tty->session)
+    if (group->tty == tty && group->sid == tty->session)
         goto out;
     // must not already have a tty
-    if (current->group->tty != NULL) {
+    if (group->tty != NULL) {
         err = _EPERM;
         goto out;
     }
@@ -653,7 +784,7 @@ static int tiocsctty(struct tty *tty, int force) {
         }
     }
 
-    tty_set_controlling(current->group, tty);
+    tty_set_controlling(group, tty);
 out:
     unlock(&pids_lock);
     return err;
@@ -661,10 +792,7 @@ out:
 
 static int tiocgpgrp(struct tty *tty, pid_t_ *fg_group) {
     int err = 0;
-    struct tty *slave = get_slave_side_tty(tty);
-    if (slave != tty) {
-        lock(&slave->lock);
-    }
+    struct tty *slave = tty_lock_slave_side(tty);
 
     if (tty == slave && (!tty_is_current(slave) || slave->fg_group == 0)) {
         err = _ENOTTY;
@@ -674,8 +802,7 @@ static int tiocgpgrp(struct tty *tty, pid_t_ *fg_group) {
     STRACE("tty group = %d\n", slave->fg_group);
 
 error_no_ctrl_tty:
-    if (slave != tty)
-        unlock(&slave->lock);
+    tty_unlock_slave_side(tty, slave);
     return err;
 }
 
@@ -683,11 +810,7 @@ error_no_ctrl_tty:
 // side of a pseudoterminal pair even if the master is specified
 static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg) {
     int err = 0;
-    struct tty *tty = in_tty;
-    if (in_tty->driver == &pty_master) {
-        tty = in_tty->pty.other;
-        lock(&tty->lock);
-    }
+    struct tty *tty = tty_lock_slave_side(in_tty);
 
     switch (cmd) {
         case TCGETS_:
@@ -715,8 +838,7 @@ static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg) {
             break;
     }
 
-    if (in_tty->driver == &pty_master)
-        unlock(&tty->lock);
+    tty_unlock_slave_side(in_tty, tty);
     return err;
 }
 
@@ -748,29 +870,37 @@ static int tty_ioctl(struct fd *fd, int cmd, void *arg) {
             };
             break;
 
-        case TIOCSCTTY_:
-            err = tiocsctty(tty, (uintptr_t) arg);
+        case TIOCSCTTY_: {
+            // Linux 的作业控制始终绑定 PTY slave；master ioctl 只是一条入口路径。
+            struct tty *real_tty = tty_lock_slave_side(tty);
+            err = tiocsctty(real_tty, (uintptr_t) arg);
+            tty_unlock_slave_side(tty, real_tty);
             break;
+        }
 
         case TIOCGPGRP_:
             err = tiocgpgrp(tty, (pid_t_ *) arg);
             break;
 
-        case TIOCSPGRP_:
+        case TIOCSPGRP_: {
+            // 与 TIOCSCTTY/TIOCGPGRP 一致，PTY master 入口必须操作真实 slave。
+            struct tty *real_tty = tty_lock_slave_side(tty);
             // see "aaaaaaaa" comment above
-            unlock(&tty->lock);
+            unlock(&real_tty->lock);
             lock(&pids_lock);
-            lock(&tty->lock);
+            lock(&real_tty->lock);
             pid_t_ sid = current->group->sid;
             unlock(&pids_lock);
-            if (!tty_is_current(tty) || sid != tty->session) {
+            if (!tty_is_current(real_tty) || sid != real_tty->session) {
                 err = _ENOTTY;
-                break;
+            } else {
+                // TODO group must be in the right session
+                real_tty->fg_group = *(dword_t *) arg;
+                STRACE("tty group set to = %d\n", real_tty->fg_group);
             }
-            // TODO group must be in the right session
-            tty->fg_group = *(dword_t *) arg;
-            STRACE("tty group set to = %d\n", tty->fg_group);
+            tty_unlock_slave_side(tty, real_tty);
             break;
+        }
 
         case FIONREAD_:
             *(dword_t *) arg = tty->bufsize;
@@ -787,14 +917,27 @@ static int tty_ioctl(struct fd *fd, int cmd, void *arg) {
 }
 
 void tty_set_winsize(struct tty *tty, struct winsize_ winsize) {
+    assert(lock_owned_by_current(&tty->lock));
     tty->winsize = winsize;
-    if (tty->fg_group != 0)
-        send_group_signal(tty->fg_group, SIGWINCH_, SIGINFO_NIL);
+    pid_t_ fg_group = tty->fg_group;
+    if (fg_group != 0) {
+        // 进程表的锁序是 pids_lock→tty；发送信号时临时放开 tty 锁。
+        unlock(&tty->lock);
+        send_group_signal(fg_group, SIGWINCH_, SIGINFO_NIL);
+        lock(&tty->lock);
+    }
 }
 
 void tty_hangup(struct tty *tty) {
     tty->hung_up = true;
     tty_input_wakeup(tty);
+    notify(&tty->consumed);
+}
+
+void tty_notify_peer_closed(struct tty *tty) {
+    assert(lock_owned_by_current(&tty->lock));
+    notify(&tty->produced);
+    tty_poll_wakeup(tty, POLL_READ | POLL_HUP);
 }
 
 struct dev_ops tty_dev = {

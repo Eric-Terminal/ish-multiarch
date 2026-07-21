@@ -15,7 +15,8 @@ void cond_init(cond_t *cond) {
     pthread_condattr_destroy(&attr);
 }
 void cond_destroy(cond_t *cond) {
-    pthread_cond_destroy(&cond->cond);
+    if (pthread_cond_destroy(&cond->cond) != 0)
+        __builtin_trap();
 }
 
 static bool is_signal_pending(lock_t *lock) {

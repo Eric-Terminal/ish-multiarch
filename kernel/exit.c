@@ -31,14 +31,24 @@ static bool exit_tgroup(struct task *task) {
 
 void (*exit_hook)(struct task *task, int code) = NULL;
 
-// 调用方持有 pids_lock；该路径同时供 wait 与自动回收使用。
-static void release_reaped_task_locked(struct task *task) {
+// 调用方持有 pids_lock；返回的 tty 引用必须在退出进程表临界区后释放。
+static struct tty *release_reaped_task_locked(struct task *task) {
     cond_destroy(&task->group->child_exit);
     cond_destroy(&task->group->stopped_cond);
-    task_leave_session(task);
+    struct tty *tty = task_leave_session(task);
     list_remove(&task->group->pgroup);
     free(task->group);
     task_destroy(task);
+    return tty;
+}
+
+static void release_detached_tty(struct tty *tty) {
+    if (tty == NULL)
+        return;
+    assert(!lock_owned_by_current(&pids_lock));
+    lock(&ttys_lock);
+    tty_release(tty);
+    unlock(&ttys_lock);
 }
 
 static struct task *find_new_parent(struct task *task) {
@@ -154,11 +164,18 @@ noreturn void do_exit(int status) {
     }
 
     vfork_notify(current);
-    if (current != leader)
+    if (current != leader) {
         task_destroy(current);
+        // 后续 auto-reap 仍会取得锁，LOCK_DEBUG 不得观察已释放的 TLS task。
+        current = NULL;
+    }
+    struct tty *reaped_tty = NULL;
     if (group_dead && auto_reap)
-        release_reaped_task_locked(leader);
+        reaped_tty = release_reaped_task_locked(leader);
     unlock(&pids_lock);
+    // 此线程不再执行 guest 工作；auto-reap 还可能已经释放 TLS 指向的 task。
+    current = NULL;
+    release_detached_tty(reaped_tty);
 
     pthread_exit(NULL);
 }
@@ -267,7 +284,9 @@ dword_t sys_exit_group(dword_t status) {
 #define P_PGID_ 2
 
 // returns false if the task cannot be reaped and true if the task was reaped
-static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct rusage_ *rusage_out, int options) {
+static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out,
+        struct rusage_ *rusage_out, int options,
+        struct tty **released_tty) {
     if (!task->zombie)
         return false;
     lock(&task->group->lock);
@@ -292,7 +311,7 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
     if (options & WNOWAIT_)
         return true;
 
-    release_reaped_task_locked(task);
+    *released_tty = release_reaped_task_locked(task);
     return true;
 }
 
@@ -322,9 +341,12 @@ static bool notify_if_continued(struct task *task,
     return continued;
 }
 
-static bool reap_if_needed(struct task *task, struct siginfo_ *info_out, struct rusage_ *rusage_out, int options) {
+static bool reap_if_needed(struct task *task, struct siginfo_ *info_out,
+        struct rusage_ *rusage_out, int options,
+        struct tty **released_tty) {
     assert(task_is_leader(task));
-    if ((options & WEXITED_ && reap_if_zombie(task, info_out, rusage_out, options)) ||
+    if ((options & WEXITED_ && reap_if_zombie(task, info_out,
+            rusage_out, options, released_tty)) ||
         (options & WUNTRACED_ &&
                 notify_if_stopped(task, info_out, options)) ||
         (options & WCONTINUED_ &&
@@ -358,6 +380,7 @@ int do_wait(int idtype, pid_t_ id, struct siginfo_ *info, struct rusage_ *rusage
     lock(&pids_lock);
     int err;
     bool got_signal = false;
+    struct tty *released_tty = NULL;
 
 retry:
     if (idtype != P_PID_) {
@@ -373,7 +396,8 @@ retry:
                     continue;
                 no_children = false;
                 info->child.pid = task->pid;
-                if (reap_if_needed(task, info, rusage, options))
+                if (reap_if_needed(task, info, rusage,
+                        options, &released_tty))
                     goto found_something;
             }
         }
@@ -388,7 +412,8 @@ retry:
             goto error;
         task = task->group->leader;
         info->child.pid = id;
-        if (reap_if_needed(task, info, rusage, options))
+        if (reap_if_needed(task, info, rusage,
+                options, &released_tty))
             goto found_something;
     }
 
@@ -415,6 +440,7 @@ retry:
 
 found_something:
     unlock(&pids_lock);
+    release_detached_tty(released_tty);
     return 0;
 
 error:

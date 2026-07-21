@@ -184,9 +184,11 @@
     self.sessionTerminal = terminal;
     NSString *stdioFile = [NSString stringWithFormat:@"/dev/pts/%d", tty->num];
     err = create_stdio(stdioFile.fileSystemRepresentation, TTY_PSEUDO_SLAVE_MAJOR, tty->num);
+    lock(&ttys_lock);
+    tty_release(tty);
+    unlock(&ttys_lock);
     if (err < 0)
         return err;
-    tty_release(tty);
 
     char argv[4096];
     [Terminal convertCommand:command toArgs:argv limitSize:sizeof(argv)];

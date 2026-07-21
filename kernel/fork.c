@@ -41,11 +41,6 @@ static void tgroup_init_copy(
     list_init(&group->threads);
     list_init(&group->pgroup);
     list_init(&group->session);
-    if (group->tty) {
-        lock(&group->tty->lock);
-        group->tty->refcount++;
-        unlock(&group->tty->lock);
-    }
     group->itimer = NULL;
     memset(group->posix_timers, 0, sizeof(group->posix_timers));
     group->doing_group_exit = false;
@@ -174,8 +169,15 @@ static int copy_task(struct task *task, dword_t flags, qword_t stack,
         lock(&current->sighand->lock);
         lock(&old_group->lock);
         tgroup_init_copy(new_group, old_group);
+        struct tty *inherited_tty = new_group->tty;
         unlock(&old_group->lock);
         unlock(&current->sighand->lock);
+        // pids_lock 保证 controlling tty 不会被摘除；避免 group→tty 锁序反转。
+        if (inherited_tty != NULL) {
+            lock(&inherited_tty->lock);
+            inherited_tty->refcount++;
+            unlock(&inherited_tty->lock);
+        }
         task->group = new_group;
         task->group->leader = task;
         task->tgid = task->pid;

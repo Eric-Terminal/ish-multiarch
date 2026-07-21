@@ -11,6 +11,9 @@
 #import "ThemesViewController.h"
 #import "UserPreferences.h"
 #import "NSObject+SaneKVO.h"
+#if !ISH_LINUX
+#include "fs/tty.h"
+#endif
 
 @interface AboutAppearanceViewController ()
 @property (strong, nonatomic) IBOutlet UISwitch *blinkCursor;
@@ -80,7 +83,26 @@ char *previewString = "# cat /proc/ish/colors\r\n"
 #if !ISH_LINUX
     if (![NSUserDefaults.standardUserDefaults boolForKey:@"recovery"]) {
         _terminal = [Terminal createPseudoTerminal:&_tty];
-        [_terminal sendOutput:previewString length:(int)strlen(previewString)];
+        if (_terminal == nil) {
+            _tty = NULL;
+        } else {
+            [_terminal sendOutput:previewString length:(int)strlen(previewString)];
+        }
+    }
+#endif
+}
+
+- (void)dealloc {
+#if !ISH_LINUX
+    if (_terminal != nil) {
+        [_terminal destroy];
+        _terminal = nil;
+    }
+    if (_tty != NULL) {
+        lock(&ttys_lock);
+        tty_release(_tty);
+        unlock(&ttys_lock);
+        _tty = NULL;
     }
 #endif
 }

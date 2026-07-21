@@ -133,6 +133,30 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
     });
 }
 
+#if !ISH_LINUX
+- (struct tty *)acquireTty {
+    lock(&ttys_lock);
+    struct tty *tty;
+    @synchronized (self) {
+        tty = _tty;
+        if (tty != NULL) {
+            lock(&tty->lock);
+            assert(tty->refcount > 0);
+            tty->refcount++;
+            unlock(&tty->lock);
+        }
+    }
+    unlock(&ttys_lock);
+    return tty;
+}
+
+- (void)releaseTty:(struct tty *)tty {
+    lock(&ttys_lock);
+    tty_release(tty);
+    unlock(&ttys_lock);
+}
+#endif
+
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqualToString:@"load"]) {
         self.loaded = YES;
@@ -155,13 +179,17 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
     [self.webView evaluateJavaScript:@"exports.getSize()" completionHandler:^(NSArray<NSNumber *> *dimensions, NSError *error) {
         int cols = dimensions[0].intValue;
         int rows = dimensions[1].intValue;
+#if !ISH_LINUX
+        struct tty *tty = [self acquireTty];
+        if (tty == NULL)
+            return;
+        lock(&tty->lock);
+        tty_set_winsize(tty, (struct winsize_) {.col = cols, .row = rows});
+        unlock(&tty->lock);
+        [self releaseTty:tty];
+#else
         if (self.tty == NULL)
             return;
-#if !ISH_LINUX
-        lock(&self.tty->lock);
-        tty_set_winsize(self.tty, (struct winsize_) {.col = cols, .row = rows});
-        unlock(&self.tty->lock);
-#else
         async_do_in_workqueue(^{
             self->_tty->ops->resize(self->_tty, cols, rows);
         });
@@ -213,11 +241,15 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 #endif
 
 - (void)sendInput:(NSData *)input {
+#if !ISH_LINUX
+    struct tty *tty = [self acquireTty];
+    if (tty == NULL)
+        return;
+    tty_input(tty, input.bytes, input.length, 0);
+    [self releaseTty:tty];
+#else
     if (self.tty == NULL)
         return;
-#if !ISH_LINUX
-    tty_input(self.tty, input.bytes, input.length, 0);
-#else
     async_do_in_workqueue(^{
         NSData *inputRef = input;
         self.tty->ops->send_input(self.tty, inputRef.bytes, inputRef.length);
@@ -317,18 +349,19 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 }
 
 - (void)destroy {
-    tty_t tty = self.tty;
-    if (tty != NULL) {
 #if !ISH_LINUX
-        if (tty != NULL) {
-            lock(&tty->lock);
-            tty_hangup(tty);
-            unlock(&tty->lock);
-        }
+    struct tty *tty = [self acquireTty];
+    if (tty != NULL) {
+        lock(&tty->lock);
+        tty_hangup(tty);
+        unlock(&tty->lock);
+        [self releaseTty:tty];
+    }
 #else
+    tty_t tty = self.tty;
+    if (tty != NULL)
         tty->ops->hangup(tty);
 #endif
-    }
     @synchronized (Terminal.class) {
         [terminals removeObjectForKey:self.terminalsKey];
     }
