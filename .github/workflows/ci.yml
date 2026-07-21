@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install libarchive-dev
+          sudo apt-get install libarchive-dev sqlite3
           pip3 install meson ninja
       - name: Clone Linux
         if: matrix.kernel == 'linux'
@@ -52,6 +52,14 @@ jobs:
       - name: Clone Linux
         if: matrix.kernel == 'linux'
         run: deps/clone-linux.sh
+      - name: 验证 AArch64 rootfs 构建期打包器
+        if: matrix.kernel == 'ish'
+        shell: bash
+        run: |
+          meson setup "$RUNNER_TEMP/ish-rootfs-test-build" \
+            -Dengine=asbestos -Dkernel=ish
+          meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
+            apple_aarch64_rootfs --print-errorlogs
       - name: Build
         if: matrix.kernel == 'ish'
         run: xcodebuild -project iSH.xcodeproj -scheme iSH -arch arm64 -sdk iphoneos CODE_SIGNING_ALLOWED=NO

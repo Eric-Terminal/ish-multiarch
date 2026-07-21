@@ -43,6 +43,15 @@ if libarchive.found()
         '../util/fchdir.c',
     ]
     fakefsify = executable('fakefsify', fakefsify_src, dependencies: [libarchive], link_with: [libfakefs], include_directories: [includes])
+    sqlite3_cli = find_program('sqlite3', required: false)
+    if not meson.is_cross_build() and sqlite3_cli.found()
+        apple_aarch64_rootfs_test = find_program(
+            'apple-aarch64-rootfs-test.sh')
+        test('apple_aarch64_rootfs', apple_aarch64_rootfs_test,
+            args: [fakefsify, sqlite3_cli.full_path()], timeout: 120)
+    elif not meson.is_cross_build()
+        warning('未找到 sqlite3 CLI，跳过 AArch64 rootfs 打包测试')
+    endif
     custom_target('unfakefsify',
         build_by_default: true,
         command: ['ln', '-sf', 'fakefsify', '@OUTPUT@'],
