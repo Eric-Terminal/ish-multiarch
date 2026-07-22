@@ -25,6 +25,7 @@
 #import "UIApplication+OpenURL.h"
 #include "kernel/init.h"
 #include "kernel/calls.h"
+#include "kernel/errno.h"
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
@@ -72,8 +73,12 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
 @implementation AppDelegate
 
 - (int)boot {
+    Roots *roots = Roots.instance;
+    if (roots.startupError != 0)
+        return err_map(roots.startupError);
+
 #if !ISH_LINUX
-    NSURL *root = [Roots.instance rootUrl:Roots.instance.defaultRoot];
+    NSURL *root = [roots rootUrl:roots.defaultRoot];
 
     int err = mount_root(&fakefs, [root URLByAppendingPathComponent:@"data"].fileSystemRepresentation);
     if (err < 0)
@@ -138,8 +143,7 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     task_start(current);
 
 #else
-    // On first launch, this will trigger the import of the default root. Make sure to do this before entering the kernel, because it needs to run something on the main thread, and that would deadlock.
-    [Roots instance];
+    // Roots 已在进入内核前初始化；首次导入必须留在主线程，避免等待主线程时死锁。
     NSArray<NSString *> *args = @[];
     actuate_kernel([args componentsJoinedByString:@" "].UTF8String);
 #endif
@@ -164,6 +168,10 @@ void SyncHostname(void) {
 
 - (void)configureDns {
 #if !ISH_LINUX
+    if (bootError != 0 ||
+            [NSUserDefaults.standardUserDefaults boolForKey:@"recovery"])
+        return;
+
     struct __res_state res;
     if (EXIT_SUCCESS != res_ninit(&res)) {
         exit(2);
@@ -203,6 +211,8 @@ void SyncHostname(void) {
 }
 
 + (void)maybePresentStartupMessageOnViewController:(UIViewController *)vc {
+    if (bootError != 0)
+        return;
     if ([NSUserDefaults.standardUserDefaults integerForKey:kSkipStartupMessage] >= 1)
         return;
     if (!FsIsManaged()) {
@@ -235,10 +245,12 @@ void SyncHostname(void) {
     bootError = [self boot];
 
 #if ISH_LINUX
-    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillEnterForegroundNotification object:UIApplication.sharedApplication queue:nil usingBlock:^(NSNotification * _Nonnull note) {
+    if (bootError == 0) {
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillEnterForegroundNotification object:UIApplication.sharedApplication queue:nil usingBlock:^(NSNotification * _Nonnull note) {
+            SyncHostname();
+        }];
         SyncHostname();
-    }];
-    SyncHostname();
+    }
 #endif
 
     return YES;
@@ -250,8 +262,11 @@ void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    BOOL recoveryMode = [NSUserDefaults.standardUserDefaults boolForKey:@"recovery"];
+
     // get the network permissions popup to appear on chinese devices
-    [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:@"http://captive.apple.com"]] resume];
+    if (bootError == 0)
+        [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:@"http://captive.apple.com"]] resume];
 
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"FASTLANE_SNAPSHOT"])
         [UIView setAnimationsEnabled:NO];
@@ -280,17 +295,19 @@ void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
         });
     }];
     
-    // This code is IPv4 and IPv6 aware: see https://developer.apple.com/library/archive/samplecode/Reachability/Listings/ReadMe_md.html
-    struct sockaddr_in address = {
-        .sin_len = sizeof(address),
-        .sin_family = AF_INET,
-    };
-    self.reachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (struct sockaddr *) &address);
-    SCNetworkReachabilityContext context = {
-        .info = (__bridge void *) self,
-    };
-    SCNetworkReachabilitySetCallback(self.reachability, NetworkReachabilityCallback, &context);
-    SCNetworkReachabilityScheduleWithRunLoop(self.reachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+    if (bootError == 0 && !recoveryMode) {
+        // This code is IPv4 and IPv6 aware: see https://developer.apple.com/library/archive/samplecode/Reachability/Listings/ReadMe_md.html
+        struct sockaddr_in address = {
+            .sin_len = sizeof(address),
+            .sin_family = AF_INET,
+        };
+        self.reachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (struct sockaddr *) &address);
+        SCNetworkReachabilityContext context = {
+            .info = (__bridge void *) self,
+        };
+        SCNetworkReachabilitySetCallback(self.reachability, NetworkReachabilityCallback, &context);
+        SCNetworkReachabilityScheduleWithRunLoop(self.reachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+    }
 
     if (self.window != nil) {
         // For iOS <13, where the app delegate owns the window instead of the scene
@@ -311,7 +328,11 @@ void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 - (void)application:(UIApplication *)application didDiscardSceneSessions:(NSSet<UISceneSession *> *)sceneSessions API_AVAILABLE(ios(13.0)) {
     for (UISceneSession *sceneSession in sceneSessions) {
         NSString *terminalUUID = sceneSession.stateRestorationActivity.userInfo[@"TerminalUUID"];
-        [[Terminal terminalWithUUID:[[NSUUID alloc] initWithUUIDString:terminalUUID]] destroy];
+        if (terminalUUID == nil)
+            continue;
+        NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:terminalUUID];
+        if (uuid != nil)
+            [[Terminal terminalWithUUID:uuid] destroy];
     }
 }
 

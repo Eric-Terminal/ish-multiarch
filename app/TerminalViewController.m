@@ -59,17 +59,17 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-#if !ISH_LINUX
     int bootError = [AppDelegate bootError];
-    if (bootError < 0) {
+    if (bootError != 0) {
         NSString *message = [NSString stringWithFormat:@"could not boot"];
         NSString *subtitle = [NSString stringWithFormat:@"error code %d", bootError];
+#if !ISH_LINUX
         if (bootError == _EINVAL)
             subtitle = [subtitle stringByAppendingString:@"\n(try reinstalling the app, see release notes for details)"];
+#endif
         [self showMessage:message subtitle:subtitle];
         NSLog(@"boot failed with code %d", bootError);
     }
-#endif
 
     self.terminal = self.terminal;
     [self.termView becomeFirstResponder];
@@ -150,6 +150,8 @@
 }
 
 - (void)startNewSession {
+    if ([AppDelegate bootError] != 0)
+        return;
     int err = [self startSession];
     if (err < 0) {
         [self showMessage:@"could not start session"
@@ -158,6 +160,8 @@
 }
 
 - (void)reconnectSessionFromTerminalUUID:(NSUUID *)uuid {
+    if ([AppDelegate bootError] != 0)
+        return;
     self.sessionTerminal = [Terminal terminalWithUUID:uuid];
     if (self.sessionTerminal == nil)
         [self startNewSession];

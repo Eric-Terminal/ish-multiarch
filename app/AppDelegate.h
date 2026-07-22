@@ -12,9 +12,7 @@
 @property (strong, nonatomic) UIWindow *window;
 - (void)exitApp;
 
-#if !ISH_LINUX
 + (int)bootError;
-#endif
 
 + (void)maybePresentStartupMessageOnViewController:(UIViewController *)vc;
 
@@ -25,4 +23,3 @@ extern NSString *const ProcessExitedNotification;
 #else
 extern NSString *const KernelPanicNotification;
 #endif
-

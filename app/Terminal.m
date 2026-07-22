@@ -129,7 +129,9 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         _tty = tty;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self syncWindowSize];
+        // 后台虚拟控制台没有可见视图，不应仅为同步尺寸启动 WebContent 进程。
+        if (self.loaded)
+            [self syncWindowSize];
     });
 }
 
@@ -268,8 +270,34 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 }
 
 - (void)refresh {
-    if (!self.loaded)
+    if (!self.loaded) {
+        // 隐藏控制台没有 WebContent 消费输出；保留最近一段内容并释放写端背压。
+#if !ISH_LINUX
+        lock(&_dataLock);
+        if (_pendingData.length > BUF_SIZE / 2) {
+            NSUInteger discardedLength = _pendingData.length - BUF_SIZE / 2;
+            [_pendingData replaceBytesInRange:NSMakeRange(0, discardedLength)
+                                     withBytes:NULL
+                                        length:0];
+            notify(&_dataConsumed);
+        }
+        unlock(&_dataLock);
+#else
+        @synchronized (self) {
+            if (_pendingData.length > BUF_SIZE / 2) {
+                NSUInteger discardedLength = _pendingData.length - BUF_SIZE / 2;
+                [_pendingData replaceBytesInRange:NSMakeRange(0, discardedLength)
+                                         withBytes:NULL
+                                            length:0];
+                if (_tty != NULL)
+                    async_do_in_irq(^{
+                        self->_tty->ops->can_output(self->_tty);
+                    });
+            }
+        }
+#endif
         return;
+    }
 
 #if !ISH_LINUX
     lock(&_dataLock);

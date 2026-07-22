@@ -37,8 +37,8 @@ case "$TEST_MODE" in
         fi
         ;;
     fixture)
-        if [[ -z "$TEST_SHA256" || -z "$ARCHIVE" || -z "$FAKEFSIFY" ]]; then
-            echo "错误：fixture 模式必须显式提供摘要、本地归档和 fakefsify。" >&2
+        if [[ -z "$TEST_SHA256" || -z "$ARCHIVE" ]]; then
+            echo "错误：fixture 模式必须显式提供摘要和本地归档。" >&2
             exit 2
         fi
         EXPECTED_SHA256=$TEST_SHA256
@@ -103,14 +103,33 @@ find_tool() {
     return 1
 }
 
-build_fakefsify() {
-    local build_dir
-    if [[ -n ${ISH_AARCH64_ROOTFS_HOST_BUILD:-} ]]; then
-        build_dir=$ISH_AARCH64_ROOTFS_HOST_BUILD
-    elif [[ -n ${DERIVED_FILE_DIR:-} ]]; then
-        build_dir="$DERIVED_FILE_DIR/ish-aarch64-rootfs-host"
+acquire_lock() {
+    local descriptor=$1
+    local description=$2
+    if command -v flock >/dev/null 2>&1; then
+        if ! flock -w "$LOCK_TIMEOUT" "$descriptor"; then
+            echo "错误：等待${description}锁超时。" >&2
+            return 1
+        fi
+    elif command -v lockf >/dev/null 2>&1; then
+        if ! lockf -s -t "$LOCK_TIMEOUT" "$descriptor"; then
+            echo "错误：等待${description}锁超时。" >&2
+            return 1
+        fi
     else
-        build_dir="$ROOT/build/apple-rootfs-host"
+        echo "错误：找不到 flock 或 lockf，不能安全串行化${description}。" >&2
+        return 1
+    fi
+}
+
+build_fakefsify() {
+    local build_root
+    if [[ -n ${ISH_AARCH64_ROOTFS_HOST_BUILD:-} ]]; then
+        build_root=$ISH_AARCH64_ROOTFS_HOST_BUILD
+    elif [[ -n ${DERIVED_FILE_DIR:-} ]]; then
+        build_root="$DERIVED_FILE_DIR/ish-aarch64-rootfs-host"
+    else
+        build_root="$ROOT/build/apple-rootfs-host"
     fi
     local meson
     local ninja
@@ -133,20 +152,74 @@ build_fakefsify() {
         -u PKG_CONFIG_SYSROOT_DIR -u ARCHFLAGS
         -u IPHONEOS_DEPLOYMENT_TARGET -u WATCHOS_DEPLOYMENT_TARGET
         -u MACOSX_DEPLOYMENT_TARGET)
+    local -a host_env=()
+    local host_sdk=none
+    local host_cc=cc
+    local host_cc_version=unknown
+    if [[ $(uname -s) == Darwin ]]; then
+        host_sdk=$(xcrun --sdk macosx --show-sdk-path) || {
+            echo "错误：无法取得 macOS SDK，不能构建宿主 fakefsify。" >&2
+            return 1
+        }
+        host_cc=$(xcrun --sdk macosx --find clang) || {
+            echo "错误：无法找到 macOS Clang，不能构建宿主 fakefsify。" >&2
+            return 1
+        }
+        # Xcode 构建脚本中的 cc 不会自行选择 macOS SDK，必须覆盖 iOS 交叉环境。
+        host_env=(
+            CC="$host_cc"
+            SDKROOT="$host_sdk"
+            CFLAGS="-isysroot $host_sdk"
+            LDFLAGS="-isysroot $host_sdk")
+        host_cc_version=$(
+            "$host_cc" --version | sed -n '1p')
+    fi
+
+    local meson_version
+    meson_version=$(
+        "$meson" --version | sed -n '1p')
+    local toolchain_fingerprint
+    toolchain_fingerprint=$(sha256_text "$(printf '%s\n' \
+        'ish-host-fakefsify-v1' \
+        "$ROOT" "$(uname -s)" "$(uname -m)" \
+        "$host_cc" "$host_cc_version" "$host_sdk" \
+        "$meson" "$meson_version" \
+        'buildtype=release' 'kernel=ish' 'engine=asbestos')")
+    local build_dir="$build_root/toolchain-$toolchain_fingerprint"
+    if [[ "$build_dir" == *$'\n'* ]]; then
+        echo "错误：宿主 fakefsify 构建路径不能包含换行符。" >&2
+        return 1
+    fi
+    local build_parent
+    local build_name
+    build_parent=$(dirname "$build_dir")
+    build_name=$(basename "$build_dir")
+    mkdir -p "$build_parent"
+    build_parent=$(cd "$build_parent" && pwd -P)
+    build_dir="$build_parent/$build_name"
+
+    local build_lock_key
+    build_lock_key=$(sha256_text "$build_dir")
+    exec 8> "$LOCK_ROOT/$build_lock_key.host.lock"
+    acquire_lock 8 "宿主 fakefsify 构建" || return 1
+
     if [[ ! -f "$build_dir/build.ninja" ]]; then
-        if ! "${clean_env[@]}" "$meson" setup "$build_dir" "$ROOT" \
+        if ! "${clean_env[@]}" "${host_env[@]}" \
+                "$meson" setup "$build_dir" "$ROOT" \
                 --buildtype=release -Dkernel=ish -Dengine=asbestos >&2; then
             echo "错误：无法配置宿主 fakefsify 构建。" >&2
             return 1
         fi
     else
-        if ! "${clean_env[@]}" "$meson" setup --reconfigure \
+        if ! "${clean_env[@]}" "${host_env[@]}" \
+                "$meson" setup --reconfigure \
                 "$build_dir" "$ROOT" >&2; then
             echo "错误：无法刷新宿主 fakefsify 构建。" >&2
             return 1
         fi
     fi
-    if ! "${clean_env[@]}" "$ninja" -C "$build_dir" \
+    if ! "${clean_env[@]}" "${host_env[@]}" \
+            "$ninja" -C "$build_dir" \
             tools/fakefsify >&2; then
         echo "错误：无法构建宿主 fakefsify；请安装 libarchive 开发文件，或显式传入可执行文件。" >&2
         return 1
@@ -157,6 +230,50 @@ build_fakefsify() {
     fi
     printf '%s\n' "$build_dir/tools/fakefsify"
 }
+
+OUTPUT_PARENT=$(dirname "$OUTPUT")
+OUTPUT_NAME=$(basename "$OUTPUT")
+if [[ -z "$OUTPUT_NAME" || "$OUTPUT_NAME" == "." ||
+        "$OUTPUT_NAME" == ".." || "$OUTPUT_NAME" == "/" ]]; then
+    echo "错误：输出目录名称无效：$OUTPUT" >&2
+    exit 1
+fi
+mkdir -p "$OUTPUT_PARENT"
+OUTPUT_PARENT=$(cd "$OUTPUT_PARENT" && pwd -P)
+OUTPUT="$OUTPUT_PARENT/$OUTPUT_NAME"
+case "$ROOT/" in
+    "$OUTPUT/"*)
+        echo "错误：输出目录不能是源码树或其祖先：$OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+LOCK_ROOT=${ISH_AARCH64_ROOTFS_LOCK_ROOT:-"${TMPDIR:-/tmp}/ish-aarch64-rootfs-locks-$(id -u)"}
+if [[ -L "$LOCK_ROOT" ]]; then
+    echo "错误：rootfs 锁目录不能是符号链接：$LOCK_ROOT" >&2
+    exit 1
+fi
+(
+    umask 077
+    mkdir -p "$LOCK_ROOT"
+)
+LOCK_OWNER=$(stat -f '%u' "$LOCK_ROOT" 2>/dev/null || true)
+if [[ ! "$LOCK_OWNER" =~ ^[0-9]+$ ]]; then
+    LOCK_OWNER=$(stat -c '%u' "$LOCK_ROOT")
+fi
+if [[ "$LOCK_OWNER" != "$(id -u)" ]]; then
+    echo "错误：rootfs 锁目录不属于当前用户：$LOCK_ROOT" >&2
+    exit 1
+fi
+chmod 0700 "$LOCK_ROOT"
+LOCK_TIMEOUT=${ISH_AARCH64_ROOTFS_LOCK_TIMEOUT:-60}
+if [[ ! "$LOCK_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "错误：rootfs 输出锁超时必须是非负整数秒。" >&2
+    exit 1
+fi
+LOCK_KEY=$(sha256_text "$OUTPUT")
+exec 9> "$LOCK_ROOT/$LOCK_KEY.lock"
+acquire_lock 9 "同一 rootfs 输出" || exit 1
 
 if [[ -z "$ARCHIVE" ]]; then
     if [[ -n ${ISH_AARCH64_ROOTFS_CACHE:-} ]]; then
@@ -216,63 +333,6 @@ if [[ -z "$FAKEFSIFY" ]]; then
 fi
 if [[ ! -x "$FAKEFSIFY" ]]; then
     echo "错误：fakefsify 不存在或不可执行：$FAKEFSIFY" >&2
-    exit 1
-fi
-
-OUTPUT_PARENT=$(dirname "$OUTPUT")
-OUTPUT_NAME=$(basename "$OUTPUT")
-if [[ -z "$OUTPUT_NAME" || "$OUTPUT_NAME" == "." ||
-        "$OUTPUT_NAME" == ".." || "$OUTPUT_NAME" == "/" ]]; then
-    echo "错误：输出目录名称无效：$OUTPUT" >&2
-    exit 1
-fi
-mkdir -p "$OUTPUT_PARENT"
-OUTPUT_PARENT=$(cd "$OUTPUT_PARENT" && pwd -P)
-OUTPUT="$OUTPUT_PARENT/$OUTPUT_NAME"
-case "$ROOT/" in
-    "$OUTPUT/"*)
-        echo "错误：输出目录不能是源码树或其祖先：$OUTPUT" >&2
-        exit 1
-        ;;
-esac
-
-LOCK_ROOT=${ISH_AARCH64_ROOTFS_LOCK_ROOT:-"${TMPDIR:-/tmp}/ish-aarch64-rootfs-locks-$(id -u)"}
-if [[ -L "$LOCK_ROOT" ]]; then
-    echo "错误：rootfs 锁目录不能是符号链接：$LOCK_ROOT" >&2
-    exit 1
-fi
-(
-    umask 077
-    mkdir -p "$LOCK_ROOT"
-)
-LOCK_OWNER=$(stat -f '%u' "$LOCK_ROOT" 2>/dev/null || true)
-if [[ ! "$LOCK_OWNER" =~ ^[0-9]+$ ]]; then
-    LOCK_OWNER=$(stat -c '%u' "$LOCK_ROOT")
-fi
-if [[ "$LOCK_OWNER" != "$(id -u)" ]]; then
-    echo "错误：rootfs 锁目录不属于当前用户：$LOCK_ROOT" >&2
-    exit 1
-fi
-chmod 0700 "$LOCK_ROOT"
-LOCK_KEY=$(sha256_text "$OUTPUT")
-exec 9> "$LOCK_ROOT/$LOCK_KEY.lock"
-LOCK_TIMEOUT=${ISH_AARCH64_ROOTFS_LOCK_TIMEOUT:-60}
-if [[ ! "$LOCK_TIMEOUT" =~ ^[0-9]+$ ]]; then
-    echo "错误：rootfs 输出锁超时必须是非负整数秒。" >&2
-    exit 1
-fi
-if command -v flock >/dev/null 2>&1; then
-    if ! flock -w "$LOCK_TIMEOUT" 9; then
-        echo "错误：等待同一 rootfs 输出锁超时：$OUTPUT" >&2
-        exit 1
-    fi
-elif command -v lockf >/dev/null 2>&1; then
-    if ! lockf -s -t "$LOCK_TIMEOUT" 9; then
-        echo "错误：等待同一 rootfs 输出锁超时：$OUTPUT" >&2
-        exit 1
-    fi
-else
-    echo "错误：找不到 flock 或 lockf，不能安全串行化 rootfs 输出。" >&2
     exit 1
 fi
 

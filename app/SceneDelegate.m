@@ -7,6 +7,7 @@
 
 #import "SceneDelegate.h"
 #import "AboutViewController.h"
+#import "AppDelegate.h"
 
 TerminalViewController *currentTerminalViewController = NULL;
 
@@ -28,6 +29,8 @@ static NSString *const TerminalUUID = @"TerminalUUID";
         self.window.rootViewController = vc;
         return;
     }
+    if ([AppDelegate bootError] != 0)
+        return;
 
     TerminalViewController *vc = (TerminalViewController *) self.window.rootViewController;
     vc.sceneSession = session;
@@ -35,8 +38,12 @@ static NSString *const TerminalUUID = @"TerminalUUID";
         [vc startNewSession];
     } else {
         self.terminalUUID = session.stateRestorationActivity.userInfo[TerminalUUID];
-        [vc reconnectSessionFromTerminalUUID:
-         [[NSUUID alloc] initWithUUIDString:self.terminalUUID]];
+        NSUUID *uuid = self.terminalUUID == nil ? nil :
+                [[NSUUID alloc] initWithUUIDString:self.terminalUUID];
+        if (uuid == nil)
+            [vc startNewSession];
+        else
+            [vc reconnectSessionFromTerminalUUID:uuid];
     }
 }
 

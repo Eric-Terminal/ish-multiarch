@@ -268,6 +268,7 @@
 			inputFiles = (
 			);
 			isEditable = 1;
+			runOncePerArchitecture = 0;
 			outputFiles = (
 				"$(DERIVED_FILE_DIR)/mach_excServer.h",
 				"$(DERIVED_FILE_DIR)/mach_excServer.c",
@@ -283,6 +284,20 @@
 			proxyType = 1;
 			remoteGlobalIDString = A1C000000000000000000001;
 			remoteInfo = "iSHCore-watchOS";
+		};
+		A16400000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BBFB2C542590257E00545EAB;
+			remoteInfo = libish_emu;
+		};
+		A16400000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB21A1662689041500BD19B4;
+			remoteInfo = libfakefs;
 		};
 		497F6D5A254E609000C82F46 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -1544,7 +1559,7 @@
 			buildPhases = (
 				BB21A17826890A5B00BD19B4 /* Sources */,
 				BB792B4D1F96D90D00FFB7A4 /* Frameworks */,
-				BBF1248B1FA7BF530088FB50 /* Download Root */,
+				BBF1248B1FA7BF530088FB50 /* 生成 AArch64 RootFS */,
 				BB034E8C263643C10000A498 /* Generate APK Repositories File */,
 				BB4A53AC1FAA49CA00A72ACE /* Compile JavaScript */,
 				BB792B4E1F96D90D00FFB7A4 /* Resources */,
@@ -1575,6 +1590,8 @@
 			buildRules = (
 			);
 			dependencies = (
+				A16400000000000000000002 /* PBXTargetDependency */,
+				A16400000000000000000004 /* PBXTargetDependency */,
 			);
 			name = iSHFileProvider;
 			productName = iSHFiles;
@@ -2087,20 +2104,27 @@
 			shellScript = "cd $SRCROOT/deps/libapps\n./hterm/bin/mkdist\n";
 			showEnvVarsInLog = 0;
 		};
-		BBF1248B1FA7BF530088FB50 /* Download Root */ = {
+		BBF1248B1FA7BF530088FB50 /* 生成 AArch64 RootFS */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
+			inputFileListPaths = (
+				"$(SRCROOT)/tools/apple-aarch64-rootfs-inputs.xcfilelist",
+			);
 			inputPaths = (
 			);
-			name = "Download Root";
+			name = "生成 AArch64 RootFS";
 			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/root.tar.gz",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AArch64Rootfs.seed/data/bin/busybox",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AArch64Rootfs.seed/meta.db",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AArch64Rootfs.seed/rootfs-hardlinks.tsv",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AArch64Rootfs.seed/rootfs-manifest.txt",
+				"$(DERIVED_FILE_DIR)/AArch64Rootfs.seed.owner",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "curl -L \"https://$ROOTFS_URL\" -o \"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/root.tar.gz\"\n";
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\nresources=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nseed=\"$resources/AArch64Rootfs.seed\"\nowner=\"$DERIVED_FILE_DIR/AArch64Rootfs.seed.owner\"\nseed_complete=1\nfor output in \"$seed/data/bin/busybox\" \"$seed/meta.db\" \\\n        \"$seed/rootfs-hardlinks.tsv\" \"$seed/rootfs-manifest.txt\"; do\n    [[ -f \"$output\" ]] || seed_complete=0\ndone\n# 只清理本阶段明确登记的残缺构建产物，未知目录仍交给打包器拒绝。\nif (( !seed_complete )) && [[ -f \"$owner\" && ! -L \"$owner\" ]] && \\\n        [[ $(sed -n '1p' \"$owner\") == \"$seed\" ]]; then\n    rm -rf \"$seed\"\nfi\n# Xcode 会为嵌套输出预建空目录；只移除它自己留下的空层级。\nrmdir \"$seed/data/bin\" \"$seed/data\" \"$seed\" 2>/dev/null || true\n\"$SRCROOT/tools/apple-aarch64-rootfs.sh\" \"$seed\"\nrm -f \"$resources/root.tar.gz\"\n# 归档时间戳早于源码会令 Xcode 永远判定输出过期；安装器不保留该宿主时间戳。\ntouch -m -r \"$seed/rootfs-manifest.txt\" \"$seed/data/bin/busybox\"\nowner_temporary=\"$owner.tmp.$$\"\ntrap 'rm -f \"$owner_temporary\"' EXIT\nprintf '%s\\n' \"$seed\" > \"$owner_temporary\"\nmv -f \"$owner_temporary\" \"$owner\"\ntrap - EXIT\n";
 			showEnvVarsInLog = 0;
 		};
 		BBFB2C572590257E00545EAB /* ShellScript */ = {
@@ -2333,6 +2357,16 @@
 			isa = PBXTargetDependency;
 			target = A1C000000000000000000001 /* iSHCore-watchOS */;
 			targetProxy = A1C000000000000000000014 /* PBXContainerItemProxy */;
+		};
+		A16400000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BBFB2C542590257E00545EAB /* libish_emu */;
+			targetProxy = A16400000000000000000001 /* PBXContainerItemProxy */;
+		};
+		A16400000000000000000004 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB21A1662689041500BD19B4 /* libfakefs */;
+			targetProxy = A16400000000000000000003 /* PBXContainerItemProxy */;
 		};
 		497F6D5B254E609000C82F46 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;

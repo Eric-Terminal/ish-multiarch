@@ -105,6 +105,8 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 
     _terminal = terminal;
     [_terminal addObserver:self forKeyPath:@"loaded" options:NSKeyValueObservingOptionInitial context:nil];
+    // 只有真正绑定到界面的终端才需要创建并加载 WKWebView。
+    (void) _terminal.webView;
     if (_terminal.loaded)
         [self installTerminalView];
 }
