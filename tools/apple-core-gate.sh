@@ -200,6 +200,7 @@ build_slice() {
     "$NINJA" -C "$full_build_dir" \
         libish.a libish_emu.a libfakefs.a \
         darwin_platform_link_smoke apple_runtime_link_smoke \
+        apple_watch_runtime_link_smoke \
         apple_runtime_force_link_smoke
     verify_backend_archive "${name} libish.a" "$full_build_dir/libish.a"
 
@@ -225,6 +226,13 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-rootfs-seed.c" \
         -o "$rootfs_seed_object"
 
+    local watch_runtime_object="$full_build_dir/apple-watch-runtime-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-watch-runtime.c" \
+        -o "$watch_runtime_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -232,8 +240,10 @@ build_slice() {
     done
     file "$full_build_dir/darwin_platform_link_smoke" \
         "$full_build_dir/apple_runtime_link_smoke" \
+        "$full_build_dir/apple_watch_runtime_link_smoke" \
         "$full_build_dir/apple_runtime_force_link_smoke" \
-        "$abi_probe" "$backend_probe" "$rootfs_seed_object"
+        "$abi_probe" "$backend_probe" "$rootfs_seed_object" \
+        "$watch_runtime_object"
 
     local fakefs_members
     local fakefs_symbols
@@ -252,10 +262,13 @@ build_slice() {
         exit 1
     fi
     runtime_symbols=$(xcrun nm -g \
+        "$full_build_dir/apple_watch_runtime_link_smoke")
+    local generic_runtime_symbols
+    generic_runtime_symbols=$(xcrun nm -g \
         "$full_build_dir/apple_runtime_link_smoke")
     if ! grep -Eq \
             '[[:space:]]T[[:space:]]+_ish_apple_rootfs_seed_install$' \
-            <<< "$runtime_symbols"; then
+            <<< "$generic_runtime_symbols"; then
         echo "错误：${name} 的普通 runtime consumer 未抽取 rootfs 安装器。" >&2
         exit 1
     fi
@@ -263,7 +276,8 @@ build_slice() {
     local archive_members
     archive_members=$("$AR" -t "$full_build_dir/libish.a")
     local required_member
-    for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o; do
+    for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o \
+            platform_apple-watch-runtime.c.o; do
         if ! grep -Fqx "$required_member" <<< "$archive_members"; then
             echo "错误：${name} 的 libish.a 缺少 ${required_member}。" >&2
             exit 1
@@ -277,15 +291,39 @@ build_slice() {
         "$full_build_dir/libfakefs.a" \
         "$full_build_dir/darwin_platform_link_smoke" \
         "$full_build_dir/apple_runtime_link_smoke" \
+        "$full_build_dir/apple_watch_runtime_link_smoke" \
         "$full_build_dir/apple_runtime_force_link_smoke")
     if grep -Eq '(^|[[:space:]])_host_info$' <<< "$undefined_symbols"; then
         echo "错误：${name} 仍引用 watchOS 禁用的 host_info。" >&2
         exit 1
     fi
 
+    local runtime_symbol
+    for runtime_symbol in \
+            ish_watch_runtime_start \
+            ish_watch_runtime_current_phase \
+            ish_watch_runtime_last_error \
+            ish_watch_runtime_read_output \
+            ish_watch_runtime_send_input \
+            ish_watch_runtime_set_window_size; do
+        if ! grep -Eq \
+                "[[:space:]]T[[:space:]]+_${runtime_symbol}$" \
+                <<< "$runtime_symbols"; then
+            echo "错误：${name} 的 Watch runtime consumer 未抽取 ${runtime_symbol}。" >&2
+            exit 1
+        fi
+    done
+    if grep -Eq \
+            '[[:space:]]T[[:space:]]+_ish_watch_runtime_test_append_output$' \
+            <<< "$runtime_symbols"; then
+        echo "错误：${name} 的生产 Watch runtime 泄漏了测试钩子。" >&2
+        exit 1
+    fi
+
     local executable
     local build_info
     for executable in darwin_platform_link_smoke apple_runtime_link_smoke \
+            apple_watch_runtime_link_smoke \
             apple_runtime_force_link_smoke; do
         build_info=$(xcrun vtool -show-build "$full_build_dir/$executable")
         if ! grep -q "platform $platform" <<< "$build_info"; then

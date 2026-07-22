@@ -248,6 +248,9 @@ if get_option('kernel') == 'ish'
 
         'platform/' + host_machine.system() + '.c',
     ]
+    if host_machine.system() == 'darwin'
+        src += 'platform/apple-watch-runtime.c'
+    endif
 
     libish = library('ish', src,
         include_directories: includes,
@@ -263,12 +266,28 @@ if get_option('kernel') == 'ish'
             'platform/apple-runtime-link-smoke.c',
             dependencies: ish,
             link_args: ['-Wl,-fatal_warnings'])
+        apple_watch_runtime_link_smoke = executable(
+            'apple_watch_runtime_link_smoke',
+            'platform/apple-watch-runtime-link-smoke.c',
+            dependencies: ish,
+            link_args: ['-Wl,-fatal_warnings'])
         apple_runtime_force_link_smoke = executable(
             'apple_runtime_force_link_smoke',
             'platform/apple-runtime-link-smoke.c',
             link_whole: [libish, libish_emu, libfakefs],
             dependencies: dependencies,
             link_args: ['-Wl,-fatal_warnings'])
+        if not meson.is_cross_build()
+            apple_watch_runtime_test = executable(
+                'apple_watch_runtime_test',
+                [
+                    'platform/apple-watch-runtime-test.c',
+                    'platform/apple-watch-runtime.c',
+                ],
+                c_args: '-DISH_APPLE_WATCH_RUNTIME_TESTING',
+                dependencies: ish)
+            test('apple_watch_runtime', apple_watch_runtime_test)
+        endif
     endif
 
     if not meson.is_cross_build()
