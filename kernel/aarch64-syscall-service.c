@@ -111,6 +111,10 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
     AARCH64_LINUX_SYS_RT_SIGQUEUEINFO = 138,
+    AARCH64_LINUX_SYS_SETPGID = 154,
+    AARCH64_LINUX_SYS_GETPGID = 155,
+    AARCH64_LINUX_SYS_GETSID = 156,
+    AARCH64_LINUX_SYS_SETSID = 157,
     AARCH64_LINUX_SYS_GETGROUPS = 158,
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETPID = 172,
@@ -3790,6 +3794,18 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RT_SIGQUEUEINFO:
             return dispatch_rt_sigqueueinfo(
                     context, syscall, fault, false);
+        case AARCH64_LINUX_SYS_SETPGID:
+            return syscall_result((sdword_t) sys_setpgid(
+                    syscall_pid(syscall->arguments[0]),
+                    syscall_pid(syscall->arguments[1])));
+        case AARCH64_LINUX_SYS_GETPGID:
+            return syscall_result(sys_getpgid(
+                    syscall_pid(syscall->arguments[0])));
+        case AARCH64_LINUX_SYS_GETSID:
+            return syscall_result(sys_getsid(
+                    syscall_pid(syscall->arguments[0])));
+        case AARCH64_LINUX_SYS_SETSID:
+            return syscall_result((sdword_t) sys_setsid());
         case AARCH64_LINUX_SYS_GETGROUPS:
             return dispatch_getgroups(
                     context, syscall, task, fault);

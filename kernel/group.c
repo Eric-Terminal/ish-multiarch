@@ -19,12 +19,13 @@ dword_t sys_setpgid(pid_t_ id, pid_t_ pgid) {
     if (task == NULL)
         goto out;
     struct tgroup *tgroup = task->group;
+    struct pid *group_pid = pid;
 
     // you can only join a process group in the same session
     if (id != pgid) {
         // there has to be a process in pgrp that's in the same session as id
         err = _EPERM;
-        struct pid *group_pid = pid_get(pgid);
+        group_pid = pid_get(pgid);
         if (group_pid == NULL || list_empty(&group_pid->pgroup))
             goto out;
         struct tgroup *group_first_tgroup = list_first_entry(&group_pid->pgroup, struct tgroup, pgroup);
@@ -46,7 +47,7 @@ dword_t sys_setpgid(pid_t_ id, pid_t_ pgid) {
     if (tgroup->pgid != pgid) {
         list_remove(&tgroup->pgroup);
         tgroup->pgid = pgid;
-        list_add(&pid->pgroup, &tgroup->pgroup);
+        list_add(&group_pid->pgroup, &tgroup->pgroup);
     }
 
     err = 0;
@@ -132,10 +133,17 @@ dword_t sys_setsid(void) {
     return task_setsid(current);
 }
 
-dword_t sys_getsid(void) {
-    STRACE("getsid()");
+pid_t_ sys_getsid(pid_t_ pid) {
+    STRACE("getsid(%d)", pid);
     lock(&pids_lock);
-    pid_t_ sid = current->group->sid;
+    struct task *task = current;
+    if (pid != 0)
+        task = pid_get_process_task(pid);
+    if (task == NULL) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    pid_t_ sid = task->group->sid;
     unlock(&pids_lock);
     return sid;
 }

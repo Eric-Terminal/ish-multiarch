@@ -10,6 +10,7 @@
 
 #include "fs/fd.h"
 #include "fs/tty.h"
+#include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
 #include "kernel/mm.h"
@@ -303,6 +304,96 @@ static bool enter_own_session(
     pid_t_ result = task_setsid(task);
     current = parent;
     return result == task->pid;
+}
+
+static qword_t invoke_aarch64_session_syscall(
+        struct task *task, qword_t number,
+        qword_t argument0, qword_t argument1) {
+    const struct guest_linux_syscall_context context = {
+        .task_opaque = task,
+    };
+    const struct guest_linux_syscall syscall = {
+        .number = number,
+        .arguments = {argument0, argument1},
+    };
+    struct guest_linux_user_fault fault;
+    current = task;
+    return ish_aarch64_linux_syscall_service.dispatch(
+            &context, &syscall, &fault);
+}
+
+static bool test_aarch64_session_syscalls(
+        struct task *parent) {
+    enum {
+        aarch64_sys_setpgid = 154,
+        aarch64_sys_getpgid = 155,
+        aarch64_sys_getsid = 156,
+        aarch64_sys_setsid = 157,
+    };
+    const qword_t noisy_zero = UINT64_C(0xabcdef0100000000);
+    const qword_t noisy_negative_one = UINT64_C(0x12345678ffffffff);
+    const qword_t esrch = (qword_t) (sqword_t) _ESRCH;
+    const qword_t eperm = (qword_t) (sqword_t) _EPERM;
+
+    struct task *child = make_process(parent,
+            parent->group->sid, parent->group->pgid);
+    CHECK(child != NULL, "创建 AArch64 会话系统调用子进程");
+    pid_t_ child_pid = child->pid;
+    pid_t_ parent_pid = parent->pid;
+
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_getpgid, noisy_zero, 0) ==
+                    (qword_t) parent_pid,
+            "getpgid(0) 返回当前进程组并忽略参数高位");
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_getsid, noisy_zero, 0) ==
+                    (qword_t) parent_pid,
+            "getsid(0) 返回当前会话并忽略参数高位");
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_getpgid,
+                    noisy_negative_one, 0) == esrch &&
+            invoke_aarch64_session_syscall(child,
+                    aarch64_sys_getsid,
+                    noisy_negative_one, 0) == esrch,
+            "进程查询按有符号低 32 位返回完整 64 位 ESRCH");
+
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_setpgid,
+                    noisy_zero, noisy_zero) == 0 &&
+            child->group->pgid == child_pid,
+            "setpgid(0, 0) 建立当前进程组并忽略参数高位");
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_setsid, 0, 0) == eperm,
+            "进程组 leader 的 setsid 错误被完整符号扩展");
+    CHECK(invoke_aarch64_session_syscall(child,
+                    aarch64_sys_setpgid, noisy_zero,
+                    UINT64_C(0x1234567800000000) |
+                            (dword_t) parent_pid) == 0,
+            "setpgid 可把当前进程移回同会话的既有进程组");
+    qword_t setsid_result = invoke_aarch64_session_syscall(child,
+            aarch64_sys_setsid, 0, 0);
+    CHECK(setsid_result == (qword_t) child_pid,
+            "setsid 返回新建会话 ID");
+    CHECK(child->group->sid == child_pid &&
+            child->group->pgid == child_pid,
+            "setsid 把会话与进程组锚定到线程组 leader");
+
+    CHECK(invoke_aarch64_session_syscall(parent,
+                    aarch64_sys_getsid,
+                    UINT64_C(0x8765432100000000) |
+                            (dword_t) child_pid, 0) ==
+                    (qword_t) child_pid &&
+            invoke_aarch64_session_syscall(parent,
+                    aarch64_sys_getpgid,
+                    UINT64_C(0xfeedface00000000) |
+                            (dword_t) child_pid, 0) ==
+                    (qword_t) child_pid,
+            "非零 PID 查询返回目标进程的会话与进程组");
+
+    CHECK(run_task_exit(child, 0) &&
+            wait_for_child(parent, child_pid),
+            "正规退出并回收 AArch64 会话系统调用子进程");
+    return true;
 }
 
 // 测试夹具直接建立内核已验证过的同会话进程组关系，避免依赖其他 syscall 边界。
@@ -762,7 +853,8 @@ static int run_lifecycle_scenarios(void) {
     }
     parent->blocked = sig_mask(SIGCHLD_);
 
-    if (!test_wait_reap_cleanup(parent) ||
+    if (!test_aarch64_session_syscalls(parent) ||
+            !test_wait_reap_cleanup(parent) ||
             !test_reaped_leader_and_thread_setsid(parent) ||
             !test_setsid_rejects_occupied_pgid(parent) ||
             !test_auto_reap_cleanup(parent) ||
