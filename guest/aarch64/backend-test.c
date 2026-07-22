@@ -13,6 +13,7 @@
 #define INSTRUCTION_LDR_X2 UINT32_C(0xf9400022)
 #define INSTRUCTION_ADD_X3 UINT32_C(0x8b000043)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
+#define INSTRUCTION_USHLL_V31 UINT32_C(0x2f20a7ff)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -197,6 +198,7 @@ static void write_differential_program(struct test_fixture *fixture) {
         INSTRUCTION_STR_X0,
         INSTRUCTION_LDR_X2,
         INSTRUCTION_ADD_X3,
+        INSTRUCTION_USHLL_V31,
         INSTRUCTION_SVC,
         INSTRUCTION_UNDEFINED,
     };
@@ -794,8 +796,13 @@ static void test_c_and_threaded_differential(void) {
     struct cpu_state threaded_cpu;
     init_differential_cpu(&c_cpu);
     init_differential_cpu(&threaded_cpu);
+    c_cpu.v[31].s[0] = threaded_cpu.v[31].s[0] =
+            UINT32_C(0x80000001);
+    c_cpu.v[31].s[1] = threaded_cpu.v[31].s[1] =
+            UINT32_C(0xfedcba98);
 
     const enum aarch64_step_stop expected_stops[] = {
+        AARCH64_STEP_RETIRED,
         AARCH64_STEP_RETIRED,
         AARCH64_STEP_RETIRED,
         AARCH64_STEP_RETIRED,
@@ -813,22 +820,31 @@ static void test_c_and_threaded_differential(void) {
         assert_cpu_equal(&c_cpu, &threaded_cpu);
         assert_memory_equal(&c_fixture.memory,
                 &threaded_fixture.memory);
+        if (step == 5) {
+            assert(c_cpu.v[31].d[0] ==
+                    UINT64_C(0x0000000080000001));
+            assert(c_cpu.v[31].d[1] ==
+                    UINT64_C(0x00000000fedcba98));
+            assert(c_cpu.pc == CODE_PAGE + 6 * 4);
+            assert(c_cpu.cycle == 15);
+            assert_stats(&threaded_runner, 0, 6, 2, 4);
+        }
     }
     assert(c_cpu.x[0] == 8);
     assert(c_cpu.x[2] == 8);
     assert(c_cpu.x[3] == 16);
     assert(c_fixture.memory.data[0x80] == 8);
-    assert_stats(&threaded_runner, 0, 6, 3, 3);
+    assert_stats(&threaded_runner, 0, 7, 3, 4);
 
     struct aarch64_step_result c_undefined = run_at(
-            &c_runner, &c_cpu, CODE_PAGE + 6 * 4);
+            &c_runner, &c_cpu, CODE_PAGE + 7 * 4);
     struct aarch64_step_result threaded_undefined = run_at(
-            &threaded_runner, &threaded_cpu, CODE_PAGE + 6 * 4);
+            &threaded_runner, &threaded_cpu, CODE_PAGE + 7 * 4);
     assert(c_undefined.stop == AARCH64_STEP_UNDEFINED);
     assert_step_equal(&c_undefined, &threaded_undefined);
     assert_cpu_equal(&c_cpu, &threaded_cpu);
     assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
-    assert_stats(&threaded_runner, 0, 7, 3, 3);
+    assert_stats(&threaded_runner, 0, 8, 3, 4);
 
     struct aarch64_step_result c_result = run_at(
             &c_runner, &c_cpu, CODE_PAGE);
@@ -837,7 +853,7 @@ static void test_c_and_threaded_differential(void) {
     assert_step_equal(&c_result, &threaded_result);
     assert_cpu_equal(&c_cpu, &threaded_cpu);
     assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
-    assert_stats(&threaded_runner, 1, 7, 4, 3);
+    assert_stats(&threaded_runner, 1, 8, 4, 4);
 }
 
 static void test_cache_keys_and_collision(void) {

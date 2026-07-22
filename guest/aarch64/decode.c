@@ -561,15 +561,20 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
-    if ((word & UINT32_C(0xbf80fc00)) == UINT32_C(0x0f00a400)) {
+    if ((word & UINT32_C(0x9f80fc00)) == UINT32_C(0x0f00a400)) {
         byte_t immediate = (word >> 16) & UINT32_C(0x7f);
         // immh=0000 与 AdvSIMD 修改立即数类重叠，只消费本族合法范围。
         if (immediate >= 8 && immediate < 64) {
             byte_t element_size = immediate & UINT32_C(0x20) ? 4 :
                     immediate & UINT32_C(0x10) ? 2 : 1;
+            bool upper = (word >> 30) & 1;
+            bool is_unsigned = (word >> 29) & 1;
             *decoded = (struct aarch64_decoded) {
-                .opcode = (word >> 30) & 1 ? AARCH64_OP_ADVSIMD_SSHLL2 :
-                        AARCH64_OP_ADVSIMD_SSHLL,
+                .opcode = is_unsigned ?
+                        (upper ? AARCH64_OP_ADVSIMD_USHLL2 :
+                                AARCH64_OP_ADVSIMD_USHLL) :
+                        (upper ? AARCH64_OP_ADVSIMD_SSHLL2 :
+                                AARCH64_OP_ADVSIMD_SSHLL),
                 .width = 128,
                 .operands.advsimd_shift_long = {
                     .rd = word & 0x1f,

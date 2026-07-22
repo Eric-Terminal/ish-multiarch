@@ -554,8 +554,11 @@ static void execute_advsimd_shift_long(struct cpu_state *cpu,
             instruction->operands.advsimd_shift_long.element_size;
     byte_t shift = instruction->operands.advsimd_shift_long.shift;
     byte_t lanes = 8 / source_size;
-    byte_t source_offset =
-            instruction->opcode == AARCH64_OP_ADVSIMD_SSHLL2 ? lanes : 0;
+    bool upper = instruction->opcode == AARCH64_OP_ADVSIMD_SSHLL2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_USHLL2;
+    bool is_signed = instruction->opcode == AARCH64_OP_ADVSIMD_SSHLL ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSHLL2;
+    byte_t source_offset = upper ? lanes : 0;
     qword_t source_sign = UINT64_C(1) << (source_size * 8 - 1);
     qword_t source_mask = vector_element_mask(source_size);
     union aarch64_vector_reg source = cpu->v[rn];
@@ -564,7 +567,7 @@ static void execute_advsimd_shift_long(struct cpu_state *cpu,
     for (byte_t lane = 0; lane < lanes; lane++) {
         qword_t value = read_vector_element(&source, source_size,
                 (byte_t) (source_offset + lane));
-        if (value & source_sign)
+        if (is_signed && (value & source_sign))
             value |= ~source_mask;
         write_vector_element(&result, source_size * 2,
                 lane, value << shift);
@@ -1690,6 +1693,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_SSHLL:
         case AARCH64_OP_ADVSIMD_SSHLL2:
+        case AARCH64_OP_ADVSIMD_USHLL:
+        case AARCH64_OP_ADVSIMD_USHLL2:
             execute_advsimd_shift_long(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_DUP_ELEMENT:
