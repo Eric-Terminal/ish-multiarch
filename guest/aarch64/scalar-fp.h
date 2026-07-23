@@ -559,6 +559,108 @@ static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_multiply(
     return result;
 }
 
+static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_divide(
+        qword_t left_bits, qword_t right_bits, byte_t width, dword_t fpcr) {
+    struct aarch64_scalar_fp_format format =
+            aarch64_scalar_fp_format(width);
+    struct aarch64_scalar_fp_number left =
+            aarch64_scalar_fp_unpack(left_bits, &format);
+    struct aarch64_scalar_fp_number right =
+            aarch64_scalar_fp_unpack(right_bits, &format);
+    dword_t exceptions = 0;
+    aarch64_scalar_fp_flush_input(&left, &format, fpcr, &exceptions);
+    aarch64_scalar_fp_flush_input(&right, &format, fpcr, &exceptions);
+    if (aarch64_scalar_fp_is_nan(&left, &format) ||
+            aarch64_scalar_fp_is_nan(&right, &format)) {
+        struct aarch64_scalar_fp_result result =
+                aarch64_scalar_fp_propagate_nan(
+                        &left, &right, &format, fpcr);
+        result.exceptions |= exceptions;
+        return result;
+    }
+
+    bool negative = left.sign != right.sign;
+    bool left_infinity = aarch64_scalar_fp_is_infinity(&left, &format);
+    bool right_infinity = aarch64_scalar_fp_is_infinity(&right, &format);
+    bool left_zero = aarch64_scalar_fp_is_zero(&left);
+    bool right_zero = aarch64_scalar_fp_is_zero(&right);
+    if ((left_infinity && right_infinity) ||
+            (left_zero && right_zero)) {
+        struct aarch64_scalar_fp_result result =
+                aarch64_scalar_fp_default_nan(&format);
+        result.exceptions |= exceptions;
+        return result;
+    }
+    if (left_infinity) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (negative ? format.sign_mask : 0) |
+                    format.exponent_mask,
+            .exceptions = exceptions,
+        };
+    }
+    if (right_infinity) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = negative ? format.sign_mask : 0,
+            .exceptions = exceptions,
+        };
+    }
+    if (right_zero) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (negative ? format.sign_mask : 0) |
+                    format.exponent_mask,
+            .exceptions = exceptions | AARCH64_FPSR_DZC,
+        };
+    }
+    if (left_zero) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = negative ? format.sign_mask : 0,
+            .exceptions = exceptions,
+        };
+    }
+
+    qword_t left_significand =
+            aarch64_scalar_fp_significand(&left, &format);
+    qword_t right_significand =
+            aarch64_scalar_fp_significand(&right, &format);
+    int left_exponent = aarch64_scalar_fp_exponent(&left, &format);
+    int right_exponent = aarch64_scalar_fp_exponent(&right, &format);
+    unsigned left_shift = format.fraction_bits -
+            aarch64_scalar_fp_top_bit(left_significand);
+    unsigned right_shift = format.fraction_bits -
+            aarch64_scalar_fp_top_bit(right_significand);
+    left_significand <<= left_shift;
+    right_significand <<= right_shift;
+    left_exponent -= (int) left_shift;
+    right_exponent -= (int) right_shift;
+
+    /*
+     * 保留四个额外二进制位并用余数形成 sticky。逐位长除只使用
+     * 64 位整数，避免 arm64_32 消费者依赖编译器的 128 位除法运行时。
+     */
+    unsigned precision = format.fraction_bits + 4;
+    qword_t quotient = 0;
+    qword_t remainder = left_significand;
+    if (remainder >= right_significand) {
+        quotient = 1;
+        remainder -= right_significand;
+    }
+    for (unsigned bit = 0; bit < precision; bit++) {
+        quotient <<= 1;
+        remainder <<= 1;
+        if (remainder >= right_significand) {
+            quotient |= 1;
+            remainder -= right_significand;
+        }
+    }
+
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_round(
+            negative, quotient,
+            left_exponent - right_exponent - (int) precision,
+            remainder != 0, &format, fpcr);
+    result.exceptions |= exceptions;
+    return result;
+}
+
 static inline struct aarch64_scalar_fp_compare_result
 aarch64_scalar_fp_compare(qword_t left_bits, qword_t right_bits,
         byte_t width, dword_t fpcr, bool signaling) {

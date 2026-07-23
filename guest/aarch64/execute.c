@@ -977,8 +977,11 @@ static void execute_scalar_fp_binary(struct cpu_state *cpu,
     } else if (instruction->opcode == AARCH64_OP_FSUB_SCALAR) {
         result = aarch64_scalar_fp_subtract(
                 left, right, width, cpu->fpcr);
-    } else {
+    } else if (instruction->opcode == AARCH64_OP_FMUL_SCALAR) {
         result = aarch64_scalar_fp_multiply(
+                left, right, width, cpu->fpcr);
+    } else {
+        result = aarch64_scalar_fp_divide(
                 left, right, width, cpu->fpcr);
     }
     write_scalar_fp(cpu, rd, width, result.bits);
@@ -1944,6 +1947,7 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FADD_SCALAR:
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
+        case AARCH64_OP_FDIV_SCALAR:
             execute_scalar_fp_binary(cpu, instruction);
             break;
         case AARCH64_OP_FMOV_SCALAR:

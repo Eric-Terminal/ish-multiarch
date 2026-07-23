@@ -47,6 +47,8 @@ static const struct binary_case binary_operations[] = {
     {UINT32_C(0x1e603800), AARCH64_OP_FSUB_SCALAR, 64},
     {UINT32_C(0x1e200800), AARCH64_OP_FMUL_SCALAR, 32},
     {UINT32_C(0x1e600800), AARCH64_OP_FMUL_SCALAR, 64},
+    {UINT32_C(0x1e201800), AARCH64_OP_FDIV_SCALAR, 32},
+    {UINT32_C(0x1e601800), AARCH64_OP_FDIV_SCALAR, 64},
 };
 
 static const struct unary_case unary_operations[] = {
@@ -132,6 +134,7 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FADD_SCALAR:
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
+        case AARCH64_OP_FDIV_SCALAR:
         case AARCH64_OP_FMOV_SCALAR:
         case AARCH64_OP_FCVT_SCALAR:
         case AARCH64_OP_FMOV_IMMEDIATE:
@@ -252,6 +255,9 @@ static void test_apple_clang_vectors(void) {
     assert_binary(UINT32_C(0x1e6738a3), 3, 3, 5, 7);
     assert_binary(UINT32_C(0x1e2708a3), 4, 3, 5, 7);
     assert_binary(UINT32_C(0x1e6708a3), 5, 3, 5, 7);
+    assert_binary(UINT32_C(0x1e2718a3), 6, 3, 5, 7);
+    assert_binary(UINT32_C(0x1e6718a3), 7, 3, 5, 7);
+    assert_binary(UINT32_C(0x1e3e181e), 6, 30, 0, 30);
 
     assert_unary(UINT32_C(0x1e2040a3), 0, 3, 5);
     assert_unary(UINT32_C(0x1e6040a3), 1, 3, 5);
@@ -293,7 +299,7 @@ static void test_binary_encoding_space(void) {
             }
         }
     }
-    assert(decoded_count == 196608);
+    assert(decoded_count == 262144);
 }
 
 static void test_unary_encoding_space(void) {
@@ -418,6 +424,11 @@ static void test_fixed_bits(void) {
 }
 
 static void test_rejected_neighbors(void) {
+    struct aarch64_decoded instruction;
+    // 当前 guest 不声明 FP16，保留精度和半精度 FDIV 必须进入 SIGILL。
+    assert(!aarch64_decode(UINT32_C(0x1ebe181e), &instruction));
+    assert(!aarch64_decode(UINT32_C(0x1efe181e), &instruction));
+
     // FP16、定点、向量和通用寄存器形式由不同编码族处理。
     static const dword_t words[] = {
         UINT32_C(0x1ee728a3),
@@ -433,7 +444,8 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1ea720a0),
         UINT32_C(0x1e2120a8),
         UINT32_C(0x1e6120b8),
-        UINT32_C(0x1e6718a3),
+        UINT32_C(0x1e1718a3),
+        UINT32_C(0x1e2798a3),
         UINT32_C(0x1eee1003),
         UINT32_C(0x1eae1003),
         UINT32_C(0x1e670ca3),
@@ -478,7 +490,6 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1ee2c000),
     };
     for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
-        struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(words[i], &instruction);
         assert(!decoded || !is_scalar_fp_opcode(instruction.opcode));
         assert(!is_scalar_fp_encoding(words[i]));

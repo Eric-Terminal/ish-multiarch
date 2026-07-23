@@ -287,6 +287,8 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         {UINT32_C(0x1e603800), AARCH64_OP_FSUB_SCALAR, 64},
         {UINT32_C(0x1e200800), AARCH64_OP_FMUL_SCALAR, 32},
         {UINT32_C(0x1e600800), AARCH64_OP_FMUL_SCALAR, 64},
+        {UINT32_C(0x1e201800), AARCH64_OP_FDIV_SCALAR, 32},
+        {UINT32_C(0x1e601800), AARCH64_OP_FDIV_SCALAR, 64},
     };
     dword_t scalar_fp_binary = word & UINT32_C(0xffe0fc00);
     for (unsigned i = 0; i < sizeof(scalar_fp_binary_operations) /
