@@ -70,6 +70,12 @@ static qword_t shift_register(qword_t value, byte_t width,
     value &= mask;
     if (amount == 0)
         return value;
+    if (amount == width) {
+        if (type == AARCH64_SHIFT_ASR &&
+                (value & (UINT64_C(1) << (width - 1))))
+            return mask;
+        return type == AARCH64_SHIFT_ROR ? value : 0;
+    }
     if (type == AARCH64_SHIFT_LSL)
         return (value << amount) & mask;
     if (type == AARCH64_SHIFT_LSR)
@@ -548,6 +554,30 @@ static void write_vector_element(union aarch64_vector_reg *reg,
     qword_t mask = vector_element_mask(element_size);
     reg->d[half] = (reg->d[half] & ~(mask << shift)) |
             ((value & mask) << shift);
+}
+
+static void execute_advsimd_vector_sshr(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_shift_immediate.rd;
+    byte_t rn = instruction->operands.advsimd_shift_immediate.rn;
+    byte_t element_size =
+            instruction->operands.advsimd_shift_immediate.element_size;
+    byte_t shift = instruction->operands.advsimd_shift_immediate.shift;
+    byte_t element_bits = (byte_t) (element_size * 8);
+    byte_t lanes = (byte_t) (instruction->width / element_bits);
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_vector_element(
+                &source, element_size, lane);
+        qword_t shifted = shift_register(value, element_bits,
+                AARCH64_SHIFT_ASR, shift);
+        write_vector_element(
+                &result, element_size, lane, shifted);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
 }
 
 static void execute_advsimd_narrow(struct cpu_state *cpu,
@@ -1881,6 +1911,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_SHL_SCALAR:
         case AARCH64_OP_ADVSIMD_USHR_SCALAR:
             execute_advsimd_scalar_shift(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SSHR:
+            execute_advsimd_vector_sshr(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHLL:
         case AARCH64_OP_ADVSIMD_SSHLL2:

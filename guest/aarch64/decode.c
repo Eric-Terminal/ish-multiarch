@@ -674,6 +674,30 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         }
     }
 
+    if ((word & UINT32_C(0xbf80fc00)) == UINT32_C(0x0f000400)) {
+        byte_t immediate = (word >> 16) & UINT32_C(0x7f);
+        // immh=0000 属于修改立即数类；Q=0 不定义单个 64 位向量元素。
+        if (immediate >= 8) {
+            bool q = ((word >> 30) & 1) != 0;
+            byte_t element_size = immediate & UINT32_C(0x40) ? 8 :
+                    immediate & UINT32_C(0x20) ? 4 :
+                    immediate & UINT32_C(0x10) ? 2 : 1;
+            if (!q && element_size == 8)
+                return false;
+            *decoded = (struct aarch64_decoded) {
+                .opcode = AARCH64_OP_ADVSIMD_SSHR,
+                .width = q ? 128 : 64,
+                .operands.advsimd_shift_immediate = {
+                    .rd = word & 0x1f,
+                    .rn = (word >> 5) & 0x1f,
+                    .element_size = element_size,
+                    .shift = (byte_t) (element_size * 16 - immediate),
+                },
+            };
+            return true;
+        }
+    }
+
     if ((word & UINT32_C(0xff80fc00)) == UINT32_C(0x5f005400)) {
         byte_t immediate = (word >> 16) & UINT32_C(0x7f);
         // Advanced SIMD 标量 SHL 只定义 64 位 D 形式，immh[3] 必须为一。
@@ -685,6 +709,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .operands.advsimd_shift_immediate = {
                 .rd = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
+                .element_size = 8,
                 .shift = immediate & UINT32_C(0x3f),
             },
         };
@@ -702,6 +727,7 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .operands.advsimd_shift_immediate = {
                 .rd = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
+                .element_size = 8,
                 .shift = 128 - immediate,
             },
         };
