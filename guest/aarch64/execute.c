@@ -1040,8 +1040,13 @@ static void execute_scalar_fp_compare(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static qword_t scalar_fp_signed_limit(
-        byte_t destination_width, bool negative) {
+static qword_t scalar_fp_integer_limit(byte_t destination_width,
+        bool signed_conversion, bool negative) {
+    if (!signed_conversion) {
+        if (negative)
+            return 0;
+        return destination_width == 32 ? UINT32_MAX : UINT64_MAX;
+    }
     qword_t sign = UINT64_C(1) << (destination_width - 1);
     return negative ? sign : sign - 1;
 }
@@ -1052,9 +1057,9 @@ struct scalar_fp_to_integer_result {
 };
 
 static struct scalar_fp_to_integer_result
-        convert_scalar_fp_to_signed_integer(
+        convert_scalar_fp_to_integer(
         qword_t source, byte_t source_width, byte_t destination_width,
-        dword_t fpcr) {
+        dword_t fpcr, bool signed_conversion) {
     dword_t exceptions = 0;
     qword_t bits = flush_scalar_fp_input(
             source, source_width, fpcr, &exceptions);
@@ -1074,8 +1079,8 @@ static struct scalar_fp_to_integer_result
         if (fraction != 0)
             converted = 0;
         else
-            converted = scalar_fp_signed_limit(
-                    destination_width, negative);
+            converted = scalar_fp_integer_limit(
+                    destination_width, signed_conversion, negative);
         exceptions |= AARCH64_FPSR_IOC;
     } else if (raw_exponent == 0) {
         if (fraction != 0)
@@ -1085,8 +1090,8 @@ static struct scalar_fp_to_integer_result
         if (exponent < 0) {
             exceptions |= AARCH64_FPSR_IXC;
         } else if (exponent > destination_width - 1) {
-            converted = scalar_fp_signed_limit(
-                    destination_width, negative);
+            converted = scalar_fp_integer_limit(
+                    destination_width, signed_conversion, negative);
             exceptions |= AARCH64_FPSR_IOC;
         } else {
             qword_t significand = (UINT64_C(1) << fraction_bits) |
@@ -1104,14 +1109,15 @@ static struct scalar_fp_to_integer_result
                 inexact = (significand & discarded_mask) != 0;
                 magnitude = significand >> discarded_bits;
             }
-            qword_t limit = scalar_fp_signed_limit(
-                    destination_width, negative);
+            qword_t limit = scalar_fp_integer_limit(
+                    destination_width, signed_conversion, negative);
             bool invalid = magnitude > limit;
             if (invalid) {
                 converted = limit;
                 exceptions |= AARCH64_FPSR_IOC;
             } else {
-                converted = negative ? 0 - magnitude : magnitude;
+                converted = signed_conversion && negative ?
+                        0 - magnitude : magnitude;
                 if (inexact)
                     exceptions |= AARCH64_FPSR_IXC;
             }
@@ -1131,9 +1137,9 @@ static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
     byte_t rd = instruction->operands.data_processing_1source.rd;
     byte_t rn = instruction->operands.data_processing_1source.rn;
     struct scalar_fp_to_integer_result result =
-            convert_scalar_fp_to_signed_integer(
+            convert_scalar_fp_to_integer(
                     read_scalar_fp(cpu, rn, width), width, width,
-                    cpu->fpcr);
+                    cpu->fpcr, true);
     write_scalar_fp(cpu, rd, width, result.value);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
@@ -1145,11 +1151,12 @@ static void execute_fp_to_integer(struct cpu_state *cpu,
     byte_t destination_width =
             instruction->operands.fp_to_integer.destination_width;
     struct scalar_fp_to_integer_result result =
-            convert_scalar_fp_to_signed_integer(
+            convert_scalar_fp_to_integer(
                     read_scalar_fp(cpu,
                             instruction->operands.fp_to_integer.rn,
                             source_width),
-                    source_width, destination_width, cpu->fpcr);
+                    source_width, destination_width, cpu->fpcr,
+                    instruction->opcode == AARCH64_OP_FCVTZS_GENERAL);
     write_register(cpu, instruction->operands.fp_to_integer.rd,
             destination_width, false, result.value);
     cpu->fpsr |= result.exceptions;
@@ -1943,6 +1950,7 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             execute_integer_to_fp(cpu, instruction);
             break;
         case AARCH64_OP_FCVTZS_GENERAL:
+        case AARCH64_OP_FCVTZU_GENERAL:
             execute_fp_to_integer(cpu, instruction);
             break;
         case AARCH64_OP_FADD_SCALAR:
