@@ -1032,6 +1032,20 @@ static void execute_scalar_fp_select(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_round_to_integral_minus(
+        struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.data_processing_1source.rd;
+    byte_t rn = instruction->operands.data_processing_1source.rn;
+    struct aarch64_scalar_fp_result result =
+            aarch64_scalar_fp_round_to_integral_minus(
+                    read_scalar_fp(cpu, rn, instruction->width),
+                    instruction->width, cpu->fpcr);
+    write_scalar_fp(cpu, rd, instruction->width, result.bits);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_move(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.data_processing_1source.rd;
@@ -2027,6 +2041,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_FCSEL_SCALAR:
             execute_scalar_fp_select(cpu, instruction);
+            break;
+        case AARCH64_OP_FRINTM_SCALAR:
+            execute_scalar_fp_round_to_integral_minus(cpu, instruction);
             break;
         case AARCH64_OP_FMOV_SCALAR:
             execute_scalar_fp_move(cpu, instruction);

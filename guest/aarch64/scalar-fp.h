@@ -147,6 +147,69 @@ static inline void aarch64_scalar_fp_flush_input(
     }
 }
 
+static inline struct aarch64_scalar_fp_result
+aarch64_scalar_fp_round_to_integral_minus(
+        qword_t bits, byte_t width, dword_t fpcr) {
+    const struct aarch64_scalar_fp_format format =
+            aarch64_scalar_fp_format(width);
+    struct aarch64_scalar_fp_number number =
+            aarch64_scalar_fp_unpack(bits, &format);
+    dword_t exceptions = 0;
+    aarch64_scalar_fp_flush_input(
+            &number, &format, fpcr, &exceptions);
+
+    if (aarch64_scalar_fp_is_nan(&number, &format)) {
+        if (aarch64_scalar_fp_is_signaling_nan(&number, &format))
+            exceptions |= AARCH64_FPSR_IOC;
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (fpcr & AARCH64_FPCR_DN) != 0 ?
+                    format.default_nan :
+                    number.bits | format.quiet_bit,
+            .exceptions = exceptions,
+        };
+    }
+    if (aarch64_scalar_fp_is_infinity(&number, &format) ||
+            aarch64_scalar_fp_is_zero(&number)) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = number.bits,
+            .exceptions = exceptions,
+        };
+    }
+
+    int exponent = (int) number.exponent - format.exponent_bias;
+    if (number.exponent == 0 || exponent < 0) {
+        qword_t one = (qword_t) format.exponent_bias <<
+                format.fraction_bits;
+        return (struct aarch64_scalar_fp_result) {
+            .bits = number.sign ? format.sign_mask | one : 0,
+            .exceptions = exceptions,
+        };
+    }
+    if ((unsigned) exponent >= format.fraction_bits) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = number.bits,
+            .exceptions = exceptions,
+        };
+    }
+
+    unsigned discarded = format.fraction_bits - (unsigned) exponent;
+    qword_t discarded_mask = (UINT64_C(1) << discarded) - 1;
+    if ((number.bits & discarded_mask) == 0) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = number.bits,
+            .exceptions = exceptions,
+        };
+    }
+    qword_t rounded = number.bits & ~discarded_mask;
+    if (number.sign)
+        rounded += UINT64_C(1) << discarded;
+    // FRINTM 不是 exact 变体，丢弃小数位不得累计 IXC。
+    return (struct aarch64_scalar_fp_result) {
+        .bits = rounded & format.value_mask,
+        .exceptions = exceptions,
+    };
+}
+
 static inline unsigned aarch64_scalar_fp_top_bit(__uint128_t value) {
     qword_t high = (qword_t) (value >> 64);
     if (high != 0)
