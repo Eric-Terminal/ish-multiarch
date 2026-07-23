@@ -722,18 +722,20 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         }
     }
 
-    if ((word & UINT32_C(0xbf80fc00)) == UINT32_C(0x0f000400)) {
+    if ((word & UINT32_C(0x9f80fc00)) == UINT32_C(0x0f000400)) {
         byte_t immediate = (word >> 16) & UINT32_C(0x7f);
         // immh=0000 属于修改立即数类；Q=0 不定义单个 64 位向量元素。
         if (immediate >= 8) {
             bool q = ((word >> 30) & 1) != 0;
+            bool is_unsigned = ((word >> 29) & 1) != 0;
             byte_t element_size = immediate & UINT32_C(0x40) ? 8 :
                     immediate & UINT32_C(0x20) ? 4 :
                     immediate & UINT32_C(0x10) ? 2 : 1;
             if (!q && element_size == 8)
                 return false;
             *decoded = (struct aarch64_decoded) {
-                .opcode = AARCH64_OP_ADVSIMD_SSHR,
+                .opcode = is_unsigned ? AARCH64_OP_ADVSIMD_USHR :
+                        AARCH64_OP_ADVSIMD_SSHR,
                 .width = q ? 128 : 64,
                 .operands.advsimd_shift_immediate = {
                     .rd = word & 0x1f,

@@ -42,6 +42,12 @@ static dword_t encode_vector_sshr(bool q, byte_t element_size,
             (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_vector_ushr(bool q, byte_t element_size,
+        byte_t shift, byte_t rn, byte_t rd) {
+    return encode_vector_sshr(q, element_size, shift, rn, rd) |
+            UINT32_C(0x20000000);
+}
+
 static struct aarch64_decoded decode(dword_t word) {
     struct aarch64_decoded instruction;
     assert(aarch64_decode(word, &instruction));
@@ -603,6 +609,115 @@ static void test_vector_sshr_decode(void) {
     }
 }
 
+static void assert_vector_ushr_decode(dword_t word, bool q,
+        byte_t element_size, byte_t shift, byte_t rn, byte_t rd) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_USHR);
+    assert(instruction.width == (q ? 128 : 64));
+    assert(instruction.operands.advsimd_shift_immediate.rd == rd);
+    assert(instruction.operands.advsimd_shift_immediate.rn == rn);
+    assert(instruction.operands.advsimd_shift_immediate.element_size ==
+            element_size);
+    assert(instruction.operands.advsimd_shift_immediate.shift == shift);
+}
+
+static void test_vector_ushr_decode(void) {
+    assert_vector_ushr_decode(
+            UINT32_C(0x6f7a07de), true, 8, 6, 30, 30);
+    assert_vector_ushr_decode(
+            UINT32_C(0x2f0f0420), false, 1, 1, 1, 0);
+    assert_vector_ushr_decode(
+            UINT32_C(0x2f080462), false, 1, 8, 3, 2);
+    assert_vector_ushr_decode(
+            UINT32_C(0x6f1905ac), true, 2, 7, 13, 12);
+    assert_vector_ushr_decode(
+            UINT32_C(0x2f200630), false, 4, 32, 17, 16);
+    assert_vector_ushr_decode(
+            UINT32_C(0x6f7f06b4), true, 8, 1, 21, 20);
+    assert_vector_ushr_decode(
+            UINT32_C(0x6f4007ff), true, 8, 64, 31, 31);
+
+    static const byte_t element_sizes[] = {1, 2, 4, 8};
+    unsigned legal = 0;
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size_index = 0;
+                size_index < array_size(element_sizes); size_index++) {
+            byte_t element_size = element_sizes[size_index];
+            if (!q && element_size == 8)
+                continue;
+            for (unsigned shift = 1;
+                    shift <= element_size * 8; shift++) {
+                for (unsigned rn = 0; rn < 32; rn++) {
+                    for (unsigned rd = 0; rd < 32; rd++) {
+                        assert_vector_ushr_decode(encode_vector_ushr(
+                                q != 0, element_size, (byte_t) shift,
+                                (byte_t) rn, (byte_t) rd), q != 0,
+                                element_size, (byte_t) shift,
+                                (byte_t) rn, (byte_t) rd);
+                        legal++;
+                    }
+                }
+            }
+        }
+    }
+    assert(legal == 180224);
+
+    // immh=0000 属于 MVNI，不是本族的保留编码。
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned immediate = 0; immediate < 8; immediate++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    dword_t word = UINT32_C(0x2f000400) |
+                            (dword_t) q << 30 |
+                            (dword_t) immediate << 16 |
+                            (dword_t) rn << 5 | (dword_t) rd;
+                    struct aarch64_decoded instruction = decode(word);
+                    assert(instruction.opcode == AARCH64_OP_ADVSIMD_MVNI);
+                }
+            }
+        }
+    }
+
+    for (unsigned immediate = 64; immediate < 128; immediate++) {
+        for (unsigned rn = 0; rn < 32; rn++) {
+            for (unsigned rd = 0; rd < 32; rd++) {
+                dword_t word = UINT32_C(0x2f000400) |
+                        (dword_t) immediate << 16 |
+                        (dword_t) rn << 5 | (dword_t) rd;
+                struct aarch64_decoded instruction;
+                assert(!aarch64_decode(word, &instruction));
+            }
+        }
+    }
+
+    const dword_t fixed_mask = UINT32_C(0xbf80fc00);
+    const dword_t product = UINT32_C(0x6f7a07de);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((fixed_mask & (UINT32_C(1) << bit)) == 0)
+            continue;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(
+                product ^ (UINT32_C(1) << bit), &instruction);
+        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_USHR);
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x4f7a07de), // 向量 SSHR。
+        UINT32_C(0x2f7a07de), // 保留的单个 64 位向量元素。
+        UINT32_C(0x7f7a07de), // 标量 USHR。
+        UINT32_C(0x6f7a17de), // 向量 USRA。
+        UINT32_C(0x6f7a27de), // 向量 URSHR。
+        UINT32_C(0x6f7a37de), // 向量 URSRA。
+        UINT32_C(0x6f7a47de), // 向量 SRI。
+        UINT32_C(0x6f7a57de), // 向量 SLI。
+    };
+    for (unsigned index = 0; index < array_size(neighbors); index++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[index], &instruction);
+        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_USHR);
+    }
+}
+
 static qword_t vector_lane_mask(byte_t element_size) {
     return element_size == 8 ? UINT64_MAX :
             (UINT64_C(1) << (element_size * 8)) - 1;
@@ -642,7 +757,7 @@ static qword_t reference_vector_sshr(
     return value & mask;
 }
 
-static union aarch64_vector_reg make_vector_sshr_source(
+static union aarch64_vector_reg make_vector_shift_source(
         byte_t element_size, byte_t shift) {
     qword_t mask = vector_lane_mask(element_size);
     qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
@@ -689,7 +804,7 @@ static void test_vector_sshr_execution(void) {
             for (unsigned shift = 1;
                     shift <= element_size * 8; shift++) {
                 union aarch64_vector_reg source =
-                        make_vector_sshr_source(
+                        make_vector_shift_source(
                                 element_size, (byte_t) shift);
                 union aarch64_vector_reg result =
                         expected_vector_sshr(&source, q != 0,
@@ -754,6 +869,95 @@ static void test_vector_sshr_execution(void) {
     assert(full_width.pc == UINT64_C(0x4804));
 }
 
+static qword_t reference_vector_ushr(
+        qword_t value, byte_t element_size, byte_t shift) {
+    value &= vector_lane_mask(element_size);
+    return shift == element_size * 8 ? 0 : value >> shift;
+}
+
+static union aarch64_vector_reg expected_vector_ushr(
+        const union aarch64_vector_reg *source, bool q,
+        byte_t element_size, byte_t shift) {
+    union aarch64_vector_reg result = {0};
+    byte_t lanes = (byte_t) ((q ? 16 : 8) / element_size);
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        write_vector_lane(&result, element_size, lane,
+                reference_vector_ushr(read_vector_lane(
+                        source, element_size, lane),
+                        element_size, shift));
+    }
+    return result;
+}
+
+static void assert_vector_ushr_execution(bool q, byte_t element_size,
+        byte_t shift, byte_t rn, byte_t rd) {
+    union aarch64_vector_reg source =
+            make_vector_shift_source(element_size, shift);
+    union aarch64_vector_reg result = expected_vector_ushr(
+            &source, q, element_size, shift);
+    struct cpu_state cpu = {
+        .cycle = UINT64_C(0x123456789abcdef0),
+        .sp = UINT64_C(0x1122334455667788),
+        .pc = UINT64_C(0x5000),
+        .nzcv = UINT32_C(0xa0000000),
+        .fpcr = UINT32_C(0x01000000),
+        .fpsr = UINT32_C(0x08000010),
+        .tpidr_el0 = UINT64_C(0x8877665544332211),
+        .segfault_addr = UINT64_C(0x1020304050607080),
+        .segfault_was_write = true,
+        .trapno = UINT32_C(0x12345678),
+        .single_step = true,
+        ._poked = true,
+    };
+    cpu.x[0] = UINT64_C(0xfedcba9876543210);
+    cpu.v[rn] = source;
+    if (rd != rn)
+        cpu.v[rd].q = ~(__uint128_t) 0;
+    struct cpu_state expected = cpu;
+    expected.v[rd] = result;
+    expected.pc += 4;
+
+    execute_instruction(&cpu,
+            encode_vector_ushr(q, element_size, shift, rn, rd));
+    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+}
+
+static void test_vector_ushr_execution(void) {
+    static const byte_t element_sizes[] = {1, 2, 4, 8};
+    static const byte_t registers[][2] = {
+        {1, 2},
+        {2, 2},
+        {31, 30},
+        {30, 31},
+        {31, 31},
+    };
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size_index = 0;
+                size_index < array_size(element_sizes); size_index++) {
+            byte_t element_size = element_sizes[size_index];
+            if (!q && element_size == 8)
+                continue;
+            for (unsigned shift = 1;
+                    shift <= element_size * 8; shift++) {
+                for (unsigned pair = 0;
+                        pair < array_size(registers); pair++) {
+                    assert_vector_ushr_execution(
+                            q != 0, element_size, (byte_t) shift,
+                            registers[pair][0], registers[pair][1]);
+                }
+            }
+        }
+    }
+
+    struct cpu_state product = {.pc = UINT64_C(0x6000)};
+    product.v[30].d[0] = UINT64_C(0xfedcba9876543210);
+    product.v[30].d[1] = UINT64_C(0x800000000000003f);
+    execute_instruction(&product, UINT32_C(0x6f7a07de));
+    assert(product.v[30].d[0] == UINT64_C(0x03fb72ea61d950c8));
+    assert(product.v[30].d[1] == UINT64_C(0x0200000000000000));
+    assert(product.pc == UINT64_C(0x6004));
+}
+
 int main(void) {
     test_apple_vectors();
     test_encoding_space();
@@ -765,5 +969,7 @@ int main(void) {
     test_scalar_ushr_execution();
     test_vector_sshr_decode();
     test_vector_sshr_execution();
+    test_vector_ushr_decode();
+    test_vector_ushr_execution();
     return 0;
 }

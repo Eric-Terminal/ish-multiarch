@@ -556,7 +556,7 @@ static void write_vector_element(union aarch64_vector_reg *reg,
             ((value & mask) << shift);
 }
 
-static void execute_advsimd_vector_sshr(struct cpu_state *cpu,
+static void execute_advsimd_vector_shift_right(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_shift_immediate.rd;
     byte_t rn = instruction->operands.advsimd_shift_immediate.rn;
@@ -565,6 +565,9 @@ static void execute_advsimd_vector_sshr(struct cpu_state *cpu,
     byte_t shift = instruction->operands.advsimd_shift_immediate.shift;
     byte_t element_bits = (byte_t) (element_size * 8);
     byte_t lanes = (byte_t) (instruction->width / element_bits);
+    enum aarch64_shift_type shift_type =
+            instruction->opcode == AARCH64_OP_ADVSIMD_USHR ?
+                    AARCH64_SHIFT_LSR : AARCH64_SHIFT_ASR;
     union aarch64_vector_reg source = cpu->v[rn];
     union aarch64_vector_reg result = {0};
 
@@ -572,7 +575,7 @@ static void execute_advsimd_vector_sshr(struct cpu_state *cpu,
         qword_t value = read_vector_element(
                 &source, element_size, lane);
         qword_t shifted = shift_register(value, element_bits,
-                AARCH64_SHIFT_ASR, shift);
+                shift_type, shift);
         write_vector_element(
                 &result, element_size, lane, shifted);
     }
@@ -1999,7 +2002,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             execute_advsimd_scalar_shift(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHR:
-            execute_advsimd_vector_sshr(cpu, instruction);
+        case AARCH64_OP_ADVSIMD_USHR:
+            execute_advsimd_vector_shift_right(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHLL:
         case AARCH64_OP_ADVSIMD_SSHLL2:
