@@ -578,6 +578,17 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_lseek_syscall', aarch64_lseek_syscall_test)
 
+        aarch64_getrandom_syscall_test = executable(
+            'aarch64_getrandom_syscall_test',
+            [
+                'kernel/aarch64-getrandom-syscall-test.c',
+                'kernel/aarch64-syscall-service.c',
+            ],
+            c_args: '-DISH_AARCH64_GETRANDOM_TESTING',
+            dependencies: ish)
+        test('aarch64_getrandom_syscall',
+            aarch64_getrandom_syscall_test)
+
         aarch64_fd_syscall_test = executable(
             'aarch64_fd_syscall_test',
             'kernel/aarch64-fd-syscall-test.c',

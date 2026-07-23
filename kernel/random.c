@@ -5,6 +5,7 @@
 #include <CommonCrypto/CommonCrypto.h>
 #include <CommonCrypto/CommonRandom.h>
 #else
+#include <errno.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <linux/random.h>
@@ -14,7 +15,19 @@ int get_random(char *buf, size_t len) {
 #ifdef __APPLE__
     return CCRandomGenerateBytes(buf, len) != kCCSuccess;
 #else
-    return syscall(SYS_getrandom, buf, len, 0) < 0;
+    size_t completed = 0;
+    while (completed != len) {
+        ssize_t result = syscall(SYS_getrandom,
+                buf + completed, len - completed, 0);
+        if (result > 0) {
+            completed += (size_t) result;
+            continue;
+        }
+        if (result < 0 && errno == EINTR)
+            continue;
+        return 1;
+    }
+    return 0;
 #endif
 }
 

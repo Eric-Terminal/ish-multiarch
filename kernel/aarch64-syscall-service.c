@@ -28,6 +28,7 @@
 #include "kernel/epoll.h"
 #include "kernel/errno.h"
 #include "kernel/fs.h"
+#include "kernel/random.h"
 #include "kernel/task.h"
 #include "util/timer.h"
 
@@ -52,6 +53,16 @@
 #define AARCH64_LINUX_O_DIRECTORY UINT32_C(0x004000)
 #define AARCH64_LINUX_O_LARGEFILE UINT32_C(0x020000)
 #define AARCH64_LINUX_O_CLOEXEC UINT32_C(0x080000)
+
+#define AARCH64_LINUX_GRND_NONBLOCK UINT32_C(0x0001)
+#define AARCH64_LINUX_GRND_RANDOM UINT32_C(0x0002)
+#define AARCH64_LINUX_GRND_INSECURE UINT32_C(0x0004)
+#define AARCH64_LINUX_GRND_MASK (AARCH64_LINUX_GRND_NONBLOCK | \
+        AARCH64_LINUX_GRND_RANDOM | AARCH64_LINUX_GRND_INSECURE)
+
+#ifdef ISH_AARCH64_GETRANDOM_TESTING
+extern int ish_aarch64_getrandom_test_source(char *buffer, size_t size);
+#endif
 
 // 标量 host-buffer 通道按块限制内存；向量写入则先聚合，以保留一次 fd 操作的消息边界。
 
@@ -144,6 +155,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_ACCEPT4 = 242,
     AARCH64_LINUX_SYS_WAIT4 = 260,
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
+    AARCH64_LINUX_SYS_GETRANDOM = 278,
     AARCH64_LINUX_SYS_PREADV2 = 286,
     AARCH64_LINUX_SYS_PWRITEV2 = 287,
     AARCH64_LINUX_SYS_CLONE3 = 435,
@@ -3494,6 +3506,52 @@ static qword_t dispatch_rt_sigpending(
     return 0;
 }
 
+static qword_t dispatch_getrandom(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    dword_t flags = (dword_t) syscall->arguments[2];
+    if ((flags & ~AARCH64_LINUX_GRND_MASK) != 0 ||
+            (flags & (AARCH64_LINUX_GRND_RANDOM |
+                    AARCH64_LINUX_GRND_INSECURE)) ==
+            (AARCH64_LINUX_GRND_RANDOM |
+                    AARCH64_LINUX_GRND_INSECURE))
+        return syscall_result(_EINVAL);
+
+    qword_t remaining = syscall->arguments[1] < INT_MAX ?
+            syscall->arguments[1] : INT_MAX;
+    if (remaining == 0)
+        return 0;
+
+    byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
+    qword_t address = syscall->arguments[0];
+    qword_t completed = 0;
+    while (remaining != 0) {
+        dword_t chunk = remaining < sizeof(buffer) ?
+                (dword_t) remaining : (dword_t) sizeof(buffer);
+        if (!aarch64_user_range_fits(address, chunk))
+            return user_range_error(
+                    fault, address, GUEST_MEMORY_WRITE);
+#ifdef ISH_AARCH64_GETRANDOM_TESTING
+        int random_error = ish_aarch64_getrandom_test_source(
+                (char *) buffer, chunk);
+#else
+        int random_error = get_random((char *) buffer, chunk);
+#endif
+        if (random_error != 0)
+            return syscall_result(_EIO);
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                address, buffer, chunk, fault))
+            return syscall_result(_EFAULT);
+        completed += chunk;
+        remaining -= chunk;
+        if (remaining != 0)
+            address += chunk;
+    }
+    return completed;
+}
+
 static struct siginfo_ import_aarch64_sigqueueinfo(
         const struct guest_linux_signal_info *info) {
     assert(info->payload_kind == GUEST_LINUX_SIGNAL_PAYLOAD_QUEUE);
@@ -3893,6 +3951,8 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RENAMEAT2:
             return dispatch_renameat(
                     context, syscall, task, fault, true);
+        case AARCH64_LINUX_SYS_GETRANDOM:
+            return dispatch_getrandom(context, syscall, fault);
         case AARCH64_LINUX_SYS_PREADV2: {
             dword_t flags = (dword_t) syscall->arguments[5];
             off_t_ offset = (off_t_) syscall->arguments[3];
