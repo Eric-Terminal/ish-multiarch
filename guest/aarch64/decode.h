@@ -66,6 +66,7 @@ enum aarch64_opcode {
     AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
     AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
     AARCH64_OP_LOAD_SIMD_MULTIPLE_4,
+    AARCH64_OP_LOAD_SIMD_SINGLE_LANE,
     AARCH64_OP_CASP,
     AARCH64_OP_CASPA,
     AARCH64_OP_CASPL,
@@ -248,6 +249,12 @@ struct aarch64_decoded {
             byte_t rn;
             byte_t element_size;
         } advsimd_multiple;
+        struct {
+            byte_t rt;
+            byte_t rn;
+            byte_t element_size;
+            byte_t element_index;
+        } advsimd_single_lane;
         struct {
             byte_t prfop;
             byte_t rn;

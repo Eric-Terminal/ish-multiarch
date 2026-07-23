@@ -1434,6 +1434,44 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    byte_t element_size;
+    byte_t element_index;
+    byte_t q = (word >> 30) & 1;
+    byte_t s = (word >> 12) & 1;
+    byte_t size = (word >> 10) & 3;
+    if ((word & UINT32_C(0xbfffe000)) == UINT32_C(0x0d400000)) {
+        element_size = 1;
+        element_index = (byte_t) ((q << 3) | (s << 2) | size);
+    } else if ((word & UINT32_C(0xbfffe400)) ==
+            UINT32_C(0x0d404000)) {
+        element_size = 2;
+        element_index = (byte_t) ((q << 2) | (s << 1) | (size >> 1));
+    } else if ((word & UINT32_C(0xbfffec00)) ==
+            UINT32_C(0x0d408000)) {
+        element_size = 4;
+        element_index = (byte_t) ((q << 1) | s);
+    } else if ((word & UINT32_C(0xbffffc00)) ==
+            UINT32_C(0x0d408400)) {
+        element_size = 8;
+        element_index = q;
+    } else {
+        element_size = 0;
+        element_index = 0;
+    }
+    if (element_size != 0) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_LOAD_SIMD_SINGLE_LANE,
+            .width = 128,
+            .operands.advsimd_single_lane = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .element_size = element_size,
+                .element_index = element_index,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3e000000)) == UINT32_C(0x2c000000)) {
         byte_t operation = word >> 30;
         if (operation == 3)

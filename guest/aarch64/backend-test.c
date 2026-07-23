@@ -27,6 +27,7 @@
 #define INSTRUCTION_UCVTF_D31_D31 UINT32_C(0x7e61dbff)
 #define INSTRUCTION_FCVTZU_X1_D31 UINT32_C(0x9e7903e1)
 #define INSTRUCTION_SSHR_V30_2S_V31_2S_8 UINT32_C(0x0f3807fe)
+#define INSTRUCTION_LD1_V31_B4_X1 UINT32_C(0x0d40103f)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -819,6 +820,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 44, INSTRUCTION_FCVTZU_X1_D31);
     write_instruction(&c_fixture.tlb,
             CODE_PAGE + 48, INSTRUCTION_SSHR_V30_2S_V31_2S_8);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 52, INSTRUCTION_LD1_V31_B4_X1);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE, INSTRUCTION_LDAR_X2_X1);
     write_instruction(&threaded_fixture.tlb,
@@ -845,6 +848,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 44, INSTRUCTION_FCVTZU_X1_D31);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE + 48, INSTRUCTION_SSHR_V30_2S_V31_2S_8);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 52, INSTRUCTION_LD1_V31_B4_X1);
 
     const qword_t original = UINT64_C(0x8877665544332211);
     memcpy(c_fixture.memory.data, &original, sizeof(original));
@@ -1063,6 +1068,24 @@ static void test_product_c_fallback(void) {
     assert(c_cpu.v[31].d[0] == UINT64_C(1));
     assert(c_cpu.v[31].d[1] == UINT64_C(0x0123456789abcdef));
     assert_stats(&threaded_runner, 0, 13, 0, 13);
+
+    c_fixture.memory.data[128] = 0xa5;
+    threaded_fixture.memory.data[128] = 0xa5;
+    c_cpu.x[1] = threaded_cpu.x[1] = DATA_PAGE + 128;
+    c_cpu.v[31].d[0] = threaded_cpu.v[31].d[0] =
+            UINT64_C(0x7766554433221100);
+    c_cpu.v[31].d[1] = threaded_cpu.v[31].d[1] =
+            UINT64_C(0xffeeddccbbaa9988);
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.x[1] == DATA_PAGE + 128);
+    assert(c_cpu.v[31].d[0] == UINT64_C(0x776655a533221100));
+    assert(c_cpu.v[31].d[1] == UINT64_C(0xffeeddccbbaa9988));
+    assert_stats(&threaded_runner, 0, 14, 0, 14);
 }
 
 static void test_c_and_threaded_differential(void) {
