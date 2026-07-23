@@ -52,6 +52,7 @@ int file_sync_fd(struct fd *fd, bool data_only);
 int file_sync_task(struct task *task, fd_t fd_number, bool data_only);
 int file_ftruncate_fd(struct fd *fd, off_t_ size);
 int file_ftruncate_task(struct task *task, fd_t fd_number, off_t_ size);
+int file_flock_task(struct task *task, fd_t fd_number, int operation);
 int file_truncate_task(struct task *task, const char *path, off_t_ size);
 int file_grow_fd(struct fd *fd, off_t_ size);
 /* generic open 已完成 O_TRUNC 的写权限检查时使用。 */
@@ -65,8 +66,12 @@ int file_read_check_fd(struct fd *fd);
 int file_write_check_fd(struct fd *fd);
 int file_fstat_fd(struct fd *fd, struct statbuf *stat);
 int file_fstat_task(struct task *task, fd_t fd, struct statbuf *stat);
+int file_fstatfs_task(
+        struct task *task, fd_t fd, struct statfsbuf *stat);
 int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);
+int file_accessat_task(struct task *task, fd_t dirfd,
+        const char *path, int mode);
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 int file_chdir_task(struct task *task, const char *path);
 int file_fchdir_task(struct task *task, fd_t fd);

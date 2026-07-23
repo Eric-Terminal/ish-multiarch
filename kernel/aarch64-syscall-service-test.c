@@ -7,6 +7,7 @@
 #include "fs/fd.h"
 #include "fs/poll.h"
 #include "fs/tty.h"
+#include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
@@ -97,6 +98,7 @@ struct kernel_probe {
     unsigned opened_closes;
     unsigned stat_calls;
     unsigned fstat_calls;
+    unsigned statfs_calls;
     unsigned fsetattr_calls;
     unsigned readlink_calls;
     unsigned unlink_calls;
@@ -105,9 +107,13 @@ struct kernel_probe {
     unsigned rename_calls;
     unsigned fsync_calls;
     unsigned fdatasync_calls;
+    unsigned flock_calls;
     int fsync_error;
     int fdatasync_error;
+    int flock_result;
+    int last_flock_operation;
     int fsetattr_error;
+    int statfs_error;
     off_t_ requested_size;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
@@ -116,6 +122,7 @@ struct kernel_probe {
     dword_t ioctl_scalar;
     int ioctl_result;
     struct statbuf stat;
+    struct statfsbuf statfs;
 };
 
 struct fd_state {
@@ -354,6 +361,13 @@ static int probe_fdatasync(struct fd *fd) {
     return state->kernel->fdatasync_error;
 }
 
+static int probe_flock(struct fd *fd, int operation) {
+    struct fd_state *state = fd->data;
+    state->kernel->flock_calls++;
+    state->kernel->last_flock_operation = operation;
+    return state->kernel->flock_result;
+}
+
 static ssize_t probe_ioctl_size(int command) {
     switch ((dword_t) command) {
         case FIONREAD_:
@@ -458,6 +472,16 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
     return 0;
 }
 
+static int probe_statfs(
+        struct mount *mount, struct statfsbuf *stat) {
+    struct kernel_probe *probe = mount->data;
+    probe->statfs_calls++;
+    if (probe->statfs_error != 0)
+        return probe->statfs_error;
+    *stat = probe->statfs;
+    return 0;
+}
+
 static int probe_fsetattr(struct fd *fd, struct attr attr) {
     struct fd_state *state = fd->data;
     struct kernel_probe *kernel = state->kernel;
@@ -527,6 +551,9 @@ static int probe_getpath(struct fd *fd, char *buffer) {
 }
 
 static const struct fs_ops probe_fs = {
+    .magic = INT32_C(0x10203040),
+    .statfs = probe_statfs,
+    .flock = probe_flock,
     .open = probe_open,
     .readlink = probe_readlink,
     .unlink = probe_unlink,
@@ -1010,6 +1037,24 @@ int main(void) {
             .ctime = UINT32_C(0x80000000),
             .ctime_nsec = 2,
         },
+        .statfs = {
+            .bsize = INT64_C(0x1112131415161718),
+            .blocks = UINT64_C(0x2122232425262728),
+            .bfree = UINT64_C(0x3132333435363738),
+            .bavail = UINT64_C(0x4142434445464748),
+            .files = UINT64_C(0x5152535455565758),
+            .ffree = UINT64_C(0x6162636465666768),
+            .fsid = UINT64_C(0x7172737475767778),
+            .namelen = INT64_C(0x0102030405060708),
+            .frsize = 0,
+            .flags = INT64_C(0x2122232425262728),
+            .spare = {
+                INT64_C(0x3132333435363738),
+                INT64_C(0x4142434445464748),
+                INT64_C(0x5152535455565758),
+                INT64_C(0x6162636465666768),
+            },
+        },
     };
     struct io_probe io = {.read_size = IO_DATA_SIZE};
     for (size_t i = 0; i < sizeof(io.read_data); i++)
@@ -1026,6 +1071,97 @@ int main(void) {
         return 1;
     }
     reset_user_access(&memory);
+
+    qword_t umask_result = invoke(&fixture, &memory, &fault, 166,
+            UINT64_C(0xabcdef01000001ff), 0, 0, 0);
+    CHECK(umask_result == 0027 && fixture.fs.umask == 0777 &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "AArch64 umask 返回旧值并按低 32 位保留权限位");
+    umask_result = invoke(&fixture, &memory, &fault, 166,
+            UINT64_C(0x1234567800000017), 0, 0, 0);
+    CHECK(umask_result == 0777 && fixture.fs.umask == 0027 &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "AArch64 umask 原子替换并恢复后续夹具掩码");
+
+    const size_t statfs_offset = 0x9000;
+    reset_user_access(&memory);
+    qword_t statfs_result = invoke(&fixture, &memory, &fault, 44, 99,
+            USER_BASE + statfs_offset, UINT64_MAX, UINT64_MAX);
+    CHECK(statfs_result == encoded_error(_EBADF) &&
+            kernel.statfs_calls == 0 && memory.write_calls == 0,
+            "AArch64 fstatfs 在输出前拒绝无效 fd");
+
+    memset(memory.bytes + statfs_offset, 0xa5,
+            sizeof(struct aarch64_linux_statfs));
+    reset_user_access(&memory);
+    int saved_mount_flags = fixture.mount->flags;
+    fixture.mount->flags = MS_READONLY_ | MS_NODEV_;
+    statfs_result = invoke(&fixture, &memory, &fault, 44,
+            UINT64_C(0xabcdef0100000000), USER_BASE + statfs_offset,
+            UINT64_MAX, UINT64_MAX);
+    const struct aarch64_linux_statfs expected_statfs = {
+        .type = INT32_C(0x10203040),
+        .bsize = INT64_C(0x1112131415161718),
+        .blocks = INT64_C(0x2122232425262728),
+        .bfree = INT64_C(0x3132333435363738),
+        .bavail = INT64_C(0x4142434445464748),
+        .files = INT64_C(0x5152535455565758),
+        .ffree = INT64_C(0x6162636465666768),
+        .fsid = {INT32_C(0x75767778), INT32_C(0x71727374)},
+        .namelen = INT64_C(0x0102030405060708),
+        .frsize = INT64_C(0x1112131415161718),
+        .flags = ST_VALID_ | MS_READONLY_ | MS_NODEV_,
+    };
+    CHECK(statfs_result == 0 && kernel.statfs_calls == 1 &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_statfs) &&
+            memcmp(memory.bytes + statfs_offset,
+                    &expected_statfs, sizeof(expected_statfs)) == 0,
+            "AArch64 fstatfs 输出完整 LP64 wire 布局并忽略额外寄存器");
+    fixture.mount->flags = saved_mount_flags;
+
+    kernel.statfs_error = _EIO;
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 44, 0,
+            USER_BASE + statfs_offset, 0, 0);
+    CHECK(statfs_result == encoded_error(_EIO) &&
+            kernel.statfs_calls == 2 && memory.write_calls == 0,
+            "AArch64 fstatfs 原样传播 filesystem provider 错误");
+    kernel.statfs_error = 0;
+
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 44, 0,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 63, 0, 0);
+    CHECK(statfs_result == encoded_error(_EFAULT) &&
+            kernel.statfs_calls == 3 && memory.write_calls == 0 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX - 63 &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "AArch64 fstatfs 在 provider 后拒绝跨越用户地址上限");
+
+    CHECK(invoke(&fixture, &memory, &fault, 32, 99,
+            UINT64_MAX, 0, 0) == encoded_error(_EBADF) &&
+            kernel.flock_calls == 0,
+            "AArch64 flock 的无效 fd 优先于 operation 校验");
+    CHECK(invoke(&fixture, &memory, &fault, 32, 0,
+            UINT64_C(0xabcdef0100000010), 0, 0) ==
+                    encoded_error(_EINVAL) &&
+            kernel.flock_calls == 0,
+            "AArch64 flock 按低 32 位拒绝未知 operation");
+    kernel.flock_result = _EAGAIN;
+    CHECK(invoke(&fixture, &memory, &fault, 32,
+            UINT64_C(0x1234567800000000),
+            UINT64_C(0xabcdef0100000006), 0, 0) ==
+                    encoded_error(_EAGAIN) &&
+            kernel.flock_calls == 1 &&
+            kernel.last_flock_operation == (LOCK_EX_ | LOCK_NB_),
+            "AArch64 flock 保留 EX/NB 并传播 provider 结果");
+    kernel.flock_result = 0;
+    CHECK(invoke(&fixture, &memory, &fault, 32, 0,
+            LOCK_UN_ | LOCK_NB_, 0, 0) == 0 &&
+            kernel.flock_calls == 2 &&
+            kernel.last_flock_operation == (LOCK_UN_ | LOCK_NB_),
+            "AArch64 flock 向 provider 传递非阻塞解锁");
 
     CHECK(invoke(&fixture, &memory, &fault, 82,
             UINT64_C(0xabcdef0100000000), 0, 0, 0) == 0 &&
@@ -1260,8 +1396,121 @@ int main(void) {
     CHECK(invoke(&fixture, &memory, &fault, 57, 1, 0, 0, 0) == 0,
             "socket 探针 fd 清理成功");
 
-    // openat 只读取 guest ABI 的低位参数，且不会越过路径 NUL。
     const size_t path_offset = 0x100;
+    static const char access_path[] = "metadata";
+    memcpy(memory.bytes + path_offset,
+            access_path, sizeof(access_path));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + sizeof(access_path);
+    unsigned stat_calls_before_access = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 48,
+            UINT64_C(0x12345678ffffff9c), USER_BASE + path_offset,
+            UINT64_C(0xdeadbeef00000000), UINT64_MAX);
+    CHECK(result == 0 &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0 &&
+            kernel.stat_calls > stat_calls_before_access &&
+            memory.read_calls == sizeof(access_path) &&
+            memory.max_read_size == 1,
+            "faccessat 按低 32 位识别 AT_FDCWD/F_OK 并在 NUL 停止");
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 48, 99,
+            UINT64_MAX, UINT64_C(0xabcdef0100000008), 0);
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0,
+            "faccessat 在 pathname 之前拒绝未知 mode 位");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + 3;
+    unsigned stat_calls_before_fault = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 48, 99,
+            USER_BASE + path_offset, AC_R, 0);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 4 &&
+            memory.read_bytes == 3 &&
+            kernel.stat_calls == stat_calls_before_fault &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "faccessat 在 dirfd 前保持 pathname 的精确 guest fault");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    unsigned stat_calls_before_empty = kernel.stat_calls;
+    result = invoke(&fixture, &memory, &fault, 48, 99,
+            USER_BASE + path_offset, 0, UINT64_C(0x1000));
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            kernel.stat_calls == stat_calls_before_empty,
+            "旧 faccessat 忽略第四寄存器且空路径先于无效 dirfd");
+    memcpy(memory.bytes + path_offset,
+            access_path, sizeof(access_path));
+
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 48, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_EBADF),
+            "faccessat 的相对路径拒绝无效 dirfd");
+    result = invoke(&fixture, &memory, &fault, 48, 0,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == encoded_error(_ENOTDIR),
+            "faccessat 的相对路径要求 dirfd 指向目录");
+
+    static const char absolute_metadata_path[] = "/work/metadata";
+    memcpy(memory.bytes + path_offset, absolute_metadata_path,
+            sizeof(absolute_metadata_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 48, 99,
+            USER_BASE + path_offset, 0, 0);
+    CHECK(result == 0 &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0,
+            "faccessat 的绝对路径忽略无效 dirfd");
+
+    mode_t_ saved_access_mode = kernel.stat.mode;
+    uid_t_ saved_stat_uid = kernel.stat.uid;
+    uid_t_ saved_stat_gid = kernel.stat.gid;
+    uid_t_ saved_uid;
+    uid_t_ saved_gid;
+    uid_t_ saved_euid;
+    uid_t_ saved_egid;
+    kernel.stat.mode = S_IFREG | 0400;
+    kernel.stat.uid = 4101;
+    kernel.stat.gid = 4201;
+    lock(&pids_lock);
+    saved_uid = fixture.task.uid;
+    saved_gid = fixture.task.gid;
+    saved_euid = fixture.task.euid;
+    saved_egid = fixture.task.egid;
+    fixture.task.uid = 4101;
+    fixture.task.gid = 4202;
+    fixture.task.euid = 4301;
+    fixture.task.egid = 4302;
+    unlock(&pids_lock);
+    memcpy(memory.bytes + path_offset,
+            access_path, sizeof(access_path));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 48, AT_FDCWD_,
+            USER_BASE + path_offset, AC_R, UINT64_MAX);
+    CHECK(result == 0,
+            "旧 faccessat 使用真实所有者身份允许读取");
+    lock(&pids_lock);
+    fixture.task.uid = 4301;
+    fixture.task.gid = 4302;
+    fixture.task.euid = 4101;
+    fixture.task.egid = 4201;
+    unlock(&pids_lock);
+    result = invoke(&fixture, &memory, &fault, 48, AT_FDCWD_,
+            USER_BASE + path_offset, AC_R, UINT64_C(0x200));
+    CHECK(result == encoded_error(_EACCES),
+            "旧 faccessat 忽略第四寄存器且不以有效身份绕过权限");
+    kernel.stat.mode = saved_access_mode;
+    kernel.stat.uid = saved_stat_uid;
+    kernel.stat.gid = saved_stat_gid;
+    lock(&pids_lock);
+    fixture.task.uid = saved_uid;
+    fixture.task.gid = saved_gid;
+    fixture.task.euid = saved_euid;
+    fixture.task.egid = saved_egid;
+    unlock(&pids_lock);
+
+    // openat 只读取 guest ABI 的低位参数，且不会越过路径 NUL。
     static const char created_path[] = "created";
     memcpy(memory.bytes + path_offset, created_path, sizeof(created_path));
     reset_user_access(&memory);

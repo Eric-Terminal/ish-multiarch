@@ -97,4 +97,30 @@ _Static_assert(__builtin_offsetof(struct aarch64_linux_stat, atime_sec) == 72 &&
         __builtin_offsetof(struct aarch64_linux_stat, unused5) == 124,
         "AArch64 Linux stat 时间与保留字段偏移不正确");
 
+struct aarch64_linux_statfs {
+    sqword_t type;
+    sqword_t bsize;
+    sqword_t blocks;
+    sqword_t bfree;
+    sqword_t bavail;
+    sqword_t files;
+    sqword_t ffree;
+    sdword_t fsid[2];
+    sqword_t namelen;
+    sqword_t frsize;
+    sqword_t flags;
+    sqword_t spare[4];
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_statfs) == 120 &&
+        _Alignof(struct aarch64_linux_statfs) == 8,
+        "AArch64 Linux statfs ABI 必须固定为 120 字节且按 8 字节对齐");
+_Static_assert(__builtin_offsetof(struct aarch64_linux_statfs, type) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_statfs, blocks) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_statfs, fsid) == 56 &&
+        __builtin_offsetof(struct aarch64_linux_statfs, namelen) == 64 &&
+        __builtin_offsetof(struct aarch64_linux_statfs, flags) == 80 &&
+        __builtin_offsetof(struct aarch64_linux_statfs, spare) == 88,
+        "AArch64 Linux statfs 字段偏移必须与 asm-generic ABI 一致");
+
 #endif

@@ -528,12 +528,15 @@ int realfs_flock(struct fd *fd, int operation) {
     if (operation & LOCK_EX_) real_op |= LOCK_EX;
     if (operation & LOCK_UN_) real_op |= LOCK_UN;
     if (operation & LOCK_NB_) real_op |= LOCK_NB;
-    return flock(fd->real_fd, real_op);
+    if (flock(fd->real_fd, real_op) < 0)
+        return errno_map();
+    return 0;
 }
 
 int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {
     struct statvfs vfs = {};
-    fstatvfs(mount->root_fd, &vfs);
+    if (fstatvfs(mount->root_fd, &vfs) < 0)
+        return errno_map();
     stat->bsize = vfs.f_bsize;
     stat->blocks = vfs.f_blocks;
     stat->bfree = vfs.f_bfree;

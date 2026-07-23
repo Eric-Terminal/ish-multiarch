@@ -95,6 +95,8 @@ struct statfsbuf {
     long spare[4];
 };
 
+#define ST_VALID_ 0x20
+
 struct statfs_ {
     uint_t type;
     uint_t bsize;

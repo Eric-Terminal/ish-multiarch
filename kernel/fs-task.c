@@ -506,6 +506,25 @@ int file_ftruncate_task(
     return result;
 }
 
+int file_flock_task(
+        struct task *task, fd_t fd_number, int operation) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+
+    int command = operation & ~LOCK_NB_;
+    int result;
+    if (command != LOCK_SH_ && command != LOCK_EX_ &&
+            command != LOCK_UN_)
+        result = _EINVAL;
+    else if (fd->mount->fs->flock == NULL)
+        result = _EBADF;
+    else
+        result = fd->mount->fs->flock(fd, operation);
+    fd_close(fd);
+    return result;
+}
+
 int file_grow_fd(struct fd *fd, off_t_ size) {
     return file_resize_fd(fd, size, true, true);
 }
@@ -609,6 +628,59 @@ int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
     int result = file_fstat_fd(fd, stat);
     if (fd != NULL)
         fd_close(fd);
+    return result;
+}
+
+int file_fstatfs_task(
+        struct task *task, fd_t fd_number, struct statfsbuf *stat) {
+    memset(stat, 0, sizeof(*stat));
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+
+    int result = 0;
+    if (fd->mount->fs->statfs != NULL)
+        result = fd->mount->fs->statfs(fd->mount, stat);
+    if (result == 0) {
+        if (stat->type == 0)
+            stat->type = fd->mount->fs->magic;
+        if (stat->frsize == 0)
+            stat->frsize = stat->bsize;
+        stat->flags = ST_VALID_ | (fd->mount->flags &
+                (MS_READONLY_ | MS_NOSUID_ | MS_NODEV_ | MS_NOEXEC_));
+    }
+    fd_close(fd);
+    return result;
+}
+
+int file_accessat_task(struct task *task, fd_t dirfd,
+        const char *path, int mode) {
+    if (mode & ~(AC_R | AC_W | AC_X))
+        return _EINVAL;
+    if (path[0] == '\0')
+        return _ENOENT;
+
+    // 绝对路径从目标任务根目录解析，Linux 不检查传入的 dirfd。
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    const struct fs_access_identity identity = {
+        .uid = credentials.uid,
+        .gid = credentials.gid,
+    };
+    int result = generic_accessat_task(
+            task, at, path, mode, &identity);
+    if (retained)
+        fd_close(at);
     return result;
 }
 

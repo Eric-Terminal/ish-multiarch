@@ -81,11 +81,14 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_DUP3 = 24,
     AARCH64_LINUX_SYS_FCNTL = 25,
     AARCH64_LINUX_SYS_IOCTL = 29,
+    AARCH64_LINUX_SYS_FLOCK = 32,
     AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_RENAMEAT = 38,
+    AARCH64_LINUX_SYS_FSTATFS = 44,
     AARCH64_LINUX_SYS_TRUNCATE = 45,
     AARCH64_LINUX_SYS_FTRUNCATE = 46,
+    AARCH64_LINUX_SYS_FACCESSAT = 48,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
     AARCH64_LINUX_SYS_OPENAT = 56,
@@ -128,6 +131,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SETSID = 157,
     AARCH64_LINUX_SYS_GETGROUPS = 158,
     AARCH64_LINUX_SYS_UNAME = 160,
+    AARCH64_LINUX_SYS_UMASK = 166,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
     AARCH64_LINUX_SYS_GETUID = 174,
@@ -815,6 +819,23 @@ static qword_t dispatch_truncate(
     if ((sqword_t) copied < 0)
         return copied;
     return syscall_result(file_truncate_task(task, path, size));
+}
+
+static qword_t dispatch_faccessat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    int mode = (int) (dword_t) syscall->arguments[2];
+    if (mode & ~(AC_R | AC_W | AC_X))
+        return syscall_result(_EINVAL);
+
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_accessat_task(task,
+            syscall_fd(syscall->arguments[0]), path, mode));
 }
 
 static qword_t dispatch_connect(
@@ -3225,6 +3246,47 @@ static struct aarch64_linux_stat pack_stat(const struct statbuf *source) {
     };
 }
 
+static struct aarch64_linux_statfs pack_statfs(
+        const struct statfsbuf *source) {
+    return (struct aarch64_linux_statfs) {
+        .type = source->type,
+        .bsize = source->bsize,
+        .blocks = (sqword_t) source->blocks,
+        .bfree = (sqword_t) source->bfree,
+        .bavail = (sqword_t) source->bavail,
+        .files = (sqword_t) source->files,
+        .ffree = (sqword_t) source->ffree,
+        .fsid = {
+            (sdword_t) (dword_t) source->fsid,
+            (sdword_t) (dword_t) (source->fsid >> 32),
+        },
+        .namelen = source->namelen,
+        .frsize = source->frsize,
+        .flags = source->flags,
+    };
+}
+
+static qword_t dispatch_fstatfs(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct statfsbuf host_stat;
+    int error = file_fstatfs_task(
+            task, syscall_fd(syscall->arguments[0]), &host_stat);
+    if (error < 0)
+        return syscall_result(error);
+
+    struct aarch64_linux_statfs guest_stat = pack_statfs(&host_stat);
+    qword_t address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(address, sizeof(guest_stat)))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &guest_stat, sizeof(guest_stat), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t copy_stat_to_user(
         const struct guest_linux_syscall_context *context,
         const struct statbuf *host_stat, qword_t address,
@@ -3694,6 +3756,10 @@ static qword_t dispatch_syscall_inner(
             return aarch64_linux_dispatch_fcntl(syscall, task);
         case AARCH64_LINUX_SYS_IOCTL:
             return dispatch_ioctl(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FLOCK:
+            return syscall_result(file_flock_task(task,
+                    syscall_fd(syscall->arguments[0]),
+                    (int) (dword_t) syscall->arguments[1]));
         case AARCH64_LINUX_SYS_MKDIRAT:
             return dispatch_mkdirat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNLINKAT:
@@ -3701,6 +3767,8 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RENAMEAT:
             return dispatch_renameat(
                     context, syscall, task, fault, false);
+        case AARCH64_LINUX_SYS_FSTATFS:
+            return dispatch_fstatfs(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_TRUNCATE:
             return dispatch_truncate(
                     context, syscall, task, fault);
@@ -3708,6 +3776,9 @@ static qword_t dispatch_syscall_inner(
             return syscall_result(file_ftruncate_task(task,
                     syscall_fd(syscall->arguments[0]),
                     (off_t_) (sqword_t) syscall->arguments[1]));
+        case AARCH64_LINUX_SYS_FACCESSAT:
+            return dispatch_faccessat(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CHDIR:
             return dispatch_chdir(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FCHDIR:
@@ -3869,6 +3940,8 @@ static qword_t dispatch_syscall_inner(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNAME:
             return dispatch_uname(context, syscall, fault);
+        case AARCH64_LINUX_SYS_UMASK:
+            return sys_umask((dword_t) syscall->arguments[0]);
         case AARCH64_LINUX_SYS_GETPID:
             return (qword_t) task_getpid(task);
         case AARCH64_LINUX_SYS_GETPPID:
