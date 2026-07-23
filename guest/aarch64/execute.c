@@ -520,7 +520,10 @@ static void execute_advsimd_scalar_shift(struct cpu_state *cpu,
     byte_t rn = instruction->operands.advsimd_shift_immediate.rn;
     byte_t shift = instruction->operands.advsimd_shift_immediate.shift;
     qword_t source = cpu->v[rn].d[0];
-    cpu->v[rd].d[0] = source << shift;
+    if (instruction->opcode == AARCH64_OP_ADVSIMD_SHL_SCALAR)
+        cpu->v[rd].d[0] = source << shift;
+    else
+        cpu->v[rd].d[0] = shift == 64 ? 0 : source >> shift;
     cpu->v[rd].d[1] = 0;
     cpu->pc += 4;
 }
@@ -545,6 +548,29 @@ static void write_vector_element(union aarch64_vector_reg *reg,
     qword_t mask = vector_element_mask(element_size);
     reg->d[half] = (reg->d[half] & ~(mask << shift)) |
             ((value & mask) << shift);
+}
+
+static void execute_advsimd_narrow(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_narrow.rd;
+    byte_t rn = instruction->operands.advsimd_narrow.rn;
+    byte_t source_size =
+            instruction->operands.advsimd_narrow.source_element_size;
+    byte_t destination_size = source_size / 2;
+    byte_t lanes = 16 / source_size;
+    bool upper = instruction->opcode == AARCH64_OP_ADVSIMD_XTN2;
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+    if (upper)
+        result.d[0] = cpu->v[rd].d[0];
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_vector_element(
+                &source, source_size, lane);
+        write_vector_element(&result, destination_size,
+                (byte_t) (lane + (upper ? lanes : 0)), value);
+    }
+    cpu->v[rd] = result;
+    cpu->pc += 4;
 }
 
 static void execute_advsimd_shift_long(struct cpu_state *cpu,
@@ -970,6 +996,23 @@ static void execute_scalar_fp_move(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_conversion(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t source_width = instruction->width;
+    byte_t destination_width =
+            instruction->operands.scalar_fp_conversion.destination_width;
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_convert(
+            read_scalar_fp(cpu,
+                    instruction->operands.scalar_fp_conversion.rn,
+                    source_width),
+            source_width, destination_width, cpu->fpcr);
+    write_scalar_fp(cpu,
+            instruction->operands.scalar_fp_conversion.rd,
+            destination_width, result.bits);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_immediate(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     write_scalar_fp(cpu, instruction->operands.scalar_fp_immediate.rd,
@@ -1349,6 +1392,44 @@ static bool execute_simd_load_store(struct cpu_state *cpu,
 
     if (address_mode != AARCH64_ADDRESS_OFFSET)
         write_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_simd_load_multiple_4(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.advsimd_multiple.rt;
+    byte_t rn = instruction->operands.advsimd_multiple.rn;
+    byte_t element_size =
+            instruction->operands.advsimd_multiple.element_size;
+    byte_t vector_size = instruction->width / 8;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    byte_t bytes[4 * sizeof(union aarch64_vector_reg)];
+    size_t access_size = (size_t) vector_size * 4;
+    for (size_t offset = 0; offset < access_size;
+            offset += GUEST_TLB_MAX_ACCESS_SIZE) {
+        size_t remaining = access_size - offset;
+        size_t chunk = remaining < GUEST_TLB_MAX_ACCESS_SIZE ?
+                remaining : GUEST_TLB_MAX_ACCESS_SIZE;
+        if (!guest_tlb_read(tlb, address + offset,
+                bytes + offset, chunk, GUEST_MEMORY_READ, fault))
+            return false;
+    }
+
+    union aarch64_vector_reg values[4] = {0};
+    for (byte_t offset = 0; offset < vector_size;
+            offset += element_size) {
+        for (byte_t structure = 0; structure < 4; structure++) {
+            memcpy(values[structure].b + offset,
+                    bytes + 4 * offset + structure * element_size,
+                    element_size);
+        }
+    }
+    // 全部访存成功后再提交寄存器，避免跨页故障留下部分结构。
+    for (byte_t structure = 0; structure < 4; structure++)
+        cpu->v[(rt + structure) & 31] = values[structure];
     cpu->pc += 4;
     return true;
 }
@@ -1787,6 +1868,7 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             execute_advsimd_immediate(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SHL_SCALAR:
+        case AARCH64_OP_ADVSIMD_USHR_SCALAR:
             execute_advsimd_scalar_shift(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHLL:
@@ -1794,6 +1876,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_USHLL:
         case AARCH64_OP_ADVSIMD_USHLL2:
             execute_advsimd_shift_long(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_XTN:
+        case AARCH64_OP_ADVSIMD_XTN2:
+            execute_advsimd_narrow(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_DUP_ELEMENT:
         case AARCH64_OP_ADVSIMD_DUP_GENERAL:
@@ -1862,6 +1948,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_FMOV_SCALAR:
             execute_scalar_fp_move(cpu, instruction);
+            break;
+        case AARCH64_OP_FCVT_SCALAR:
+            execute_scalar_fp_conversion(cpu, instruction);
             break;
         case AARCH64_OP_FMOV_IMMEDIATE:
             execute_scalar_fp_immediate(cpu, instruction);
@@ -1998,6 +2087,11 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET:
         case AARCH64_OP_STORE_SIMD_REGISTER_OFFSET:
             if (!execute_simd_load_store(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LOAD_SIMD_MULTIPLE_4:
+            if (!execute_simd_load_multiple_4(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

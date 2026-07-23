@@ -311,6 +311,70 @@ static inline int aarch64_scalar_fp_exponent(
             format->exponent_bias;
 }
 
+static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_convert(
+        qword_t source_bits, byte_t source_width,
+        byte_t destination_width, dword_t fpcr) {
+    struct aarch64_scalar_fp_format source_format =
+            aarch64_scalar_fp_format(source_width);
+    struct aarch64_scalar_fp_format destination_format =
+            aarch64_scalar_fp_format(destination_width);
+    struct aarch64_scalar_fp_number source =
+            aarch64_scalar_fp_unpack(source_bits, &source_format);
+    dword_t exceptions = 0;
+    aarch64_scalar_fp_flush_input(
+            &source, &source_format, fpcr, &exceptions);
+
+    if (aarch64_scalar_fp_is_nan(&source, &source_format)) {
+        bool invalid = aarch64_scalar_fp_is_signaling_nan(
+                &source, &source_format);
+        qword_t bits;
+        if ((fpcr & AARCH64_FPCR_DN) != 0) {
+            bits = destination_format.default_nan;
+        } else {
+            qword_t payload = source.fraction |
+                    source_format.quiet_bit;
+            if (destination_format.fraction_bits >
+                    source_format.fraction_bits) {
+                payload <<= destination_format.fraction_bits -
+                        source_format.fraction_bits;
+            } else {
+                payload >>= source_format.fraction_bits -
+                        destination_format.fraction_bits;
+            }
+            bits = (source.sign ? destination_format.sign_mask : 0) |
+                    destination_format.exponent_mask |
+                    (payload & destination_format.fraction_mask);
+        }
+        return (struct aarch64_scalar_fp_result) {
+            .bits = bits,
+            .exceptions = exceptions |
+                    (invalid ? AARCH64_FPSR_IOC : 0),
+        };
+    }
+    if (aarch64_scalar_fp_is_infinity(&source, &source_format)) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (source.sign ? destination_format.sign_mask : 0) |
+                    destination_format.exponent_mask,
+            .exceptions = exceptions,
+        };
+    }
+    if (aarch64_scalar_fp_is_zero(&source)) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = source.sign ? destination_format.sign_mask : 0,
+            .exceptions = exceptions,
+        };
+    }
+
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_round(
+            source.sign,
+            aarch64_scalar_fp_significand(&source, &source_format),
+            aarch64_scalar_fp_exponent(&source, &source_format) -
+                    (int) source_format.fraction_bits,
+            false, &destination_format, fpcr);
+    result.exceptions |= exceptions;
+    return result;
+}
+
 static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_add_core(
         qword_t left_bits, qword_t right_bits, byte_t width, dword_t fpcr,
         bool subtract) {

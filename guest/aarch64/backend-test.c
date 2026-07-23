@@ -18,6 +18,10 @@
 #define INSTRUCTION_STLR_X0_X1 UINT32_C(0xc89ffc20)
 #define INSTRUCTION_PRFM_X0 UINT32_C(0xf9800000)
 #define INSTRUCTION_STR_Q30_X21_X0 UINT32_C(0x3ca06abe)
+#define INSTRUCTION_LD4_V28_X0 UINT32_C(0x4c40081c)
+#define INSTRUCTION_USHR_D28_D31_39 UINT32_C(0x7f5907fc)
+#define INSTRUCTION_XTN_V28_4H_V28_4S UINT32_C(0x0e612b9c)
+#define INSTRUCTION_FCVT_D0_S0 UINT32_C(0x1e22c000)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -779,7 +783,7 @@ static void test_fast_dispatch_structure(void) {
             array_size(hot_instructions) + 1, 2);
 }
 
-static void test_memory_access_c_fallback(void) {
+static void test_product_c_fallback(void) {
     struct test_fixture c_fixture;
     struct test_fixture threaded_fixture;
     init_fixture(&c_fixture);
@@ -792,6 +796,14 @@ static void test_memory_access_c_fallback(void) {
             CODE_PAGE + 8, INSTRUCTION_PRFM_X0);
     write_instruction(&c_fixture.tlb,
             CODE_PAGE + 12, INSTRUCTION_STR_Q30_X21_X0);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 16, INSTRUCTION_LD4_V28_X0);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 20, INSTRUCTION_USHR_D28_D31_39);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 24, INSTRUCTION_XTN_V28_4H_V28_4S);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 28, INSTRUCTION_FCVT_D0_S0);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE, INSTRUCTION_LDAR_X2_X1);
     write_instruction(&threaded_fixture.tlb,
@@ -800,10 +812,28 @@ static void test_memory_access_c_fallback(void) {
             CODE_PAGE + 8, INSTRUCTION_PRFM_X0);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE + 12, INSTRUCTION_STR_Q30_X21_X0);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 16, INSTRUCTION_LD4_V28_X0);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 20, INSTRUCTION_USHR_D28_D31_39);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 24, INSTRUCTION_XTN_V28_4H_V28_4S);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 28, INSTRUCTION_FCVT_D0_S0);
 
     const qword_t original = UINT64_C(0x8877665544332211);
     memcpy(c_fixture.memory.data, &original, sizeof(original));
     memcpy(threaded_fixture.memory.data, &original, sizeof(original));
+    for (unsigned element = 0; element < 4; element++) {
+        for (unsigned structure = 0; structure < 4; structure++) {
+            dword_t value = UINT32_C(0x10203040) +
+                    element * 0x100 + structure;
+            size_t offset = 64 + (element * 4 + structure) * sizeof(value);
+            memcpy(c_fixture.memory.data + offset, &value, sizeof(value));
+            memcpy(threaded_fixture.memory.data + offset,
+                    &value, sizeof(value));
+        }
+    }
 
     struct aarch64_runner c_runner;
     struct aarch64_runner threaded_runner;
@@ -873,6 +903,68 @@ static void test_memory_access_c_fallback(void) {
     assert(stored_low == UINT64_C(0x1122334455667788));
     assert(stored_high == UINT64_C(0x99aabbccddeeff00));
     assert_stats(&threaded_runner, 0, 4, 0, 4);
+
+    c_cpu.x[0] = threaded_cpu.x[0] = DATA_PAGE + 64;
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    for (unsigned structure = 0; structure < 4; structure++) {
+        for (unsigned element = 0; element < 4; element++) {
+            assert(c_cpu.v[28 + structure].s[element] ==
+                    UINT32_C(0x10203040) +
+                            element * 0x100 + structure);
+        }
+    }
+    assert_stats(&threaded_runner, 0, 5, 0, 5);
+
+    c_cpu.v[31].d[0] = threaded_cpu.v[31].d[0] =
+            UINT64_C(0xfedcba9876543210);
+    c_cpu.v[28].d[0] = threaded_cpu.v[28].d[0] = UINT64_MAX;
+    c_cpu.v[28].d[1] = threaded_cpu.v[28].d[1] = UINT64_MAX;
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[28].d[0] ==
+            (UINT64_C(0xfedcba9876543210) >> 39));
+    assert(c_cpu.v[28].d[1] == 0);
+    assert_stats(&threaded_runner, 0, 6, 0, 6);
+
+    c_cpu.v[28].s[0] = threaded_cpu.v[28].s[0] =
+            UINT32_C(0x1111aaaa);
+    c_cpu.v[28].s[1] = threaded_cpu.v[28].s[1] =
+            UINT32_C(0x2222bbbb);
+    c_cpu.v[28].s[2] = threaded_cpu.v[28].s[2] =
+            UINT32_C(0x3333cccc);
+    c_cpu.v[28].s[3] = threaded_cpu.v[28].s[3] =
+            UINT32_C(0x4444dddd);
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[28].d[0] == UINT64_C(0xddddccccbbbbaaaa));
+    assert(c_cpu.v[28].d[1] == 0);
+    assert_stats(&threaded_runner, 0, 7, 0, 7);
+
+    c_cpu.v[0].s[0] = threaded_cpu.v[0].s[0] = UINT32_C(0x3fc00000);
+    c_cpu.v[0].s[1] = threaded_cpu.v[0].s[1] = UINT32_MAX;
+    c_cpu.v[0].d[1] = threaded_cpu.v[0].d[1] = UINT64_MAX;
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[0].d[0] == UINT64_C(0x3ff8000000000000));
+    assert(c_cpu.v[0].d[1] == 0);
+    assert_stats(&threaded_runner, 0, 8, 0, 8);
 }
 
 static void test_c_and_threaded_differential(void) {
@@ -1111,7 +1203,7 @@ int main(void) {
     test_fast_branch_differential();
     test_fast_svc_differential();
     test_fast_dispatch_structure();
-    test_memory_access_c_fallback();
+    test_product_c_fallback();
     test_c_and_threaded_differential();
     test_cache_keys_and_collision();
     test_rwx_self_modifying_code();

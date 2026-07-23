@@ -92,6 +92,15 @@ static dword_t encode_register_offset(unsigned size_field,
             rt;
 }
 
+static dword_t encode_ld4(bool quadword, unsigned size_field,
+        byte_t rt, byte_t rn) {
+    return UINT32_C(0x0c400000) |
+            (dword_t) quadword << 30 |
+            (dword_t) size_field << 10 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
 static struct aarch64_execute_result execute_word(struct test_memory *memory,
         struct cpu_state *cpu, dword_t word) {
     struct aarch64_decoded instruction;
@@ -249,6 +258,138 @@ static void test_register_offset_apple_vectors(void) {
         assert(instruction.operands.load_store.address_mode ==
                 AARCH64_ADDRESS_OFFSET);
     }
+}
+
+static void test_ld4_decode(void) {
+    static const struct {
+        dword_t word;
+        byte_t width;
+        byte_t element_size;
+        byte_t rt;
+        byte_t rn;
+    } cases[] = {
+        {UINT32_C(0x4c400020), 128, 1, 0, 1},
+        {UINT32_C(0x4c4007e4), 128, 2, 4, 31},
+        // SQLite WAL 实际执行的结构化读取。
+        {UINT32_C(0x4c40081c), 128, 4, 28, 0},
+        {UINT32_C(0x4c400c20), 128, 8, 0, 1},
+        {UINT32_C(0x0c400048), 64, 1, 8, 2},
+        {UINT32_C(0x0c40046c), 64, 2, 12, 3},
+        {UINT32_C(0x0c400890), 64, 4, 16, 4},
+    };
+    for (size_t i = 0; i < array_size(cases); i++) {
+        struct aarch64_decoded instruction;
+        assert(aarch64_decode(cases[i].word, &instruction));
+        assert(instruction.opcode == AARCH64_OP_LOAD_SIMD_MULTIPLE_4);
+        assert(instruction.width == cases[i].width);
+        assert(instruction.operands.advsimd_multiple.element_size ==
+                cases[i].element_size);
+        assert(instruction.operands.advsimd_multiple.rt == cases[i].rt);
+        assert(instruction.operands.advsimd_multiple.rn == cases[i].rn);
+    }
+
+    struct aarch64_decoded instruction;
+    assert(!aarch64_decode(encode_ld4(false, 3, 0, 1), &instruction));
+    static const dword_t neighboring_forms[] = {
+        UINT32_C(0x4c000020),
+        UINT32_C(0x4cdf0020),
+        UINT32_C(0x4cc20020),
+        UINT32_C(0x4c404020),
+        UINT32_C(0x4c408020),
+        UINT32_C(0x4c407020),
+    };
+    for (size_t i = 0; i < array_size(neighboring_forms); i++) {
+        bool decoded = aarch64_decode(neighboring_forms[i], &instruction);
+        assert(!decoded ||
+                instruction.opcode != AARCH64_OP_LOAD_SIMD_MULTIPLE_4);
+    }
+    static const dword_t reserved_forms[] = {
+        UINT32_C(0x4c40181c),
+        UINT32_C(0x4c40381c),
+        UINT32_C(0x4c60081c),
+        UINT32_C(0x4c41081c),
+    };
+    for (size_t i = 0; i < array_size(reserved_forms); i++)
+        assert(!aarch64_decode(reserved_forms[i], &instruction));
+}
+
+static void prepare_ld4(byte_t *bytes,
+        union aarch64_vector_reg expected[4],
+        byte_t vector_size, byte_t element_size, byte_t seed) {
+    memset(expected, 0, 4 * sizeof(*expected));
+    for (byte_t index = 0; index < 4 * vector_size; index++)
+        bytes[index] = (byte_t) (seed + index);
+    for (byte_t offset = 0; offset < vector_size;
+            offset += element_size) {
+        for (byte_t structure = 0; structure < 4; structure++) {
+            memcpy(expected[structure].b + offset,
+                    bytes + 4 * offset + structure * element_size,
+                    element_size);
+        }
+    }
+}
+
+static void test_ld4_execution(struct test_memory *memory) {
+    union aarch64_vector_reg expected[4];
+    prepare_ld4(memory->first + 256, expected, 16, 4, 0x10);
+    struct cpu_state cpu = {
+        .cycle = 37,
+        .pc = UINT64_C(0x3600),
+        .x[0] = DATA_PAGE + 256,
+        .nzcv = UINT32_C(0xa0000000),
+    };
+    for (byte_t structure = 0; structure < 4; structure++)
+        fill_vector(&cpu.v[28 + structure], (byte_t) (0xc0 + structure));
+    assert_retired(memory, &cpu, UINT32_C(0x4c40081c));
+    for (byte_t structure = 0; structure < 4; structure++)
+        assert(memcmp(cpu.v[28 + structure].b,
+                expected[structure].b, 16) == 0);
+    assert(cpu.x[0] == DATA_PAGE + 256 && cpu.cycle == 37);
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+
+    prepare_ld4(memory->first + 512, expected, 8, 2, 0x60);
+    cpu.sp = DATA_PAGE + 512;
+    for (byte_t structure = 0; structure < 4; structure++)
+        fill_vector(&cpu.v[(31 + structure) & 31], 0xe0);
+    assert_retired(memory, &cpu, encode_ld4(false, 1, 31, 31));
+    for (byte_t structure = 0; structure < 4; structure++) {
+        assert(memcmp(cpu.v[(31 + structure) & 31].b,
+                expected[structure].b, 16) == 0);
+    }
+    assert(cpu.sp == DATA_PAGE + 512);
+
+    byte_t crossing[64];
+    prepare_ld4(crossing, expected, 16, 4, 0x90);
+    memcpy(memory->first + GUEST_MEMORY_PAGE_SIZE - 32, crossing, 32);
+    memcpy(memory->next, crossing + 32, 32);
+    cpu.x[1] = DATA_NEXT - 32;
+    assert_retired(memory, &cpu, encode_ld4(true, 2, 4, 1));
+    for (byte_t structure = 0; structure < 4; structure++)
+        assert(memcmp(cpu.v[4 + structure].b,
+                expected[structure].b, 16) == 0);
+
+    union aarch64_vector_reg before[4];
+    for (byte_t structure = 0; structure < 4; structure++) {
+        fill_vector(&cpu.v[8 + structure], (byte_t) (0x20 + structure));
+        before[structure] = cpu.v[8 + structure];
+    }
+    memory->pages[1].permissions = GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
+    cpu.pc = UINT64_C(0x3800);
+    cpu.x[2] = DATA_NEXT - 32;
+    struct aarch64_execute_result result = execute_word(
+            memory, &cpu, encode_ld4(true, 2, 8, 2));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    for (byte_t structure = 0; structure < 4; structure++)
+        assert(memcmp(cpu.v[8 + structure].b,
+                before[structure].b, 16) == 0);
+    assert(cpu.x[2] == DATA_NEXT - 32 && cpu.pc == UINT64_C(0x3800));
+    memory->pages[1].permissions =
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
 }
 
 static bool valid_form(unsigned size_field, unsigned operation) {
@@ -678,12 +819,14 @@ static void test_register_offset_fault_transactions(
 int main(void) {
     test_apple_vectors();
     test_register_offset_apple_vectors();
+    test_ld4_decode();
     test_encoding_space();
 
     struct test_memory memory;
     init_test_memory(&memory);
     test_widths_and_unsigned_offsets(&memory);
     test_register_offsets(&memory);
+    test_ld4_execution(&memory);
     test_unscaled_and_writeback(&memory);
     test_sp_and_v31(&memory);
     test_cross_page(&memory);

@@ -21,6 +21,13 @@ static dword_t encode_scalar_shl(byte_t shift, byte_t rn, byte_t rd) {
             (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_scalar_ushr(byte_t shift, byte_t rn, byte_t rd) {
+    assert(shift >= 1 && shift <= 64);
+    return UINT32_C(0x7f000400) |
+            (dword_t) (128 - shift) << 16 |
+            (dword_t) rn << 5 | rd;
+}
+
 static struct aarch64_decoded decode(dword_t word) {
     struct aarch64_decoded instruction;
     assert(aarch64_decode(word, &instruction));
@@ -375,6 +382,105 @@ static void test_scalar_shl_execution(void) {
     }
 }
 
+static void assert_scalar_ushr_decode(
+        dword_t word, byte_t shift, byte_t rn, byte_t rd) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_USHR_SCALAR);
+    assert(instruction.width == 64);
+    assert(instruction.operands.advsimd_shift_immediate.rd == rd);
+    assert(instruction.operands.advsimd_shift_immediate.rn == rn);
+    assert(instruction.operands.advsimd_shift_immediate.shift == shift);
+}
+
+static void test_scalar_ushr_decode(void) {
+    assert_scalar_ushr_decode(
+            UINT32_C(0x7f5907fc), 39, 31, 28);
+    assert_scalar_ushr_decode(UINT32_C(0x7f7f0420), 1, 1, 0);
+    assert_scalar_ushr_decode(UINT32_C(0x7f400462), 64, 3, 2);
+
+    unsigned count = 0;
+    for (unsigned shift = 1; shift <= 64; shift++) {
+        for (unsigned rn = 0; rn < 32; rn++) {
+            for (unsigned rd = 0; rd < 32; rd++) {
+                assert_scalar_ushr_decode(encode_scalar_ushr(
+                        (byte_t) shift, (byte_t) rn, (byte_t) rd),
+                        (byte_t) shift, (byte_t) rn, (byte_t) rd);
+                count++;
+            }
+        }
+    }
+    assert(count == 65536);
+
+    for (unsigned immediate = 0; immediate < 64; immediate++) {
+        struct aarch64_decoded instruction;
+        dword_t word = UINT32_C(0x7f000400) |
+                (dword_t) immediate << 16;
+        assert(!aarch64_decode(word, &instruction));
+    }
+
+    const dword_t fixed_mask = UINT32_C(0xffc0fc00);
+    const dword_t base = UINT32_C(0x7f5907fc);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((fixed_mask & (UINT32_C(1) << bit)) == 0)
+            continue;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(
+                base ^ (UINT32_C(1) << bit), &instruction);
+        assert(!decoded || instruction.opcode !=
+                AARCH64_OP_ADVSIMD_USHR_SCALAR);
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x5f5907fc), // SSHR D28, D31, #39。
+        UINT32_C(0x7f5917fc), // USRA D28, D31, #39。
+        UINT32_C(0x5f5917fc), // SSRA D28, D31, #39。
+        UINT32_C(0x7f5947fc), // SRI D28, D31, #39。
+        UINT32_C(0x5f6757fc), // SHL D28, D31, #39。
+        UINT32_C(0x6f5907fc), // USHR V28.2D, V31.2D, #39。
+    };
+    for (unsigned index = 0; index < array_size(neighbors); index++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[index], &instruction);
+        assert(!decoded || instruction.opcode !=
+                AARCH64_OP_ADVSIMD_USHR_SCALAR);
+    }
+}
+
+static void test_scalar_ushr_execution(void) {
+    for (unsigned shift = 1; shift <= 64; shift++) {
+        qword_t source = UINT64_C(0x8123456789abcdef) ^ shift;
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x2000),
+            .sp = UINT64_C(0x1122334455667788),
+            .nzcv = UINT32_C(0xa0000000),
+            .fpcr = UINT32_C(0x01000000),
+            .fpsr = UINT32_C(0x08000000),
+        };
+        cpu.x[0] = UINT64_C(0x8877665544332211);
+        cpu.v[1].d[0] = source;
+        cpu.v[1].d[1] = UINT64_C(0x1020304050607080);
+        cpu.v[2].d[0] = UINT64_MAX;
+        cpu.v[2].d[1] = UINT64_MAX;
+        union aarch64_vector_reg saved_source = cpu.v[1];
+
+        execute_instruction(&cpu,
+                encode_scalar_ushr((byte_t) shift, 1, 2));
+        assert_scalar_shl_state(&cpu,
+                shift == 64 ? 0 : source >> shift,
+                UINT64_C(0x2004));
+        assert(cpu.v[1].d[0] == saved_source.d[0]);
+        assert(cpu.v[1].d[1] == saved_source.d[1]);
+
+        cpu.v[2].d[0] = source;
+        cpu.v[2].d[1] = UINT64_MAX;
+        execute_instruction(&cpu,
+                encode_scalar_ushr((byte_t) shift, 2, 2));
+        assert_scalar_shl_state(&cpu,
+                shift == 64 ? 0 : source >> shift,
+                UINT64_C(0x2008));
+    }
+}
+
 int main(void) {
     test_apple_vectors();
     test_encoding_space();
@@ -382,5 +488,7 @@ int main(void) {
     test_special_forms();
     test_scalar_shl_decode();
     test_scalar_shl_execution();
+    test_scalar_ushr_decode();
+    test_scalar_ushr_execution();
     return 0;
 }

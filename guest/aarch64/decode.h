@@ -65,6 +65,7 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_SIMD_IMM9,
     AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
     AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
+    AARCH64_OP_LOAD_SIMD_MULTIPLE_4,
     AARCH64_OP_CASP,
     AARCH64_OP_CASPA,
     AARCH64_OP_CASPL,
@@ -124,10 +125,13 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_ORR_IMMEDIATE,
     AARCH64_OP_ADVSIMD_BIC_IMMEDIATE,
     AARCH64_OP_ADVSIMD_SHL_SCALAR,
+    AARCH64_OP_ADVSIMD_USHR_SCALAR,
     AARCH64_OP_ADVSIMD_SSHLL,
     AARCH64_OP_ADVSIMD_SSHLL2,
     AARCH64_OP_ADVSIMD_USHLL,
     AARCH64_OP_ADVSIMD_USHLL2,
+    AARCH64_OP_ADVSIMD_XTN,
+    AARCH64_OP_ADVSIMD_XTN2,
     AARCH64_OP_ADVSIMD_DUP_ELEMENT,
     AARCH64_OP_ADVSIMD_DUP_GENERAL,
     AARCH64_OP_ADVSIMD_INS_ELEMENT,
@@ -172,6 +176,7 @@ enum aarch64_opcode {
     AARCH64_OP_FSUB_SCALAR,
     AARCH64_OP_FMUL_SCALAR,
     AARCH64_OP_FMOV_SCALAR,
+    AARCH64_OP_FCVT_SCALAR,
     AARCH64_OP_FMOV_IMMEDIATE,
     AARCH64_OP_FCMP_SCALAR,
     AARCH64_OP_FCMPE_SCALAR,
@@ -234,6 +239,11 @@ struct aarch64_decoded {
             enum aarch64_address_mode address_mode;
             bool signed_load;
         } load_store;
+        struct {
+            byte_t rt;
+            byte_t rn;
+            byte_t element_size;
+        } advsimd_multiple;
         struct {
             byte_t prfop;
             byte_t rn;
@@ -335,6 +345,11 @@ struct aarch64_decoded {
             byte_t destination_width;
         } fp_to_integer;
         struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t destination_width;
+        } scalar_fp_conversion;
+        struct {
             byte_t rn;
             byte_t rm;
             bool zero;
@@ -358,6 +373,11 @@ struct aarch64_decoded {
             byte_t element_size;
             byte_t shift;
         } advsimd_shift_long;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t source_element_size;
+        } advsimd_narrow;
         struct {
             byte_t rd;
             byte_t rn;

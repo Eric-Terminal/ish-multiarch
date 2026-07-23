@@ -1486,6 +1486,17 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_advsimd_shift_long', aarch64_advsimd_shift_long_test)
 
+    aarch64_advsimd_narrow_test = executable(
+        'aarch64_advsimd_narrow_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/advsimd-narrow-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_advsimd_narrow', aarch64_advsimd_narrow_test)
+
     aarch64_advsimd_copy_test = executable('aarch64_advsimd_copy_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',

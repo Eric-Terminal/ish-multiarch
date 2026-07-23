@@ -32,6 +32,8 @@
 #define FMUL_D UINT32_C(0x1e600800)
 #define FMOV_S UINT32_C(0x1e204000)
 #define FMOV_D UINT32_C(0x1e604000)
+#define FCVT_D_S UINT32_C(0x1e22c000)
+#define FCVT_S_D UINT32_C(0x1e624000)
 #define FMOV_IMMEDIATE_S UINT32_C(0x1e201000)
 #define FMOV_IMMEDIATE_D UINT32_C(0x1e601000)
 #define FCMP_S UINT32_C(0x1e202000)
@@ -246,6 +248,141 @@ static void test_scalar_fmov(void) {
         execute_word(&cpu, unary(cases[i].base, 7, 7));
         assert_scalar_result(&cpu, 7, cases[i].width, cases[i].bits);
         assert(cpu.pc == UINT64_C(0x1008));
+    }
+}
+
+struct precision_conversion_case {
+    dword_t base;
+    byte_t source_width;
+    byte_t destination_width;
+    qword_t source;
+    dword_t fpcr;
+    qword_t expected;
+    dword_t flags;
+};
+
+static void test_fcvt_precision_conversion(void) {
+    struct cpu_state product = initial_cpu();
+    set_scalar(&product, 0, 32, UINT32_C(0x3fc00000));
+    // apk 的容量格式化路径实际使用原地 fcvt d0, s0。
+    execute_word(&product, FCVT_D_S);
+    assert_scalar_result(&product, 0, 64,
+            UINT64_C(0x3ff8000000000000));
+    assert(product.fpsr == TEST_FPSR_QC);
+    assert_non_fp_state(
+            &product, UINT64_C(0x1004), UINT32_C(0xa0000000));
+
+    static const struct precision_conversion_case cases[] = {
+        {FCVT_D_S, 32, 64, UINT32_C(0x3f800000), 0,
+                UINT64_C(0x3ff0000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x80000000), 0,
+                UINT64_C(0x8000000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x3f800001), TEST_FPCR_RZ,
+                UINT64_C(0x3ff0000020000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x00000001), 0,
+                UINT64_C(0x36a0000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x00000001), TEST_FPCR_FZ,
+                0, TEST_FPSR_IDC},
+        {FCVT_D_S, 32, 64, UINT32_C(0x80000001), TEST_FPCR_FZ,
+                UINT64_C(0x8000000000000000), TEST_FPSR_IDC},
+        {FCVT_D_S, 32, 64, UINT32_C(0x7f800000), 0,
+                UINT64_C(0x7ff0000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0xff800000), 0,
+                UINT64_C(0xfff0000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x7fc12345), 0,
+                UINT64_C(0x7ff82468a0000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0xffc12345), 0,
+                UINT64_C(0xfff82468a0000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0xffc12345), TEST_FPCR_DN,
+                UINT64_C(0x7ff8000000000000), 0},
+        {FCVT_D_S, 32, 64, UINT32_C(0x7f812345), 0,
+                UINT64_C(0x7ff82468a0000000), TEST_FPSR_IOC},
+        {FCVT_D_S, 32, 64, UINT32_C(0x7f812345), TEST_FPCR_DN,
+                UINT64_C(0x7ff8000000000000), TEST_FPSR_IOC},
+
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000000000000), 0,
+                UINT32_C(0x3f800000), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0x8000000000000000), 0,
+                UINT32_C(0x80000000), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0xfff0000000000000), 0,
+                UINT32_C(0xff800000), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0x36a0000000000000), 0,
+                UINT32_C(0x00000001), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0x36a0000000000000), TEST_FPCR_FZ,
+                0, TEST_FPSR_UFC},
+        {FCVT_S_D, 64, 32, UINT64_C(0xb6a0000000000000),
+                TEST_FPCR_FZ | TEST_FPCR_RP,
+                UINT32_C(0x80000000), TEST_FPSR_UFC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x0000000000000001), 0,
+                0, TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x0000000000000001), TEST_FPCR_FZ,
+                0, TEST_FPSR_IDC},
+
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000010000000), 0,
+                UINT32_C(0x3f800000), TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000010000000), TEST_FPCR_RP,
+                UINT32_C(0x3f800001), TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000010000000), TEST_FPCR_RM,
+                UINT32_C(0x3f800000), TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000010000000), TEST_FPCR_RZ,
+                UINT32_C(0x3f800000), TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0xbff0000010000000), TEST_FPCR_RM,
+                UINT32_C(0xbf800001), TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x3ff0000030000000), 0,
+                UINT32_C(0x3f800002), TEST_FPSR_IXC},
+
+        {FCVT_S_D, 64, 32, UINT64_C(0x3690000000000000), 0,
+                0, TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x3690000000000000), TEST_FPCR_RP,
+                UINT32_C(0x00000001), TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0xb690000000000000), TEST_FPCR_RM,
+                UINT32_C(0x80000001), TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x380fffffe0000000), 0,
+                UINT32_C(0x00800000), TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x380fffffe0000000), TEST_FPCR_RZ,
+                UINT32_C(0x007fffff), TEST_FPSR_UFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x380fffffe0000000), TEST_FPCR_FZ,
+                0, TEST_FPSR_UFC},
+
+        {FCVT_S_D, 64, 32, UINT64_C(0x47f0000000000000), 0,
+                UINT32_C(0x7f800000), TEST_FPSR_OFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x47f0000000000000), TEST_FPCR_RZ,
+                UINT32_C(0x7f7fffff), TEST_FPSR_OFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0xc7f0000000000000), TEST_FPCR_RM,
+                UINT32_C(0xff800000), TEST_FPSR_OFC | TEST_FPSR_IXC},
+        {FCVT_S_D, 64, 32, UINT64_C(0xc7f0000000000000), TEST_FPCR_RP,
+                UINT32_C(0xff7fffff), TEST_FPSR_OFC | TEST_FPSR_IXC},
+
+        {FCVT_S_D, 64, 32, UINT64_C(0x7ff8123456789abc), 0,
+                UINT32_C(0x7fc091a2), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0xfff8123456789abc), 0,
+                UINT32_C(0xffc091a2), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0x7ff0123456789abc), 0,
+                UINT32_C(0x7fc091a2), TEST_FPSR_IOC},
+        {FCVT_S_D, 64, 32, UINT64_C(0x7ff8000000000001), 0,
+                UINT32_C(0x7fc00000), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0xfff8123456789abc), TEST_FPCR_DN,
+                UINT32_C(0x7fc00000), 0},
+        {FCVT_S_D, 64, 32, UINT64_C(0x7ff0123456789abc), TEST_FPCR_DN,
+                UINT32_C(0x7fc00000), TEST_FPSR_IOC},
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+        const struct precision_conversion_case *test = &cases[i];
+        struct cpu_state cpu = initial_cpu();
+        cpu.fpcr = test->fpcr;
+        cpu.fpsr = TEST_FPSR_QC;
+        set_scalar(&cpu, 7, test->source_width, test->source);
+        union aarch64_vector_reg source = cpu.v[7];
+        memset(&cpu.v[8], 0xa5, sizeof(cpu.v[8]));
+        execute_word(&cpu, unary(test->base, 8, 7));
+        assert_scalar_result(
+                &cpu, 8, test->destination_width, test->expected);
+        assert(memcmp(&cpu.v[7], &source, sizeof(source)) == 0);
+        assert(cpu.fpsr == (TEST_FPSR_QC | test->flags));
+        assert(cpu.fpcr == test->fpcr);
+        assert_non_fp_state(
+                &cpu, UINT64_C(0x1004), UINT32_C(0xa0000000));
     }
 }
 
@@ -769,6 +906,7 @@ int main(void) {
     test_busybox_sleep_path();
     test_basic_arithmetic();
     test_scalar_fmov();
+    test_fcvt_precision_conversion();
     test_fmov_immediate();
     test_arithmetic_rounding_modes();
     test_nan_and_default_nan();

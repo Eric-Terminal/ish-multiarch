@@ -324,6 +324,32 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
 
     static const struct {
         dword_t bits;
+        byte_t source_width;
+        byte_t destination_width;
+    } scalar_fp_conversions[] = {
+        {UINT32_C(0x1e22c000), 32, 64},
+        {UINT32_C(0x1e624000), 64, 32},
+    };
+    dword_t scalar_fp_conversion = word & UINT32_C(0xfffffc00);
+    for (unsigned i = 0; i < sizeof(scalar_fp_conversions) /
+            sizeof(scalar_fp_conversions[0]); i++) {
+        if (scalar_fp_conversion != scalar_fp_conversions[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_FCVT_SCALAR,
+            .width = scalar_fp_conversions[i].source_width,
+            .operands.scalar_fp_conversion = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .destination_width =
+                        scalar_fp_conversions[i].destination_width,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
         enum aarch64_opcode opcode;
         byte_t width;
     } scalar_fp_unary_operations[] = {
@@ -627,6 +653,41 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rd = word & 0x1f,
                 .rn = (word >> 5) & 0x1f,
                 .shift = immediate & UINT32_C(0x3f),
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xff80fc00)) == UINT32_C(0x7f000400)) {
+        byte_t immediate = (word >> 16) & UINT32_C(0x7f);
+        // Advanced SIMD 标量 USHR 只定义 64 位 D 形式。
+        if ((immediate & UINT32_C(0x40)) == 0)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_USHR_SCALAR,
+            .width = 64,
+            .operands.advsimd_shift_immediate = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .shift = 128 - immediate,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xbf3ffc00)) == UINT32_C(0x0e212800)) {
+        byte_t size = (word >> 22) & 3;
+        if (size == 3)
+            return false;
+        bool upper = ((word >> 30) & 1) != 0;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = upper ? AARCH64_OP_ADVSIMD_XTN2 :
+                    AARCH64_OP_ADVSIMD_XTN,
+            .width = upper ? 128 : 64,
+            .operands.advsimd_narrow = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .source_element_size = (byte_t) (2U << size),
             },
         };
         return true;
@@ -1292,6 +1353,23 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rt2 = 31,
                 .rn = rn,
                 .size = (byte_t) (1U << size_shift),
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xbffff000)) == UINT32_C(0x0c400000)) {
+        bool quadword = ((word >> 30) & 1) != 0;
+        byte_t size_shift = (word >> 10) & 3;
+        if (!quadword && size_shift == 3)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_LOAD_SIMD_MULTIPLE_4,
+            .width = quadword ? 128 : 64,
+            .operands.advsimd_multiple = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .element_size = (byte_t) (1U << size_shift),
             },
         };
         return true;
