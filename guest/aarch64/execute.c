@@ -1020,6 +1020,18 @@ static void execute_scalar_fp_binary(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_select(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    const byte_t source = aarch64_condition_holds(cpu->nzcv,
+            instruction->operands.conditional_select.condition) ?
+            instruction->operands.conditional_select.rn :
+            instruction->operands.conditional_select.rm;
+    const qword_t bits = read_scalar_fp(cpu, source, instruction->width);
+    write_scalar_fp(cpu, instruction->operands.conditional_select.rd,
+            instruction->width, bits);
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_move(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.data_processing_1source.rd;
@@ -2012,6 +2024,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FMUL_SCALAR:
         case AARCH64_OP_FDIV_SCALAR:
             execute_scalar_fp_binary(cpu, instruction);
+            break;
+        case AARCH64_OP_FCSEL_SCALAR:
+            execute_scalar_fp_select(cpu, instruction);
             break;
         case AARCH64_OP_FMOV_SCALAR:
             execute_scalar_fp_move(cpu, instruction);

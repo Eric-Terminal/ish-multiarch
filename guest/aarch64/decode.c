@@ -312,6 +312,20 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xffa00c00)) == UINT32_C(0x1e200c00)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_FCSEL_SCALAR,
+            .width = (word & UINT32_C(0x00400000)) != 0 ? 64 : 32,
+            .operands.conditional_select = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .condition = (word >> 12) & 0xf,
+            },
+        };
+        return true;
+    }
+
     dword_t scalar_fp_immediate = word & UINT32_C(0xffe01fe0);
     if (scalar_fp_immediate == UINT32_C(0x1e201000) ||
             scalar_fp_immediate == UINT32_C(0x1e601000)) {

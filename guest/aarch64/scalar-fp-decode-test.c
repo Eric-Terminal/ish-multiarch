@@ -3,6 +3,7 @@
 #include "guest/aarch64/decode.h"
 
 #define BINARY_FIXED_MASK UINT32_C(0xffe0fc00)
+#define SELECT_FIXED_MASK UINT32_C(0xffe00c00)
 #define UNARY_FIXED_MASK UINT32_C(0xfffffc00)
 #define PRECISION_FIXED_MASK UINT32_C(0xfffffc00)
 #define IMMEDIATE_FIXED_MASK UINT32_C(0xffe01fe0)
@@ -18,6 +19,11 @@ struct binary_case {
 struct unary_case {
     dword_t bits;
     enum aarch64_opcode opcode;
+    byte_t width;
+};
+
+struct select_case {
+    dword_t bits;
     byte_t width;
 };
 
@@ -62,6 +68,11 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x7e61d800), AARCH64_OP_UCVTF_SCALAR, 64},
 };
 
+static const struct select_case select_operations[] = {
+    {UINT32_C(0x1e200c00), 32},
+    {UINT32_C(0x1e600c00), 64},
+};
+
 static const struct precision_case precision_conversions[] = {
     {UINT32_C(0x1e22c000), 32, 64},
     {UINT32_C(0x1e624000), 64, 32},
@@ -101,6 +112,12 @@ static dword_t encode_unary(unsigned operation, byte_t rn, byte_t rd) {
     return unary_operations[operation].bits | (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_select(unsigned operation, byte_t condition,
+        byte_t rn, byte_t rm, byte_t rd) {
+    return select_operations[operation].bits | (dword_t) rm << 16 |
+            (dword_t) condition << 12 | (dword_t) rn << 5 | rd;
+}
+
 static dword_t encode_precision(unsigned operation, byte_t rn, byte_t rd) {
     return precision_conversions[operation].bits |
             (dword_t) rn << 5 | rd;
@@ -137,6 +154,7 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
         case AARCH64_OP_FDIV_SCALAR:
+        case AARCH64_OP_FCSEL_SCALAR:
         case AARCH64_OP_FMOV_SCALAR:
         case AARCH64_OP_FCVT_SCALAR:
         case AARCH64_OP_FMOV_IMMEDIATE:
@@ -160,6 +178,11 @@ static bool is_scalar_fp_encoding(dword_t word) {
     for (unsigned i = 0; i < sizeof(unary_operations) /
             sizeof(unary_operations[0]); i++) {
         if ((word & UNARY_FIXED_MASK) == unary_operations[i].bits)
+            return true;
+    }
+    for (unsigned i = 0; i < sizeof(select_operations) /
+            sizeof(select_operations[0]); i++) {
+        if ((word & SELECT_FIXED_MASK) == select_operations[i].bits)
             return true;
     }
     for (unsigned i = 0; i < sizeof(precision_conversions) /
@@ -216,6 +239,17 @@ static void assert_unary(dword_t word, unsigned operation, byte_t rd,
     assert(instruction.operands.data_processing_1source.rn == rn);
 }
 
+static void assert_select(dword_t word, unsigned operation, byte_t rd,
+        byte_t rn, byte_t rm, byte_t condition) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_FCSEL_SCALAR);
+    assert(instruction.width == select_operations[operation].width);
+    assert(instruction.operands.conditional_select.rd == rd);
+    assert(instruction.operands.conditional_select.rn == rn);
+    assert(instruction.operands.conditional_select.rm == rm);
+    assert(instruction.operands.conditional_select.condition == condition);
+}
+
 static void assert_precision(dword_t word, unsigned operation,
         byte_t rd, byte_t rn) {
     struct aarch64_decoded instruction = decode(word);
@@ -261,6 +295,13 @@ static void test_apple_clang_vectors(void) {
     assert_binary(UINT32_C(0x1e2718a3), 6, 3, 5, 7);
     assert_binary(UINT32_C(0x1e6718a3), 7, 3, 5, 7);
     assert_binary(UINT32_C(0x1e3e181e), 6, 30, 0, 30);
+
+    assert_select(UINT32_C(0x1e220c20), 0, 0, 1, 2, 0);
+    assert_select(UINT32_C(0x1e251c83), 0, 3, 4, 5, 1);
+    assert_select(UINT32_C(0x1e3fefff), 0, 31, 31, 31, 14);
+    assert_select(UINT32_C(0x1e7f4c00), 1, 0, 0, 31, 4);
+    assert_select(UINT32_C(0x1e65cc83), 1, 3, 4, 5, 12);
+    assert_select(UINT32_C(0x1e7fffff), 1, 31, 31, 31, 15);
 
     assert_unary(UINT32_C(0x1e2040a3), 0, 3, 5);
     assert_unary(UINT32_C(0x1e6040a3), 1, 3, 5);
@@ -321,6 +362,55 @@ static void test_unary_encoding_space(void) {
         }
     }
     assert(decoded_count == 8192);
+}
+
+static void test_select_encoding_space(void) {
+    unsigned decoded_count = 0;
+    for (unsigned operation = 0; operation < sizeof(select_operations) /
+            sizeof(select_operations[0]); operation++) {
+        for (unsigned condition = 0; condition < 16; condition++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rm = 0; rm < 32; rm++) {
+                    for (unsigned rd = 0; rd < 32; rd++) {
+                        assert_select(encode_select(operation,
+                                (byte_t) condition, (byte_t) rn,
+                                (byte_t) rm, (byte_t) rd), operation,
+                                (byte_t) rd, (byte_t) rn, (byte_t) rm,
+                                (byte_t) condition);
+                        decoded_count++;
+                    }
+                }
+            }
+        }
+    }
+    assert(decoded_count == 1048576);
+}
+
+static void test_rejected_select_precision_spaces(void) {
+    static const dword_t bases[] = {
+        UINT32_C(0x1ea00c00),
+        UINT32_C(0x1ee00c00),
+    };
+    unsigned rejected_count = 0;
+    for (unsigned precision = 0; precision <
+            sizeof(bases) / sizeof(bases[0]); precision++) {
+        for (unsigned condition = 0; condition < 16; condition++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rm = 0; rm < 32; rm++) {
+                    for (unsigned rd = 0; rd < 32; rd++) {
+                        dword_t word = bases[precision] |
+                                (dword_t) rm << 16 |
+                                (dword_t) condition << 12 |
+                                (dword_t) rn << 5 | rd;
+                        struct aarch64_decoded instruction;
+                        assert(!aarch64_decode(word, &instruction));
+                        rejected_count++;
+                    }
+                }
+            }
+        }
+    }
+    assert(rejected_count == 1048576);
 }
 
 static void test_precision_encoding_space(void) {
@@ -395,6 +485,14 @@ static void test_fixed_bits(void) {
                 assert_classification(base ^ (UINT32_C(1) << bit));
         }
     }
+    for (unsigned operation = 0; operation < sizeof(select_operations) /
+            sizeof(select_operations[0]); operation++) {
+        dword_t base = encode_select(operation, 4, 5, 7, 3);
+        for (unsigned bit = 0; bit < 32; bit++) {
+            if (SELECT_FIXED_MASK & (UINT32_C(1) << bit))
+                assert_classification(base ^ (UINT32_C(1) << bit));
+        }
+    }
     for (unsigned operation = 0; operation <
             sizeof(precision_conversions) /
                     sizeof(precision_conversions[0]); operation++) {
@@ -422,6 +520,7 @@ static void test_fixed_bits(void) {
         }
     }
     assert(BINARY_FIXED_MASK == UINT32_C(0xffe0fc00));
+    assert(SELECT_FIXED_MASK == UINT32_C(0xffe00c00));
     assert(UNARY_FIXED_MASK == UINT32_C(0xfffffc00));
     assert(PRECISION_FIXED_MASK == UINT32_C(0xfffffc00));
     assert(IMMEDIATE_FIXED_MASK == UINT32_C(0xffe01fe0));
@@ -454,8 +553,13 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e2798a3),
         UINT32_C(0x1eee1003),
         UINT32_C(0x1eae1003),
-        UINT32_C(0x1e670ca3),
         UINT32_C(0x1e6704a0),
+        UINT32_C(0x1ebf4c00),
+        UINT32_C(0x1eff4c00),
+        UINT32_C(0x1e7f4400),
+        UINT32_C(0x1e7f4800),
+        UINT32_C(0x1e7f4000),
+        UINT32_C(0x1e5f4c00),
         UINT32_C(0x5ef9b8a3),
         UINT32_C(0x5e79d8a3),
         UINT32_C(0x7ea1b8a3),
@@ -522,6 +626,8 @@ int main(void) {
     test_apple_clang_vectors();
     test_binary_encoding_space();
     test_unary_encoding_space();
+    test_select_encoding_space();
+    test_rejected_select_precision_spaces();
     test_precision_encoding_space();
     test_immediate_encoding_space();
     test_compare_encoding_space();
