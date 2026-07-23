@@ -22,6 +22,7 @@
 #define INSTRUCTION_USHR_D28_D31_39 UINT32_C(0x7f5907fc)
 #define INSTRUCTION_XTN_V28_4H_V28_4S UINT32_C(0x0e612b9c)
 #define INSTRUCTION_FCVT_D0_S0 UINT32_C(0x1e22c000)
+#define INSTRUCTION_MOV_S15_V31_S3 UINT32_C(0x5e1c07ef)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -804,6 +805,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 24, INSTRUCTION_XTN_V28_4H_V28_4S);
     write_instruction(&c_fixture.tlb,
             CODE_PAGE + 28, INSTRUCTION_FCVT_D0_S0);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 32, INSTRUCTION_MOV_S15_V31_S3);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE, INSTRUCTION_LDAR_X2_X1);
     write_instruction(&threaded_fixture.tlb,
@@ -820,6 +823,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 24, INSTRUCTION_XTN_V28_4H_V28_4S);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE + 28, INSTRUCTION_FCVT_D0_S0);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 32, INSTRUCTION_MOV_S15_V31_S3);
 
     const qword_t original = UINT64_C(0x8877665544332211);
     memcpy(c_fixture.memory.data, &original, sizeof(original));
@@ -965,6 +970,19 @@ static void test_product_c_fallback(void) {
     assert(c_cpu.v[0].d[0] == UINT64_C(0x3ff8000000000000));
     assert(c_cpu.v[0].d[1] == 0);
     assert_stats(&threaded_runner, 0, 8, 0, 8);
+
+    c_cpu.v[31].s[3] = threaded_cpu.v[31].s[3] =
+            UINT32_C(0x55667788);
+    c_cpu.v[15].q = threaded_cpu.v[15].q = ~(__uint128_t) 0;
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[15].d[0] == UINT64_C(0x55667788));
+    assert(c_cpu.v[15].d[1] == 0);
+    assert_stats(&threaded_runner, 0, 9, 0, 9);
 }
 
 static void test_c_and_threaded_differential(void) {

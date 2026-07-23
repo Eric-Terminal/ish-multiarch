@@ -25,6 +25,12 @@ static dword_t encode_copy(bool q, bool op, byte_t imm5, byte_t imm4,
             (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_scalar_copy(byte_t imm5, byte_t rn, byte_t rd) {
+    return UINT32_C(0x5e000400) |
+            (dword_t) imm5 << 16 |
+            (dword_t) rn << 5 | rd;
+}
+
 static byte_t element_imm5(byte_t element_size, byte_t index) {
     byte_t shift = 0;
     while ((1U << shift) != element_size)
@@ -82,6 +88,8 @@ static int opcode_index(enum aarch64_opcode opcode) {
 
 static void test_decode(void) {
     static const struct decode_case cases[] = {
+        {UINT32_C(0x5e1c07ef), AARCH64_OP_ADVSIMD_DUP_ELEMENT,
+            32, 15, 31, 4, 3, 3},
         {UINT32_C(0x0e0f0462), AARCH64_OP_ADVSIMD_DUP_ELEMENT,
             64, 2, 3, 1, 7, 7},
         {UINT32_C(0x4e1c04a4), AARCH64_OP_ADVSIMD_DUP_ELEMENT,
@@ -135,6 +143,27 @@ static void test_decode(void) {
     assert(memcmp(counts, expected_counts, sizeof(counts)) == 0);
 
     struct aarch64_decoded instruction;
+    for (byte_t imm5 = 0; imm5 < 32; imm5++) {
+        bool valid = (imm5 & 0xf) != 0;
+        bool decoded = aarch64_decode(
+                encode_scalar_copy(imm5, 31, 15), &instruction);
+        assert(decoded == valid);
+        if (!decoded)
+            continue;
+        byte_t size_shift = 0;
+        while ((imm5 & (1U << size_shift)) == 0)
+            size_shift++;
+        byte_t element_size = (byte_t) (1U << size_shift);
+        byte_t index = imm5 >> (size_shift + 1);
+        assert(instruction.opcode == AARCH64_OP_ADVSIMD_DUP_ELEMENT);
+        assert(instruction.width == element_size * 8);
+        assert(instruction.operands.advsimd_copy.rd == 15);
+        assert(instruction.operands.advsimd_copy.rn == 31);
+        assert(instruction.operands.advsimd_copy.element_size ==
+                element_size);
+        assert(instruction.operands.advsimd_copy.source_index == index);
+    }
+
     assert(aarch64_decode(encode_copy(true, false, 31, 1, 1, 2),
             &instruction));
     assert(instruction.opcode == AARCH64_OP_ADVSIMD_DUP_GENERAL);
@@ -148,6 +177,7 @@ static void test_decode(void) {
         UINT32_C(0x2e010420), UINT32_C(0x0e042c20),
         UINT32_C(0x4e082c20), UINT32_C(0x0e083c20),
         UINT32_C(0x4e043c20), UINT32_C(0x4e011420),
+        UINT32_C(0x5e1c03ef), UINT32_C(0x7e1c07ef),
     };
     for (size_t i = 0; i < array_size(invalid); i++)
         assert(!aarch64_decode(invalid[i], &instruction));
@@ -220,6 +250,48 @@ static void test_dup(void) {
     assert(cpu.v[31].q == 0);
 }
 
+static void test_scalar_dup(void) {
+    static const struct {
+        byte_t element_size;
+        byte_t index;
+        qword_t value;
+    } cases[] = {
+        {1, 15, UINT64_C(0xa5)},
+        {2, 7, UINT64_C(0xb6c7)},
+        {4, 3, UINT64_C(0xd8e9fa0b)},
+        {8, 1, UINT64_C(0x123456789abcdef0)},
+    };
+
+    for (size_t i = 0; i < array_size(cases); i++) {
+        struct cpu_state cpu = make_cpu();
+        cpu.v[31].q = ~(__uint128_t) 0;
+        if (cases[i].element_size == 1)
+            cpu.v[31].b[cases[i].index] = (byte_t) cases[i].value;
+        else if (cases[i].element_size == 2)
+            cpu.v[31].h[cases[i].index] = (word_t) cases[i].value;
+        else if (cases[i].element_size == 4)
+            cpu.v[31].s[cases[i].index] = (dword_t) cases[i].value;
+        else
+            cpu.v[31].d[cases[i].index] = cases[i].value;
+        union aarch64_vector_reg source = cpu.v[31];
+
+        execute_word(&cpu, encode_scalar_copy(
+                element_imm5(cases[i].element_size, cases[i].index),
+                31, 15));
+        assert(cpu.v[15].d[0] == cases[i].value);
+        assert(cpu.v[15].d[1] == 0);
+        assert(memcmp(&cpu.v[31], &source, sizeof(source)) == 0);
+    }
+
+    struct cpu_state aliased = make_cpu();
+    aliased.v[31].d[0] = UINT64_C(0x1111222233334444);
+    aliased.v[31].d[1] = UINT64_C(0x5555666677778888);
+    execute_word(&aliased, encode_scalar_copy(
+            element_imm5(4, 3), 31, 31));
+    assert(aliased.v[31].d[0] == UINT64_C(0x0000000055556666));
+    assert(aliased.v[31].d[1] == 0);
+}
+
 static void test_insert(void) {
     struct cpu_state cpu = make_cpu();
     for (byte_t i = 0; i < 16; i++)
@@ -284,6 +356,7 @@ static void test_move_to_general(void) {
 int main(void) {
     test_decode();
     test_dup();
+    test_scalar_dup();
     test_insert();
     test_move_to_general();
     return 0;
