@@ -74,6 +74,18 @@ _Static_assert(AARCH64_LINUX_IOV_TRANSACTION_LIMIT <=
         "向量事务缓冲上限不得超过 Linux MAX_RW_COUNT");
 
 enum aarch64_linux_syscall_number {
+    AARCH64_LINUX_SYS_SETXATTR = 5,
+    AARCH64_LINUX_SYS_LSETXATTR = 6,
+    AARCH64_LINUX_SYS_FSETXATTR = 7,
+    AARCH64_LINUX_SYS_GETXATTR = 8,
+    AARCH64_LINUX_SYS_LGETXATTR = 9,
+    AARCH64_LINUX_SYS_FGETXATTR = 10,
+    AARCH64_LINUX_SYS_LISTXATTR = 11,
+    AARCH64_LINUX_SYS_LLISTXATTR = 12,
+    AARCH64_LINUX_SYS_FLISTXATTR = 13,
+    AARCH64_LINUX_SYS_REMOVEXATTR = 14,
+    AARCH64_LINUX_SYS_LREMOVEXATTR = 15,
+    AARCH64_LINUX_SYS_FREMOVEXATTR = 16,
     AARCH64_LINUX_SYS_GETCWD = 17,
     AARCH64_LINUX_SYS_EPOLL_CREATE1 = 20,
     AARCH64_LINUX_SYS_EPOLL_CTL = 21,
@@ -85,6 +97,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FLOCK = 32,
     AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
+    AARCH64_LINUX_SYS_SYMLINKAT = 36,
     AARCH64_LINUX_SYS_RENAMEAT = 38,
     AARCH64_LINUX_SYS_FSTATFS = 44,
     AARCH64_LINUX_SYS_TRUNCATE = 45,
@@ -92,6 +105,10 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FACCESSAT = 48,
     AARCH64_LINUX_SYS_CHDIR = 49,
     AARCH64_LINUX_SYS_FCHDIR = 50,
+    AARCH64_LINUX_SYS_FCHMOD = 52,
+    AARCH64_LINUX_SYS_FCHMODAT = 53,
+    AARCH64_LINUX_SYS_FCHOWNAT = 54,
+    AARCH64_LINUX_SYS_FCHOWN = 55,
     AARCH64_LINUX_SYS_OPENAT = 56,
     AARCH64_LINUX_SYS_CLOSE = 57,
     AARCH64_LINUX_SYS_PIPE2 = 59,
@@ -112,6 +129,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_FSYNC = 82,
     AARCH64_LINUX_SYS_FDATASYNC = 83,
+    AARCH64_LINUX_SYS_UTIMENSAT = 88,
     AARCH64_LINUX_SYS_FUTEX = 98,
     AARCH64_LINUX_SYS_SET_ROBUST_LIST = 99,
     AARCH64_LINUX_SYS_GET_ROBUST_LIST = 100,
@@ -786,6 +804,26 @@ static qword_t dispatch_mkdirat(
             (mode_t_) (dword_t) syscall->arguments[2]));
 }
 
+static qword_t dispatch_symlinkat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    char target[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[0], target, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    if (target[0] == '\0')
+        return syscall_result(_ENOENT);
+    char link[MAX_PATH];
+    copied = copy_path_from_user(
+            context, syscall->arguments[2], link, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_symlinkat_task(task, target,
+            syscall_fd(syscall->arguments[1]), link));
+}
+
 static qword_t dispatch_renameat(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -838,6 +876,91 @@ static qword_t dispatch_faccessat(
         return copied;
     return syscall_result(file_accessat_task(task,
             syscall_fd(syscall->arguments[0]), path, mode));
+}
+
+static qword_t dispatch_fchmodat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_fchmodat_task(task,
+            syscall_fd(syscall->arguments[0]), path,
+            (mode_t_) (word_t) syscall->arguments[2]));
+}
+
+static qword_t dispatch_fchownat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t raw_flags = (dword_t) syscall->arguments[4];
+    if (raw_flags & ~(dword_t) (
+            AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_))
+        return syscall_result(_EINVAL);
+
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_fchownat_task(task,
+            syscall_fd(syscall->arguments[0]), path,
+            (uid_t_) (dword_t) syscall->arguments[2],
+            (uid_t_) (dword_t) syscall->arguments[3],
+            (int) raw_flags));
+}
+
+static qword_t dispatch_utimensat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct file_timespec times[2];
+    qword_t times_address = syscall->arguments[2];
+    if (times_address == 0) {
+        times[0] = times[1] = (struct file_timespec) {
+            .nsec = LINUX_UTIME_NOW_,
+        };
+    } else {
+        struct aarch64_linux_timespec wire[2];
+        if (!aarch64_user_range_fits(
+                times_address, sizeof(wire)))
+            return user_range_error(
+                    fault, times_address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                times_address, wire, sizeof(wire), fault))
+            return syscall_result(_EFAULT);
+        for (size_t index = 0; index < 2; index++) {
+            times[index] = (struct file_timespec) {
+                .sec = wire[index].sec,
+                .nsec = wire[index].nsec,
+            };
+        }
+        if (times[0].nsec == LINUX_UTIME_OMIT_ &&
+                times[1].nsec == LINUX_UTIME_OMIT_)
+            return 0;
+    }
+
+    dword_t raw_flags = (dword_t) syscall->arguments[3];
+    if (raw_flags & ~(dword_t) (
+            AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_))
+        return syscall_result(_EINVAL);
+
+    char path[MAX_PATH];
+    const char *path_pointer = NULL;
+    if (syscall->arguments[1] != 0) {
+        qword_t copied = copy_path_from_user(
+                context, syscall->arguments[1], path, fault);
+        if ((sqword_t) copied < 0)
+            return copied;
+        path_pointer = path;
+    }
+    return syscall_result(file_utimensat_task(task,
+            syscall_fd(syscall->arguments[0]), path_pointer,
+            times, (int) raw_flags));
 }
 
 static qword_t dispatch_connect(
@@ -3741,6 +3864,20 @@ static qword_t dispatch_syscall_inner(
                 GUEST_LINUX_SYSCALL_RESTART_DEFAULT;
 
     switch (syscall->number) {
+        case AARCH64_LINUX_SYS_SETXATTR:
+        case AARCH64_LINUX_SYS_LSETXATTR:
+        case AARCH64_LINUX_SYS_FSETXATTR:
+        case AARCH64_LINUX_SYS_GETXATTR:
+        case AARCH64_LINUX_SYS_LGETXATTR:
+        case AARCH64_LINUX_SYS_FGETXATTR:
+        case AARCH64_LINUX_SYS_LISTXATTR:
+        case AARCH64_LINUX_SYS_LLISTXATTR:
+        case AARCH64_LINUX_SYS_FLISTXATTR:
+        case AARCH64_LINUX_SYS_REMOVEXATTR:
+        case AARCH64_LINUX_SYS_LREMOVEXATTR:
+        case AARCH64_LINUX_SYS_FREMOVEXATTR:
+            // 与官方 i386 兼容路径一致：当前文件系统明确不提供 xattr。
+            return syscall_result(_ENOTSUP);
         case AARCH64_LINUX_SYS_GETCWD:
             return dispatch_getcwd(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_EPOLL_CREATE1:
@@ -3767,6 +3904,8 @@ static qword_t dispatch_syscall_inner(
             return dispatch_mkdirat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNLINKAT:
             return dispatch_unlinkat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SYMLINKAT:
+            return dispatch_symlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RENAMEAT:
             return dispatch_renameat(
                     context, syscall, task, fault, false);
@@ -3787,6 +3926,21 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_FCHDIR:
             return syscall_result(file_fchdir_task(
                     task, syscall_fd(syscall->arguments[0])));
+        case AARCH64_LINUX_SYS_FCHMOD:
+            return syscall_result(file_fchmod_task(task,
+                    syscall_fd(syscall->arguments[0]),
+                    (mode_t_) (word_t) syscall->arguments[1]));
+        case AARCH64_LINUX_SYS_FCHMODAT:
+            return dispatch_fchmodat(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FCHOWNAT:
+            return dispatch_fchownat(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_FCHOWN:
+            return syscall_result(file_fchown_task(task,
+                    syscall_fd(syscall->arguments[0]),
+                    (uid_t_) (dword_t) syscall->arguments[1],
+                    (uid_t_) (dword_t) syscall->arguments[2]));
         case AARCH64_LINUX_SYS_OPENAT:
             return dispatch_openat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOSE:
@@ -3838,6 +3992,9 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_FDATASYNC:
             return syscall_result(file_sync_task(task,
                     syscall_fd(syscall->arguments[0]), true));
+        case AARCH64_LINUX_SYS_UTIMENSAT:
+            return dispatch_utimensat(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FUTEX:
             if (!task_has_aarch64_process(task))
                 return syscall_result(_EINVAL);

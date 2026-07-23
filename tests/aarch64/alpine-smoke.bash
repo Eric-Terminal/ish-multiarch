@@ -134,6 +134,8 @@ run_guest /bin/sh -c '
     mkdir -p /tmp/ish-aarch64-smoke
     printf "multiarch-ok\n" > /tmp/ish-aarch64-smoke/data
     test "$(cat /tmp/ish-aarch64-smoke/data)" = multiarch-ok
+    chmod 0640 /tmp/ish-aarch64-smoke/data
+    test "$(stat -c %a /tmp/ish-aarch64-smoke/data)" = 640
     cp /tmp/ish-aarch64-smoke/data /tmp/ish-aarch64-smoke/copy
     mv /tmp/ish-aarch64-smoke/copy /tmp/ish-aarch64-smoke/moved
     test -f /tmp/ish-aarch64-smoke/moved

@@ -91,6 +91,9 @@ struct kernel_probe {
     char last_mkdir_path[MAX_PATH];
     char last_rename_source[MAX_PATH];
     char last_rename_destination[MAX_PATH];
+    char last_symlink_target[MAX_PATH];
+    char last_symlink_link[MAX_PATH];
+    char last_setattr_path[MAX_PATH];
     int last_flags;
     int last_mode;
     int last_mkdir_mode;
@@ -100,11 +103,17 @@ struct kernel_probe {
     unsigned fstat_calls;
     unsigned statfs_calls;
     unsigned fsetattr_calls;
+    unsigned mode_fsetattr_calls;
+    unsigned ownership_fsetattr_calls;
+    unsigned setattr_calls;
+    unsigned utime_calls;
+    unsigned futime_calls;
     unsigned readlink_calls;
     unsigned unlink_calls;
     unsigned rmdir_calls;
     unsigned mkdir_calls;
     unsigned rename_calls;
+    unsigned symlink_calls;
     unsigned fsync_calls;
     unsigned fdatasync_calls;
     unsigned flock_calls;
@@ -113,8 +122,16 @@ struct kernel_probe {
     int flock_result;
     int last_flock_operation;
     int fsetattr_error;
+    int mode_error;
+    int ownership_error;
+    int utime_error;
+    int futime_error;
     int statfs_error;
     off_t_ requested_size;
+    struct attr last_attr;
+    struct timespec last_atime;
+    struct timespec last_mtime;
+    bool last_follow_links;
     unsigned ioctl_calls;
     dword_t last_ioctl_command;
     dword_t ioctl_input;
@@ -485,6 +502,16 @@ static int probe_statfs(
 static int probe_fsetattr(struct fd *fd, struct attr attr) {
     struct fd_state *state = fd->data;
     struct kernel_probe *kernel = state->kernel;
+    if (attr.type == attr_ownership) {
+        kernel->ownership_fsetattr_calls++;
+        kernel->last_attr = attr;
+        return kernel->ownership_error;
+    }
+    if (attr.type == attr_mode) {
+        kernel->mode_fsetattr_calls++;
+        kernel->last_attr = attr;
+        return kernel->mode_error;
+    }
     CHECK(lock_owned_by_current(&fd->lock),
             "truncate provider 回调必须持有 fd 锁");
     CHECK(attr.type == attr_size && attr.size >= 0,
@@ -495,6 +522,38 @@ static int probe_fsetattr(struct fd *fd, struct attr attr) {
         return kernel->fsetattr_error;
     kernel->stat.size = (qword_t) attr.size;
     return 0;
+}
+
+static int probe_setattr(
+        struct mount *mount, const char *path, struct attr attr) {
+    struct kernel_probe *kernel = mount->data;
+    kernel->setattr_calls++;
+    strcpy(kernel->last_setattr_path, path);
+    kernel->last_attr = attr;
+    return attr.type == attr_mode ?
+            kernel->mode_error : kernel->ownership_error;
+}
+
+static int probe_utime(struct mount *mount, const char *path,
+        struct timespec atime, struct timespec mtime,
+        bool follow_links) {
+    struct kernel_probe *kernel = mount->data;
+    kernel->utime_calls++;
+    strcpy(kernel->last_setattr_path, path);
+    kernel->last_atime = atime;
+    kernel->last_mtime = mtime;
+    kernel->last_follow_links = follow_links;
+    return kernel->utime_error;
+}
+
+static int probe_futime(struct fd *fd,
+        struct timespec atime, struct timespec mtime) {
+    struct fd_state *state = fd->data;
+    struct kernel_probe *kernel = state->kernel;
+    kernel->futime_calls++;
+    kernel->last_atime = atime;
+    kernel->last_mtime = mtime;
+    return kernel->futime_error;
 }
 
 static ssize_t probe_readlink(struct mount *mount,
@@ -544,6 +603,15 @@ static int probe_rename(struct mount *mount,
     return 0;
 }
 
+static int probe_symlink(struct mount *mount,
+        const char *target, const char *link) {
+    struct kernel_probe *probe = mount->data;
+    probe->symlink_calls++;
+    strcpy(probe->last_symlink_target, target);
+    strcpy(probe->last_symlink_link, link);
+    return 0;
+}
+
 static int probe_getpath(struct fd *fd, char *buffer) {
     struct fd_state *state = fd->data;
     strcpy(buffer, state->path);
@@ -560,9 +628,13 @@ static const struct fs_ops probe_fs = {
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
     .rename = probe_rename,
+    .symlink = probe_symlink,
     .stat = probe_stat,
     .fstat = probe_fstat,
+    .setattr = probe_setattr,
     .fsetattr = probe_fsetattr,
+    .utime = probe_utime,
+    .futime = probe_futime,
     .getpath = probe_getpath,
 };
 
@@ -997,6 +1069,315 @@ static int test_pselect6(struct task_fixture *fixture,
     return 0;
 }
 
+static int test_metadata_syscalls(struct task_fixture *fixture,
+        struct user_memory *memory,
+        struct guest_linux_user_fault *fault,
+        struct kernel_probe *kernel) {
+    const size_t path_offset = 0xe000;
+    const size_t times_offset = 0xe103;
+    const qword_t path_address = USER_BASE + path_offset;
+    const qword_t times_address = USER_BASE + times_offset;
+    static const char metadata_path[] = "metadata";
+    memcpy(memory->bytes + path_offset,
+            metadata_path, sizeof(metadata_path));
+
+    qword_t result;
+    for (qword_t number = 5; number <= 16; number++) {
+        reset_user_access(memory);
+        memory->fail_read_at = path_address;
+        memory->fail_write_at = path_address;
+        result = invoke_five(fixture, memory, fault, number,
+                UINT64_MAX, path_address, path_address, UINT64_MAX,
+                UINT64_MAX);
+        CHECK(result == encoded_error(_ENOTSUP) &&
+                memory->read_calls == 0 && memory->write_calls == 0 &&
+                fault->address == 0 && fault->access == 0 &&
+                fault->kind == GUEST_MEMORY_FAULT_NONE,
+                "AArch64 xattr stub 与官方 i386 一致且不访问 guest 参数");
+    }
+
+    unsigned chmod_setattr_before = kernel->setattr_calls;
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 53,
+            UINT64_C(0x11223344ffffff9c), path_address,
+            UINT64_C(0xaabbccddffffe1ed), UINT64_MAX);
+    CHECK(result == 0 &&
+            kernel->setattr_calls == chmod_setattr_before + 1 &&
+            strcmp(kernel->last_setattr_path, "/work/metadata") == 0 &&
+            kernel->last_attr.type == attr_mode &&
+            kernel->last_attr.mode == 0755 &&
+            kernel->last_attr.follow_links &&
+            memory->read_calls == sizeof(metadata_path),
+            "三参数 fchmodat 解码低位参数、忽略 x3 并跟随链接");
+
+    reset_user_access(memory);
+    memory->fail_read_at = path_address;
+    result = invoke(fixture, memory, fault, 53,
+            99, path_address, 0600, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->read_calls == 1 &&
+            kernel->setattr_calls == chmod_setattr_before + 1,
+            "fchmodat 的 pathname 故障优先于 dirfd");
+
+    unsigned mode_fsetattr_before = kernel->mode_fsetattr_calls;
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 52,
+            UINT64_C(0xabcdef0100000000),
+            UINT64_C(0x55667788ffffe1a0), 0, 0);
+    CHECK(result == 0 &&
+            kernel->mode_fsetattr_calls == mode_fsetattr_before + 1 &&
+            kernel->last_attr.type == attr_mode &&
+            kernel->last_attr.mode == 0640 &&
+            memory->read_calls == 0 && memory->write_calls == 0,
+            "fchmod 解码低位 fd/mode 并直接操作打开文件");
+    CHECK(invoke(fixture, memory, fault, 52,
+                    99, 0600, 0, 0) == encoded_error(_EBADF) &&
+            kernel->mode_fsetattr_calls == mode_fsetattr_before + 1,
+            "fchmod 先验证目标任务 fd");
+
+    kernel->mode_error = _EROFS;
+    CHECK(invoke(fixture, memory, fault, 52,
+                    0, 0600, 0, 0) == encoded_error(_EROFS) &&
+            kernel->mode_fsetattr_calls == mode_fsetattr_before + 2,
+            "fchmod 原样传播 mode provider 错误");
+    memcpy(memory->bytes + path_offset,
+            metadata_path, sizeof(metadata_path));
+    CHECK(invoke(fixture, memory, fault, 53,
+                    AT_FDCWD_, path_address, 0600, UINT64_MAX) ==
+                    encoded_error(_EROFS) &&
+            kernel->setattr_calls == chmod_setattr_before + 2,
+            "fchmodat 原样传播路径 mode provider 错误");
+    kernel->mode_error = 0;
+
+    unsigned setattr_before = kernel->setattr_calls;
+    reset_user_access(memory);
+    result = invoke_five(fixture, memory, fault, 54,
+            UINT64_C(0x11223344ffffff9c), path_address,
+            UINT64_C(0xaabbccdd000004d2),
+            UINT64_C(0xeeff00110000162e),
+            UINT64_C(0x1234567800000000));
+    CHECK(result == 0 && kernel->setattr_calls == setattr_before + 1 &&
+            strcmp(kernel->last_setattr_path, "/work/metadata") == 0 &&
+            kernel->last_attr.type == attr_ownership &&
+            kernel->last_attr.ownership.uid == 1234 &&
+            kernel->last_attr.ownership.gid == 5678 &&
+            kernel->last_attr.follow_links &&
+            memory->read_calls == sizeof(metadata_path),
+            "fchownat 解码低 32 位参数并原子提交 owner/group");
+
+    reset_user_access(memory);
+    memory->fail_read_at = path_address;
+    result = invoke_five(fixture, memory, fault, 54,
+            99, path_address, 1, 2, UINT64_C(0x80000000));
+    CHECK(result == encoded_error(_EINVAL) &&
+            memory->read_calls == 0 &&
+            kernel->setattr_calls == setattr_before + 1,
+            "fchownat 的未知 flags 优先于 pathname 故障");
+
+    static const char link_path[] = "link";
+    memcpy(memory->bytes + path_offset, link_path, sizeof(link_path));
+    reset_user_access(memory);
+    result = invoke_five(fixture, memory, fault, 54,
+            AT_FDCWD_, path_address, 41, 42,
+            UINT64_C(0xaabbccdd00000100));
+    CHECK(result == 0 && kernel->setattr_calls == setattr_before + 2 &&
+            strcmp(kernel->last_setattr_path, "/work/link") == 0 &&
+            !kernel->last_attr.follow_links &&
+            kernel->last_attr.ownership.uid == 41 &&
+            kernel->last_attr.ownership.gid == 42,
+            "fchownat 的 NOFOLLOW 保留最终符号链接对象");
+
+    memcpy(memory->bytes + path_offset,
+            metadata_path, sizeof(metadata_path));
+    kernel->ownership_error = _EIO;
+    reset_user_access(memory);
+    result = invoke_five(fixture, memory, fault, 54,
+            AT_FDCWD_, path_address, UINT64_MAX, UINT64_MAX, 0);
+    CHECK(result == encoded_error(_EIO) &&
+            kernel->setattr_calls == setattr_before + 3 &&
+            kernel->last_attr.ownership.uid == UINT32_MAX &&
+            kernel->last_attr.ownership.gid == UINT32_MAX,
+            "fchownat 的两个 -1 哨兵仍调用 ownership provider");
+    kernel->ownership_error = 0;
+
+    memory->bytes[path_offset] = '\0';
+    unsigned fsetattr_before = kernel->ownership_fsetattr_calls;
+    reset_user_access(memory);
+    result = invoke_five(fixture, memory, fault, 54,
+            UINT64_C(0x9988776600000000), path_address,
+            91, UINT64_MAX, UINT64_C(0x1000));
+    CHECK(result == 0 &&
+            kernel->ownership_fsetattr_calls == fsetattr_before + 1 &&
+            kernel->last_attr.ownership.uid == 91 &&
+            kernel->last_attr.ownership.gid == UINT32_MAX,
+            "fchownat 的 EMPTY_PATH 直接修改普通文件 fd");
+
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 55,
+            UINT64_C(0xabcdef0100000000), UINT64_MAX,
+            UINT64_C(0x556677880000004d), 0);
+    CHECK(result == 0 &&
+            kernel->ownership_fsetattr_calls == fsetattr_before + 2 &&
+            kernel->last_attr.ownership.uid == UINT32_MAX &&
+            kernel->last_attr.ownership.gid == 77 &&
+            memory->read_calls == 0 && memory->write_calls == 0,
+            "fchown 解码低位 fd 并独立保留 -1 哨兵");
+    CHECK(invoke(fixture, memory, fault, 55, 99,
+                    UINT64_MAX, UINT64_MAX, 0) ==
+                    encoded_error(_EBADF) &&
+            kernel->ownership_fsetattr_calls == fsetattr_before + 2,
+            "fchown 的两个 -1 仍先验证 fd");
+
+    kernel->ownership_error = _ENOSPC;
+    CHECK(invoke(fixture, memory, fault, 55, 0,
+                    UINT64_MAX, UINT64_MAX, 0) ==
+                    encoded_error(_ENOSPC) &&
+            kernel->ownership_fsetattr_calls == fsetattr_before + 3,
+            "fchown 的两个 -1 哨兵仍调用 ownership provider");
+    kernel->ownership_error = 0;
+
+    kernel->ownership_error = _EIO;
+    CHECK(invoke(fixture, memory, fault, 55, 0, 1, 2, 0) ==
+                    encoded_error(_EIO) &&
+            kernel->ownership_fsetattr_calls == fsetattr_before + 4,
+            "fchown 原样传播组合 ownership provider 错误");
+    kernel->ownership_error = 0;
+
+    struct aarch64_linux_timespec wire[2] = {
+        {
+            .sec = INT64_C(0x100000001),
+            .nsec = INT64_C(123456789),
+        },
+        {
+            .sec = INT64_C(-0x100000002),
+            .nsec = LINUX_UTIME_OMIT_,
+        },
+    };
+    memcpy(memory->bytes + times_offset, wire, sizeof(wire));
+    memcpy(memory->bytes + path_offset,
+            metadata_path, sizeof(metadata_path));
+    unsigned utime_before = kernel->utime_calls;
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 88,
+            AT_FDCWD_, path_address, times_address, 0);
+    CHECK(result == 0 && kernel->utime_calls == utime_before + 1 &&
+            strcmp(kernel->last_setattr_path, "/work/metadata") == 0 &&
+            (sqword_t) kernel->last_atime.tv_sec ==
+                    INT64_C(0x100000001) &&
+            kernel->last_atime.tv_nsec == 123456789 &&
+            kernel->last_mtime.tv_nsec == UTIME_OMIT &&
+            memory->read_calls == 1 + sizeof(metadata_path) &&
+            memory->read_bytes == sizeof(wire) + sizeof(metadata_path) &&
+            memory->max_read_size == sizeof(wire) &&
+            access_is(memory, 0, times_address,
+                    sizeof(wire), GUEST_MEMORY_READ),
+            "utimensat 先读取完整 LP64 wire 再解析路径并翻译 OMIT");
+
+    reset_user_access(memory);
+    memory->fail_read_at = times_address + 17;
+    result = invoke(fixture, memory, fault, 88,
+            AT_FDCWD_, path_address, times_address, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->read_calls == 1 &&
+            kernel->utime_calls == utime_before + 1 &&
+            fault->address == times_address + 17 &&
+            fault->access == GUEST_MEMORY_READ,
+            "utimensat 的 timespec 中途故障优先于 pathname");
+
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 88,
+            AT_FDCWD_, path_address,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 15, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            memory->read_calls == 0 &&
+            kernel->utime_calls == utime_before + 1 &&
+            fault->kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "utimensat 在 guest 回调前拒绝越过 AArch64 地址上限的 wire");
+
+    wire[0].nsec = LINUX_UTIME_OMIT_;
+    wire[1].nsec = LINUX_UTIME_OMIT_;
+    memcpy(memory->bytes + times_offset, wire, sizeof(wire));
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 88,
+            99, UINT64_MAX, times_address, UINT64_MAX);
+    CHECK(result == 0 && memory->read_calls == 1 &&
+            kernel->utime_calls == utime_before + 1,
+            "utimensat 的双 OMIT 在读取 wire 后跳过 flags、路径和 fd");
+
+    wire[0].nsec = 1;
+    wire[1].nsec = 2;
+    memcpy(memory->bytes + times_offset, wire, sizeof(wire));
+    reset_user_access(memory);
+    memory->fail_read_at = path_address;
+    result = invoke(fixture, memory, fault, 88,
+            99, path_address, times_address, UINT64_C(0x80000000));
+    CHECK(result == encoded_error(_EINVAL) &&
+            memory->read_calls == 1 &&
+            kernel->utime_calls == utime_before + 1,
+            "utimensat 在读取 timespec 后让未知 flags 优先于 pathname");
+
+    unsigned futime_before = kernel->futime_calls;
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 88, 0, 0, 0, 0);
+    CHECK(result == 0 && kernel->futime_calls == futime_before + 1 &&
+            kernel->last_atime.tv_nsec == UTIME_NOW &&
+            kernel->last_mtime.tv_nsec == UTIME_NOW &&
+            memory->read_calls == 0,
+            "utimensat 的 NULL times 通过真实 fd 语义设置当前时间");
+    CHECK(invoke(fixture, memory, fault, 88,
+                    AT_FDCWD_, 0, 0, 0) == encoded_error(_EFAULT),
+            "utimensat 不把 NULL pathname 与 AT_FDCWD 冒充当前目录");
+    CHECK(invoke(fixture, memory, fault, 88,
+                    AT_FDCWD_, 0, 0, AT_EMPTY_PATH_) ==
+                    encoded_error(_EFAULT) &&
+            invoke(fixture, memory, fault, 88,
+                    AT_FDCWD_, 0, 0, AT_SYMLINK_NOFOLLOW_) ==
+                    encoded_error(_EFAULT),
+            "utimensat 的合法路径 flags 不掩盖 AT_FDCWD NULL pathname");
+
+    wire[0].nsec = INT64_C(1000000000);
+    wire[1].nsec = 0;
+    memcpy(memory->bytes + times_offset, wire, sizeof(wire));
+    reset_user_access(memory);
+    CHECK(invoke(fixture, memory, fault, 88,
+                    99, 0, times_address, 0) == encoded_error(_EBADF) &&
+            kernel->futime_calls == futime_before + 1,
+            "utimensat 的 fd 错误优先于非法纳秒");
+    CHECK(invoke(fixture, memory, fault, 88,
+                    0, 0, times_address, 0) == encoded_error(_EINVAL) &&
+            kernel->futime_calls == futime_before + 1,
+            "utimensat 在有效 fd 上拒绝非法纳秒");
+
+    wire[0].nsec = 3;
+    wire[1].nsec = 4;
+    memcpy(memory->bytes + times_offset, wire, sizeof(wire));
+    memory->bytes[path_offset] = '\0';
+    reset_user_access(memory);
+    result = invoke(fixture, memory, fault, 88,
+            0, path_address, times_address, AT_EMPTY_PATH_);
+    CHECK(result == 0 && kernel->futime_calls == futime_before + 2,
+            "utimensat 的 EMPTY_PATH 直接更新时间 fd");
+
+    kernel->futime_error = _ENOSPC;
+    CHECK(invoke(fixture, memory, fault, 88,
+                    0, 0, times_address, 0) == encoded_error(_ENOSPC) &&
+            kernel->futime_calls == futime_before + 3,
+            "utimensat 原样传播 futime provider 错误");
+    kernel->futime_error = 0;
+
+    memcpy(memory->bytes + path_offset,
+            metadata_path, sizeof(metadata_path));
+    unsigned utime_error_before = kernel->utime_calls;
+    kernel->utime_error = _EROFS;
+    CHECK(invoke(fixture, memory, fault, 88,
+                    AT_FDCWD_, path_address, times_address, 0) ==
+                    encoded_error(_EROFS) &&
+            kernel->utime_calls == utime_error_before + 1,
+            "utimensat 原样传播路径 utime provider 错误");
+    kernel->utime_error = 0;
+    return 0;
+}
+
 static const byte_t expected_stat[128] = {
     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
     0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
@@ -1067,6 +1448,13 @@ int main(void) {
     struct guest_linux_user_fault fault;
 
     if (test_pselect6(&fixture, &memory, &fault, &io) != 0) {
+        (void) destroy_fixture(&fixture);
+        return 1;
+    }
+    reset_user_access(&memory);
+
+    if (test_metadata_syscalls(
+            &fixture, &memory, &fault, &kernel) != 0) {
         (void) destroy_fixture(&fixture);
         return 1;
     }
@@ -2033,6 +2421,95 @@ int main(void) {
             "mkdirat 绝对路径从目标 root 解析并忽略无效 dirfd");
 
     const size_t rename_destination_offset = path_offset + 0x100;
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + rename_destination_offset;
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + path_offset, 99,
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_ENOENT) && memory.read_calls == 1 &&
+            kernel.symlink_calls == 0,
+            "symlinkat 空目标优先于链接路径故障返回 ENOENT");
+
+    static const char symlink_target[] = "../bin/busybox";
+    static const char symlink_link[] = "applet";
+    memcpy(memory.bytes + path_offset,
+            symlink_target, sizeof(symlink_target));
+    memcpy(memory.bytes + rename_destination_offset,
+            symlink_link, sizeof(symlink_link));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + path_offset,
+            UINT64_C(0x12345678ffffff9c),
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == 0 && kernel.symlink_calls == 1 &&
+            strcmp(kernel.last_symlink_target, "../bin/busybox") == 0 &&
+            strcmp(kernel.last_symlink_link, "/work/applet") == 0 &&
+            memory.read_calls == sizeof(symlink_target) + sizeof(symlink_link),
+            "symlinkat 保留目标文本并按目标任务 cwd 创建链接");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + rename_destination_offset + 3;
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + path_offset, AT_FDCWD_,
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            kernel.symlink_calls == 1 &&
+            memory.read_calls == sizeof(symlink_target) + 4 &&
+            memory.read_bytes == sizeof(symlink_target) + 3 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "symlinkat 链接路径故障保持精确 guest fault 且不创建链接");
+
+    memory.bytes[rename_destination_offset] = '\0';
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + path_offset, 99,
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_ENOENT) &&
+            kernel.symlink_calls == 1,
+            "symlinkat 空链接路径优先于无效 dirfd 返回 ENOENT");
+
+    static const char symlink_absolute[] = "/absolute-link";
+    memcpy(memory.bytes + rename_destination_offset,
+            symlink_absolute, sizeof(symlink_absolute));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + path_offset, 99,
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == 0 && kernel.symlink_calls == 2 &&
+            strcmp(kernel.last_symlink_target, "../bin/busybox") == 0 &&
+            strcmp(kernel.last_symlink_link, "/absolute-link") == 0,
+            "symlinkat 绝对路径使用目标 root 并忽略无效 dirfd");
+
+    const size_t long_target_offset = 0x6000;
+    const size_t long_link_offset = 0x7200;
+    memset(memory.bytes + long_target_offset, 'x', MAX_PATH - 1);
+    memory.bytes[long_target_offset + MAX_PATH - 1] = '\0';
+    static const char long_symlink_link[] = "long-link";
+    memcpy(memory.bytes + long_link_offset,
+            long_symlink_link, sizeof(long_symlink_link));
+    reset_user_access(&memory);
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + long_target_offset, AT_FDCWD_,
+            USER_BASE + long_link_offset, 0);
+    CHECK(result == 0 && kernel.symlink_calls == 3 &&
+            strlen(kernel.last_symlink_target) == MAX_PATH - 1 &&
+            strcmp(kernel.last_symlink_link, "/work/long-link") == 0,
+            "symlinkat 接受含 NUL 的 4096 字节最长目标");
+
+    memset(memory.bytes + long_target_offset, 'x', MAX_PATH);
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + long_link_offset;
+    result = invoke(&fixture, &memory, &fault, 36,
+            USER_BASE + long_target_offset, AT_FDCWD_,
+            USER_BASE + long_link_offset, 0);
+    CHECK(result == encoded_error(_ENAMETOOLONG) &&
+            memory.read_calls == MAX_PATH &&
+            kernel.symlink_calls == 3,
+            "symlinkat 的 4096 个非 NUL 目标字节返回 ENAMETOOLONG 且不读链接路径");
+
     static const char rename_source[] = "rename-source";
     static const char rename_destination[] = "rename-destination";
     memcpy(memory.bytes + path_offset,
