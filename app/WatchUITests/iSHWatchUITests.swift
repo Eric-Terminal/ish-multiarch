@@ -199,7 +199,7 @@ final class iSHWatchUITests: XCTestCase {
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
 
-        runNetworkStage(
+        runGuestStage(
             "RESOLVER",
             command:
                 "grep -Eq '^nameserver[[:space:]]+[^[:space:]]+' " +
@@ -209,7 +209,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "GETENT",
             command:
                 "timeout 90 getent hosts dl-cdn.alpinelinux.org " +
@@ -219,7 +219,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "NSLOOKUP",
             command:
                 "timeout 90 nslookup dl-cdn.alpinelinux.org " +
@@ -229,7 +229,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "HTTP-IPV4",
             command:
                 "ip=$(nslookup dl-cdn.alpinelinux.org | " +
@@ -244,7 +244,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "HTTP",
             command:
                 "printf 'GET / HTTP/1.0\\r\\nHost: " +
@@ -257,7 +257,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "HTTPS",
             command:
                 "a=/tmp/ish-apkindex.tar.gz; rm -f \"$a\"; " +
@@ -271,7 +271,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "APK-CONFIG",
             command:
                 "test \"$(apk --print-arch 2>\"$l\")\" = aarch64 && " +
@@ -285,7 +285,7 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
-        runNetworkStage(
+        runGuestStage(
             "APK-UPDATE",
             command:
                 "s=/tmp/ish-apk-search.log; rm -f \"$s\"; " +
@@ -299,8 +299,107 @@ final class iSHWatchUITests: XCTestCase {
             terminal: terminal)
     }
 
-    private func runNetworkStage(
+    func testAArch64SQLite持久化() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let input = app.textFields["command-input"]
+        XCTAssertTrue(
+            input.waitForExistence(timeout: 180),
+            "命令输入框没有在期限内出现")
+        let ready = expectation(
+            for: NSPredicate(format: "enabled == true"),
+            evaluatedWith: input)
+        wait(for: [ready], timeout: 180)
+
+        let send = app.buttons["send-command"]
+        XCTAssertTrue(
+            send.waitForExistence(timeout: 10),
+            "发送按钮没有出现")
+        let terminal = app.staticTexts["terminal-output"]
+        XCTAssertTrue(
+            terminal.waitForExistence(timeout: 10),
+            "终端输出没有出现")
+
+        runGuestStage(
+            "INSTALL",
+            suite: "SQLITE",
+            command:
+                "if apk info -e sqlite >/dev/null 2>&1; then :; " +
+                "else timeout -k 15 900 apk --cache-max-age 10080 " +
+                "add --no-progress 'sqlite=3.53.2-r0' " +
+                ">\"$l\" 2>&1; fi && " +
+                "timeout -k 15 900 apk --cache-max-age 10080 " +
+                "fix --no-progress ncurses-terminfo-base " +
+                "libncursesw readline sqlite " +
+                ">>\"$l\" 2>&1 && " +
+                "sqlite3 --version >>\"$l\" 2>&1",
+            timeout: 1020,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "WAL",
+            suite: "SQLITE",
+            command:
+                "d=/root/.ish-sqlite-gate; db=$d/matrix.db; o=$d/result; " +
+                "rm -rf \"$d\"; mkdir -p \"$d\" && " +
+                "sqlite3 \"$db\" 'PRAGMA journal_mode=WAL; " +
+                "CREATE TABLE values_under_test(value INTEGER); " +
+                "BEGIN; INSERT INTO values_under_test VALUES(40),(2); " +
+                "COMMIT; SELECT sum(value) FROM values_under_test; " +
+                "PRAGMA integrity_check;' >\"$o\" 2>\"$l\" && " +
+                "test \"$(sed -n '1p' \"$o\")\" = wal && " +
+                "test \"$(sed -n '2p' \"$o\")\" = 42 && " +
+                "test \"$(sed -n '3p' \"$o\")\" = ok && " +
+                "test -s \"$db\" && sync",
+            timeout: 180,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+
+        app.terminate()
+        app.launch()
+
+        let restartedInput = app.textFields["command-input"]
+        XCTAssertTrue(
+            restartedInput.waitForExistence(timeout: 180),
+            "重启后命令输入框没有在期限内出现")
+        let restartedReady = expectation(
+            for: NSPredicate(format: "enabled == true"),
+            evaluatedWith: restartedInput)
+        wait(for: [restartedReady], timeout: 180)
+
+        let restartedSend = app.buttons["send-command"]
+        XCTAssertTrue(
+            restartedSend.waitForExistence(timeout: 10),
+            "重启后发送按钮没有出现")
+        let restartedTerminal = app.staticTexts["terminal-output"]
+        XCTAssertTrue(
+            restartedTerminal.waitForExistence(timeout: 10),
+            "重启后终端输出没有出现")
+        runGuestStage(
+            "RESTART",
+            suite: "SQLITE",
+            command:
+                "d=/root/.ish-sqlite-gate; db=$d/matrix.db; " +
+                "command -v sqlite3 >\"$l\" 2>&1 && " +
+                "test \"$(sqlite3 \"$db\" 'SELECT sum(value) " +
+                "FROM values_under_test;')\" = 42 && " +
+                "test \"$(sqlite3 \"$db\" 'PRAGMA integrity_check;')\" = ok && " +
+                "rm -rf \"$d\"",
+            timeout: 180,
+            app: app,
+            input: restartedInput,
+            send: restartedSend,
+            terminal: restartedTerminal)
+    }
+
+    private func runGuestStage(
         _ stage: String,
+        suite: String = "NET",
         command: String,
         timeout: TimeInterval,
         app: XCUIApplication,
@@ -309,14 +408,14 @@ final class iSHWatchUITests: XCTestCase {
         terminal: XCUIElement
     ) {
         let token = String(UUID().uuidString.prefix(8))
-        let pass = "ISH-NET:\(token):\(stage):PASS"
-        let fail = "ISH-NET:\(token):\(stage):FAIL"
-        let log = "/tmp/ish-net-\(stage.lowercased()).log"
+        let pass = "ISH-\(suite):\(token):\(stage):PASS"
+        let fail = "ISH-\(suite):\(token):\(stage):FAIL"
+        let log = "/tmp/ish-\(suite.lowercased())-\(stage.lowercased()).log"
         let script =
             "t=\(token); l=\(log); rm -f \"$l\"; if \(command); then " +
-            "printf 'ISH-NET:%s:\(stage):PASS\\n' \"$t\"; else r=$?; " +
+            "printf 'ISH-\(suite):%s:\(stage):PASS\\n' \"$t\"; else r=$?; " +
             "tail -c 4096 \"$l\" 2>/dev/null; " +
-            "printf '\\nISH-NET:%s:\(stage):FAIL:%s\\n' \"$t\" \"$r\"; fi"
+            "printf '\\nISH-\(suite):%s:\(stage):FAIL:%s\\n' \"$t\" \"$r\"; fi"
 
         input.tap()
         let systemInput = app.textViews.firstMatch
