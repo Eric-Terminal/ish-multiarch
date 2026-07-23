@@ -329,6 +329,12 @@ static void fake_stat_setattr(struct ish_stat *ishstat, struct attr attr) {
         case attr_gid:
             ishstat->gid = attr.gid;
             break;
+        case attr_ownership:
+            if (attr.ownership.uid != (uid_t_) -1)
+                ishstat->uid = attr.ownership.uid;
+            if (attr.ownership.gid != (uid_t_) -1)
+                ishstat->gid = attr.ownership.gid;
+            break;
         case attr_mode:
             ishstat->mode = (ishstat->mode & S_IFMT) | (attr.mode & ~S_IFMT);
             break;
@@ -515,6 +521,7 @@ const struct fs_ops fakefs = {
     .fsetattr = fakefs_fsetattr,
     .getpath = realfs_getpath,
     .utime = realfs_utime,
+    .futime = realfs_futime,
 
     .mkdir = fakefs_mkdir,
     .rmdir = fakefs_rmdir,

@@ -46,6 +46,10 @@ struct open_probe {
     char last_mkdir_path[MAX_PATH];
     char last_rename_source[MAX_PATH];
     char last_rename_destination[MAX_PATH];
+    char last_symlink_target[MAX_PATH];
+    char last_symlink_link[MAX_PATH];
+    char last_setattr_path[MAX_PATH];
+    char last_futime_path[MAX_PATH];
     int last_flags;
     int last_mode;
     uid_t_ last_open_uid;
@@ -60,6 +64,12 @@ struct open_probe {
     unsigned rmdirs;
     unsigned mkdirs;
     unsigned renames;
+    unsigned symlinks;
+    unsigned setattrs;
+    unsigned mode_fsetattrs;
+    unsigned ownership_fsetattrs;
+    unsigned utimes;
+    unsigned futimes;
     uid_t_ owner;
     uid_t_ group;
     mode_t_ file_mode;
@@ -67,6 +77,11 @@ struct open_probe {
     off_t_ requested_size;
     unsigned resize_calls;
     int resize_error;
+    int mode_error;
+    struct attr last_attr;
+    struct timespec last_atime;
+    struct timespec last_mtime;
+    bool last_follow_links;
     bool report_created;
     struct access_identity_gate *access_gate;
 };
@@ -204,6 +219,18 @@ static int probe_fstat(struct fd *fd, struct statbuf *stat) {
 static int probe_fsetattr(struct fd *fd, struct attr attr) {
     struct file_state *state = fd->data;
     struct open_probe *probe = state->probe;
+    if (attr.type == attr_ownership) {
+        probe->ownership_fsetattrs++;
+        probe->last_attr = attr;
+        strcpy(probe->last_futime_path, state->path);
+        return 0;
+    }
+    if (attr.type == attr_mode) {
+        probe->mode_fsetattrs++;
+        probe->last_attr = attr;
+        strcpy(probe->last_futime_path, state->path);
+        return probe->mode_error;
+    }
     assert(lock_owned_by_current(&fd->lock));
     assert(attr.type == attr_size);
     probe->resize_calls++;
@@ -211,6 +238,38 @@ static int probe_fsetattr(struct fd *fd, struct attr attr) {
     if (probe->resize_error != 0)
         return probe->resize_error;
     probe->file_size = (qword_t) attr.size;
+    return 0;
+}
+
+static int probe_setattr(
+        struct mount *mount, const char *path, struct attr attr) {
+    struct open_probe *probe = mount->data;
+    probe->setattrs++;
+    strcpy(probe->last_setattr_path, path);
+    probe->last_attr = attr;
+    return attr.type == attr_mode ? probe->mode_error : 0;
+}
+
+static int probe_utime(struct mount *mount, const char *path,
+        struct timespec atime, struct timespec mtime,
+        bool follow_links) {
+    struct open_probe *probe = mount->data;
+    probe->utimes++;
+    strcpy(probe->last_setattr_path, path);
+    probe->last_atime = atime;
+    probe->last_mtime = mtime;
+    probe->last_follow_links = follow_links;
+    return 0;
+}
+
+static int probe_futime(struct fd *fd,
+        struct timespec atime, struct timespec mtime) {
+    struct file_state *state = fd->data;
+    struct open_probe *probe = state->probe;
+    probe->futimes++;
+    strcpy(probe->last_futime_path, state->path);
+    probe->last_atime = atime;
+    probe->last_mtime = mtime;
     return 0;
 }
 
@@ -274,6 +333,15 @@ static int probe_rename(struct mount *mount,
     return 0;
 }
 
+static int probe_symlink(struct mount *mount,
+        const char *target, const char *link) {
+    struct open_probe *probe = mount->data;
+    probe->symlinks++;
+    strcpy(probe->last_symlink_target, target);
+    strcpy(probe->last_symlink_link, link);
+    return 0;
+}
+
 static const struct fs_ops probe_fs = {
     .open = probe_open,
     .open_identity = probe_open_identity,
@@ -282,9 +350,13 @@ static const struct fs_ops probe_fs = {
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
     .rename = probe_rename,
+    .symlink = probe_symlink,
     .stat = probe_stat,
     .fstat = probe_fstat,
+    .setattr = probe_setattr,
     .fsetattr = probe_fsetattr,
+    .utime = probe_utime,
+    .futime = probe_futime,
     .getpath = probe_getpath,
 };
 
@@ -678,6 +750,152 @@ int main(void) {
             memcmp(link_target, "explicit", 8) == 0,
             "readlinkat 相对路径使用目标任务中的显式 dirfd");
 
+    CHECK(file_fchownat_task(&target.task, AT_FDCWD_,
+            "child", 1101, 1202, 0) == 0 &&
+            probe.setattrs == 1 &&
+            strcmp(probe.last_setattr_path, "/target/child") == 0 &&
+            probe.last_attr.type == attr_ownership &&
+            probe.last_attr.ownership.uid == 1101 &&
+            probe.last_attr.ownership.gid == 1202 &&
+            probe.last_attr.follow_links,
+            "fchownat 使用目标任务 cwd 并组合提交 ownership");
+    CHECK(file_fchownat_task(&target.task, 0,
+            "nested", 1303, 1404, 0) == 0 &&
+            probe.setattrs == 2 &&
+            strcmp(probe.last_setattr_path, "/explicit/nested") == 0,
+            "fchownat 使用目标任务的显式 dirfd");
+    CHECK(file_fchownat_task(&target.task, AT_FDCWD_,
+            "link", 1505, 1606, AT_SYMLINK_NOFOLLOW_) == 0 &&
+            probe.setattrs == 3 &&
+            strcmp(probe.last_setattr_path, "/target/link") == 0 &&
+            !probe.last_attr.follow_links,
+            "fchownat NOFOLLOW 保留最终符号链接");
+    CHECK(file_fchownat_task(&target.task, 99,
+            "/absolute", 1707, 1808, 0) == 0 &&
+            probe.setattrs == 4 &&
+            strcmp(probe.last_setattr_path, "/sandbox/absolute") == 0,
+            "fchownat 绝对路径使用目标 root 并忽略无效 dirfd");
+    CHECK(file_fchownat_task(&target.task, 99,
+            "relative", 1, 2, 0) == _EBADF &&
+            probe.setattrs == 4,
+            "fchownat 相对路径拒绝目标任务中的无效 dirfd");
+    CHECK(file_fchownat_task(&target.task, 99,
+            "", 1, 2, 0) == _ENOENT,
+            "fchownat 空路径在 dirfd 前返回 ENOENT");
+
+    unsigned ownership_fsetattrs = probe.ownership_fsetattrs;
+    CHECK(file_fchownat_task(&target.task, 0,
+            "", 1909, (uid_t_) -1, AT_EMPTY_PATH_) == 0 &&
+            probe.ownership_fsetattrs == ownership_fsetattrs + 1 &&
+            strcmp(probe.last_futime_path, "/explicit") == 0 &&
+            probe.last_attr.ownership.uid == 1909 &&
+            probe.last_attr.ownership.gid == UINT32_MAX,
+            "fchownat EMPTY_PATH 直接操作目标任务 fd");
+    CHECK(file_fchown_task(&target.task, 0,
+            (uid_t_) -1, 2010) == 0 &&
+            probe.ownership_fsetattrs == ownership_fsetattrs + 2 &&
+            probe.last_attr.ownership.uid == UINT32_MAX &&
+            probe.last_attr.ownership.gid == 2010,
+            "fchown 通过强引用操作目标任务 fd");
+    CHECK(file_fchown_task(&target.task, 99,
+            (uid_t_) -1, (uid_t_) -1) == _EBADF,
+            "fchown 的空变更仍验证目标任务 fd");
+
+    unsigned chmod_setattrs = probe.setattrs;
+    CHECK(file_fchmodat_task(&target.task, AT_FDCWD_,
+            "child", (mode_t_) 0100755) == 0 &&
+            probe.setattrs == chmod_setattrs + 1 &&
+            strcmp(probe.last_setattr_path, "/target/child") == 0 &&
+            probe.last_attr.type == attr_mode &&
+            probe.last_attr.mode == 0755 &&
+            probe.last_attr.follow_links,
+            "fchmodat 使用目标任务 cwd、过滤 mode 并跟随链接");
+    CHECK(file_fchmodat_task(&target.task, 0,
+            "nested", 0640) == 0 &&
+            probe.setattrs == chmod_setattrs + 2 &&
+            strcmp(probe.last_setattr_path, "/explicit/nested") == 0,
+            "fchmodat 使用目标任务中的显式 dirfd");
+    CHECK(file_fchmodat_task(&target.task, 99,
+            "/absolute", 0600) == 0 &&
+            probe.setattrs == chmod_setattrs + 3 &&
+            strcmp(probe.last_setattr_path, "/sandbox/absolute") == 0,
+            "fchmodat 绝对路径忽略无效 dirfd");
+    CHECK(file_fchmodat_task(&target.task, AT_FDCWD_,
+            "link", 0600) == 0 &&
+            probe.setattrs == chmod_setattrs + 4 &&
+            strcmp(probe.last_setattr_path, "/sandbox/absolute") == 0 &&
+            probe.last_attr.follow_links,
+            "旧 fchmodat 固定跟随最终符号链接");
+    CHECK(file_fchmodat_task(&target.task, 99,
+            "relative", 0600) == _EBADF &&
+            file_fchmodat_task(&target.task, 99,
+                    "", 0600) == _ENOENT &&
+            file_fchmodat_task(&target.task, AT_FDCWD_,
+                    NULL, 0600) == _EFAULT,
+            "fchmodat 保留 pathname 与 dirfd 错误边界");
+    explicit_dir->type = S_IFREG;
+    CHECK(file_fchmodat_task(&target.task, 0,
+                    "nested", 0600) == _ENOTDIR &&
+            probe.setattrs == chmod_setattrs + 4,
+            "fchmodat 拒绝非目录 dirfd");
+    explicit_dir->type = S_IFDIR;
+
+    unsigned mode_fsetattrs = probe.mode_fsetattrs;
+    CHECK(file_fchmod_task(&target.task, 0, (mode_t_) 0100640) == 0 &&
+            probe.mode_fsetattrs == mode_fsetattrs + 1 &&
+            strcmp(probe.last_futime_path, "/explicit") == 0 &&
+            probe.last_attr.type == attr_mode &&
+            probe.last_attr.mode == 0640,
+            "fchmod 通过强引用操作目标任务 fd 并过滤 mode");
+    CHECK(file_fchmod_task(&target.task, 99, 0600) == _EBADF &&
+            probe.mode_fsetattrs == mode_fsetattrs + 1,
+            "fchmod 拒绝目标任务中的无效 fd");
+    probe.mode_error = _EROFS;
+    CHECK(file_fchmod_task(&target.task, 0, 0600) == _EROFS &&
+            probe.mode_fsetattrs == mode_fsetattrs + 2,
+            "fchmod 原样传播 mode provider 错误");
+    probe.mode_error = 0;
+
+    const struct file_timespec file_times[2] = {
+        {.sec = INT64_C(0x100000001), .nsec = 123456789},
+        {.sec = 0, .nsec = LINUX_UTIME_NOW_},
+    };
+    CHECK(file_utimensat_task(&target.task, AT_FDCWD_,
+            "child", file_times, 0) == 0 &&
+            probe.utimes == 1 &&
+            strcmp(probe.last_setattr_path, "/target/child") == 0 &&
+            (sqword_t) probe.last_atime.tv_sec == INT64_C(0x100000001) &&
+            probe.last_atime.tv_nsec == 123456789 &&
+            probe.last_mtime.tv_nsec == UTIME_NOW,
+            "utimensat 使用目标任务 cwd 并保留 64 位时间");
+    CHECK(file_utimensat_task(&target.task, 0,
+            "nested", file_times, AT_SYMLINK_NOFOLLOW_) == 0 &&
+            probe.utimes == 2 &&
+            strcmp(probe.last_setattr_path, "/explicit/nested") == 0 &&
+            !probe.last_follow_links,
+            "utimensat 使用目标任务显式 dirfd");
+    CHECK(file_utimensat_task(&target.task, 0,
+            NULL, file_times, 0) == 0 &&
+            probe.futimes == 1 &&
+            strcmp(probe.last_futime_path, "/explicit") == 0,
+            "utimensat NULL pathname 保持真正 fd 语义");
+    CHECK(file_utimensat_task(&target.task, AT_FDCWD_,
+            "", file_times, AT_EMPTY_PATH_) == 0 &&
+            probe.futimes == 2 &&
+            strcmp(probe.last_futime_path, "/target") == 0,
+            "utimensat EMPTY_PATH 直接操作目标任务 cwd");
+    CHECK(file_utimensat_task(&target.task, AT_FDCWD_,
+            NULL, file_times, 0) == _EFAULT,
+            "utimensat 不把 NULL pathname 冒充 AT_FDCWD");
+    const struct file_timespec omit_times[2] = {
+        {.nsec = LINUX_UTIME_OMIT_},
+        {.nsec = LINUX_UTIME_OMIT_},
+    };
+    CHECK(file_utimensat_task(&target.task, 99,
+            NULL, omit_times, INT32_MIN) == 0 &&
+            probe.utimes == 2 && probe.futimes == 2,
+            "utimensat 双 OMIT 跳过 flags、路径与 fd");
+
     const int sync_flags = (1 << 20) | (1 << 12);
     unsigned identity_opens_before = probe.identity_opens;
     struct fd *sync_read = generic_openat_task(
@@ -965,6 +1183,44 @@ int main(void) {
             strcmp(probe.last_mkdir_path, "/decoy/compat") == 0 &&
             probe.last_mkdir_mode == 0701,
             "兼容 mkdirat 入口仍使用 current 的 cwd");
+
+    CHECK(file_symlinkat_task(
+            &target.task, "", 99, "link") == _ENOENT &&
+            probe.symlinks == 0,
+            "symlinkat 空目标优先于 dirfd 返回 ENOENT");
+    CHECK(file_symlinkat_task(
+            &target.task, "busybox", 99, "") == _ENOENT &&
+            probe.symlinks == 0,
+            "symlinkat 空链接路径优先于 dirfd 返回 ENOENT");
+    CHECK(file_symlinkat_task(&target.task,
+            "../bin/busybox", AT_FDCWD_, "applet") == 0 &&
+            probe.symlinks == 1 &&
+            strcmp(probe.last_symlink_target, "../bin/busybox") == 0 &&
+            strcmp(probe.last_symlink_link, "/target/applet") == 0,
+            "symlinkat 保留目标文本并从目标任务 cwd 创建链接");
+    CHECK(file_symlinkat_task(&target.task,
+            "target", 0, "nested") == 0 &&
+            probe.symlinks == 2 &&
+            strcmp(probe.last_symlink_link, "/explicit/nested") == 0,
+            "symlinkat 使用目标任务显式 dirfd");
+    CHECK(file_symlinkat_task(&target.task,
+            "target", 99, "relative") == _EBADF &&
+            probe.symlinks == 2,
+            "symlinkat 相对路径拒绝无效 dirfd");
+    CHECK(file_symlinkat_task(&target.task,
+            "target", cwd_fd, "child") == _ENOTDIR &&
+            probe.symlinks == 2,
+            "symlinkat 相对路径拒绝普通文件 dirfd");
+    CHECK(file_symlinkat_task(&target.task,
+            "target", 99, "/absolute-link") == 0 &&
+            probe.symlinks == 3 &&
+            strcmp(probe.last_symlink_link, "/sandbox/absolute-link") == 0,
+            "symlinkat 绝对路径使用目标 root 并忽略无效 dirfd");
+    CHECK(generic_symlinkat("compat-target", AT_PWD, "compat-link") == 0 &&
+            probe.symlinks == 4 &&
+            strcmp(probe.last_symlink_target, "compat-target") == 0 &&
+            strcmp(probe.last_symlink_link, "/decoy/compat-link") == 0,
+            "兼容 symlinkat 入口仍使用 current 的 cwd");
 
     CHECK(file_renameat_task(&target.task, 99, "",
             99, "destination") == _ENOENT && probe.renames == 0,

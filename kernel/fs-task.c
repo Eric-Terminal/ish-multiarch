@@ -20,6 +20,14 @@ static struct fd *at_fd_task_retain(
     return f_get_task_retain(task, fd_number);
 }
 
+static struct fd *task_cwd_retain(struct task *task) {
+    struct fs_info *fs = task->fs;
+    lock(&fs->lock);
+    struct fd *cwd = fs->pwd == NULL ? NULL : fd_retain(fs->pwd);
+    unlock(&fs->lock);
+    return cwd;
+}
+
 static void apply_umask_task(struct task *task, mode_t_ *mode) {
     struct fs_info *fs = task->fs;
     lock(&fs->lock);
@@ -941,5 +949,187 @@ int file_renameat_task(struct task *task,
         fd_close(destination_at);
     if (source_retained)
         fd_close(source_at);
+    return result;
+}
+
+int file_symlinkat_task(struct task *task, const char *target,
+        fd_t dirfd, const char *link) {
+    if (target[0] == '\0' || link[0] == '\0')
+        return _ENOENT;
+
+    // 绝对链接路径从目标 root 解析，不检查传入的 dirfd。
+    bool retained = link[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = retained ? f_get_task_retain(task, dirfd) : AT_PWD;
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    int result = generic_symlinkat_task(task, target, at, link);
+    if (retained)
+        fd_close(at);
+    return result;
+}
+
+static struct attr mode_attr(mode_t_ mode) {
+    return make_attr(mode, mode & 07777);
+}
+
+static int file_fchmod_fd(struct fd *fd, mode_t_ mode) {
+    if (fd == NULL)
+        return _EBADF;
+    if (fd->mount == NULL || fd->mount->fs->fsetattr == NULL)
+        return _EPERM;
+    return fd->mount->fs->fsetattr(fd, mode_attr(mode));
+}
+
+int file_fchmod_task(struct task *task, fd_t fd_number, mode_t_ mode) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    int result = file_fchmod_fd(fd, mode);
+    fd_close(fd);
+    return result;
+}
+
+int file_fchmodat_task(struct task *task, fd_t dirfd,
+        const char *path, mode_t_ mode) {
+    if (path == NULL)
+        return _EFAULT;
+    if (path[0] == '\0')
+        return _ENOENT;
+
+    // 旧 fchmodat 固定跟随最终符号链接；带 flags 的 fchmodat2 是独立 syscall。
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    int result = generic_setattrat_task(
+            task, at, path, mode_attr(mode), true);
+    if (retained)
+        fd_close(at);
+    return result;
+}
+
+static struct attr ownership_attr(uid_t_ owner, uid_t_ group) {
+    return (struct attr) {
+        .type = attr_ownership,
+        .ownership = {
+            .uid = owner,
+            .gid = group,
+        },
+    };
+}
+
+static int file_fchown_fd(
+        struct fd *fd, uid_t_ owner, uid_t_ group) {
+    if (fd == NULL)
+        return _EBADF;
+    if (fd->mount == NULL || fd->mount->fs->fsetattr == NULL)
+        return _EPERM;
+    return fd->mount->fs->fsetattr(
+            fd, ownership_attr(owner, group));
+}
+
+int file_fchown_task(struct task *task, fd_t fd_number,
+        uid_t_ owner, uid_t_ group) {
+    struct fd *fd = f_get_task_retain(task, fd_number);
+    if (fd == NULL)
+        return _EBADF;
+    int result = file_fchown_fd(fd, owner, group);
+    fd_close(fd);
+    return result;
+}
+
+int file_fchownat_task(struct task *task, fd_t dirfd,
+        const char *path, uid_t_ owner, uid_t_ group, int flags) {
+    if (flags & ~(AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_))
+        return _EINVAL;
+    if (path == NULL)
+        return _EFAULT;
+    if (path[0] == '\0') {
+        if (!(flags & AT_EMPTY_PATH_))
+            return _ENOENT;
+        struct fd *fd = dirfd == AT_FDCWD_ ?
+                task_cwd_retain(task) :
+                f_get_task_retain(task, dirfd);
+        if (fd == NULL)
+            return _EBADF;
+        int result = file_fchown_fd(fd, owner, group);
+        fd_close(fd);
+        return result;
+    }
+
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+
+    bool follow_links = !(flags & AT_SYMLINK_NOFOLLOW_);
+    int result = generic_setattrat_task(task, at, path,
+            ownership_attr(owner, group), follow_links);
+    if (retained)
+        fd_close(at);
+    return result;
+}
+
+int file_utimensat_task(struct task *task, fd_t dirfd,
+        const char *path, const struct file_timespec times[2], int flags) {
+    if (times[0].nsec == LINUX_UTIME_OMIT_ &&
+            times[1].nsec == LINUX_UTIME_OMIT_)
+        return 0;
+    if (flags & ~(AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_))
+        return _EINVAL;
+
+    if (path == NULL) {
+        if (dirfd == AT_FDCWD_)
+            return _EFAULT;
+        if (flags != 0)
+            return _EINVAL;
+        struct fd *fd = f_get_task_retain(task, dirfd);
+        if (fd == NULL)
+            return _EBADF;
+        int result = generic_futimens(fd, times);
+        fd_close(fd);
+        return result;
+    }
+
+    if (path[0] == '\0') {
+        if (!(flags & AT_EMPTY_PATH_))
+            return _ENOENT;
+        struct fd *fd = dirfd == AT_FDCWD_ ?
+                task_cwd_retain(task) :
+                f_get_task_retain(task, dirfd);
+        if (fd == NULL)
+            return _EBADF;
+        int result = generic_futimens(fd, times);
+        fd_close(fd);
+        return result;
+    }
+
+    bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
+    struct fd *at = path[0] == '/' ? AT_PWD :
+            at_fd_task_retain(task, dirfd);
+    if (at == NULL)
+        return _EBADF;
+    if (at != AT_PWD && !S_ISDIR(at->type)) {
+        fd_close(at);
+        return _ENOTDIR;
+    }
+    int result = generic_utimens_task(task, at, path, times,
+            !(flags & AT_SYMLINK_NOFOLLOW_));
+    if (retained)
+        fd_close(at);
     return result;
 }

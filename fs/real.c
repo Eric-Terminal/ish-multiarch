@@ -466,12 +466,18 @@ int realfs_setattr(struct mount *mount, const char *path, struct attr attr) {
     path = fix_path(path);
     int root = mount->root_fd;
     int err;
+    int chown_flags = attr.follow_links ? 0 : AT_SYMLINK_NOFOLLOW;
     switch (attr.type) {
         case attr_uid:
-            err = fchownat(root, path, attr.uid, -1, 0);
+            err = fchownat(root, path, attr.uid, -1, chown_flags);
             break;
         case attr_gid:
-            err = fchownat(root, path, attr.gid, -1, 0);
+            err = fchownat(root, path, -1, attr.gid, chown_flags);
+            break;
+        case attr_ownership:
+            err = fchownat(root, path,
+                    attr.ownership.uid, attr.ownership.gid,
+                    chown_flags);
             break;
         case attr_mode:
             err = fchmodat(root, path, attr.mode, 0);
@@ -494,7 +500,11 @@ int realfs_fsetattr(struct fd *fd, struct attr attr) {
             err = fchown(real_fd, attr.uid, -1);
             break;
         case attr_gid:
-            err = fchown(real_fd, attr.gid, -1);
+            err = fchown(real_fd, -1, attr.gid);
+            break;
+        case attr_ownership:
+            err = fchown(real_fd,
+                    attr.ownership.uid, attr.ownership.gid);
             break;
         case attr_mode:
             err = fchmod(real_fd, attr.mode);
@@ -509,10 +519,21 @@ int realfs_fsetattr(struct fd *fd, struct attr attr) {
     return err;
 }
 
-int realfs_utime(struct mount *mount, const char *path, struct timespec atime, struct timespec mtime) {
+int realfs_utime(struct mount *mount, const char *path,
+        struct timespec atime, struct timespec mtime,
+        bool follow_links) {
     struct timespec times[2] = {atime, mtime};
-    int err = utimensat(mount->root_fd, fix_path(path), times, 0);
+    int flags = follow_links ? 0 : AT_SYMLINK_NOFOLLOW;
+    int err = utimensat(mount->root_fd, fix_path(path), times, flags);
     if (err < 0)
+        return errno_map();
+    return 0;
+}
+
+int realfs_futime(
+        struct fd *fd, struct timespec atime, struct timespec mtime) {
+    struct timespec times[2] = {atime, mtime};
+    if (futimens(fd->real_fd, times) < 0)
         return errno_map();
     return 0;
 }
@@ -641,6 +662,7 @@ const struct fs_ops realfs = {
     .setattr = realfs_setattr,
     .fsetattr = realfs_fsetattr,
     .utime = realfs_utime,
+    .futime = realfs_futime,
     .getpath = realfs_getpath,
     .flock = realfs_flock,
 

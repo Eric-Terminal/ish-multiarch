@@ -429,6 +429,12 @@ static int devpts_setattr_num(int pty_num, struct attr attr) {
         case attr_gid:
             tty->pty.gid = attr.gid;
             break;
+        case attr_ownership:
+            if (attr.ownership.uid != (uid_t_) -1)
+                tty->pty.uid = attr.ownership.uid;
+            if (attr.ownership.gid != (uid_t_) -1)
+                tty->pty.gid = attr.ownership.gid;
+            break;
         case attr_mode:
             tty->pty.perms = attr.mode;
             break;

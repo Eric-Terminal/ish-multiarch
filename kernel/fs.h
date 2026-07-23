@@ -14,6 +14,14 @@
 struct task;
 struct dir_entry;
 
+#define LINUX_UTIME_NOW_ INT64_C(0x3fffffff)
+#define LINUX_UTIME_OMIT_ INT64_C(0x3ffffffe)
+
+struct file_timespec {
+    sqword_t sec;
+    sqword_t nsec;
+};
+
 // 回调在目标 fd 的位置锁内执行：返回正记录长度表示已提交，负值表示需要回滚。
 typedef sqword_t (*file_dirent_emit_t)(void *opaque,
         const struct dir_entry *entry, off_t_ next_position);
@@ -91,6 +99,17 @@ int file_mkdirat_task(struct task *task, fd_t dirfd,
 int file_renameat_task(struct task *task,
         fd_t source_dirfd, const char *source,
         fd_t destination_dirfd, const char *destination);
+int file_symlinkat_task(struct task *task, const char *target,
+        fd_t dirfd, const char *link);
+int file_fchmod_task(struct task *task, fd_t fd, mode_t_ mode);
+int file_fchmodat_task(struct task *task, fd_t dirfd,
+        const char *path, mode_t_ mode);
+int file_fchown_task(struct task *task, fd_t fd,
+        uid_t_ owner, uid_t_ group);
+int file_fchownat_task(struct task *task, fd_t dirfd,
+        const char *path, uid_t_ owner, uid_t_ group, int flags);
+int file_utimensat_task(struct task *task, fd_t dirfd,
+        const char *path, const struct file_timespec times[2], int flags);
 
 #define MAX_PATH 4096
 #define MAX_NAME 256
@@ -99,12 +118,18 @@ struct attr {
     enum attr_type {
         attr_uid,
         attr_gid,
+        attr_ownership,
         attr_mode,
         attr_size,
     } type;
+    bool follow_links;
     union {
         uid_t_ uid;
         uid_t_ gid;
+        struct {
+            uid_t_ uid;
+            uid_t_ gid;
+        } ownership;
         mode_t_ mode;
         off_t_ size;
     };
@@ -142,6 +167,8 @@ int generic_renameat(struct fd *src_at, const char *src, struct fd *dst_at, cons
 int generic_renameat_task(struct task *task,
         struct fd *src_at, const char *src,
         struct fd *dst_at, const char *dst);
+int generic_symlinkat_task(struct task *task,
+        const char *target, struct fd *at, const char *link);
 int generic_symlinkat(const char *target, struct fd *at, const char *link);
 int generic_mknodat(struct fd *at, const char *path, mode_t_ mode, dev_t_ dev);
 int generic_seek(struct fd *fd, off_t_ off, int whence, off_t_ size);
@@ -161,7 +188,14 @@ int generic_statat_task(struct task *task, struct fd *at,
         const char *path, struct statbuf *stat, bool follow_links);
 int generic_statat(struct fd *at, const char *path,
         struct statbuf *stat, bool follow_links);
+int generic_setattrat_task(struct task *task, struct fd *at,
+        const char *path, struct attr attr, bool follow_links);
 int generic_setattrat(struct fd *at, const char *path, struct attr attr, bool follow_links);
+int generic_utimens_task(struct task *task, struct fd *at,
+        const char *path, const struct file_timespec times[2],
+        bool follow_links);
+int generic_futimens(
+        struct fd *fd, const struct file_timespec times[2]);
 int generic_utime(struct fd *at, const char *path, struct timespec atime, struct timespec mtime, bool follow_links);
 ssize_t generic_readlinkat_task(struct task *task, struct fd *at,
         const char *path, char *buffer, size_t size);
@@ -270,7 +304,11 @@ struct fs_ops {
     int (*fstat)(struct fd *fd, struct statbuf *stat); // required
     int (*setattr)(struct mount *mount, const char *path, struct attr attr);
     int (*fsetattr)(struct fd *fd, struct attr attr);
-    int (*utime)(struct mount *mount, const char *path, struct timespec atime, struct timespec mtime);
+    int (*utime)(struct mount *mount, const char *path,
+            struct timespec atime, struct timespec mtime,
+            bool follow_links);
+    int (*futime)(struct fd *fd,
+            struct timespec atime, struct timespec mtime);
     // Returns the path of the file descriptor, null terminated, buf must be at least MAX_PATH+1
     int (*getpath)(struct fd *fd, char *buf); // required
 

@@ -30,6 +30,12 @@ static int adhoc_fsetattr(struct fd *fd, struct attr attr) {
         case attr_gid:
             fd->stat.gid = attr.gid;
             break;
+        case attr_ownership:
+            if (attr.ownership.uid != (uid_t_) -1)
+                fd->stat.uid = attr.ownership.uid;
+            if (attr.ownership.gid != (uid_t_) -1)
+                fd->stat.gid = attr.ownership.gid;
+            break;
         case attr_mode:
             fd->stat.mode = (fd->stat.mode & S_IFMT) | (attr.mode & ~S_IFMT);
             break;

@@ -318,9 +318,11 @@ int generic_renameat(struct fd *src_at, const char *src_raw,
             current, src_at, src_raw, dst_at, dst_raw);
 }
 
-int generic_symlinkat(const char *target, struct fd *at, const char *link_raw) {
+int generic_symlinkat_task(struct task *task,
+        const char *target, struct fd *at, const char *link_raw) {
     char link[MAX_PATH];
-    int err = path_normalize(at, link_raw, link, N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
+    int err = path_normalize_task(task, at, link_raw, link,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(link);
@@ -329,6 +331,11 @@ int generic_symlinkat(const char *target, struct fd *at, const char *link_raw) {
         err = mount->fs->symlink(mount, target, link);
     mount_release(mount);
     return err;
+}
+
+int generic_symlinkat(
+        const char *target, struct fd *at, const char *link_raw) {
+    return generic_symlinkat_task(current, target, at, link_raw);
 }
 
 int generic_mknodat(struct fd *at, const char *path_raw, mode_t_ mode, dev_t_ dev) {
@@ -349,17 +356,87 @@ int generic_mknodat(struct fd *at, const char *path_raw, mode_t_ mode, dev_t_ de
     return err;
 }
 
-int generic_setattrat(struct fd *at, const char *path_raw, struct attr attr, bool follow_links) {
+int generic_setattrat_task(struct task *task, struct fd *at,
+        const char *path_raw, struct attr attr, bool follow_links) {
     char path[MAX_PATH];
-    int err = path_normalize(at, path_raw, path, follow_links ? N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
+    int err = path_normalize_task(task, at, path_raw, path,
+            follow_links ? N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
     if (err < 0)
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->setattr)
+    if (mount->fs->setattr) {
+        attr.follow_links = follow_links;
         err = mount->fs->setattr(mount, path, attr);
+    }
     mount_release(mount);
     return err;
+}
+
+int generic_setattrat(struct fd *at, const char *path_raw,
+        struct attr attr, bool follow_links) {
+    return generic_setattrat_task(
+            current, at, path_raw, attr, follow_links);
+}
+
+static int file_timespec_pair_to_host(
+        const struct file_timespec source[2],
+        struct timespec destination[2]) {
+    for (size_t index = 0; index < 2; index++) {
+        if (source[index].nsec == LINUX_UTIME_NOW_ ||
+                source[index].nsec == LINUX_UTIME_OMIT_) {
+            destination[index] = (struct timespec) {
+                .tv_nsec = source[index].nsec == LINUX_UTIME_NOW_ ?
+                        UTIME_NOW : UTIME_OMIT,
+            };
+            continue;
+        }
+        if (source[index].nsec < 0 ||
+                source[index].nsec >= INT64_C(1000000000))
+            return _EINVAL;
+        time_t seconds = (time_t) source[index].sec;
+        if ((sqword_t) seconds != source[index].sec)
+            return _EOVERFLOW;
+        destination[index] = (struct timespec) {
+            .tv_sec = seconds,
+            .tv_nsec = (long) source[index].nsec,
+        };
+    }
+    return 0;
+}
+
+int generic_utimens_task(struct task *task, struct fd *at,
+        const char *path_raw, const struct file_timespec times[2],
+        bool follow_links) {
+    char path[MAX_PATH];
+    int err = path_normalize_task(task, at, path_raw, path,
+            follow_links ? N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
+    if (err < 0)
+        return err;
+    struct timespec host_times[2];
+    err = file_timespec_pair_to_host(times, host_times);
+    if (err < 0)
+        return err;
+    struct mount *mount = find_mount_and_trim_path(path);
+    err = _EPERM;
+    if (mount->fs->utime)
+        err = mount->fs->utime(mount, path,
+                host_times[0], host_times[1], follow_links);
+    mount_release(mount);
+    return err;
+}
+
+int generic_futimens(
+        struct fd *fd, const struct file_timespec times[2]) {
+    if (fd == NULL)
+        return _EBADF;
+    struct timespec host_times[2];
+    int err = file_timespec_pair_to_host(times, host_times);
+    if (err < 0)
+        return err;
+    if (fd->mount == NULL || fd->mount->fs->futime == NULL)
+        return _EPERM;
+    return fd->mount->fs->futime(fd, host_times[0], host_times[1]);
 }
 
 int generic_utime(struct fd *at, const char *path_raw, struct timespec atime, struct timespec mtime, bool follow_links) {
@@ -370,7 +447,8 @@ int generic_utime(struct fd *at, const char *path_raw, struct timespec atime, st
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
     if (mount->fs->utime)
-        err = mount->fs->utime(mount, path, atime, mtime);
+        err = mount->fs->utime(
+                mount, path, atime, mtime, follow_links);
     mount_release(mount);
     return err;
 }
