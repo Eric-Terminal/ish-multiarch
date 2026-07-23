@@ -1548,6 +1548,16 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_integer_to_fp', aarch64_integer_to_fp_test)
 
+    aarch64_fp_to_integer_test = executable('aarch64_fp_to_integer_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/fp-to-integer-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_fp_to_integer', aarch64_fp_to_integer_test)
+
     aarch64_scalar_fp_decode_test = executable(
             'aarch64_scalar_fp_decode_test', [
             'guest/aarch64/decode.c',

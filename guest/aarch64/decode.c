@@ -250,6 +250,34 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
 
     static const struct {
         dword_t bits;
+        byte_t source_width;
+        byte_t destination_width;
+    } fp_to_integer_conversions[] = {
+        {UINT32_C(0x1e380000), 32, 32},
+        {UINT32_C(0x1e780000), 64, 32},
+        {UINT32_C(0x9e380000), 32, 64},
+        {UINT32_C(0x9e780000), 64, 64},
+    };
+    dword_t fp_to_integer = word & UINT32_C(0xfffffc00);
+    for (unsigned i = 0; i < sizeof(fp_to_integer_conversions) /
+            sizeof(fp_to_integer_conversions[0]); i++) {
+        if (fp_to_integer != fp_to_integer_conversions[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_FCVTZS_GENERAL,
+            .width = fp_to_integer_conversions[i].source_width,
+            .operands.fp_to_integer = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .destination_width =
+                        fp_to_integer_conversions[i].destination_width,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
         enum aarch64_opcode opcode;
         byte_t width;
     } scalar_fp_binary_operations[] = {
@@ -1207,6 +1235,25 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    dword_t ordered_access = word & UINT32_C(0x3ffffc00);
+    if (ordered_access == UINT32_C(0x08dffc00) ||
+            ordered_access == UINT32_C(0x089ffc00)) {
+        byte_t size_shift = word >> 30;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = ordered_access == UINT32_C(0x08dffc00) ?
+                    AARCH64_OP_LDAR : AARCH64_OP_STLR,
+            .width = size_shift == 3 ? 64 : 32,
+            .operands.exclusive = {
+                .rs = 31,
+                .rt = word & 0x1f,
+                .rt2 = 31,
+                .rn = (word >> 5) & 0x1f,
+                .size = (byte_t) (1U << size_shift),
+            },
+        };
+        return true;
+    }
+
     dword_t exclusive_load = word & UINT32_C(0x3ffffc00);
     if (exclusive_load == UINT32_C(0x085f7c00) ||
             exclusive_load == UINT32_C(0x085ffc00)) {
@@ -1378,6 +1425,33 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0x3f200c00)) == UINT32_C(0x3c200800)) {
+        byte_t size_field = word >> 30;
+        byte_t operation = (word >> 22) & 3;
+        byte_t extend_type = (word >> 13) & 7;
+        bool load;
+        byte_t size;
+        if ((extend_type & 2) == 0 || !decode_simd_transfer(
+                size_field, operation, &load, &size))
+            return false;
+        byte_t size_shift = size == 16 ? 4 : size_field;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = load ? AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET :
+                    AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
+            .width = (byte_t) (size * 8),
+            .operands.load_store = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .size = size,
+                .extend_type = (enum aarch64_extend_type) extend_type,
+                .shift = (word >> 12) & 1 ? size_shift : 0,
+                .address_mode = AARCH64_ADDRESS_OFFSET,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x3f200c00)) == UINT32_C(0x38200800)) {
         byte_t operation = (word >> 22) & 3;
         byte_t size_shift = word >> 30;
@@ -1446,6 +1520,19 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .offset = sign_extend((word >> 12) & UINT32_C(0x1ff), 9),
                 .address_mode = address_mode,
                 .signed_load = signed_load,
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xf9800000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_PRFM_IMM12,
+            .operands.prefetch = {
+                .prfop = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .offset = (qword_t) ((word >> 10) &
+                        UINT32_C(0xfff)) << 3,
             },
         };
         return true;

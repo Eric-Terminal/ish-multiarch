@@ -79,6 +79,19 @@ static dword_t encode_unscaled(unsigned size_field, unsigned operation,
             rt;
 }
 
+static dword_t encode_register_offset(unsigned size_field,
+        unsigned operation, unsigned option, bool scaled,
+        byte_t rm, byte_t rt, byte_t rn) {
+    return UINT32_C(0x3c200800) |
+            (dword_t) size_field << 30 |
+            (dword_t) operation << 22 |
+            (dword_t) rm << 16 |
+            (dword_t) option << 13 |
+            (dword_t) scaled << 12 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
 static struct aarch64_execute_result execute_word(struct test_memory *memory,
         struct cpu_state *cpu, dword_t word) {
     struct aarch64_decoded instruction;
@@ -193,6 +206,51 @@ static void test_apple_vectors(void) {
     }
 }
 
+struct register_decode_case {
+    dword_t word;
+    enum aarch64_opcode opcode;
+    byte_t size;
+    byte_t rt;
+    byte_t rn;
+    byte_t rm;
+    enum aarch64_extend_type extend_type;
+    byte_t shift;
+};
+
+static void test_register_offset_apple_vectors(void) {
+    // 机器码由 LLVM AArch64 汇编器生成。
+    static const struct register_decode_case cases[] = {
+        {UINT32_C(0x3c224820), AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
+                1, 0, 1, 2, AARCH64_EXTEND_UXTW, 0},
+        {UINT32_C(0x7c64dbe3), AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
+                2, 3, 31, 4, AARCH64_EXTEND_SXTW, 1},
+        {UINT32_C(0xbc2768c5), AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
+                4, 5, 6, 7, AARCH64_EXTEND_UXTX, 0},
+        {UINT32_C(0xfc6a7928), AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
+                8, 8, 9, 10, AARCH64_EXTEND_UXTX, 3},
+        // Alpine TLS 子进程实际执行的指令。
+        {UINT32_C(0x3ca06abe), AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
+                16, 30, 21, 0, AARCH64_EXTEND_UXTX, 0},
+        {UINT32_C(0x3cedf98b), AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
+                16, 11, 12, 13, AARCH64_EXTEND_SXTX, 4},
+    };
+    for (size_t i = 0; i < array_size(cases); i++) {
+        struct aarch64_decoded instruction;
+        assert(aarch64_decode(cases[i].word, &instruction));
+        assert(instruction.opcode == cases[i].opcode);
+        assert(instruction.width == cases[i].size * 8);
+        assert(instruction.operands.load_store.size == cases[i].size);
+        assert(instruction.operands.load_store.rt == cases[i].rt);
+        assert(instruction.operands.load_store.rn == cases[i].rn);
+        assert(instruction.operands.load_store.rm == cases[i].rm);
+        assert(instruction.operands.load_store.extend_type ==
+                cases[i].extend_type);
+        assert(instruction.operands.load_store.shift == cases[i].shift);
+        assert(instruction.operands.load_store.address_mode ==
+                AARCH64_ADDRESS_OFFSET);
+    }
+}
+
 static bool valid_form(unsigned size_field, unsigned operation) {
     return (operation & 2) == 0 || size_field == 0;
 }
@@ -263,6 +321,41 @@ static void test_encoding_space(void) {
     }
     assert(unscaled_count == 15360);
 
+    unsigned register_count = 0;
+    for (unsigned size_field = 0; size_field < 4; size_field++) {
+        for (unsigned operation = 0; operation < 4; operation++) {
+            for (unsigned option = 0; option < 8; option++) {
+                for (unsigned scaled = 0; scaled < 2; scaled++) {
+                    struct aarch64_decoded instruction;
+                    bool decoded = aarch64_decode(encode_register_offset(
+                            size_field, operation, option, scaled != 0,
+                            2, 3, 4), &instruction);
+                    bool expected = valid_form(size_field, operation) &&
+                            (option & 2) != 0;
+                    assert(decoded == expected);
+                    if (!decoded)
+                        continue;
+                    register_count++;
+                    byte_t size = (byte_t)
+                            form_size(size_field, operation);
+                    assert(instruction.opcode == ((operation & 1) ?
+                            AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET :
+                            AARCH64_OP_STORE_SIMD_REGISTER_OFFSET));
+                    assert(instruction.operands.load_store.size == size);
+                    assert(instruction.operands.load_store.rm == 2);
+                    assert(instruction.operands.load_store.rt == 3);
+                    assert(instruction.operands.load_store.rn == 4);
+                    assert(instruction.operands.load_store.extend_type ==
+                            (enum aarch64_extend_type) option);
+                    byte_t scale = size == 16 ? 4 : (byte_t) size_field;
+                    assert(instruction.operands.load_store.shift ==
+                            (scaled ? scale : 0));
+                }
+            }
+        }
+    }
+    assert(register_count == 80);
+
     for (unsigned rn = 0; rn < 32; rn++) {
         for (unsigned rt = 0; rt < 32; rt++) {
             struct aarch64_decoded instruction;
@@ -327,6 +420,67 @@ static void test_widths_and_unsigned_offsets(struct test_memory *memory) {
         assert(memcmp(memory->first + 1024, source.b,
                 forms[i].size) == 0);
     }
+}
+
+static void test_register_offsets(struct test_memory *memory) {
+    static const struct transfer_form forms[] = {
+        {0, 0, 1, 1},
+        {1, 0, 1, 2},
+        {2, 0, 1, 4},
+        {3, 0, 1, 8},
+        {0, 2, 3, 16},
+    };
+    for (size_t i = 0; i < array_size(forms); i++) {
+        size_t target = 2304 + i * 128;
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x1400),
+            .sp = UINT64_C(0x1122334455667788),
+            .nzcv = UINT32_C(0xa0000000),
+            .fpcr = UINT32_C(0x01000000),
+            .fpsr = UINT32_C(0x08000000),
+        };
+        fill_vector(&cpu.v[0], (byte_t) (0x20 + i * 0x20));
+        union aarch64_vector_reg source = cpu.v[0];
+        cpu.x[1] = DATA_PAGE + target - 3 * forms[i].size;
+        cpu.x[2] = 3;
+        assert_retired(memory, &cpu, encode_register_offset(
+                forms[i].size_field, forms[i].store_operation,
+                AARCH64_EXTEND_UXTX, true, 2, 0, 1));
+        assert(memcmp(memory->first + target,
+                source.b, forms[i].size) == 0);
+
+        memset(cpu.v[3].b, 0xff, sizeof(cpu.v[3].b));
+        assert_retired(memory, &cpu, encode_register_offset(
+                forms[i].size_field, forms[i].load_operation,
+                AARCH64_EXTEND_UXTX, true, 2, 3, 1));
+        assert_vector(&cpu.v[3], source.b, forms[i].size);
+        assert(cpu.sp == UINT64_C(0x1122334455667788));
+        assert(cpu.nzcv == UINT32_C(0xa0000000));
+        assert(cpu.fpcr == UINT32_C(0x01000000));
+        assert(cpu.fpsr == UINT32_C(0x08000000));
+    }
+
+    struct cpu_state cpu = {.pc = UINT64_C(0x1600)};
+    fill_vector(&cpu.v[30], 0xa0);
+    union aarch64_vector_reg tls_source = cpu.v[30];
+    cpu.x[21] = DATA_PAGE + 3200;
+    cpu.x[0] = 32;
+    assert_retired(memory, &cpu, UINT32_C(0x3ca06abe));
+    assert(memcmp(memory->first + 3232,
+            tls_source.b, sizeof(tls_source.b)) == 0);
+
+    fill_vector(&cpu.v[31], 0xc0);
+    union aarch64_vector_reg v31_source = cpu.v[31];
+    cpu.sp = DATA_PAGE + 3264;
+    cpu.x[4] = 16;
+    assert_retired(memory, &cpu, encode_register_offset(
+            0, 2, AARCH64_EXTEND_UXTX, false, 4, 31, 31));
+    memset(cpu.v[31].b, 0, sizeof(cpu.v[31].b));
+    assert_retired(memory, &cpu, encode_register_offset(
+            0, 3, AARCH64_EXTEND_UXTX, false, 4, 31, 31));
+    assert(memcmp(cpu.v[31].b,
+            v31_source.b, sizeof(v31_source.b)) == 0);
+    assert(cpu.sp == DATA_PAGE + 3264);
 }
 
 static void test_unscaled_and_writeback(struct test_memory *memory) {
@@ -467,16 +621,73 @@ static void test_fault_transactions(struct test_memory *memory) {
     assert(memcmp(cpu.v[2].b, old_value.b, 16) == 0);
 }
 
+static void test_register_offset_fault_transactions(
+        struct test_memory *memory) {
+    byte_t first_before[8];
+    byte_t next_before[8];
+    memset(memory->first + GUEST_MEMORY_PAGE_SIZE - 8, 0x55, 8);
+    memset(memory->next, 0xaa, 8);
+    memcpy(first_before,
+            memory->first + GUEST_MEMORY_PAGE_SIZE - 8, 8);
+    memcpy(next_before, memory->next, 8);
+    memory->pages[1].permissions = GUEST_MEMORY_READ;
+    guest_address_space_changed(&memory->space);
+
+    struct cpu_state cpu = {
+        .cycle = 29,
+        .pc = UINT64_C(0x3400),
+        .x[1] = DATA_NEXT - 16,
+        .x[2] = 8,
+    };
+    fill_vector(&cpu.v[0], 0x20);
+    union aarch64_vector_reg source = cpu.v[0];
+    struct aarch64_execute_result result = execute_word(memory, &cpu,
+            encode_register_offset(0, 2, AARCH64_EXTEND_UXTX,
+                    false, 2, 0, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(memcmp(memory->first + GUEST_MEMORY_PAGE_SIZE - 8,
+            first_before, 8) == 0);
+    assert(memcmp(memory->next, next_before, 8) == 0);
+    assert(memcmp(cpu.v[0].b, source.b, sizeof(source.b)) == 0);
+    assert(cpu.pc == UINT64_C(0x3400) && cpu.cycle == 29);
+
+    memory->pages[1].permissions = GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
+    union aarch64_vector_reg destination;
+    fill_vector(&destination, 0xd0);
+    cpu.v[3] = destination;
+    result = execute_word(memory, &cpu,
+            encode_register_offset(0, 3, AARCH64_EXTEND_UXTX,
+                    false, 2, 3, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == DATA_NEXT);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(memcmp(cpu.v[3].b,
+            destination.b, sizeof(destination.b)) == 0);
+    assert(cpu.pc == UINT64_C(0x3400) && cpu.cycle == 29);
+
+    memory->pages[1].permissions =
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
+    guest_address_space_changed(&memory->space);
+}
+
 int main(void) {
     test_apple_vectors();
+    test_register_offset_apple_vectors();
     test_encoding_space();
 
     struct test_memory memory;
     init_test_memory(&memory);
     test_widths_and_unsigned_offsets(&memory);
+    test_register_offsets(&memory);
     test_unscaled_and_writeback(&memory);
     test_sp_and_v31(&memory);
     test_cross_page(&memory);
+    test_register_offset_fault_transactions(&memory);
     test_fault_transactions(&memory);
     return 0;
 }

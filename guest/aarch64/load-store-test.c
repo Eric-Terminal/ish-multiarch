@@ -644,7 +644,7 @@ static void test_register_offset_decode(void) {
     static const dword_t unsupported[] = {
         UINT32_C(0x38222820), UINT32_C(0xf8a26820),
         UINT32_C(0xb8e858e6), UINT32_C(0xf8e26820),
-        UINT32_C(0x3ce26820),
+        UINT32_C(0x3ce22820),
     };
     for (size_t i = 0; i < array_size(unsupported); i++) {
         struct aarch64_decoded instruction;

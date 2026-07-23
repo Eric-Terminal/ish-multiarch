@@ -115,6 +115,22 @@ static dword_t encode_store(unsigned size_shift, bool release,
             rt;
 }
 
+static dword_t encode_load_acquire(unsigned size_shift,
+        byte_t rt, byte_t rn) {
+    return UINT32_C(0x08dffc00) |
+            (dword_t) size_shift << 30 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
+static dword_t encode_store_release(unsigned size_shift,
+        byte_t rt, byte_t rn) {
+    return UINT32_C(0x089ffc00) |
+            (dword_t) size_shift << 30 |
+            (dword_t) rn << 5 |
+            rt;
+}
+
 static dword_t encode_pair_load(bool wide, bool acquire,
         byte_t rt, byte_t rt2, byte_t rn) {
     return UINT32_C(0x887f0000) |
@@ -172,6 +188,21 @@ static qword_t get_value(const byte_t *source, byte_t size) {
 static qword_t size_mask(byte_t size) {
     return size == 8 ? UINT64_MAX :
             (UINT64_C(1) << (size * 8)) - 1;
+}
+
+static void assert_monitor_equal(
+        const struct aarch64_exclusive_monitor *actual,
+        const struct aarch64_exclusive_monitor *expected) {
+    assert(actual->address == expected->address);
+    assert(actual->value_low == expected->value_low);
+    assert(actual->value_high == expected->value_high);
+    assert(actual->address_space == expected->address_space);
+    assert(actual->mapping_epoch == expected->mapping_epoch);
+    assert(actual->write_epoch == expected->write_epoch);
+    assert(actual->sync_identity == expected->sync_identity);
+    assert(actual->size == expected->size);
+    assert(actual->pair == expected->pair);
+    assert(actual->valid == expected->valid);
 }
 
 static void assert_decode(dword_t word, enum aarch64_opcode opcode,
@@ -236,6 +267,24 @@ static void test_apple_vectors(void) {
             8, 64, 31, 31, 31);
     assert_decode(UINT32_C(0xc800ffff), AARCH64_OP_STLXR,
             8, 64, 0, 31, 31);
+
+    assert_decode(UINT32_C(0x08dffc83), AARCH64_OP_LDAR,
+            1, 32, 31, 3, 4);
+    assert_decode(UINT32_C(0x48dffcc5), AARCH64_OP_LDAR,
+            2, 32, 31, 5, 6);
+    assert_decode(UINT32_C(0x88dffc41), AARCH64_OP_LDAR,
+            4, 32, 31, 1, 2);
+    // Alpine TLS 子进程实际执行的指令。
+    assert_decode(UINT32_C(0xc8dffc00), AARCH64_OP_LDAR,
+            8, 64, 31, 0, 0);
+    assert_decode(UINT32_C(0x089ffd49), AARCH64_OP_STLR,
+            1, 32, 31, 9, 10);
+    assert_decode(UINT32_C(0x489ffd8b), AARCH64_OP_STLR,
+            2, 32, 31, 11, 12);
+    assert_decode(UINT32_C(0x889ffdcd), AARCH64_OP_STLR,
+            4, 32, 31, 13, 14);
+    assert_decode(UINT32_C(0xc89ffd07), AARCH64_OP_STLR,
+            8, 64, 31, 7, 8);
 }
 
 static void test_pair_apple_vectors(void) {
@@ -334,6 +383,17 @@ static void test_encoding_space(void) {
     }
 }
 
+static void test_ordered_encoding_space(void) {
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        byte_t size = (byte_t) (1U << size_shift);
+        byte_t width = size_shift == 3 ? 64 : 32;
+        assert_decode(encode_load_acquire(size_shift, 1, 2),
+                AARCH64_OP_LDAR, size, width, 31, 1, 2);
+        assert_decode(encode_store_release(size_shift, 3, 4),
+                AARCH64_OP_STLR, size, width, 31, 3, 4);
+    }
+}
+
 static void test_all_sizes(struct test_memory *memory) {
     for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
         byte_t size = (byte_t) (1U << size_shift);
@@ -379,6 +439,118 @@ static void test_all_sizes(struct test_memory *memory) {
         assert(cpu.sp == UINT64_C(0x1122334455667788));
         assert(cpu.nzcv == UINT32_C(0xa0000000));
     }
+}
+
+static void test_ordered_accesses(struct test_memory *memory) {
+    for (unsigned size_shift = 0; size_shift < 4; size_shift++) {
+        byte_t size = (byte_t) (1U << size_shift);
+        size_t offset = 1408 + size_shift * 32;
+        qword_t original = UINT64_C(0xfedcba9876543210) &
+                size_mask(size);
+        qword_t replacement = UINT64_C(0x0123456789abcdef) &
+                size_mask(size);
+        put_value(memory->data + offset, original, size);
+
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x6000),
+            .sp = UINT64_C(0x1122334455667788),
+            .nzcv = UINT32_C(0xa0000000),
+            .fpcr = AARCH64_FPCR_FZ,
+            .fpsr = AARCH64_FPSR_IXC,
+        };
+        aarch64_set_exclusive(&cpu, DATA_PAGE + 2048, 4, false,
+                UINT32_C(0xaabbccdd), 0, &memory->space, 7, 11, 13);
+        struct aarch64_exclusive_monitor monitor = cpu.exclusive;
+        cpu.x[1] = DATA_PAGE + offset;
+        cpu.x[2] = UINT64_MAX;
+        assert_retired(memory, &cpu,
+                encode_load_acquire(size_shift, 2, 1));
+        assert(cpu.x[2] == original);
+        assert_monitor_equal(&cpu.exclusive, &monitor);
+
+        cpu.x[3] = replacement;
+        assert_retired(memory, &cpu,
+                encode_store_release(size_shift, 3, 1));
+        assert(get_value(memory->data + offset, size) == replacement);
+        assert_monitor_equal(&cpu.exclusive, &monitor);
+        assert(cpu.sp == UINT64_C(0x1122334455667788));
+        assert(cpu.nzcv == UINT32_C(0xa0000000));
+        assert(cpu.fpcr == AARCH64_FPCR_FZ);
+        assert(cpu.fpsr == AARCH64_FPSR_IXC);
+    }
+
+    size_t offset = 1536;
+    put_value(memory->data + offset,
+            UINT64_C(0x8877665544332211), 8);
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x6400),
+        .sp = DATA_PAGE + offset,
+        .x[0] = UINT64_C(0x123456789abcdef0),
+    };
+    assert_retired(memory, &cpu, encode_load_acquire(3, 31, 31));
+    assert(cpu.x[0] == UINT64_C(0x123456789abcdef0));
+    assert_retired(memory, &cpu, encode_store_release(3, 31, 31));
+    assert(get_value(memory->data + offset, 8) == 0);
+
+    put_value(memory->data + offset,
+            UINT64_C(0x1020304050607080), 8);
+    cpu.x[1] = DATA_PAGE + offset;
+    assert_retired(memory, &cpu, encode_load_acquire(3, 1, 1));
+    assert(cpu.x[1] == UINT64_C(0x1020304050607080));
+    cpu.x[1] = DATA_PAGE + offset;
+    assert_retired(memory, &cpu, encode_store_release(3, 1, 1));
+    assert(get_value(memory->data + offset, 8) == DATA_PAGE + offset);
+}
+
+static void test_ordered_faults(struct test_memory *memory) {
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x6800),
+        .x[1] = UNMAPPED_PAGE,
+        .x[2] = UINT64_C(0x1122334455667788),
+    };
+    struct aarch64_execute_result result = execute_word(
+            memory, &cpu, encode_load_acquire(3, 2, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.fault.address == UNMAPPED_PAGE);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[2] == UINT64_C(0x1122334455667788));
+    assert(cpu.pc == UINT64_C(0x6800));
+
+    cpu.x[1] = DATA_PAGE + 1;
+    result = execute_word(memory, &cpu,
+            encode_load_acquire(3, 2, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_ALIGNMENT);
+    assert(result.fault.address == DATA_PAGE + 1);
+    assert(result.fault.access == GUEST_MEMORY_READ);
+    assert(cpu.x[2] == UINT64_C(0x1122334455667788));
+    assert(cpu.pc == UINT64_C(0x6800));
+
+    size_t offset = 1600;
+    put_value(memory->data + offset, UINT32_C(0x12345678), 4);
+    cpu.x[1] = DATA_PAGE + offset + 1;
+    cpu.x[3] = UINT32_C(0xaabbccdd);
+    result = execute_word(memory, &cpu,
+            encode_store_release(2, 3, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_ALIGNMENT);
+    assert(result.fault.address == DATA_PAGE + offset + 1);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(get_value(memory->data + offset, 4) == UINT32_C(0x12345678));
+    assert(cpu.pc == UINT64_C(0x6800));
+
+    put_value(memory->readonly + offset, UINT32_C(0x87654321), 4);
+    cpu.x[1] = READONLY_PAGE + offset;
+    result = execute_word(memory, &cpu,
+            encode_store_release(2, 3, 1));
+    assert(result.stop == AARCH64_EXECUTE_DATA_FAULT);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.fault.address == READONLY_PAGE + offset);
+    assert(result.fault.access == GUEST_MEMORY_WRITE);
+    assert(get_value(memory->readonly + offset, 4) ==
+            UINT32_C(0x87654321));
+    assert(cpu.pc == UINT64_C(0x6800));
 }
 
 static void test_zero_register_and_sp(struct test_memory *memory) {
@@ -1114,11 +1286,14 @@ int main(void) {
     test_apple_vectors();
     test_pair_apple_vectors();
     test_encoding_space();
+    test_ordered_encoding_space();
     test_pair_encoding_space();
 
     struct test_memory memory;
     init_test_memory(&memory);
     test_all_sizes(&memory);
+    test_ordered_accesses(&memory);
+    test_ordered_faults(&memory);
     test_zero_register_and_sp(&memory);
     test_monitor_failures(&memory);
     test_aba_invalidates_reservation(&memory);

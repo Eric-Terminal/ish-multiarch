@@ -19,6 +19,7 @@ enum aarch64_opcode {
     AARCH64_OP_RET,
     AARCH64_OP_LOAD_IMM12,
     AARCH64_OP_STORE_IMM12,
+    AARCH64_OP_PRFM_IMM12,
     AARCH64_OP_SVC,
     AARCH64_OP_ADD_SHIFTED_REGISTER,
     AARCH64_OP_ADDS_SHIFTED_REGISTER,
@@ -62,10 +63,14 @@ enum aarch64_opcode {
     AARCH64_OP_STORE_SIMD_IMM12,
     AARCH64_OP_LOAD_SIMD_IMM9,
     AARCH64_OP_STORE_SIMD_IMM9,
+    AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET,
+    AARCH64_OP_STORE_SIMD_REGISTER_OFFSET,
     AARCH64_OP_CASP,
     AARCH64_OP_CASPA,
     AARCH64_OP_CASPL,
     AARCH64_OP_CASPAL,
+    AARCH64_OP_LDAR,
+    AARCH64_OP_STLR,
     AARCH64_OP_LDXR,
     AARCH64_OP_LDAXR,
     AARCH64_OP_STXR,
@@ -162,6 +167,7 @@ enum aarch64_opcode {
     AARCH64_OP_FMOV_SIMD_HIGH_FROM_GENERAL,
     AARCH64_OP_SCVTF_GENERAL,
     AARCH64_OP_UCVTF_GENERAL,
+    AARCH64_OP_FCVTZS_GENERAL,
     AARCH64_OP_FADD_SCALAR,
     AARCH64_OP_FSUB_SCALAR,
     AARCH64_OP_FMUL_SCALAR,
@@ -228,6 +234,11 @@ struct aarch64_decoded {
             enum aarch64_address_mode address_mode;
             bool signed_load;
         } load_store;
+        struct {
+            byte_t prfop;
+            byte_t rn;
+            qword_t offset;
+        } prefetch;
         struct {
             byte_t rt;
             byte_t rt2;
@@ -318,6 +329,11 @@ struct aarch64_decoded {
             byte_t rn;
             byte_t destination_width;
         } integer_to_fp;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t destination_width;
+        } fp_to_integer;
         struct {
             byte_t rn;
             byte_t rm;

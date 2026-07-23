@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <string.h>
 
 #include "guest/aarch64/execute.h"
@@ -993,36 +994,42 @@ static void execute_scalar_fp_compare(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static qword_t scalar_fp_signed_limit(byte_t width, bool negative) {
-    qword_t sign = UINT64_C(1) << (width - 1);
+static qword_t scalar_fp_signed_limit(
+        byte_t destination_width, bool negative) {
+    qword_t sign = UINT64_C(1) << (destination_width - 1);
     return negative ? sign : sign - 1;
 }
 
-static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
-        const struct aarch64_decoded *instruction) {
-    byte_t width = instruction->width;
-    byte_t rd = instruction->operands.data_processing_1source.rd;
-    byte_t rn = instruction->operands.data_processing_1source.rn;
+struct scalar_fp_to_integer_result {
+    qword_t value;
+    dword_t exceptions;
+};
+
+static struct scalar_fp_to_integer_result
+        convert_scalar_fp_to_signed_integer(
+        qword_t source, byte_t source_width, byte_t destination_width,
+        dword_t fpcr) {
     dword_t exceptions = 0;
     qword_t bits = flush_scalar_fp_input(
-            read_scalar_fp(cpu, rn, width), width, cpu->fpcr, &exceptions);
-    qword_t sign_mask = scalar_fp_sign_mask(width);
-    qword_t exponent_mask = scalar_fp_exponent_mask(width);
-    qword_t fraction_mask = scalar_fp_fraction_mask(width);
+            source, source_width, fpcr, &exceptions);
+    qword_t sign_mask = scalar_fp_sign_mask(source_width);
+    qword_t exponent_mask = scalar_fp_exponent_mask(source_width);
+    qword_t fraction_mask = scalar_fp_fraction_mask(source_width);
     qword_t fraction = bits & fraction_mask;
     bool negative = (bits & sign_mask) != 0;
-    unsigned fraction_bits = width == 32 ? 23 : 52;
-    unsigned exponent_bias = width == 32 ? 127 : 1023;
+    unsigned fraction_bits = source_width == 32 ? 23 : 52;
+    unsigned exponent_bias = source_width == 32 ? 127 : 1023;
     unsigned raw_exponent = (unsigned) ((bits & exponent_mask) >>
             fraction_bits);
-    unsigned maximum_exponent = width == 32 ? 255 : 2047;
+    unsigned maximum_exponent = source_width == 32 ? 255 : 2047;
     qword_t converted = 0;
 
     if (raw_exponent == maximum_exponent) {
         if (fraction != 0)
             converted = 0;
         else
-            converted = scalar_fp_signed_limit(width, negative);
+            converted = scalar_fp_signed_limit(
+                    destination_width, negative);
         exceptions |= AARCH64_FPSR_IOC;
     } else if (raw_exponent == 0) {
         if (fraction != 0)
@@ -1031,39 +1038,75 @@ static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
         int exponent = (int) raw_exponent - (int) exponent_bias;
         if (exponent < 0) {
             exceptions |= AARCH64_FPSR_IXC;
+        } else if (exponent > destination_width - 1) {
+            converted = scalar_fp_signed_limit(
+                    destination_width, negative);
+            exceptions |= AARCH64_FPSR_IOC;
         } else {
             qword_t significand = (UINT64_C(1) << fraction_bits) |
                     fraction;
-            bool invalid = exponent > width - 1;
-            if (exponent == width - 1) {
-                invalid = !negative ||
-                        significand != (UINT64_C(1) << fraction_bits);
+            qword_t magnitude;
+            bool inexact = false;
+            if ((unsigned) exponent >= fraction_bits) {
+                magnitude = significand <<
+                        ((unsigned) exponent - fraction_bits);
+            } else {
+                unsigned discarded_bits =
+                        fraction_bits - (unsigned) exponent;
+                qword_t discarded_mask =
+                        (UINT64_C(1) << discarded_bits) - 1;
+                inexact = (significand & discarded_mask) != 0;
+                magnitude = significand >> discarded_bits;
             }
+            qword_t limit = scalar_fp_signed_limit(
+                    destination_width, negative);
+            bool invalid = magnitude > limit;
             if (invalid) {
-                converted = scalar_fp_signed_limit(width, negative);
+                converted = limit;
                 exceptions |= AARCH64_FPSR_IOC;
             } else {
-                qword_t magnitude;
-                if ((unsigned) exponent >= fraction_bits) {
-                    magnitude = significand <<
-                            ((unsigned) exponent - fraction_bits);
-                } else {
-                    unsigned discarded_bits =
-                            fraction_bits - (unsigned) exponent;
-                    qword_t discarded_mask =
-                            (UINT64_C(1) << discarded_bits) - 1;
-                    if ((significand & discarded_mask) != 0)
-                        exceptions |= AARCH64_FPSR_IXC;
-                    magnitude = significand >> discarded_bits;
-                }
                 converted = negative ? 0 - magnitude : magnitude;
-                if (width == 32)
-                    converted = (dword_t) converted;
+                if (inexact)
+                    exceptions |= AARCH64_FPSR_IXC;
             }
         }
     }
-    write_scalar_fp(cpu, rd, width, converted);
-    cpu->fpsr |= exceptions;
+    if (destination_width == 32)
+        converted = (dword_t) converted;
+    return (struct scalar_fp_to_integer_result) {
+        .value = converted,
+        .exceptions = exceptions,
+    };
+}
+
+static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t width = instruction->width;
+    byte_t rd = instruction->operands.data_processing_1source.rd;
+    byte_t rn = instruction->operands.data_processing_1source.rn;
+    struct scalar_fp_to_integer_result result =
+            convert_scalar_fp_to_signed_integer(
+                    read_scalar_fp(cpu, rn, width), width, width,
+                    cpu->fpcr);
+    write_scalar_fp(cpu, rd, width, result.value);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
+static void execute_fp_to_integer(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t source_width = instruction->width;
+    byte_t destination_width =
+            instruction->operands.fp_to_integer.destination_width;
+    struct scalar_fp_to_integer_result result =
+            convert_scalar_fp_to_signed_integer(
+                    read_scalar_fp(cpu,
+                            instruction->operands.fp_to_integer.rn,
+                            source_width),
+                    source_width, destination_width, cpu->fpcr);
+    write_register(cpu, instruction->operands.fp_to_integer.rd,
+            destination_width, false, result.value);
+    cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
 }
 
@@ -1277,13 +1320,22 @@ static bool execute_simd_load_store(struct cpu_state *cpu,
     guest_addr_t base = rn == 31 ? cpu->sp : cpu->x[rn];
     enum aarch64_address_mode address_mode =
             instruction->operands.load_store.address_mode;
-    guest_addr_t adjusted = base +
-            (qword_t) instruction->operands.load_store.offset;
+    qword_t offset = (qword_t) instruction->operands.load_store.offset;
+    if (instruction->opcode == AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET ||
+            instruction->opcode == AARCH64_OP_STORE_SIMD_REGISTER_OFFSET) {
+        qword_t index = read_register(cpu,
+                instruction->operands.load_store.rm, 64, false);
+        offset = extend_register(index, 64,
+                instruction->operands.load_store.extend_type,
+                instruction->operands.load_store.shift);
+    }
+    guest_addr_t adjusted = base + offset;
     guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
             base : adjusted;
 
     bool load = instruction->opcode == AARCH64_OP_LOAD_SIMD_IMM12 ||
-            instruction->opcode == AARCH64_OP_LOAD_SIMD_IMM9;
+            instruction->opcode == AARCH64_OP_LOAD_SIMD_IMM9 ||
+            instruction->opcode == AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET;
     if (load) {
         union aarch64_vector_reg value = {0};
         if (!guest_tlb_read(tlb, address, value.b, size,
@@ -1471,6 +1523,52 @@ static bool execute_load_exclusive(struct cpu_state *cpu,
             token.write_generation, token.sync_identity);
     write_register(cpu, instruction->operands.exclusive.rt,
             instruction->width, false, value);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_load_acquire(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t size = instruction->operands.exclusive.size;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    if (!check_exclusive_alignment(
+            address, size, GUEST_MEMORY_READ, fault))
+        return false;
+
+    byte_t bytes[8];
+    if (!guest_tlb_read(tlb, address, bytes, size,
+            GUEST_MEMORY_READ, fault))
+        return false;
+    qword_t value = load_little_endian(bytes, size);
+    atomic_thread_fence(memory_order_acquire);
+    write_register(cpu, instruction->operands.exclusive.rt,
+            instruction->width, false, value);
+    cpu->pc += 4;
+    return true;
+}
+
+static bool execute_store_release(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rn = instruction->operands.exclusive.rn;
+    byte_t size = instruction->operands.exclusive.size;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    qword_t value = read_register(cpu,
+            instruction->operands.exclusive.rt,
+            instruction->width, false);
+    if (!check_exclusive_alignment(
+            address, size, GUEST_MEMORY_WRITE, fault))
+        return false;
+
+    byte_t bytes[8];
+    store_little_endian(bytes, size, value);
+    atomic_thread_fence(memory_order_release);
+    if (!guest_tlb_write(tlb, address, bytes, size, fault))
+        return false;
     cpu->pc += 4;
     return true;
 }
@@ -1754,6 +1852,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_UCVTF_GENERAL:
             execute_integer_to_fp(cpu, instruction);
             break;
+        case AARCH64_OP_FCVTZS_GENERAL:
+            execute_fp_to_integer(cpu, instruction);
+            break;
         case AARCH64_OP_FADD_SCALAR:
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
@@ -1894,6 +1995,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_STORE_SIMD_IMM12:
         case AARCH64_OP_LOAD_SIMD_IMM9:
         case AARCH64_OP_STORE_SIMD_IMM9:
+        case AARCH64_OP_LOAD_SIMD_REGISTER_OFFSET:
+        case AARCH64_OP_STORE_SIMD_REGISTER_OFFSET:
             if (!execute_simd_load_store(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
@@ -1903,6 +2006,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             if (!execute_load_store_pair(cpu, tlb, instruction,
                     &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_PRFM_IMM12:
+            // 预取仅是性能提示；忽略它也不能产生同步访存故障。
+            cpu->pc += 4;
             break;
         case AARCH64_OP_LOAD_SIMD_PAIR:
         case AARCH64_OP_STORE_SIMD_PAIR:
@@ -1915,6 +2022,16 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_CASPL:
         case AARCH64_OP_CASPAL:
             if (!execute_compare_swap_pair(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LDAR:
+            if (!execute_load_acquire(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_STLR:
+            if (!execute_store_release(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

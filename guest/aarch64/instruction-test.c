@@ -724,6 +724,32 @@ static void test_load_store_decode(void) {
     assert(instruction.operands.load_store.offset == -4);
 }
 
+static void test_prefetch(void) {
+    struct aarch64_decoded instruction = decode(UINT32_C(0xf9800000));
+    assert(instruction.opcode == AARCH64_OP_PRFM_IMM12);
+    assert(instruction.operands.prefetch.prfop == 0);
+    assert(instruction.operands.prefetch.rn == 0);
+    assert(instruction.operands.prefetch.offset == 0);
+
+    instruction = decode(UINT32_C(0xf9bfffff));
+    assert(instruction.opcode == AARCH64_OP_PRFM_IMM12);
+    assert(instruction.operands.prefetch.prfop == 31);
+    assert(instruction.operands.prefetch.rn == 31);
+    assert(instruction.operands.prefetch.offset == UINT64_C(0x7ff8));
+
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x7800),
+        .x[0] = UINT64_MAX,
+        .sp = UINT64_MAX,
+        .nzcv = UINT32_C(0xa0000000),
+    };
+    execute_instruction(&cpu, &instruction);
+    assert(cpu.pc == UINT64_C(0x7804));
+    assert(cpu.x[0] == UINT64_MAX);
+    assert(cpu.sp == UINT64_MAX);
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+}
+
 static void test_unprivileged_load_store_decode(void) {
     struct aarch64_decoded instruction = decode(UINT32_C(0x38100820));
     assert(instruction.opcode == AARCH64_OP_STORE_UNPRIVILEGED);
@@ -856,6 +882,7 @@ int main(void) {
     test_branches();
     test_conditional_branches();
     test_load_store_decode();
+    test_prefetch();
     test_unprivileged_load_store_decode();
     test_signed_load_decode();
     test_load_store_pair_decode();
@@ -873,7 +900,6 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xb81fcce7), &invalid));
     assert(!aarch64_decode(UINT32_C(0x38dfece7), &invalid));
     assert(!aarch64_decode(UINT32_C(0xb9c00020), &invalid));
-    assert(!aarch64_decode(UINT32_C(0xf9800400), &invalid));
     assert(!aarch64_decode(UINT32_C(0xf89f8000), &invalid));
     assert(!aarch64_decode(UINT32_C(0x12400020), &invalid));
     assert(!aarch64_decode(UINT32_C(0x9200f820), &invalid));
