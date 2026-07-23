@@ -38,7 +38,8 @@ struct real_poll_event {
 static void *rpe_data(struct real_poll_event *rpe);
 static int rpe_events(struct real_poll_event *rpe);
 static int real_poll_wait(struct real_poll *real, struct real_poll_event *events, int max, struct timespec *timeout);
-static int real_poll_update(struct real_poll *real, int fd, int types, void *data);
+static int real_poll_update(struct real_poll *real, int fd, int types,
+        void *data, bool supports_exception_filter);
 
 static poll_listen_wait_exit_test_hook_t
         listen_wait_exit_test_hook;
@@ -80,6 +81,7 @@ error:
 struct poll_real_fd {
     int number;
     bool socket_locked;
+    bool supports_exception_filter;
 };
 
 // poll 锁先于 socket 锁。恢复流程发布或撤销 raw fd 时持有 socket 锁，
@@ -90,6 +92,7 @@ static bool poll_real_fd_begin(
     if (fd->ops == &socket_fdops) {
         lock(&fd->lock);
         real->socket_locked = true;
+        real->supports_exception_filter = true;
         if (fd->real_fd < 0) {
             unlock(&fd->lock);
             real->socket_locked = false;
@@ -195,7 +198,8 @@ static int poll_add_fd_impl(
     struct poll_real_fd real;
     if (!wake_only && poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
-                &poll->real, real.number, types, poll_fd);
+                &poll->real, real.number, types, poll_fd,
+                real.supports_exception_filter);
         poll_real_fd_end(fd, &real);
         if (err < 0) {
             poll_fd_free(poll_fd);
@@ -261,7 +265,8 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
     if (!poll_fd->wake_only && poll_fd->enabled &&
             poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
-                &poll->real, real.number, 0, poll_fd);
+                &poll->real, real.number, 0, poll_fd,
+                real.supports_exception_filter);
         poll_real_fd_end(fd, &real);
         if (err < 0) {
             err = errno_map();
@@ -297,7 +302,8 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     struct poll_real_fd real;
     if (!poll_fd->wake_only && poll_real_fd_begin(fd, &real)) {
         err = real_poll_update(
-                &poll->real, real.number, types, poll_fd);
+                &poll->real, real.number, types, poll_fd,
+                real.supports_exception_filter);
         poll_real_fd_end(fd, &real);
         if (err < 0) {
             err = errno_map();
@@ -337,7 +343,8 @@ void poll_cleanup_fd(struct fd *fd) {
         struct poll_real_fd real;
         if (!poll_fd->wake_only && poll_fd->enabled &&
                 poll_real_fd_begin(fd, &real)) {
-            real_poll_update(&poll->real, real.number, 0, poll_fd);
+            real_poll_update(&poll->real, real.number, 0, poll_fd,
+                    real.supports_exception_filter);
             poll_real_fd_end(fd, &real);
         }
         list_remove(&poll_fd->polls);
@@ -396,7 +403,8 @@ int poll_rearm_fd(struct fd *fd) {
             int result;
             do {
                 result = real_poll_update(&poll->real,
-                        real.number, poll_fd->types, poll_fd);
+                        real.number, poll_fd->types, poll_fd,
+                        real.supports_exception_filter);
             } while (result < 0 && errno == EINTR);
             poll_real_fd_end(fd, &real);
             if (result == 0) {
@@ -467,7 +475,7 @@ static int poll_wait_deadline(struct poll *poll_,
         fcntl(poll_->notify_pipe[0], F_SETFL, O_NONBLOCK);
         fcntl(poll_->notify_pipe[1], F_SETFL, O_NONBLOCK);
         if (real_poll_update(&poll_->real, poll_->notify_pipe[0],
-                POLL_READ, NULL) < 0) {
+                POLL_READ, NULL, false) < 0) {
             int err = errno_map();
             close(poll_->notify_pipe[0]);
             close(poll_->notify_pipe[1]);
@@ -546,7 +554,8 @@ static int poll_wait_deadline(struct poll *poll_,
                     if (!poll_fd->wake_only &&
                             poll_real_fd_begin(fd, &real)) {
                         real_poll_update(&poll_->real,
-                                real.number, 0, poll_fd);
+                                real.number, 0, poll_fd,
+                                real.supports_exception_filter);
                         poll_real_fd_end(fd, &real);
                     }
                     poll_fd->enabled = false;
@@ -827,7 +836,9 @@ static int real_poll_wait(struct real_poll *real, struct real_poll_event *events
     return epoll_wait(real->fd, (struct epoll_event *) events, max, timeout_millis);
 }
 
-static int real_poll_update(struct real_poll *real, int fd, int types, void *data) {
+static int real_poll_update(struct real_poll *real, int fd, int types,
+        void *data, bool supports_exception_filter) {
+    (void) supports_exception_filter;
     types &= ~EPOLLONESHOT;
     if (types == 0)
         return epoll_ctl(real->fd, EPOLL_CTL_DEL, fd, NULL);
@@ -854,11 +865,15 @@ static int real_poll_init(struct real_poll *real) {
     return 0;
 }
 
-static int real_poll_update(struct real_poll *real, int fd, int types, void *data) {
+static int real_poll_update(struct real_poll *real, int fd, int types,
+        void *data, bool supports_exception_filter) {
     struct kevent e[3] = {
         {.filter = EVFILT_READ, .flags = types & (POLL_READ | POLL_HUP) ? EV_ADD : EV_DELETE},
         {.filter = EVFILT_WRITE, .flags = types & POLL_WRITE ? EV_ADD : EV_DELETE},
-        {.filter = EVFILT_EXCEPT, .flags = types & POLL_ERR ? EV_ADD : EV_DELETE},
+        {.filter = EVFILT_EXCEPT,
+                .flags = supports_exception_filter && types & POLL_ERR ?
+                        EV_ADD : EV_DELETE,
+                .fflags = supports_exception_filter ? NOTE_OOB : 0},
     };
     if (!(types & POLL_READ) && types & POLL_HUP) {
         // Set the low water mark really high so we'll only get woken up on a hangup
@@ -892,7 +907,7 @@ static int real_poll_update(struct real_poll *real, int fd, int types, void *dat
         else if (e[index].filter == EVFILT_WRITE)
             deleting = !(types & POLL_WRITE);
         else if (e[index].filter == EVFILT_EXCEPT)
-            deleting = !(types & POLL_ERR);
+            deleting = !supports_exception_filter || !(types & POLL_ERR);
         else {
             errno = EIO;
             return -1;

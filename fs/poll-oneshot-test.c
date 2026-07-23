@@ -1183,9 +1183,10 @@ static int test_real_fd_cleanup(void) {
 
     struct poll *poll = poll_create();
     CHECK(!IS_ERR(poll), "为真实文件创建 poll 实例");
-    CHECK(poll_add_fd(poll, read_end, POLL_READ | POLL_ONESHOT,
+    CHECK(poll_add_fd(poll, read_end,
+            POLL_READ | POLL_ERR | POLL_HUP | POLL_ONESHOT,
             (union poll_fd_info) {.num = 7}) == 0,
-            "登记真实管道读端");
+            "登记带 Linux 常驻错误事件的真实管道读端");
     CHECK(write(pipe_fds[1], "x", 1) == 1, "使真实管道进入就绪状态");
 
     struct timespec immediate = {0};
@@ -1195,7 +1196,8 @@ static int test_real_fd_cleanup(void) {
     struct callback_result disabled = {0};
     CHECK(poll_wait(poll, record_event, &disabled, &immediate) == 0 &&
             disabled.calls == 0, "真实后端在重置前保持禁用");
-    CHECK(poll_mod_fd(poll, read_end, POLL_READ | POLL_ONESHOT,
+    CHECK(poll_mod_fd(poll, read_end,
+            POLL_READ | POLL_ERR | POLL_HUP | POLL_ONESHOT,
             (union poll_fd_info) {.num = 8}) == 0,
             "真实后端可通过 MOD 重置");
     struct callback_result second = {0};
@@ -1207,6 +1209,34 @@ static int test_real_fd_cleanup(void) {
     CHECK(list_empty(&poll->poll_fds), "关闭文件对象同步清理 poll 登记");
     poll_destroy(poll);
     CHECK(close(pipe_fds[1]) == 0, "关闭宿主管道写端");
+    return 0;
+}
+
+static int test_socket_exception_filter_registration(void) {
+    struct fd *socket;
+    int peer;
+    CHECK(restart_socket_create(&socket, &peer),
+            "创建异常事件登记测试套接字");
+
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll), "为异常事件登记创建 poll 实例");
+    CHECK(poll_add_fd(poll, socket,
+            POLL_READ | POLL_ERR | POLL_HUP,
+            (union poll_fd_info) {.num = 10}) == 0,
+            "为套接字登记带 NOTE_OOB 的异常事件过滤器");
+    CHECK(write(peer, "x", 1) == 1, "使异常事件登记测试套接字可读");
+
+    struct timespec immediate = {0};
+    struct callback_result result = {0};
+    CHECK(poll_wait(poll, record_event, &result, &immediate) == 1 &&
+            result.calls == 1 && result.types & POLL_READ,
+            "异常事件过滤器不影响套接字普通可读事件");
+
+    CHECK(fd_close(socket) == 0, "关闭异常事件登记测试套接字");
+    CHECK(list_empty(&poll->poll_fds),
+            "关闭套接字同步清理异常事件登记");
+    poll_destroy(poll);
+    CHECK(close(peer) == 0, "关闭异常事件登记测试对端");
     return 0;
 }
 
@@ -1269,6 +1299,8 @@ int main(void) {
         result = test_epoll_wait_retains_epoll_fd();
     if (result == 0)
         result = test_real_fd_cleanup();
+    if (result == 0)
+        result = test_socket_exception_filter_registration();
     if (result == 0)
         result = test_real_fd_registration_error();
 
