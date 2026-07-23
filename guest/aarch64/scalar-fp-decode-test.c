@@ -58,6 +58,8 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x5ee1b800), AARCH64_OP_FCVTZS_SCALAR, 64},
     {UINT32_C(0x5e21d800), AARCH64_OP_SCVTF_SCALAR, 32},
     {UINT32_C(0x5e61d800), AARCH64_OP_SCVTF_SCALAR, 64},
+    {UINT32_C(0x7e21d800), AARCH64_OP_UCVTF_SCALAR, 32},
+    {UINT32_C(0x7e61d800), AARCH64_OP_UCVTF_SCALAR, 64},
 };
 
 static const struct precision_case precision_conversions[] = {
@@ -142,6 +144,7 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FCMPE_SCALAR:
         case AARCH64_OP_FCVTZS_SCALAR:
         case AARCH64_OP_SCVTF_SCALAR:
+        case AARCH64_OP_UCVTF_SCALAR:
             return true;
         default:
             return false;
@@ -265,6 +268,9 @@ static void test_apple_clang_vectors(void) {
     assert_unary(UINT32_C(0x5ee1b8a3), 3, 3, 5);
     assert_unary(UINT32_C(0x5e21d8a3), 4, 3, 5);
     assert_unary(UINT32_C(0x5e61d8a3), 5, 3, 5);
+    assert_unary(UINT32_C(0x7e21d8a3), 6, 3, 5);
+    assert_unary(UINT32_C(0x7e61d8a3), 7, 3, 5);
+    assert_unary(UINT32_C(0x7e61dbff), 7, 31, 31);
 
     assert_precision(UINT32_C(0x1e22c0a3), 0, 3, 5);
     assert_precision(UINT32_C(0x1e6240a3), 1, 3, 5);
@@ -314,7 +320,7 @@ static void test_unary_encoding_space(void) {
             }
         }
     }
-    assert(decoded_count == 6144);
+    assert(decoded_count == 8192);
 }
 
 static void test_precision_encoding_space(void) {
@@ -454,12 +460,19 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x5e79d8a3),
         UINT32_C(0x7ea1b8a3),
         UINT32_C(0x7ee1b8a3),
-        UINT32_C(0x7e21d8a3),
-        UINT32_C(0x7e61d8a3),
+        UINT32_C(0x7e79d8a3),
+        UINT32_C(0x7ea1d8a3),
+        UINT32_C(0x7ee1d8a3),
+        UINT32_C(0x7e61c8a3),
+        UINT32_C(0x3e61d8a3),
+        UINT32_C(0xfe61d8a3),
+        UINT32_C(0x7e69d8a3),
         UINT32_C(0x5f3ffca3),
         UINT32_C(0x5f7ffca3),
         UINT32_C(0x5f3fe4a3),
         UINT32_C(0x5f7fe4a3),
+        UINT32_C(0x7f3fe4a3),
+        UINT32_C(0x7f7fe4a3),
         UINT32_C(0x0e27d4a3),
         UINT32_C(0x4e27d4a3),
         UINT32_C(0x4e67d4a3),
@@ -475,6 +488,9 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x0e21d8a3),
         UINT32_C(0x4e21d8a3),
         UINT32_C(0x4e61d8a3),
+        UINT32_C(0x2e21d8a3),
+        UINT32_C(0x6e21d8a3),
+        UINT32_C(0x6e61d8a3),
         UINT32_C(0x1e3800a3),
         UINT32_C(0x1e7800a3),
         UINT32_C(0x9e3800a3),
@@ -483,6 +499,12 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e6200a3),
         UINT32_C(0x9e2200a3),
         UINT32_C(0x9e6200a3),
+        UINT32_C(0x1e2300a3),
+        UINT32_C(0x1e6300a3),
+        UINT32_C(0x9e2300a3),
+        UINT32_C(0x9e6300a3),
+        UINT32_C(0x9e3d00a3),
+        UINT32_C(0x1e7d00a3),
         // 当前 guest 不声明可选 FP16，相关精度转换必须保持未定义。
         UINT32_C(0x1e23c000),
         UINT32_C(0x1e63c000),

@@ -183,6 +183,7 @@ enum aarch64_opcode {
     AARCH64_OP_FCMPE_SCALAR,
     AARCH64_OP_FCVTZS_SCALAR,
     AARCH64_OP_SCVTF_SCALAR,
+    AARCH64_OP_UCVTF_SCALAR,
 };
 
 enum aarch64_shift_type {

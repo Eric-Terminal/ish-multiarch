@@ -1162,7 +1162,8 @@ static void execute_scalar_integer_to_fp(struct cpu_state *cpu,
     byte_t rn = instruction->operands.data_processing_1source.rn;
     qword_t source = read_scalar_fp(cpu, rn, instruction->width);
     convert_integer_to_fp(cpu, rd, source, instruction->width,
-            instruction->width, true);
+            instruction->width,
+            instruction->opcode == AARCH64_OP_SCVTF_SCALAR);
     cpu->pc += 4;
 }
 
@@ -1967,6 +1968,7 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             execute_scalar_fp_to_integer(cpu, instruction);
             break;
         case AARCH64_OP_SCVTF_SCALAR:
+        case AARCH64_OP_UCVTF_SCALAR:
             execute_scalar_integer_to_fp(cpu, instruction);
             break;
         case AARCH64_OP_UDIV:

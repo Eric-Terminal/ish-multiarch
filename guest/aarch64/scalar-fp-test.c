@@ -48,6 +48,8 @@
 #define FCVTZS_D UINT32_C(0x5ee1b800)
 #define SCVTF_S UINT32_C(0x5e21d800)
 #define SCVTF_D UINT32_C(0x5e61d800)
+#define UCVTF_S UINT32_C(0x7e21d800)
+#define UCVTF_D UINT32_C(0x7e61d800)
 
 static dword_t binary(dword_t base, byte_t rd, byte_t rn, byte_t rm) {
     return base | (dword_t) rm << 16 | (dword_t) rn << 5 | rd;
@@ -840,18 +842,25 @@ static void test_fcvtzs_boundaries(void) {
     }
 }
 
-static void run_scvtf(byte_t width, qword_t input, dword_t fpcr,
-        qword_t expected, dword_t expected_flags) {
+static void run_scalar_integer_to_fp(dword_t base, byte_t width,
+        qword_t input, dword_t fpcr, qword_t expected,
+        dword_t expected_flags) {
     struct cpu_state cpu = initial_cpu();
     cpu.fpcr = fpcr;
     cpu.fpsr = TEST_FPSR_QC | TEST_FPSR_IOC;
     set_scalar(&cpu, 13, width, input);
-    execute_word(&cpu, unary(width == 32 ? SCVTF_S : SCVTF_D, 14, 13));
+    execute_word(&cpu, unary(base, 14, 13));
     assert_scalar_result(&cpu, 14, width, expected);
     assert(cpu.fpsr ==
             (TEST_FPSR_QC | TEST_FPSR_IOC | expected_flags));
     assert(cpu.fpcr == fpcr);
     assert_non_fp_state(&cpu, UINT64_C(0x1004), UINT32_C(0xa0000000));
+}
+
+static void run_scvtf(byte_t width, qword_t input, dword_t fpcr,
+        qword_t expected, dword_t expected_flags) {
+    run_scalar_integer_to_fp(width == 32 ? SCVTF_S : SCVTF_D,
+            width, input, fpcr, expected, expected_flags);
 }
 
 static void test_scvtf_extremes_and_rounding(void) {
@@ -902,6 +911,48 @@ static void test_scvtf_extremes_and_rounding(void) {
             UINT64_C(0xc3e0000000000000), 0);
 }
 
+static void test_ucvtf_extremes_and_rounding(void) {
+    struct cpu_state product = initial_cpu();
+    product.fpcr = TEST_FPCR_DN | TEST_FPCR_FZ;
+    product.fpsr = TEST_FPSR_QC | TEST_FPSR_IOC;
+    set_scalar(&product, 31, 64, UINT64_C(9));
+    execute_word(&product, UINT32_C(0x7e61dbff));
+    assert_scalar_result(&product, 31, 64,
+            UINT64_C(0x4022000000000000));
+    assert(product.fpcr == (TEST_FPCR_DN | TEST_FPCR_FZ));
+    assert(product.fpsr == (TEST_FPSR_QC | TEST_FPSR_IOC));
+    assert_non_fp_state(&product, UINT64_C(0x1004),
+            UINT32_C(0xa0000000));
+
+    run_scalar_integer_to_fp(UCVTF_S, 32, 0, 0, 0, 0);
+    run_scalar_integer_to_fp(UCVTF_S, 32, UINT32_MAX, 0,
+            UINT32_C(0x4f800000), TEST_FPSR_IXC);
+    run_scalar_integer_to_fp(UCVTF_D, 64, UINT64_MAX, 0,
+            UINT64_C(0x43f0000000000000), TEST_FPSR_IXC);
+
+    static const dword_t modes[] = {
+        0, TEST_FPCR_RP, TEST_FPCR_RM, TEST_FPCR_RZ,
+    };
+    static const dword_t single[] = {
+        UINT32_C(0x4b800000), UINT32_C(0x4b800001),
+        UINT32_C(0x4b800000), UINT32_C(0x4b800000),
+    };
+    static const qword_t double_precision[] = {
+        UINT64_C(0x4340000000000000),
+        UINT64_C(0x4340000000000001),
+        UINT64_C(0x4340000000000000),
+        UINT64_C(0x4340000000000000),
+    };
+    for (unsigned i = 0; i < ARRAY_SIZE(modes); i++) {
+        run_scalar_integer_to_fp(UCVTF_S, 32,
+                (UINT32_C(1) << 24) + 1, modes[i],
+                single[i], TEST_FPSR_IXC);
+        run_scalar_integer_to_fp(UCVTF_D, 64,
+                (UINT64_C(1) << 53) + 1, modes[i],
+                double_precision[i], TEST_FPSR_IXC);
+    }
+}
+
 int main(void) {
     test_busybox_sleep_path();
     test_basic_arithmetic();
@@ -916,5 +967,6 @@ int main(void) {
     test_compare_with_zero_and_fz();
     test_fcvtzs_boundaries();
     test_scvtf_extremes_and_rounding();
+    test_ucvtf_extremes_and_rounding();
     return 0;
 }
