@@ -204,6 +204,12 @@ int fd_setflags(struct fd *fd, int flags);
 #define F_SETFD_ 2
 #define F_GETFL_ 3
 #define F_SETFL_ 4
+#define F_GETLK_ 5
+#define F_SETLK_ 6
+#define F_SETLKW_ 7
+#define F_GETLK64_ 12
+#define F_SETLK64_ 13
+#define F_SETLKW64_ 14
 #define F_DUPFD_CLOEXEC_ 1030
 #define FD_CLOEXEC_ 1
 

@@ -191,7 +191,7 @@ static int file_lock_from_flock(struct fd *fd, struct flock_ *flock, struct file
     }
     lock->type = flock->type;
     lock->owner = current->files;
-    lock->pid = current->pid;
+    lock->pid = current->tgid;
     return 0;
 }
 
@@ -229,7 +229,12 @@ out:
 }
 
 int fcntl_setlk(struct fd *fd, struct flock_ *flock, bool blocking) {
-    if (flock->type != F_RDLCK_ && flock->type != F_WRLCK_ && flock->type != F_UNLCK_)
+    struct file_lock request;
+    int err = file_lock_from_flock(fd, flock, &request);
+    if (err < 0)
+        return err;
+    if (flock->type != F_RDLCK_ && flock->type != F_WRLCK_ &&
+            flock->type != F_UNLCK_)
         return _EINVAL;
     int fd_mode = fd_getflags(fd) & O_ACCMODE_;
     if (flock->type == F_RDLCK_ && fd_mode == O_WRONLY_)
@@ -240,10 +245,6 @@ int fcntl_setlk(struct fd *fd, struct flock_ *flock, bool blocking) {
     struct inode_data *inode = fd->inode;
     lock(&inode->lock);
 
-    struct file_lock request;
-    int err = file_lock_from_flock(fd, flock, &request);
-    if (err < 0)
-        goto out;
     while ((err = file_lock_acquire(inode, &request)) == _EAGAIN) {
         if (!blocking)
             break;
@@ -251,7 +252,6 @@ int fcntl_setlk(struct fd *fd, struct flock_ *flock, bool blocking) {
         if (err < 0)
             break;
     }
-out:
     unlock(&inode->lock);
     return err;
 }
@@ -259,10 +259,15 @@ out:
 void file_lock_remove_owned_by(struct fd *fd, void *owner) {
     struct inode_data *inode = fd->inode;
     lock(&inode->lock);
+    bool removed = false;
     struct file_lock *lock, *tmp;
     list_for_each_entry_safe(&inode->posix_locks, lock, tmp, locks) {
-        if (lock->owner == owner)
+        if (lock->owner == owner) {
             file_lock_delete(lock);
+            removed = true;
+        }
     }
+    if (removed)
+        notify(&inode->posix_unlock);
     unlock(&inode->lock);
 }

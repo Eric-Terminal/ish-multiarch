@@ -529,13 +529,6 @@ void fdtable_do_cloexec(struct fdtable *table) {
     socket_scm_collect_checkpoint();
 }
 
-#define F_GETLK_ 5
-#define F_SETLK_ 6
-#define F_SETLKW_ 7
-#define F_GETLK64_ 12
-#define F_SETLK64_ 13
-#define F_SETLKW64_ 14
-
 fd_t f_dupfd_task(struct task *task, fd_t old_fd,
         fd_t minimum, int flags) {
     if (flags & ~O_CLOEXEC_)
@@ -773,14 +766,15 @@ dword_t sys_fcntl(fd_t f, dword_t cmd, dword_t arg) {
             flock.start = flock32.start;
             flock.len = flock32.len;
             flock.pid = flock32.pid;
-            return fcntl_setlk(fd, &flock, cmd == F_SETLKW64_);
+            return fcntl_setlk(fd, &flock, cmd == F_SETLKW_);
 
         case F_SETLK64_:
         case F_SETLKW64_:
-            STRACE("fcntl(%d, F_SETLK%*s64, %#x)", f, cmd == F_SETLKW_, "W", arg);
+            STRACE("fcntl(%d, F_SETLK%*s64, %#x)", f,
+                    cmd == F_SETLKW64_, "W", arg);
             if (user_read(arg, &flock, sizeof(flock)))
                 return _EFAULT;
-            return fcntl_setlk(fd, &flock, cmd == F_SETLKW_);
+            return fcntl_setlk(fd, &flock, cmd == F_SETLKW64_);
 
         default:
             STRACE("fcntl(%d, %d)", f, cmd);
