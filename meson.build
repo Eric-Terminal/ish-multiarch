@@ -151,6 +151,10 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
         dependencies: sqlite3,
         c_args: '-DISH_APPLE_ROOTFS_SEED_TESTING')
     test('apple_rootfs_seed', apple_rootfs_seed_test)
+
+    apple_watch_decoder_test_shell = find_program('bash')
+    test('apple_watch_terminal_decoder', apple_watch_decoder_test_shell,
+        args: files('tools/apple-watch-terminal-decoder-test.sh'))
 endif
 
 subdir('deps')

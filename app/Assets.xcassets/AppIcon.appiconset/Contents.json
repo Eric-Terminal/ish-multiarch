@@ -107,6 +107,12 @@
       "idiom" : "ios-marketing",
       "filename" : "App Store.png",
       "scale" : "1x"
+    },
+    {
+      "filename" : "App Store.png",
+      "idiom" : "universal",
+      "platform" : "watchos",
+      "size" : "1024x1024"
     }
   ],
   "info" : {
