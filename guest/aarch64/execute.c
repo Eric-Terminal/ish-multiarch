@@ -681,6 +681,22 @@ static void execute_advsimd_table(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_extract(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_extract.rd;
+    byte_t rn = instruction->operands.advsimd_extract.rn;
+    byte_t rm = instruction->operands.advsimd_extract.rm;
+    byte_t byte_offset =
+            instruction->operands.advsimd_extract.byte_offset;
+    byte_t bytes = instruction->width / 8;
+    byte_t first_bytes = (byte_t) (bytes - byte_offset);
+    union aarch64_vector_reg result = {0};
+    memcpy(result.b, &cpu->v[rn].b[byte_offset], first_bytes);
+    memcpy(&result.b[first_bytes], cpu->v[rm].b, byte_offset);
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_permute(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
@@ -1996,6 +2012,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_TBL:
         case AARCH64_OP_ADVSIMD_TBX:
             execute_advsimd_table(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_EXT:
+            execute_advsimd_extract(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_UZP1:
         case AARCH64_OP_ADVSIMD_UZP2:

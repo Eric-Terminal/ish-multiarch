@@ -143,6 +143,7 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_ADD,
     AARCH64_OP_ADVSIMD_TBL,
     AARCH64_OP_ADVSIMD_TBX,
+    AARCH64_OP_ADVSIMD_EXT,
     AARCH64_OP_ADVSIMD_UZP1,
     AARCH64_OP_ADVSIMD_UZP2,
     AARCH64_OP_ADVSIMD_TRN1,
@@ -412,6 +413,12 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t table_count;
         } advsimd_table;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t rm;
+            byte_t byte_offset;
+        } advsimd_extract;
         struct {
             byte_t rs;
             byte_t rs2;

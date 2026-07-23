@@ -567,6 +567,24 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbfe08400)) == UINT32_C(0x2e000000)) {
+        bool q = ((word >> 30) & 1) != 0;
+        byte_t byte_offset = (word >> 11) & 0xf;
+        if (!q && byte_offset >= 8)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_EXT,
+            .width = q ? 128 : 64,
+            .operands.advsimd_extract = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .byte_offset = byte_offset,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbfe08c00)) == UINT32_C(0x0e000000)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = (word >> 12) & 1 ?

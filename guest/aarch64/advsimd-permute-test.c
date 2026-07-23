@@ -7,6 +7,9 @@
 #define ADVSIMD_PERMUTE_FIXED_MASK UINT32_C(0xbf208c00)
 #define ADVSIMD_PERMUTE_FIXED_BITS UINT32_C(0x0e000800)
 #define ADVSIMD_PERMUTE_VARIABLE_MASK UINT32_C(0x40df73ff)
+#define ADVSIMD_EXT_FIXED_MASK UINT32_C(0xbfe08400)
+#define ADVSIMD_EXT_FIXED_BITS UINT32_C(0x2e000000)
+#define ADVSIMD_EXT_VARIABLE_MASK UINT32_C(0x401f7bff)
 
 static dword_t encode(bool q, byte_t size, byte_t operation,
         byte_t rm, byte_t rn, byte_t rd) {
@@ -15,6 +18,16 @@ static dword_t encode(bool q, byte_t size, byte_t operation,
             (dword_t) size << 22 |
             (dword_t) rm << 16 |
             (dword_t) operation << 12 |
+            (dword_t) rn << 5 |
+            rd;
+}
+
+static dword_t encode_extract(bool q, byte_t byte_offset,
+        byte_t rm, byte_t rn, byte_t rd) {
+    return ADVSIMD_EXT_FIXED_BITS |
+            (dword_t) q << 30 |
+            (dword_t) rm << 16 |
+            (dword_t) byte_offset << 11 |
             (dword_t) rn << 5 |
             rd;
 }
@@ -63,6 +76,17 @@ static void assert_decode(dword_t word, enum aarch64_opcode opcode,
     assert(instruction.operands.advsimd_three_same.rm == rm);
     assert(instruction.operands.advsimd_three_same.element_size ==
             element_size);
+}
+
+static void assert_extract_decode(dword_t word, byte_t width,
+        byte_t byte_offset, byte_t rd, byte_t rn, byte_t rm) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_EXT);
+    assert(instruction.width == width);
+    assert(instruction.operands.advsimd_extract.rd == rd);
+    assert(instruction.operands.advsimd_extract.rn == rn);
+    assert(instruction.operands.advsimd_extract.rm == rm);
+    assert(instruction.operands.advsimd_extract.byte_offset == byte_offset);
 }
 
 static void test_llvm_vectors(void) {
@@ -145,6 +169,78 @@ static void test_fixed_bits(void) {
     }
 }
 
+static void test_extract_llvm_vectors(void) {
+    assert_extract_decode(UINT32_C(0x2e020020), 64, 0, 0, 1, 2);
+    assert_extract_decode(UINT32_C(0x2e053883), 64, 7, 3, 4, 5);
+    assert_extract_decode(UINT32_C(0x2e1f3bff), 64, 7, 31, 31, 31);
+    assert_extract_decode(UINT32_C(0x6e0800e6), 128, 0, 6, 7, 8);
+    assert_extract_decode(UINT32_C(0x6e0b7949), 128, 15, 9, 10, 11);
+    assert_extract_decode(UINT32_C(0x6e1e4360), 128, 8, 0, 27, 30);
+    assert_extract_decode(UINT32_C(0x6e1f7bff), 128, 15, 31, 31, 31);
+}
+
+static void test_extract_encoding_space(void) {
+    assert((ADVSIMD_EXT_FIXED_MASK & ADVSIMD_EXT_VARIABLE_MASK) == 0);
+    assert((ADVSIMD_EXT_FIXED_MASK |
+            ADVSIMD_EXT_VARIABLE_MASK) == UINT32_MAX);
+    unsigned decoded_count = 0;
+    unsigned reserved_count = 0;
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned byte_offset = 0; byte_offset < 16; byte_offset++) {
+            for (unsigned rm = 0; rm < 32; rm++) {
+                for (unsigned rn = 0; rn < 32; rn++) {
+                    for (unsigned rd = 0; rd < 32; rd++) {
+                        struct aarch64_decoded instruction = {0};
+                        bool decoded = aarch64_decode(encode_extract(q,
+                                (byte_t) byte_offset, (byte_t) rm,
+                                (byte_t) rn, (byte_t) rd), &instruction);
+                        bool expected = q != 0 || byte_offset < 8;
+                        assert(decoded == expected);
+                        if (!expected) {
+                            reserved_count++;
+                            continue;
+                        }
+                        decoded_count++;
+                        assert(instruction.opcode ==
+                                AARCH64_OP_ADVSIMD_EXT);
+                        assert(instruction.width == (q ? 128 : 64));
+                        assert(instruction.operands.advsimd_extract.rd == rd);
+                        assert(instruction.operands.advsimd_extract.rn == rn);
+                        assert(instruction.operands.advsimd_extract.rm == rm);
+                        assert(instruction.operands.advsimd_extract.
+                                byte_offset == byte_offset);
+                    }
+                }
+            }
+        }
+    }
+    assert(decoded_count == 786432);
+    assert(reserved_count == 262144);
+}
+
+static void assert_not_extract(dword_t word) {
+    struct aarch64_decoded instruction = {0};
+    bool decoded = aarch64_decode(word, &instruction);
+    assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_EXT);
+}
+
+static void test_extract_boundaries(void) {
+    dword_t base = UINT32_C(0x6e1e4360);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((ADVSIMD_EXT_FIXED_MASK & (UINT32_C(1) << bit)) != 0)
+            assert_not_extract(base ^ (UINT32_C(1) << bit));
+    }
+
+    struct aarch64_decoded instruction = {0};
+    assert(!aarch64_decode(encode_extract(false, 8, 2, 1, 0),
+            &instruction));
+    assert(!aarch64_decode(encode_extract(false, 15, 2, 1, 0),
+            &instruction));
+    assert_not_extract(UINT32_C(0x4e1e4360));
+    assert_not_extract(UINT32_C(0x6e1e4760));
+    assert_not_extract(UINT32_C(0x6e3e4360));
+}
+
 static qword_t read_lane(const union aarch64_vector_reg *reg,
         byte_t element_size, byte_t index) {
     if (element_size == 1)
@@ -200,6 +296,138 @@ static void fill_registers(struct cpu_state *cpu) {
     for (unsigned reg = 0; reg < 32; reg++) {
         for (unsigned byte = 0; byte < 16; byte++)
             cpu->v[reg].b[byte] = (byte_t) (reg * 19 + byte * 11);
+    }
+}
+
+static struct cpu_state initial_extract_cpu(void) {
+    struct cpu_state cpu = {
+        .cycle = UINT64_C(0x1020304050607080),
+        .sp = UINT64_C(0x1122334455667788),
+        .pc = UINT64_C(0x1000),
+        .nzcv = UINT32_C(0xa0000000),
+        .fpcr = UINT32_C(0x07c09f00),
+        .fpsr = UINT32_C(0x0800009f),
+        .tpidr_el0 = UINT64_C(0x8877665544332211),
+        .segfault_addr = UINT64_C(0x123456789abcdef0),
+        .segfault_was_write = true,
+        .trapno = UINT32_C(0x13572468),
+        .single_step = true,
+        ._poked = true,
+    };
+    for (unsigned reg = 0; reg < 31; reg++)
+        cpu.x[reg] = UINT64_C(0x0102030405060708) ^ reg;
+    fill_registers(&cpu);
+    return cpu;
+}
+
+static union aarch64_vector_reg reference_extract(
+        const struct cpu_state *before, bool q, byte_t byte_offset,
+        byte_t rn, byte_t rm) {
+    byte_t bytes = q ? 16 : 8;
+    byte_t concatenated[32] = {0};
+    union aarch64_vector_reg result = {0};
+    memcpy(concatenated, before->v[rn].b, bytes);
+    memcpy(&concatenated[bytes], before->v[rm].b, bytes);
+    memcpy(result.b, &concatenated[byte_offset], bytes);
+    return result;
+}
+
+static void execute_extract_and_assert(bool q, byte_t byte_offset,
+        byte_t rd, byte_t rn, byte_t rm) {
+    dword_t word = encode_extract(q, byte_offset, rm, rn, rd);
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_EXT);
+    assert(instruction.width == (q ? 128 : 64));
+    assert(instruction.operands.advsimd_extract.rd == rd);
+    assert(instruction.operands.advsimd_extract.rn == rn);
+    assert(instruction.operands.advsimd_extract.rm == rm);
+    assert(instruction.operands.advsimd_extract.byte_offset == byte_offset);
+    if (q && byte_offset == 8 && rd == 0 && rn == 27 && rm == 30)
+        assert(word == UINT32_C(0x6e1e4360));
+
+    struct cpu_state cpu = initial_extract_cpu();
+    struct cpu_state expected = cpu;
+    expected.pc += 4;
+    expected.v[rd] = reference_extract(&cpu, q, byte_offset, rn, rm);
+    struct aarch64_execute_result result =
+            aarch64_execute(&cpu, NULL, &instruction);
+    assert(result.stop == AARCH64_EXECUTE_RETIRED);
+    assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+}
+
+static void test_extract_known_answers(void) {
+    static const struct {
+        bool q;
+        byte_t byte_offset;
+        byte_t expected[16];
+    } cases[] = {
+        {false, 0, {0, 1, 2, 3, 4, 5, 6, 7}},
+        {false, 1, {1, 2, 3, 4, 5, 6, 7, 0x80}},
+        {false, 7, {7, 0x80, 0x81, 0x82,
+                0x83, 0x84, 0x85, 0x86}},
+        {true, 1, {1, 2, 3, 4, 5, 6, 7, 8,
+                9, 10, 11, 12, 13, 14, 15, 0x80}},
+        {true, 8, {8, 9, 10, 11, 12, 13, 14, 15,
+                0x80, 0x81, 0x82, 0x83,
+                0x84, 0x85, 0x86, 0x87}},
+        {true, 15, {15, 0x80, 0x81, 0x82,
+                0x83, 0x84, 0x85, 0x86,
+                0x87, 0x88, 0x89, 0x8a,
+                0x8b, 0x8c, 0x8d, 0x8e}},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct cpu_state cpu = initial_extract_cpu();
+        for (unsigned byte = 0; byte < 16; byte++) {
+            cpu.v[1].b[byte] = (byte_t) byte;
+            cpu.v[2].b[byte] = (byte_t) (0x80 + byte);
+        }
+        cpu.v[0].q = ~(__uint128_t) 0;
+        struct cpu_state expected = cpu;
+        expected.pc += 4;
+        memcpy(expected.v[0].b, cases[i].expected,
+                sizeof(cases[i].expected));
+
+        struct aarch64_decoded instruction =
+                decode(encode_extract(cases[i].q,
+                        cases[i].byte_offset, 2, 1, 0));
+        struct aarch64_execute_result result =
+                aarch64_execute(&cpu, NULL, &instruction);
+        assert(result.stop == AARCH64_EXECUTE_RETIRED);
+        assert(result.fault.kind == GUEST_MEMORY_FAULT_NONE);
+        assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+    }
+}
+
+static void test_extract_execution_space(void) {
+    static const struct {
+        byte_t rd;
+        byte_t rn;
+        byte_t rm;
+    } registers[] = {
+        {0, 1, 2},
+        {1, 1, 2},
+        {2, 1, 2},
+        {0, 1, 1},
+        {1, 1, 1},
+        {31, 1, 2},
+        {0, 31, 2},
+        {0, 1, 31},
+        {31, 31, 31},
+        {0, 27, 30},
+    };
+    for (unsigned q = 0; q < 2; q++) {
+        unsigned bytes = q ? 16 : 8;
+        for (unsigned byte_offset = 0;
+                byte_offset < bytes; byte_offset++) {
+            for (unsigned form = 0;
+                    form < sizeof(registers) / sizeof(registers[0]);
+                    form++) {
+                execute_extract_and_assert(q, (byte_t) byte_offset,
+                        registers[form].rd, registers[form].rn,
+                        registers[form].rm);
+            }
+        }
     }
 }
 
@@ -301,7 +529,12 @@ int main(void) {
     test_llvm_vectors();
     test_encoding_space();
     test_fixed_bits();
+    test_extract_llvm_vectors();
+    test_extract_encoding_space();
+    test_extract_boundaries();
     test_known_answers();
     test_execution_space();
+    test_extract_known_answers();
+    test_extract_execution_space();
     return 0;
 }
