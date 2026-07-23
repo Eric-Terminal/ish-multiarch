@@ -52,14 +52,15 @@ jobs:
       - name: Clone Linux
         if: matrix.kernel == 'linux'
         run: deps/clone-linux.sh
-      - name: 验证 rootfs 与 TTY 生命周期回归
+      - name: 验证 resolver、rootfs 与 TTY 生命周期回归
         if: matrix.kernel == 'ish'
         shell: bash
         run: |
           meson setup "$RUNNER_TEMP/ish-rootfs-test-build" \
             -Dengine=asbestos -Dkernel=ish
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
-            apple_aarch64_rootfs apple_rootfs_seed pty_lifecycle \
+            apple_aarch64_rootfs apple_rootfs_seed apple_resolver \
+            pty_lifecycle \
             pty_read_lifecycle tty_real_lifecycle \
             session_tty_lifecycle tty_open_lifecycle \
             tty_echo_lifecycle fork_tty_lock_lifecycle \

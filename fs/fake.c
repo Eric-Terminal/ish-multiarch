@@ -21,7 +21,9 @@
 // this exists only to override readdir to fix the returned inode numbers
 static struct fd_ops fakefs_fdops;
 
-static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, int mode) {
+static struct fd *fakefs_open_identity(struct mount *mount,
+        const char *path, int flags, int mode,
+        const struct fs_access_identity *identity) {
     struct fakefs_db *fs = &mount->fakefs;
     struct fd *fd = realfs.open(mount, path, flags, 0666);
     if (IS_ERR(fd))
@@ -32,8 +34,8 @@ static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, 
     if (flags & O_CREAT_) {
         struct ish_stat ishstat;
         ishstat.mode = mode | S_IFREG;
-        ishstat.uid = current->euid;
-        ishstat.gid = current->egid;
+        ishstat.uid = identity->uid;
+        ishstat.gid = identity->gid;
         ishstat.rdev = 0;
         if (fd->fake_inode == 0) {
             path_create(fs, path, &ishstat);
@@ -50,6 +52,21 @@ static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, 
     }
     fd->ops = &fakefs_fdops;
     return fd;
+}
+
+static struct fd *fakefs_open(
+        struct mount *mount, const char *path, int flags, int mode) {
+    struct fs_access_identity identity;
+    const struct fs_access_identity *identity_pointer = NULL;
+    if (flags & O_CREAT_) {
+        identity = (struct fs_access_identity) {
+            .uid = current->euid,
+            .gid = current->egid,
+        };
+        identity_pointer = &identity;
+    }
+    return fakefs_open_identity(
+            mount, path, flags, mode, identity_pointer);
 }
 
 // WARNING: giant hack, just for file providerws
@@ -480,6 +497,7 @@ const struct fs_ops fakefs = {
     .umount = fakefs_umount,
     .statfs = realfs_statfs,
     .open = fakefs_open,
+    .open_identity = fakefs_open_identity,
     .readlink = fakefs_readlink,
     .link = fakefs_link,
     .unlink = fakefs_unlink,

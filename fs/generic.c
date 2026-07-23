@@ -31,6 +31,15 @@ bool contains_mount_point(const char *path) {
     return false;
 }
 
+static struct fd *provider_open(struct mount *mount, const char *path,
+        int flags, int mode,
+        const struct fs_access_identity *identity) {
+    if (mount->fs->open_identity != NULL)
+        return mount->fs->open_identity(
+                mount, path, flags, mode, identity);
+    return mount->fs->open(mount, path, flags, mode);
+}
+
 static struct fd *generic_openat_task_access(struct task *task,
         struct fd *at, const char *path_raw,
         int flags, int mode, int accmode) {
@@ -58,8 +67,8 @@ static struct fd *generic_openat_task_access(struct task *task,
         /* 用户态 provider 需要一份可截断且仍可读的稳定句柄。 */
         provider_flags = (provider_flags & ~O_ACCMODE_) | O_RDWR_;
     }
-    struct fd *fd = mount->fs->open(
-            mount, path, provider_flags, mode);
+    struct fd *fd = provider_open(
+            mount, path, provider_flags, mode, &identity);
     if (IS_ERR(fd)) {
         // if an error happens after this point, fd_close will release the
         // mount, but right now we need to do it manually
@@ -81,7 +90,8 @@ static struct fd *generic_openat_task_access(struct task *task,
         mount_retain(mount);
         fd_close(fd);
         provider_flags = flags & ~O_TRUNC_;
-        fd = mount->fs->open(mount, path, provider_flags, mode);
+        fd = provider_open(
+                mount, path, provider_flags, mode, &identity);
         if (IS_ERR(fd)) {
             mount_release(mount);
             return fd;

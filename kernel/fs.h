@@ -27,6 +27,7 @@ struct fs_info {
 };
 struct fs_info *fs_info_new(void);
 struct fs_info *fs_info_copy(struct fs_info *fs);
+void fs_info_retain(struct fs_info *fs);
 void fs_info_release(struct fs_info *fs);
 
 void fs_chdir(struct fs_info *fs, struct fd *pwd);
@@ -235,6 +236,10 @@ struct fs_ops {
     int (*statfs)(struct mount *mount, struct statfsbuf *stat);
 
     struct fd *(*open)(struct mount *mount, const char *path, int flags, int mode); // required
+    // task-aware 路径可显式传递身份，避免 filesystem provider 回读 TLS current。
+    struct fd *(*open_identity)(struct mount *mount, const char *path,
+            int flags, int mode,
+            const struct fs_access_identity *identity);
     ssize_t (*readlink)(struct mount *mount, const char *path, char *buf, size_t bufsize);
 
     // These return _EPERM if not present

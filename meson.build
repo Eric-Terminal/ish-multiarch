@@ -100,6 +100,10 @@ libm = cc.find_library('m', required: false)
 libdl = cc.find_library('dl', required: false)
 sqlite3 = cc.find_library('sqlite3')
 dependencies = [librt, libm, libdl, threads]
+if host_machine.system() == 'darwin'
+    libresolv = cc.find_library('resolv')
+    dependencies += [libresolv]
+endif
 
 subdir('vdso') # ish depends on the vdso
 
@@ -253,7 +257,10 @@ if get_option('kernel') == 'ish'
         'platform/' + host_machine.system() + '.c',
     ]
     if host_machine.system() == 'darwin'
-        src += 'platform/apple-watch-runtime.c'
+        src += [
+            'platform/apple-resolver.c',
+            'platform/apple-watch-runtime.c',
+        ]
     endif
 
     libish = library('ish', src,
@@ -282,6 +289,16 @@ if get_option('kernel') == 'ish'
             dependencies: dependencies,
             link_args: ['-Wl,-fatal_warnings'])
         if not meson.is_cross_build()
+            apple_resolver_test = executable(
+                'apple_resolver_test',
+                [
+                    'platform/apple-resolver-test.c',
+                    'platform/apple-resolver.c',
+                ],
+                c_args: '-DISH_APPLE_RESOLVER_TESTING',
+                dependencies: ish)
+            test('apple_resolver', apple_resolver_test)
+
             apple_watch_runtime_test = executable(
                 'apple_watch_runtime_test',
                 [

@@ -19,6 +19,7 @@
 #include "kernel/fs.h"
 #include "kernel/init.h"
 #include "kernel/task.h"
+#include "platform/apple-resolver.h"
 #include "platform/apple-rootfs-seed.h"
 
 #define WATCH_OUTPUT_CAPACITY (64 * 1024)
@@ -299,6 +300,9 @@ int ish_watch_runtime_start(
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
+
+    // DNS 暂不可用不应阻止离线 shell；联网门禁会报告具体失败。
+    (void) ish_apple_guest_configure_dns_pid(1);
 
     exit_hook = watch_handle_exit;
     die_handler = watch_handle_die;

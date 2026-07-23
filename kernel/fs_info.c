@@ -22,6 +22,10 @@ struct fs_info *fs_info_copy(struct fs_info *fs) {
     return new_fs;
 }
 
+void fs_info_retain(struct fs_info *fs) {
+    fs->refcount++;
+}
+
 void fs_info_release(struct fs_info *fs) {
     if (--fs->refcount == 0) {
         if (fs->pwd != NULL)

@@ -22,7 +22,8 @@ struct tmp_inode {
     };
 };
 
-static struct tmp_inode *tmp_inode_new(mode_t_ mode) {
+static struct tmp_inode *tmp_inode_new_identity(
+        mode_t_ mode, const struct fs_access_identity *identity) {
     struct tmp_inode *node = malloc(sizeof(struct tmp_inode));
     if (node == NULL)
         return NULL;
@@ -34,11 +35,19 @@ static struct tmp_inode *tmp_inode_new(mode_t_ mode) {
     node->stat.inode = next_inode++;
 
     node->stat.mode = mode;
-    node->stat.uid = current->euid;
-    node->stat.gid = current->egid;
+    node->stat.uid = identity->uid;
+    node->stat.gid = identity->gid;
     if (S_ISREG(mode))
         node->file_data = NULL;
     return node;
+}
+
+static struct tmp_inode *tmp_inode_new(mode_t_ mode) {
+    const struct fs_access_identity identity = {
+        .uid = current->euid,
+        .gid = current->egid,
+    };
+    return tmp_inode_new_identity(mode, &identity);
 }
 
 DEFINE_REFCOUNT_STATIC(tmp_inode)
@@ -272,7 +281,9 @@ static int tmpfs_umount(struct mount *UNUSED(mount)) {
     return 0;
 }
 
-static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, int mode) {
+static struct fd *tmpfs_open_identity(struct mount *mount,
+        const char *path, int flags, int mode,
+        const struct fs_access_identity *identity) {
     struct tmp_dirent *dirent;
     bool opened_created = false;
     if (flags & O_CREAT_) {
@@ -297,7 +308,8 @@ static struct fd *tmpfs_open(struct mount *mount, const char *path, int flags, i
         }
 
         if (dirent == ERR_PTR(_ENOENT)) {
-            struct tmp_inode *inode = tmp_inode_new(S_IFREG | mode);
+            struct tmp_inode *inode = tmp_inode_new_identity(
+                    S_IFREG | mode, identity);
             if (inode == NULL) {
                 err = _ENOMEM;
                 goto out_creat;
@@ -340,6 +352,21 @@ opened:
     }
     unlock(&dirent->lock);
     return fd;
+}
+
+static struct fd *tmpfs_open(
+        struct mount *mount, const char *path, int flags, int mode) {
+    struct fs_access_identity identity;
+    const struct fs_access_identity *identity_pointer = NULL;
+    if (current != NULL) {
+        identity = (struct fs_access_identity) {
+            .uid = current->euid,
+            .gid = current->egid,
+        };
+        identity_pointer = &identity;
+    }
+    return tmpfs_open_identity(
+            mount, path, flags, mode, identity_pointer);
 }
 
 static int tmpfs_stat(struct mount *mount, const char *path, struct statbuf *stat) {
@@ -771,6 +798,7 @@ const struct fs_ops tmpfs = {
     .mount = tmpfs_mount,
     .umount = tmpfs_umount,
     .open = tmpfs_open,
+    .open_identity = tmpfs_open_identity,
     .close = tmpfs_close,
     .stat = tmpfs_stat,
     .fstat = tmpfs_fstat,

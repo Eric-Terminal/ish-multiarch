@@ -48,6 +48,11 @@ struct open_probe {
     char last_rename_destination[MAX_PATH];
     int last_flags;
     int last_mode;
+    uid_t_ last_open_uid;
+    uid_t_ last_open_gid;
+    uid_t_ previous_open_uid;
+    uid_t_ previous_open_gid;
+    unsigned identity_opens;
     int last_mkdir_mode;
     unsigned opens;
     unsigned closes;
@@ -143,6 +148,18 @@ static struct fd *probe_open(struct mount *mount,
     fd->data = state;
     fd->opened_created = probe->report_created;
     return fd;
+}
+
+static struct fd *probe_open_identity(struct mount *mount,
+        const char *path, int flags, int mode,
+        const struct fs_access_identity *identity) {
+    struct open_probe *probe = mount->data;
+    probe->previous_open_uid = probe->last_open_uid;
+    probe->previous_open_gid = probe->last_open_gid;
+    probe->last_open_uid = identity->uid;
+    probe->last_open_gid = identity->gid;
+    probe->identity_opens++;
+    return probe_open(mount, path, flags, mode);
 }
 
 static int probe_stat(struct mount *mount, const char *path, struct statbuf *stat) {
@@ -259,6 +276,7 @@ static int probe_rename(struct mount *mount,
 
 static const struct fs_ops probe_fs = {
     .open = probe_open,
+    .open_identity = probe_open_identity,
     .readlink = probe_readlink,
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
@@ -661,10 +679,14 @@ int main(void) {
             "readlinkat 相对路径使用目标任务中的显式 dirfd");
 
     const int sync_flags = (1 << 20) | (1 << 12);
+    unsigned identity_opens_before = probe.identity_opens;
     struct fd *sync_read = generic_openat_task(
             &target.task, AT_PWD, "sync-read", sync_flags, 0);
-    CHECK(!IS_ERR(sync_read) && probe.last_flags == sync_flags,
-            "guest O_SYNC 位不改变只读打开的权限类别");
+    CHECK(!IS_ERR(sync_read) && probe.last_flags == sync_flags &&
+            probe.identity_opens == identity_opens_before + 1 &&
+            probe.last_open_uid == target.task.euid &&
+            probe.last_open_gid == target.task.egid,
+            "task-aware open 显式传递目标身份且保留 guest flags");
     fd_close(sync_read);
 
     probe.file_mode = S_IFREG | 0600;
@@ -711,12 +733,18 @@ int main(void) {
             "O_RDONLY|O_TRUNC 同时要求读取和写入权限");
 
     probe.file_mode = S_IFIFO | 0666;
+    identity_opens_before = probe.identity_opens;
     struct fd *fifo = generic_openat_task(&target.task,
             AT_PWD, "created", O_RDONLY_ | O_TRUNC_, 0);
     CHECK(!IS_ERR(fifo) && S_ISFIFO(fifo->type) &&
             probe.last_flags == O_RDONLY_ &&
-            probe.resize_calls == resize_calls_before + 1,
-            "非普通文件按原访问模式重开且不执行 O_TRUNC");
+            probe.resize_calls == resize_calls_before + 1 &&
+            probe.identity_opens == identity_opens_before + 2 &&
+            probe.previous_open_uid == target.task.euid &&
+            probe.previous_open_gid == target.task.egid &&
+            probe.last_open_uid == target.task.euid &&
+            probe.last_open_gid == target.task.egid,
+            "非普通文件以同一目标身份重开且不执行 O_TRUNC");
     fd_close(fifo);
 
     probe.file_mode = S_IFDIR | 0777;

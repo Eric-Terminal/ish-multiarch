@@ -226,6 +226,13 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-rootfs-seed.c" \
         -o "$rootfs_seed_object"
 
+    local resolver_object="$full_build_dir/apple-resolver-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-resolver.c" \
+        -o "$resolver_object"
+
     local watch_runtime_object="$full_build_dir/apple-watch-runtime-strict.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
         -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
@@ -243,6 +250,7 @@ build_slice() {
         "$full_build_dir/apple_watch_runtime_link_smoke" \
         "$full_build_dir/apple_runtime_force_link_smoke" \
         "$abi_probe" "$backend_probe" "$rootfs_seed_object" \
+        "$resolver_object" \
         "$watch_runtime_object"
 
     local fakefs_members
@@ -272,11 +280,23 @@ build_slice() {
         echo "错误：${name} 的普通 runtime consumer 未抽取 rootfs 安装器。" >&2
         exit 1
     fi
+    if ! grep -Eq \
+            '[[:space:]]T[[:space:]]+_ish_apple_guest_configure_dns_pid$' \
+            <<< "$runtime_symbols"; then
+        echo "错误：${name} 的 Watch runtime consumer 未抽取 Apple resolver。" >&2
+        exit 1
+    fi
+    if ! otool -L "$full_build_dir/apple_watch_runtime_link_smoke" | \
+            grep -Fq '/usr/lib/libresolv.9.dylib'; then
+        echo "错误：${name} 的 Watch runtime consumer 未链接 libresolv。" >&2
+        exit 1
+    fi
 
     local archive_members
     archive_members=$("$AR" -t "$full_build_dir/libish.a")
     local required_member
     for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o \
+            platform_apple-resolver.c.o \
             platform_apple-watch-runtime.c.o; do
         if ! grep -Fqx "$required_member" <<< "$archive_members"; then
             echo "错误：${name} 的 libish.a 缺少 ${required_member}。" >&2

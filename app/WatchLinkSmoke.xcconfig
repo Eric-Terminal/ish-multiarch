@@ -9,5 +9,5 @@ INFOPLIST_KEY_WKWatchOnly = YES
 
 HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)
 LIBRARY_SEARCH_PATHS = $(inherited) $(ISH_WATCH_LIBRARY_DIR)
-OTHER_LDFLAGS = $(inherited) -Wl,-fatal_warnings -lish -lish_emu -lfakefs -lm -ldl -lsqlite3
+OTHER_LDFLAGS = $(inherited) -Wl,-fatal_warnings -lish -lish_emu -lfakefs -lm -ldl -lsqlite3 -lresolv
 ONLY_ACTIVE_ARCH = NO

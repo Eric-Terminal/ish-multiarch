@@ -5,9 +5,7 @@
 //  Created by Theodore Dubois on 10/17/17.
 //
 
-#include <resolv.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import "AboutViewController.h"
 #import "AppDelegate.h"
@@ -26,9 +24,11 @@
 #include "kernel/init.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
+#include "kernel/task.h"
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#include "platform/apple-resolver.h"
 
 #if ISH_LINUX
 #import "LinuxInterop.h"
@@ -171,38 +171,7 @@ void SyncHostname(void) {
     if (bootError != 0 ||
             [NSUserDefaults.standardUserDefaults boolForKey:@"recovery"])
         return;
-
-    struct __res_state res;
-    if (EXIT_SUCCESS != res_ninit(&res)) {
-        exit(2);
-    }
-    NSMutableString *resolvConf = [NSMutableString new];
-    if (res.dnsrch[0] != NULL) {
-        [resolvConf appendString:@"search"];
-        for (int i = 0; res.dnsrch[i] != NULL; i++) {
-            [resolvConf appendFormat:@" %s", res.dnsrch[i]];
-        }
-        [resolvConf appendString:@"\n"];
-    }
-    union res_sockaddr_union servers[NI_MAXSERV];
-    int serversFound = res_getservers(&res, servers, NI_MAXSERV);
-    char address[NI_MAXHOST];
-    for (int i = 0; i < serversFound; i ++) {
-        union res_sockaddr_union s = servers[i];
-        if (s.sin.sin_len == 0)
-            continue;
-        getnameinfo((struct sockaddr *) &s.sin, s.sin.sin_len,
-                    address, sizeof(address),
-                    NULL, 0, NI_NUMERICHOST);
-        [resolvConf appendFormat:@"nameserver %s\n", address];
-    }
-    
-    current = pid_get_task(1);
-    struct fd *fd = generic_open("/etc/resolv.conf", O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0666);
-    if (!IS_ERR(fd)) {
-        fd->ops->write(fd, resolvConf.UTF8String, [resolvConf lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
-        fd_close(fd);
-    }
+    (void) ish_apple_guest_configure_dns_pid(1);
 #endif
 }
 
