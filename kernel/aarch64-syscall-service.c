@@ -51,6 +51,7 @@
 #define AARCH64_LINUX_O_APPEND UINT32_C(0x000400)
 #define AARCH64_LINUX_O_NONBLOCK UINT32_C(0x000800)
 #define AARCH64_LINUX_O_DIRECTORY UINT32_C(0x004000)
+#define AARCH64_LINUX_O_NOFOLLOW UINT32_C(0x008000)
 #define AARCH64_LINUX_O_LARGEFILE UINT32_C(0x020000)
 #define AARCH64_LINUX_O_CLOEXEC UINT32_C(0x080000)
 
@@ -713,8 +714,8 @@ static qword_t dispatch_openat(
             AARCH64_LINUX_O_CREAT | AARCH64_LINUX_O_EXCL |
             AARCH64_LINUX_O_NOCTTY | AARCH64_LINUX_O_TRUNC |
             AARCH64_LINUX_O_APPEND | AARCH64_LINUX_O_NONBLOCK |
-            AARCH64_LINUX_O_DIRECTORY | AARCH64_LINUX_O_LARGEFILE |
-            AARCH64_LINUX_O_CLOEXEC;
+            AARCH64_LINUX_O_LARGEFILE | AARCH64_LINUX_O_DIRECTORY |
+            AARCH64_LINUX_O_NOFOLLOW | AARCH64_LINUX_O_CLOEXEC;
     dword_t access_mode = raw_flags & AARCH64_LINUX_O_ACCMODE;
     if (access_mode == AARCH64_LINUX_O_ACCMODE ||
             (raw_flags & ~supported_flags) != 0 ||
@@ -724,8 +725,8 @@ static qword_t dispatch_openat(
                     AARCH64_LINUX_O_DIRECTORY))
         return syscall_result(_EINVAL);
 
-    int flags = access_mode == 1 ? O_WRONLY_ :
-            access_mode == 2 ? O_RDWR_ : O_RDONLY_;
+    int flags = (access_mode == 1 ? O_WRONLY_ :
+            access_mode == 2 ? O_RDWR_ : O_RDONLY_) | O_LARGEFILE_;
     static const struct {
         dword_t guest;
         int internal;
@@ -737,6 +738,7 @@ static qword_t dispatch_openat(
         {AARCH64_LINUX_O_APPEND, O_APPEND_},
         {AARCH64_LINUX_O_NONBLOCK, O_NONBLOCK_},
         {AARCH64_LINUX_O_DIRECTORY, O_DIRECTORY_},
+        {AARCH64_LINUX_O_NOFOLLOW, O_NOFOLLOW_},
         {AARCH64_LINUX_O_CLOEXEC, O_CLOEXEC_},
     };
     for (size_t index = 0; index < array_size(mappings); index++)
@@ -3753,7 +3755,8 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_DUP3:
             return aarch64_linux_dispatch_dup3(syscall, task);
         case AARCH64_LINUX_SYS_FCNTL:
-            return aarch64_linux_dispatch_fcntl(syscall, task);
+            return aarch64_linux_dispatch_fcntl(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_IOCTL:
             return dispatch_ioctl(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FLOCK:

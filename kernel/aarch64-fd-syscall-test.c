@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 
 #include "fs/fd.h"
+#include "fs/inode.h"
+#include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-syscall-service.h"
@@ -14,6 +16,9 @@
 #define USER_BASE UINT64_C(0x00007abc12340000)
 #define USER_MEMORY_SIZE UINT32_C(0x1000)
 #define HIGH_ARGUMENT UINT64_C(0x5a5a5a5a00000000)
+#define AARCH64_TEST_O_DIRECTORY UINT32_C(0x004000)
+#define AARCH64_TEST_O_NOFOLLOW UINT32_C(0x008000)
+#define AARCH64_TEST_O_LARGEFILE UINT32_C(0x020000)
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -180,6 +185,16 @@ static const struct fd_ops probe_fd_ops = {
     .close = probe_close,
 };
 
+// 测试 inode 由栈持有，最后关闭时阻止通用 fd 路径替它释放所有权。
+static int lock_fd_close(struct fd *fd) {
+    fd->inode = NULL;
+    return 0;
+}
+
+static const struct fd_ops lock_fd_ops = {
+    .close = lock_fd_close,
+};
+
 static struct fd *make_probe_fd(struct fd_probe *probe) {
     struct fd *fd = fd_create(&probe_fd_ops);
     if (fd == NULL)
@@ -187,6 +202,23 @@ static struct fd *make_probe_fd(struct fd_probe *probe) {
     fd->data = probe;
     fd->type = S_IFREG;
     fd->flags = O_RDWR_;
+    return fd;
+}
+
+static void init_lock_inode(struct inode_data *inode) {
+    memset(inode, 0, sizeof(*inode));
+    list_init(&inode->posix_locks);
+    cond_init(&inode->posix_unlock);
+    lock_init(&inode->lock);
+}
+
+static struct fd *make_lock_fd(struct inode_data *inode) {
+    struct fd *fd = fd_create(&lock_fd_ops);
+    if (fd == NULL)
+        return NULL;
+    fd->type = S_IFREG;
+    fd->flags = O_RDWR_;
+    fd->inode = inode;
     return fd;
 }
 
@@ -270,6 +302,25 @@ static bool test_dup_and_fcntl(void) {
     CHECK(result == (O_RDWR_ | status_flags),
             "重复描述符共享文件状态 flags");
 
+    source->flags |= O_LARGEFILE_;
+    result = invoke(&fixture.task, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETFL_, UINT64_MAX);
+    CHECK(result == (O_RDWR_ | status_flags | AARCH64_TEST_O_LARGEFILE),
+            "F_GETFL 独立转换 AArch64 LARGEFILE 位");
+    source->flags &= ~O_LARGEFILE_;
+    source->flags |= O_DIRECTORY_;
+    result = invoke(&fixture.task, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETFL_, UINT64_MAX);
+    CHECK(result == (O_RDWR_ | status_flags | AARCH64_TEST_O_DIRECTORY),
+            "F_GETFL 独立转换 AArch64 DIRECTORY 位");
+    source->flags &= ~O_DIRECTORY_;
+    source->flags |= O_NOFOLLOW_;
+    result = invoke(&fixture.task, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETFL_, UINT64_MAX);
+    CHECK(result == (O_RDWR_ | status_flags | AARCH64_TEST_O_NOFOLLOW),
+            "F_GETFL 独立转换 AArch64 NOFOLLOW 位");
+    source->flags &= ~(O_LARGEFILE_ | O_DIRECTORY_ | O_NOFOLLOW_);
+
     CHECK(invoke(&fixture.task, &memory, &fault, 25,
             HIGH_ARGUMENT, HIGH_ARGUMENT | F_DUPFD_,
             HIGH_ARGUMENT | 3) == 3 &&
@@ -336,6 +387,200 @@ static bool test_dup_and_fcntl(void) {
     fdtable_release(child.files);
     current = &fixture.task;
 
+    destroy_fixture(&fixture);
+    return true;
+}
+
+static bool test_fcntl_record_locks(void) {
+    struct syscall_fixture fixture;
+    CHECK(init_fixture(&fixture, 8), "初始化 fcntl 记录锁夹具");
+    fixture.task.pid = 42;
+    fixture.task.tgid = 42;
+    struct user_memory memory = {0};
+    reset_user(&memory);
+    struct guest_linux_user_fault fault;
+    struct inode_data inode;
+    init_lock_inode(&inode);
+    struct fd *file = make_lock_fd(&inode);
+    CHECK(file != NULL && f_install_task(&fixture.task, file, 0) == 0,
+            "安装带 inode 的记录锁文件");
+
+    const size_t flock_offset = 3;
+    const qword_t flock_address = USER_BASE + flock_offset;
+    const sqword_t lock_start = INT64_C(0x100000005);
+    struct aarch64_linux_flock wire = {
+        .type = F_WRLCK_,
+        .whence = LSEEK_SET,
+        .padding = UINT32_C(0xa1b2c3d4),
+        .start = lock_start,
+        .len = 7,
+        .pid = -1,
+        .tail_padding = UINT32_C(0x55667788),
+    };
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    qword_t result = invoke(&fixture.task, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLK_, flock_address);
+    CHECK(result == 0 && memory.read_calls == 1 &&
+            memory.max_read_size == sizeof(wire) &&
+            memory.write_calls == 0 && list_size(&inode.posix_locks) == 1,
+            "F_SETLK 读取 32 字节 LP64 wire 并建立记录锁");
+    struct file_lock *stored = list_first_entry(
+            &inode.posix_locks, struct file_lock, locks);
+    CHECK(stored->type == F_WRLCK_ && stored->start == lock_start &&
+            stored->end == lock_start + 6 && stored->pid == 42 &&
+            stored->owner == fixture.task.files,
+            "F_SETLK 保留 64 位区间并以调用进程为 owner");
+
+    struct task child = {
+        .pid = 84,
+        .tgid = 84,
+        .group = &fixture.group,
+        .files = fdtable_copy(fixture.task.files),
+    };
+    CHECK(!IS_ERR(child.files), "复制独立记录锁 owner");
+
+    wire = (struct aarch64_linux_flock) {
+        .type = F_RDLCK_,
+        .whence = LSEEK_SET,
+        .padding = UINT32_C(0xa1b2c3d4),
+        .start = lock_start,
+        .len = 7,
+        .pid = -1,
+        .tail_padding = UINT32_C(0x55667788),
+    };
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    result = invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETLK_, flock_address);
+    memcpy(&wire, memory.bytes + flock_offset, sizeof(wire));
+    CHECK(result == 0 && memory.read_calls == 1 &&
+            memory.write_calls == 1 &&
+            memory.max_read_size == sizeof(wire) &&
+            memory.max_write_size == sizeof(wire) &&
+            wire.type == F_WRLCK_ && wire.whence == LSEEK_SET &&
+            wire.start == lock_start && wire.len == 7 && wire.pid == 42,
+            "F_GETLK 向另一 owner 写回冲突锁的完整 64 位字段");
+    CHECK(wire.padding == UINT32_C(0xa1b2c3d4) &&
+            wire.tail_padding == UINT32_C(0x55667788),
+            "F_GETLK 保留 Linux copy_from_user 带入的填充字节");
+
+    wire.type = F_WRLCK_;
+    wire.pid = -1;
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    CHECK(invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLK_, flock_address) ==
+            encoded_error(_EAGAIN),
+            "F_SETLK 把不同 owner 的冲突返回 EAGAIN");
+
+    wire.start = lock_start + 0x100;
+    wire.len = 0;
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    CHECK(invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLKW_, flock_address) == 0 &&
+            list_size(&inode.posix_locks) == 2,
+            "F_SETLKW 非冲突路径复用阻塞锁引擎");
+
+    wire.start = lock_start;
+    wire.len = 7;
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    memory.fail_read_at = flock_address + 8;
+    result = invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLK_, flock_address);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1 &&
+            memory.write_calls == 0 && fault.address == flock_address + 8 &&
+            fault.access == GUEST_MEMORY_READ,
+            "F_SETLK 传递 guest copyin 页故障");
+
+    reset_user(&memory);
+    memory.fail_write_at = flock_address + 24;
+    result = invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETLK_, flock_address);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 1 &&
+            memory.write_calls == 1 && fault.address == flock_address + 24 &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "F_GETLK 传递 guest copyout 页故障");
+
+    reset_user(&memory);
+    qword_t crossing_address =
+            AARCH64_LINUX_USER_ADDRESS_MAX - UINT64_C(15);
+    result = invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLK_, crossing_address);
+    CHECK(result == encoded_error(_EFAULT) && memory.read_calls == 0 &&
+            memory.write_calls == 0 && fault.address == crossing_address &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "F_SETLK 在 copyin 前拒绝跨越 AArch64 用户上限的 wire");
+
+    reset_user(&memory);
+    result = invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT | 99, HIGH_ARGUMENT | F_SETLK_,
+            crossing_address);
+    CHECK(result == encoded_error(_EBADF) && memory.read_calls == 0 &&
+            memory.write_calls == 0,
+            "记录锁命令依 Linux fcntl 顺序优先返回 EBADF");
+
+    const dword_t unsupported_commands[] = {
+        F_GETLK64_, F_SETLK64_, F_SETLKW64_,
+    };
+    for (size_t index = 0; index < array_size(unsupported_commands); index++) {
+        reset_user(&memory);
+        CHECK(invoke(&child, &memory, &fault, 25,
+                HIGH_ARGUMENT, HIGH_ARGUMENT | unsupported_commands[index],
+                flock_address) == encoded_error(_EINVAL) &&
+                memory.read_calls == 0 && memory.write_calls == 0,
+                "AArch64 64 位 ABI 拒绝仅供兼容进程使用的 flock64 命令");
+    }
+
+    struct fd_probe no_inode_probe = {0};
+    struct fd *no_inode = make_probe_fd(&no_inode_probe);
+    CHECK(no_inode != NULL &&
+            f_install_task(&child, no_inode, 0) == 1,
+            "安装没有 inode 的有效描述符");
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    CHECK(invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT | 1, HIGH_ARGUMENT | F_SETLK_,
+            flock_address) == encoded_error(_EBADF) &&
+            memory.read_calls == 1 && memory.write_calls == 0,
+            "记录锁拒绝缺少 inode 的 fd 而不解引用空指针");
+
+    wire.type = F_UNLCK_;
+    wire.start = lock_start;
+    wire.len = 7;
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    CHECK(invoke(&fixture.task, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_SETLK_, flock_address) == 0 &&
+            list_size(&inode.posix_locks) == 1,
+            "F_UNLCK 通过相同 LP64 wire 解除父 owner 的区间");
+
+    wire = (struct aarch64_linux_flock) {
+        .type = F_WRLCK_,
+        .whence = LSEEK_CUR,
+        .padding = UINT32_C(0xa1b2c3d4),
+        .start = lock_start,
+        .len = 7,
+        .pid = -123,
+        .tail_padding = UINT32_C(0x55667788),
+    };
+    struct aarch64_linux_flock expected_unlocked = wire;
+    memcpy(memory.bytes + flock_offset, &wire, sizeof(wire));
+    reset_user(&memory);
+    CHECK(invoke(&child, &memory, &fault, 25,
+            HIGH_ARGUMENT, HIGH_ARGUMENT | F_GETLK_, flock_address) == 0,
+            "F_GETLK 无冲突查询成功");
+    memcpy(&wire, memory.bytes + flock_offset, sizeof(wire));
+    expected_unlocked.type = F_UNLCK_;
+    CHECK(memcmp(&wire, &expected_unlocked, sizeof(wire)) == 0,
+            "F_GETLK 无冲突时只把 type 改为 UNLCK");
+
+    fdtable_release(child.files);
+    current = &fixture.task;
+    CHECK(list_empty(&inode.posix_locks),
+            "关闭子 fdtable 清理剩余记录锁");
     destroy_fixture(&fixture);
     return true;
 }
@@ -472,6 +717,7 @@ static bool test_pipe_rollbacks(void) {
 
 int main(void) {
     if (!test_dup_and_fcntl() ||
+            !test_fcntl_record_locks() ||
             !test_pipe_success() ||
             !test_pipe_rollbacks())
         return 1;

@@ -55,7 +55,8 @@ static struct fd *generic_openat_task_access(struct task *task,
     };
     char path[MAX_PATH];
     int err = path_normalize_task_access(task, at, path_raw, path,
-            N_SYMLINK_FOLLOW |
+            (flags & O_NOFOLLOW_ ?
+                    N_SYMLINK_NOFOLLOW : N_SYMLINK_FOLLOW) |
             (flags & O_CREAT_ ? N_PARENT_DIR_WRITE : 0), &identity);
     if (err < 0)
         return ERR_PTR(err);
@@ -122,6 +123,12 @@ static struct fd *generic_openat_task_access(struct task *task,
             (flags & (O_RDWR_ | O_WRONLY_ | O_TRUNC_)))
         goto error;
 
+    if (S_ISLNK(fd->type)) {
+        assert(flags & O_NOFOLLOW_);
+        err = _ELOOP;
+        goto error;
+    }
+
     if (fd->opened_created) {
         err = 0;
     } else if (accmode == AC_X && !(flags & O_DIRECTORY_) &&
@@ -134,7 +141,6 @@ static struct fd *generic_openat_task_access(struct task *task,
     if (err < 0)
         goto error;
 
-    assert(!S_ISLNK(fd->type)); // would mean path_normalize didn't do its job
     if (S_ISBLK(fd->type) || S_ISCHR(fd->type)) {
         int type;
         if (S_ISBLK(fd->type))

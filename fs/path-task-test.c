@@ -886,6 +886,18 @@ int main(void) {
     CHECK(IS_ERR(denied) && PTR_ERR(denied) == _EACCES,
             "兼容 generic_openat 仍按 current 凭据检查权限");
 
+    mode_t_ saved_file_mode = probe.file_mode;
+    probe.file_mode = S_IFLNK | 0777;
+    closes_before = probe.closes;
+    struct fd *nofollow = generic_openat_task(
+            &target.task, AT_PWD, "link", O_RDONLY_ | O_NOFOLLOW_, 0);
+    CHECK(IS_ERR(nofollow) && PTR_ERR(nofollow) == _ELOOP &&
+            strcmp(probe.last_path, "/target/link") == 0 &&
+            probe.last_flags == (O_RDONLY_ | O_NOFOLLOW_) &&
+            probe.closes == closes_before + 1,
+            "openat NOFOLLOW 不跟随最终符号链接并释放 provider fd");
+    probe.file_mode = saved_file_mode;
+
     CHECK(file_unlinkat_task(&target.task, 99, "", false) == _ENOENT &&
             probe.unlinks == 0, "unlinkat 空路径优先返回 ENOENT");
     CHECK(file_unlinkat_task(
@@ -1076,7 +1088,7 @@ int main(void) {
     fd_close(decoy.root);
     fd_close(target.pwd);
     fd_close(target.root);
-    CHECK(probe.opens == 21 && probe.closes == 21,
+    CHECK(probe.opens == 22 && probe.closes == 22,
             "所有成功、拒绝和超限打开都恰好关闭一次");
     CHECK(mount->refcount == 1, "清理阶段仅保留测试持有的 mount 引用");
     mount_release(mount);

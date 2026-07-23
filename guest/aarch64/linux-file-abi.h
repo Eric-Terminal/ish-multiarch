@@ -14,6 +14,25 @@ _Static_assert(sizeof(struct aarch64_linux_iovec) == 16 &&
         __builtin_offsetof(struct aarch64_linux_iovec, length) == 8,
         "AArch64 Linux iovec ABI 必须固定为两个连续 qword");
 
+struct aarch64_linux_flock {
+    word_t type;
+    word_t whence;
+    dword_t padding;
+    sqword_t start;
+    sqword_t len;
+    sdword_t pid;
+    dword_t tail_padding;
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_flock) == 32 &&
+        _Alignof(struct aarch64_linux_flock) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_flock, type) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_flock, whence) == 2 &&
+        __builtin_offsetof(struct aarch64_linux_flock, start) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_flock, len) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_flock, pid) == 24,
+        "AArch64 Linux flock ABI 必须保留 LP64 对齐与 32 字节布局");
+
 struct aarch64_linux_epoll_event {
     dword_t events;
     dword_t padding;

@@ -5,6 +5,23 @@
 #include "guest/aarch64/linux-file-abi.h"
 
 int main(void) {
+    const struct aarch64_linux_flock flock = {
+        .type = UINT16_C(0x0102),
+        .whence = UINT16_C(0x0304),
+        .padding = UINT32_C(0x05060708),
+        .start = -2,
+        .len = INT64_C(0x1112131415161718),
+        .pid = -3,
+        .tail_padding = UINT32_C(0x21222324),
+    };
+    static const byte_t expected_flock[32] = {
+        0x02, 0x01, 0x04, 0x03, 0x08, 0x07, 0x06, 0x05,
+        0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+        0xfd, 0xff, 0xff, 0xff, 0x24, 0x23, 0x22, 0x21,
+    };
+    assert(memcmp(&flock, expected_flock, sizeof(expected_flock)) == 0);
+
     const struct aarch64_linux_stat stat = {
         .dev = UINT64_C(0x01020304),
         .ino = UINT64_C(0x1112131415161718),

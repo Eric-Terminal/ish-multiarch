@@ -10,7 +10,9 @@ qword_t aarch64_linux_dispatch_dup(
 qword_t aarch64_linux_dispatch_dup3(
         const struct guest_linux_syscall *syscall, struct task *task);
 qword_t aarch64_linux_dispatch_fcntl(
-        const struct guest_linux_syscall *syscall, struct task *task);
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault);
 qword_t aarch64_linux_dispatch_pipe2(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,

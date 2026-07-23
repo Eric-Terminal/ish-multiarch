@@ -47,6 +47,7 @@ static int open_flags_real_from_fake(int flags) {
     if (flags & O_TRUNC_) real_flags |= O_TRUNC;
     if (flags & O_APPEND_) real_flags |= O_APPEND;
     if (flags & O_NONBLOCK_) real_flags |= O_NONBLOCK;
+    if (flags & O_NOFOLLOW_) real_flags |= O_NOFOLLOW;
     return real_flags;
 }
 
@@ -60,6 +61,7 @@ static int open_flags_fake_from_real(int flags) {
     if (flags & O_TRUNC) fake_flags |= O_TRUNC_;
     if (flags & O_APPEND) fake_flags |= O_APPEND_;
     if (flags & O_NONBLOCK) fake_flags |= O_NONBLOCK_;
+    if (flags & O_NOFOLLOW) fake_flags |= O_NOFOLLOW_;
     return fake_flags;
 }
 #pragma clang diagnostic pop
@@ -587,7 +589,9 @@ int realfs_getflags(struct fd *fd) {
     int guest_flags = open_flags_fake_from_real(flags);
     if (!fd->logical_access_mode)
         return guest_flags;
-    return (guest_flags & ~O_ACCMODE_) | (fd->flags & O_ACCMODE_);
+    return (guest_flags & ~O_ACCMODE_) |
+            (fd->flags & (O_ACCMODE_ | O_LARGEFILE_ |
+                    O_DIRECTORY_ | O_NOFOLLOW_));
 }
 
 int realfs_setflags(struct fd *fd, dword_t flags) {

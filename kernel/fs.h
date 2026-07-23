@@ -217,7 +217,9 @@ bool mount_param_flag(const char *info, const char *flag);
 #define O_TRUNC_ (1 << 9)
 #define O_APPEND_ (1 << 10)
 #define O_NONBLOCK_ (1 << 11)
+#define O_LARGEFILE_ (1 << 15)
 #define O_DIRECTORY_ (1 << 16)
+#define O_NOFOLLOW_ (1 << 17)
 #define O_CLOEXEC_ (1 << 19)
 
 // generic ioctls
