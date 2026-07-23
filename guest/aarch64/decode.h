@@ -161,6 +161,7 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_ORR,
     AARCH64_OP_ADVSIMD_ORN,
     AARCH64_OP_ADVSIMD_EOR,
+    AARCH64_OP_ADVSIMD_NOT,
     AARCH64_OP_ADVSIMD_BSL,
     AARCH64_OP_ADVSIMD_BIT,
     AARCH64_OP_ADVSIMD_BIF,
@@ -407,6 +408,10 @@ struct aarch64_decoded {
             byte_t rm;
             byte_t element_size;
         } advsimd_three_same;
+        struct {
+            byte_t rd;
+            byte_t rn;
+        } advsimd_unary;
         struct {
             byte_t rd;
             byte_t rn;

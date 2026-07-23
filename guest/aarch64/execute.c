@@ -806,6 +806,19 @@ static void execute_advsimd_logical(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_not(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    union aarch64_vector_reg result = {0};
+    result.d[0] = ~cpu->v[rn].d[0];
+    if (instruction->width == 128)
+        result.d[1] = ~cpu->v[rn].d[1];
+    // 延迟写回保护源目标别名，并让 64 位形态清零目标高半。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_pairwise_extrema(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
@@ -2041,6 +2054,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_BIT:
         case AARCH64_OP_ADVSIMD_BIF:
             execute_advsimd_logical(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_NOT:
+            execute_advsimd_not(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SMAXP:
         case AARCH64_OP_ADVSIMD_SMINP:

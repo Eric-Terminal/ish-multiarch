@@ -519,6 +519,18 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbffffc00)) == UINT32_C(0x2e205800)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_NOT,
+            .width = (word >> 30) & 1 ? 128 : 64,
+            .operands.advsimd_unary = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0x9f20f400)) == UINT32_C(0x0e20a400)) {
         bool u = ((word >> 29) & 1) != 0;
         bool minimum = ((word >> 11) & 1) != 0;
