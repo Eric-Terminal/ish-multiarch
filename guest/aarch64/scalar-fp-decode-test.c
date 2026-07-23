@@ -68,6 +68,8 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x7e61d800), AARCH64_OP_UCVTF_SCALAR, 64},
     {UINT32_C(0x1e254000), AARCH64_OP_FRINTM_SCALAR, 32},
     {UINT32_C(0x1e654000), AARCH64_OP_FRINTM_SCALAR, 64},
+    {UINT32_C(0x1e214000), AARCH64_OP_FNEG_SCALAR, 32},
+    {UINT32_C(0x1e614000), AARCH64_OP_FNEG_SCALAR, 64},
 };
 
 static const struct select_case select_operations[] = {
@@ -157,6 +159,7 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FMUL_SCALAR:
         case AARCH64_OP_FDIV_SCALAR:
         case AARCH64_OP_FCSEL_SCALAR:
+        case AARCH64_OP_FNEG_SCALAR:
         case AARCH64_OP_FRINTM_SCALAR:
         case AARCH64_OP_FMOV_SCALAR:
         case AARCH64_OP_FCVT_SCALAR:
@@ -319,6 +322,10 @@ static void test_apple_clang_vectors(void) {
     assert_unary(UINT32_C(0x1e2543ff), 8, 31, 31);
     assert_unary(UINT32_C(0x1e654062), 9, 2, 3);
     assert_unary(UINT32_C(0x1e6543ff), 9, 31, 31);
+    assert_unary(UINT32_C(0x1e214020), 10, 0, 1);
+    assert_unary(UINT32_C(0x1e2143ff), 10, 31, 31);
+    assert_unary(UINT32_C(0x1e614062), 11, 2, 3);
+    assert_unary(UINT32_C(0x1e6143ff), 11, 31, 31);
 
     assert_precision(UINT32_C(0x1e22c0a3), 0, 3, 5);
     assert_precision(UINT32_C(0x1e6240a3), 1, 3, 5);
@@ -368,13 +375,15 @@ static void test_unary_encoding_space(void) {
             }
         }
     }
-    assert(decoded_count == 10240);
+    assert(decoded_count == 12288);
 }
 
-static void test_rejected_frintm_precision_spaces(void) {
+static void test_rejected_unary_precision_spaces(void) {
     static const dword_t bases[] = {
         UINT32_C(0x1ea54000),
         UINT32_C(0x1ee54000),
+        UINT32_C(0x1ea14000),
+        UINT32_C(0x1ee14000),
     };
     unsigned rejected_count = 0;
     for (unsigned precision = 0; precision <
@@ -389,7 +398,7 @@ static void test_rejected_frintm_precision_spaces(void) {
             }
         }
     }
-    assert(rejected_count == 2048);
+    assert(rejected_count == 4096);
 }
 
 static void test_select_encoding_space(void) {
@@ -602,6 +611,13 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x0e219820),
         UINT32_C(0x4e219862),
         UINT32_C(0x4e6198a4),
+        UINT32_C(0x1e20c0a3),
+        UINT32_C(0x1e60c0a3),
+        UINT32_C(0x1e21c0a3),
+        UINT32_C(0x1e61c0a3),
+        UINT32_C(0x2ea0f820),
+        UINT32_C(0x6ea0f862),
+        UINT32_C(0x6ee0f8a4),
         UINT32_C(0x5ef9b8a3),
         UINT32_C(0x5e79d8a3),
         UINT32_C(0x7ea1b8a3),
@@ -668,7 +684,7 @@ int main(void) {
     test_apple_clang_vectors();
     test_binary_encoding_space();
     test_unary_encoding_space();
-    test_rejected_frintm_precision_spaces();
+    test_rejected_unary_precision_spaces();
     test_select_encoding_space();
     test_rejected_select_precision_spaces();
     test_precision_encoding_space();

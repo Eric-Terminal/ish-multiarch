@@ -376,6 +376,8 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     } scalar_fp_unary_operations[] = {
         {UINT32_C(0x1e204000), AARCH64_OP_FMOV_SCALAR, 32},
         {UINT32_C(0x1e604000), AARCH64_OP_FMOV_SCALAR, 64},
+        {UINT32_C(0x1e214000), AARCH64_OP_FNEG_SCALAR, 32},
+        {UINT32_C(0x1e614000), AARCH64_OP_FNEG_SCALAR, 64},
         {UINT32_C(0x1e254000), AARCH64_OP_FRINTM_SCALAR, 32},
         {UINT32_C(0x1e654000), AARCH64_OP_FRINTM_SCALAR, 64},
         {UINT32_C(0x5ea1b800), AARCH64_OP_FCVTZS_SCALAR, 32},
