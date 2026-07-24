@@ -1731,10 +1731,12 @@ static bool execute_simd_load_store(struct cpu_state *cpu,
     return true;
 }
 
-static bool execute_simd_load_multiple_4(struct cpu_state *cpu,
+static bool execute_simd_load_multiple(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
     assert(tlb != NULL);
+    byte_t structure_count =
+            instruction->opcode == AARCH64_OP_LOAD_SIMD_MULTIPLE_2 ? 2 : 4;
     byte_t rt = instruction->operands.advsimd_multiple.rt;
     byte_t rn = instruction->operands.advsimd_multiple.rn;
     byte_t element_size =
@@ -1742,7 +1744,7 @@ static bool execute_simd_load_multiple_4(struct cpu_state *cpu,
     byte_t vector_size = instruction->width / 8;
     guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
     byte_t bytes[4 * sizeof(union aarch64_vector_reg)];
-    size_t access_size = (size_t) vector_size * 4;
+    size_t access_size = (size_t) vector_size * structure_count;
     for (size_t offset = 0; offset < access_size;
             offset += GUEST_TLB_MAX_ACCESS_SIZE) {
         size_t remaining = access_size - offset;
@@ -1756,14 +1758,17 @@ static bool execute_simd_load_multiple_4(struct cpu_state *cpu,
     union aarch64_vector_reg values[4] = {0};
     for (byte_t offset = 0; offset < vector_size;
             offset += element_size) {
-        for (byte_t structure = 0; structure < 4; structure++) {
+        for (byte_t structure = 0;
+                structure < structure_count; structure++) {
             memcpy(values[structure].b + offset,
-                    bytes + 4 * offset + structure * element_size,
+                    bytes + structure_count * offset +
+                            structure * element_size,
                     element_size);
         }
     }
     // 全部访存成功后再提交寄存器，避免跨页故障留下部分结构。
-    for (byte_t structure = 0; structure < 4; structure++)
+    for (byte_t structure = 0;
+            structure < structure_count; structure++)
         cpu->v[(rt + structure) & 31] = values[structure];
     cpu->pc += 4;
     return true;
@@ -2511,8 +2516,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
+        case AARCH64_OP_LOAD_SIMD_MULTIPLE_2:
         case AARCH64_OP_LOAD_SIMD_MULTIPLE_4:
-            if (!execute_simd_load_multiple_4(
+            if (!execute_simd_load_multiple(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

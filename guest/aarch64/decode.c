@@ -1687,13 +1687,17 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
-    if ((word & UINT32_C(0xbffff000)) == UINT32_C(0x0c400000)) {
+    dword_t multiple_load = word & UINT32_C(0xbffff000);
+    if (multiple_load == UINT32_C(0x0c408000) ||
+            multiple_load == UINT32_C(0x0c400000)) {
         bool quadword = ((word >> 30) & 1) != 0;
         byte_t size_shift = (word >> 10) & 3;
         if (!quadword && size_shift == 3)
             return false;
         *decoded = (struct aarch64_decoded) {
-            .opcode = AARCH64_OP_LOAD_SIMD_MULTIPLE_4,
+            .opcode = multiple_load == UINT32_C(0x0c408000) ?
+                    AARCH64_OP_LOAD_SIMD_MULTIPLE_2 :
+                    AARCH64_OP_LOAD_SIMD_MULTIPLE_4,
             .width = quadword ? 128 : 64,
             .operands.advsimd_multiple = {
                 .rt = word & 0x1f,
