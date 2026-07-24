@@ -66,6 +66,33 @@ meson test -C build-perf --benchmark --verbose
 
 基准会预热 TLB 与 threaded 缓存，自适应到两种后端的单次采样均至少 100 ms，再以 5:5 的交替次序采集十组 C/threaded 配对样本，报告每条 guest 指令的中位耗时、MAD 离散度和配对加速比。任一 MAD 超过 10% 时只会提示本轮不宜作为回归基线，不会把环境噪声判为代码失败。结果只用于同一台、负载稳定机器上的提交间比较，不设置跨机型或共享 CI 的性能阈值，也不代表完整 Linux 软件或 Apple 设备运行时性能。
 
+完整 iSH 二进制还提供一个手工双后端差分门禁。它只在原生 arm64 macOS 上运行，从同一个
+规范 Alpine 3.24.1 fakefs 种子复制两棵隔离 root，串行建立并运行固定为 C 与 threaded
+默认后端的全新 Release 构建：
+
+```sh
+tools/apple-aarch64-rootfs.sh \
+    /tmp/ish-aarch64-paired-seed \
+    /tmp/alpine-minirootfs-3.24.1-aarch64.tar.gz \
+    build/tools/fakefsify
+
+MESON="$(command -v meson)" \
+NINJA="$(command -v ninja)" \
+tests/aarch64/backend-paired.bash /tmp/ish-aarch64-paired-seed
+```
+
+输入种子必须是打包器生成且当前没有被运行的四项只读快照；脚本会先冻结一份私有快照，
+不会直接 mount 或修改输入种子。
+固定离线工作负载只使用 minirootfs 自带的动态 BusyBox，覆盖 pipeline、进程创建、`exec`、
+`wait`、预期非零子进程、文件变换与 guest 生成脚本。门禁要求两个后端都以退出码 0 完成、
+stderr 为空、stdout 符合受跟踪合同，并逐字节比较工作负载专属 artifact 树。两份 root
+首次 mount 后的 `meta.db` inode、WAL 字节、PID、mtime、调度顺序和耗时都可能合法不同，
+因此不参与比较；超时只用于阻止孤儿进程，不能当作性能结果。
+
+这个门禁会创建两棵全新构建和外部 rootfs 副本，所以不注册进默认 `meson test`。它始终
+最多运行一个自己启动的 iSH，构建限制为 `-j2`，正常或可捕获的异常退出都会只终止自己启动
+的受控进程组并删除自己的临时目录，不会操作已有 iSH、Simulator 或应用容器。
+
 Apple 门禁需要 Xcode SDK、Meson 与 Ninja。它构建以下五个 Apple 切片：
 
 - iOS device `arm64`，minOS 15.0；
