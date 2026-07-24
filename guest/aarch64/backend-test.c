@@ -47,6 +47,8 @@
 #define INSTRUCTION_NEG_V29_2S_V31_2S UINT32_C(0x2ea0bbfd)
 /* GCC cc1 实际触发过的逐字节位计数指令。 */
 #define INSTRUCTION_CNT_V31_8B_V31_8B UINT32_C(0x0e205bff)
+/* GCC cc1 实际触发过的标量 64 位整数加法指令。 */
+#define INSTRUCTION_ADD_D31_D31_D30 UINT32_C(0x5efe87ff)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -867,6 +869,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 100, INSTRUCTION_NEG_V29_2S_V31_2S);
     write_instruction(&c_fixture.tlb,
             CODE_PAGE + 104, INSTRUCTION_CNT_V31_8B_V31_8B);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 108, INSTRUCTION_ADD_D31_D31_D30);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE, INSTRUCTION_LDAR_X2_X1);
     write_instruction(&threaded_fixture.tlb,
@@ -921,6 +925,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 100, INSTRUCTION_NEG_V29_2S_V31_2S);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE + 104, INSTRUCTION_CNT_V31_8B_V31_8B);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 108, INSTRUCTION_ADD_D31_D31_D30);
 
     const qword_t original = UINT64_C(0x8877665544332211);
     memcpy(c_fixture.memory.data, &original, sizeof(original));
@@ -1380,6 +1386,25 @@ static void test_product_c_fallback(void) {
     assert(memcmp(&c_cpu.v[29], &neg_result, sizeof(neg_result)) == 0);
     assert(memcmp(&c_cpu.v[24], &ushl_shifts, sizeof(ushl_shifts)) == 0);
     assert_stats(&threaded_runner, 0, 27, 0, 27);
+
+    const union aarch64_vector_reg add_source = c_cpu.v[30];
+    struct cpu_state add_expected = c_cpu;
+    add_expected.v[31] = (union aarch64_vector_reg) {
+        .d = {UINT64_C(0x00004488cd11569e), 0},
+    };
+    add_expected.pc += 4;
+    add_expected.cycle++;
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_cpu_equal(&c_cpu, &add_expected);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(memcmp(&c_cpu.v[30], &add_source, sizeof(add_source)) == 0);
+    assert(memcmp(&c_cpu.v[29], &neg_result, sizeof(neg_result)) == 0);
+    assert(memcmp(&c_cpu.v[24], &ushl_shifts, sizeof(ushl_shifts)) == 0);
+    assert_stats(&threaded_runner, 0, 28, 0, 28);
 }
 
 static void test_c_and_threaded_differential(void) {
