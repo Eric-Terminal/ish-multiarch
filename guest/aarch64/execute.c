@@ -1000,6 +1000,30 @@ static void execute_advsimd_not(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_rev64(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    byte_t element_size = instruction->operands.advsimd_unary.element_size;
+    byte_t elements_per_block = (byte_t) (8 / element_size);
+    byte_t blocks = (byte_t) (instruction->width / 64);
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t block = 0; block < blocks; block++) {
+        byte_t first = (byte_t) (block * elements_per_block);
+        for (byte_t element = 0; element < elements_per_block; element++) {
+            qword_t value = read_vector_element(&source, element_size,
+                    (byte_t) (first + elements_per_block - 1 - element));
+            write_vector_element(&result, element_size,
+                    (byte_t) (first + element), value);
+        }
+    }
+    // 每个 64 位块独立反序；延迟写回保护别名并让 Q=0 清目标高半。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_pairwise_extrema(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
@@ -2297,6 +2321,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_NOT:
             execute_advsimd_not(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_REV64:
+            execute_advsimd_rev64(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SMAXP:
         case AARCH64_OP_ADVSIMD_SMINP:
