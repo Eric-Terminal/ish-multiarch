@@ -16,6 +16,9 @@
 #define ADVSIMD_REV64_FIXED_MASK UINT32_C(0xbf3ffc00)
 #define ADVSIMD_REV64_FIXED_BITS UINT32_C(0x0e200800)
 #define ADVSIMD_REV64_VARIABLE_MASK UINT32_C(0x40c003ff)
+#define ADVSIMD_REV32_FIXED_MASK UINT32_C(0xbf3ffc00)
+#define ADVSIMD_REV32_FIXED_BITS UINT32_C(0x2e200800)
+#define ADVSIMD_REV32_VARIABLE_MASK UINT32_C(0x40c003ff)
 #define ADVSIMD_TWO_REGISTER_MISC_BITS UINT32_C(0x0e205800)
 
 static dword_t encode(bool q, byte_t operation,
@@ -45,6 +48,14 @@ static dword_t encode_cnt(bool q, byte_t rn, byte_t rd) {
 
 static dword_t encode_rev64(bool q, byte_t size, byte_t rn, byte_t rd) {
     return ADVSIMD_REV64_FIXED_BITS |
+            (dword_t) q << 30 |
+            (dword_t) size << 22 |
+            (dword_t) rn << 5 |
+            rd;
+}
+
+static dword_t encode_rev32(bool q, byte_t size, byte_t rn, byte_t rd) {
+    return ADVSIMD_REV32_FIXED_BITS |
             (dword_t) q << 30 |
             (dword_t) size << 22 |
             (dword_t) rn << 5 |
@@ -125,6 +136,16 @@ static void assert_rev64_decode(dword_t word, byte_t width,
     assert(instruction.operands.advsimd_unary.element_size == element_size);
 }
 
+static void assert_rev32_decode(dword_t word, byte_t width,
+        byte_t element_size, byte_t rd, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_REV32);
+    assert(instruction.width == width);
+    assert(instruction.operands.advsimd_unary.rd == rd);
+    assert(instruction.operands.advsimd_unary.rn == rn);
+    assert(instruction.operands.advsimd_unary.element_size == element_size);
+}
+
 static void test_llvm_vectors(void) {
     assert_decode(UINT32_C(0x4e221c20), AARCH64_OP_ADVSIMD_AND,
             128, 0, 1, 2);
@@ -165,6 +186,12 @@ static void test_llvm_vectors(void) {
     assert_rev64_decode(UINT32_C(0x4ea0096a), 128, 4, 10, 11);
     // GCC cc1 实际触发的 2S 自别名指令。
     assert_rev64_decode(UINT32_C(0x0ea00bde), 64, 4, 30, 30);
+    assert_rev32_decode(UINT32_C(0x2e200820), 64, 1, 0, 1);
+    assert_rev32_decode(UINT32_C(0x6e200862), 128, 1, 2, 3);
+    assert_rev32_decode(UINT32_C(0x2e6008a4), 64, 2, 4, 5);
+    assert_rev32_decode(UINT32_C(0x6e6008e6), 128, 2, 6, 7);
+    // GNU 链接器实际触发的 16B 自别名指令。
+    assert_rev32_decode(UINT32_C(0x6e200bff), 128, 1, 31, 31);
 }
 
 static void test_encoding_space(void) {
@@ -449,6 +476,83 @@ static void test_rev64_boundaries(void) {
             &(struct aarch64_decoded) {0}));
 }
 
+static void assert_not_vector_rev32(dword_t word) {
+    struct aarch64_decoded instruction = {0};
+    bool decoded = aarch64_decode(word, &instruction);
+    assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_REV32);
+}
+
+static void test_rev32_encoding_space(void) {
+    assert((ADVSIMD_REV32_FIXED_MASK &
+            ADVSIMD_REV32_VARIABLE_MASK) == 0);
+    assert((ADVSIMD_REV32_FIXED_MASK |
+            ADVSIMD_REV32_VARIABLE_MASK) == UINT32_MAX);
+    unsigned legal = 0;
+    unsigned reserved = 0;
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size = 0; size < 4; size++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    dword_t word = encode_rev32(q, (byte_t) size,
+                            (byte_t) rn, (byte_t) rd);
+                    struct aarch64_decoded instruction = {0};
+                    bool decoded = aarch64_decode(word, &instruction);
+                    if (size >= 2) {
+                        assert(!decoded);
+                        reserved++;
+                        continue;
+                    }
+                    assert(decoded);
+                    legal++;
+                    assert(instruction.opcode ==
+                            AARCH64_OP_ADVSIMD_REV32);
+                    assert(instruction.width == (q ? 128 : 64));
+                    assert(instruction.operands.advsimd_unary.rd == rd);
+                    assert(instruction.operands.advsimd_unary.rn == rn);
+                    assert(instruction.operands.advsimd_unary.element_size ==
+                            (byte_t) (1U << size));
+                }
+            }
+        }
+    }
+    assert(legal == 4096);
+    assert(reserved == 4096);
+}
+
+static void test_rev32_boundaries(void) {
+    dword_t product = encode_rev32(true, 0, 31, 31);
+    assert(product == UINT32_C(0x6e200bff));
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((ADVSIMD_REV32_FIXED_MASK &
+                (UINT32_C(1) << bit)) != 0)
+            assert_not_vector_rev32(product ^ (UINT32_C(1) << bit));
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x4e200bff), // REV64 16B。
+        UINT32_C(0x4e201bff), // REV16 16B。
+        UINT32_C(0x6e605bff), // RBIT 16B。
+        UINT32_C(0x4e205bff), // CNT 16B。
+        UINT32_C(0x6e205bff), // MVN 16B。
+        UINT32_C(0x4e20bbff), // ABS 16B。
+        UINT32_C(0x6e20bbff), // NEG 16B。
+        UINT32_C(0x5ac00bff), // 通用寄存器 REV32 W。
+        UINT32_C(0xdac00bff), // 通用寄存器 REV32 X。
+    };
+    for (unsigned index = 0; index < array_size(neighbors); index++)
+        assert_not_vector_rev32(neighbors[index]);
+
+    static const dword_t reserved[] = {
+        UINT32_C(0x2ea00820),
+        UINT32_C(0x6ea00820),
+        UINT32_C(0x2ee00820),
+        UINT32_C(0x6ee00820),
+    };
+    for (unsigned index = 0; index < array_size(reserved); index++)
+        assert(!aarch64_decode(reserved[index],
+                &(struct aarch64_decoded) {0}));
+}
+
 static qword_t reference_word(byte_t operation,
         qword_t old, qword_t left, qword_t right) {
     if (operation == 0)
@@ -599,6 +703,36 @@ static void test_rev64_execution_space(void) {
     }
 }
 
+static void test_rev32_execution_space(void) {
+    for (unsigned q = 0; q < 2; q++) {
+        byte_t bytes = q ? 16 : 8;
+        for (unsigned size = 0; size < 2; size++) {
+            byte_t element_size = (byte_t) (1U << size);
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    struct cpu_state cpu = initial_unary_cpu();
+                    struct cpu_state expected = cpu;
+                    union aarch64_vector_reg source = cpu.v[rn];
+                    expected.v[rd] = (union aarch64_vector_reg) {0};
+                    expected.pc += 4;
+                    for (byte_t block = 0; block < bytes; block += 4) {
+                        for (byte_t offset = 0; offset < 4;
+                                offset += element_size) {
+                            memcpy(expected.v[rd].b + block + offset,
+                                    source.b + block + 4 -
+                                            element_size - offset,
+                                    element_size);
+                        }
+                    }
+                    execute_instruction(&cpu, encode_rev32(q,
+                            (byte_t) size, (byte_t) rn, (byte_t) rd));
+                    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+                }
+            }
+        }
+    }
+}
+
 static byte_t reference_cnt_byte(byte_t value) {
     byte_t count = 0;
     while (value != 0) {
@@ -720,10 +854,13 @@ int main(void) {
     test_not_boundaries();
     test_rev64_encoding_space();
     test_rev64_boundaries();
+    test_rev32_encoding_space();
+    test_rev32_boundaries();
     test_known_answers();
     test_execution_space();
     test_cnt_execution_space();
     test_not_execution_space();
     test_rev64_execution_space();
+    test_rev32_execution_space();
     return 0;
 }

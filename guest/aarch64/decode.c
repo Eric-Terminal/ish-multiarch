@@ -667,12 +667,15 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
-    if ((word & UINT32_C(0xbf3ffc00)) == UINT32_C(0x0e200800)) {
+    if ((word & UINT32_C(0x9f3ffc00)) == UINT32_C(0x0e200800)) {
+        bool reverse_32 = ((word >> 29) & 1) != 0;
         byte_t size = (word >> 22) & 3;
-        if (size == 3)
+        if (size == 3 || (reverse_32 && size == 2))
             return false;
         *decoded = (struct aarch64_decoded) {
-            .opcode = AARCH64_OP_ADVSIMD_REV64,
+            .opcode = reverse_32 ?
+                    AARCH64_OP_ADVSIMD_REV32 :
+                    AARCH64_OP_ADVSIMD_REV64,
             .width = (word >> 30) & 1 ? 128 : 64,
             .operands.advsimd_unary = {
                 .rd = word & 0x1f,
