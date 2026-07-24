@@ -10,6 +10,9 @@
 #define ADVSIMD_ADDV_FIXED_MASK UINT32_C(0xbf3ffc00)
 #define ADVSIMD_ADDV_FIXED_BITS UINT32_C(0x0e31b800)
 #define ADVSIMD_ADDV_VARIABLE_MASK UINT32_C(0x40c003ff)
+#define ADVSIMD_NEG_FIXED_MASK UINT32_C(0xbf3ffc00)
+#define ADVSIMD_NEG_FIXED_BITS UINT32_C(0x2e20b800)
+#define ADVSIMD_NEG_VARIABLE_MASK UINT32_C(0x40c003ff)
 #define ADVSIMD_ADDP_SCALAR_FIXED_MASK UINT32_C(0xfffffc00)
 #define ADVSIMD_ADDP_SCALAR_FIXED_BITS UINT32_C(0x5ef1b800)
 #define ADVSIMD_ADDP_SCALAR_VARIABLE_MASK UINT32_C(0x000003ff)
@@ -30,6 +33,14 @@ static dword_t encode_scalar_addp(byte_t rn, byte_t rd) {
 
 static dword_t encode_addv(bool q, byte_t size, byte_t rn, byte_t rd) {
     return ADVSIMD_ADDV_FIXED_BITS |
+            (dword_t) q << 30 |
+            (dword_t) size << 22 |
+            (dword_t) rn << 5 |
+            rd;
+}
+
+static dword_t encode_neg(bool q, byte_t size, byte_t rn, byte_t rd) {
+    return ADVSIMD_NEG_FIXED_BITS |
             (dword_t) q << 30 |
             (dword_t) size << 22 |
             (dword_t) rn << 5 |
@@ -205,6 +216,87 @@ static void test_addv_decode(void) {
         struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(neighbors[index], &instruction);
         assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_ADDV);
+    }
+}
+
+static void assert_neg_decode(dword_t word, byte_t width,
+        byte_t element_size, byte_t rd, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_NEG);
+    assert(instruction.width == width);
+    assert(instruction.operands.advsimd_unary.rd == rd);
+    assert(instruction.operands.advsimd_unary.rn == rn);
+    assert(instruction.operands.advsimd_unary.element_size == element_size);
+}
+
+static void test_neg_decode(void) {
+    assert_neg_decode(UINT32_C(0x2e20b820), 64, 1, 0, 1);
+    assert_neg_decode(UINT32_C(0x6e20b883), 128, 1, 3, 4);
+    assert_neg_decode(UINT32_C(0x2e60b8c5), 64, 2, 5, 6);
+    assert_neg_decode(UINT32_C(0x6e60b907), 128, 2, 7, 8);
+    assert_neg_decode(UINT32_C(0x2ea0b949), 64, 4, 9, 10);
+    assert_neg_decode(UINT32_C(0x6ea0b98b), 128, 4, 11, 12);
+    assert_neg_decode(UINT32_C(0x6ee0bbdf), 128, 8, 31, 30);
+    // GCC cc1 实际触发的 2S 指令。
+    assert_neg_decode(UINT32_C(0x2ea0bbfd), 64, 4, 29, 31);
+
+    assert((ADVSIMD_NEG_FIXED_MASK & ADVSIMD_NEG_VARIABLE_MASK) == 0);
+    assert((ADVSIMD_NEG_FIXED_MASK | ADVSIMD_NEG_VARIABLE_MASK) ==
+            UINT32_MAX);
+    unsigned decoded_count = 0;
+    unsigned reserved_count = 0;
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size = 0; size < 4; size++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    struct aarch64_decoded instruction;
+                    bool decoded = aarch64_decode(encode_neg(q,
+                            (byte_t) size, (byte_t) rn, (byte_t) rd),
+                            &instruction);
+                    bool expected = q != 0 || size != 3;
+                    assert(decoded == expected);
+                    if (!expected) {
+                        reserved_count++;
+                        continue;
+                    }
+                    decoded_count++;
+                    assert(instruction.opcode == AARCH64_OP_ADVSIMD_NEG);
+                    assert(instruction.width == (q ? 128 : 64));
+                    assert(instruction.operands.advsimd_unary.rd == rd);
+                    assert(instruction.operands.advsimd_unary.rn == rn);
+                    assert(instruction.operands.advsimd_unary.element_size ==
+                            (1U << size));
+                }
+            }
+        }
+    }
+    assert(decoded_count == 7168);
+    assert(reserved_count == 1024);
+
+    dword_t base = encode_neg(true, 3, 31, 29);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((ADVSIMD_NEG_FIXED_MASK & (UINT32_C(1) << bit)) == 0)
+            continue;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(base ^ (UINT32_C(1) << bit),
+                &instruction);
+        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_NEG);
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x0e20b820), // ABS。
+        UINT32_C(0x0e207820), // SQABS。
+        UINT32_C(0x2e207820), // SQNEG。
+        UINT32_C(0x0e209820), // CMEQ #0。
+        UINT32_C(0x2e205820), // MVN/NOT。
+        UINT32_C(0x2ea0f820), // 向量浮点 FNEG。
+        UINT32_C(0x7ee0b820), // 标量整数 NEG D。
+    };
+    for (unsigned index = 0;
+            index < sizeof(neighbors) / sizeof(neighbors[0]); index++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[index], &instruction);
+        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_NEG);
     }
 }
 
@@ -536,14 +628,109 @@ static void test_addv_execution(void) {
             });
 }
 
+static union aarch64_vector_reg reference_neg(
+        union aarch64_vector_reg source, byte_t width,
+        byte_t element_size) {
+    unsigned lanes = width / (element_size * 8);
+    union aarch64_vector_reg result = {0};
+    for (unsigned lane = 0; lane < lanes; lane++) {
+        if (element_size == 1) {
+            result.b[lane] =
+                    (byte_t) (UINT64_C(0) - source.b[lane]);
+        } else if (element_size == 2) {
+            result.h[lane] =
+                    (word_t) (UINT64_C(0) - source.h[lane]);
+        } else if (element_size == 4) {
+            result.s[lane] =
+                    (dword_t) (UINT64_C(0) - source.s[lane]);
+        } else {
+            result.d[lane] = UINT64_C(0) - source.d[lane];
+        }
+    }
+    return result;
+}
+
+static void assert_neg_execution(bool q, byte_t size,
+        byte_t rn, byte_t rd, union aarch64_vector_reg source) {
+    struct cpu_state cpu = {
+        .cycle = UINT64_C(0x123456789abcdef0),
+        .sp = UINT64_C(0x1122334455667788),
+        .pc = UINT64_C(0x4000),
+        .nzcv = UINT32_C(0xa0000000),
+        .fpcr = UINT32_C(0x01000000),
+        .fpsr = UINT32_C(0x08000010),
+        .tpidr_el0 = UINT64_C(0x8877665544332211),
+        .segfault_addr = UINT64_C(0x1020304050607080),
+        .segfault_was_write = true,
+        .trapno = UINT32_C(0x12345678),
+        .single_step = true,
+        ._poked = true,
+    };
+    cpu.x[0] = UINT64_C(0xfedcba9876543210);
+    for (unsigned reg = 0; reg < 32; reg++) {
+        cpu.v[reg].d[0] = UINT64_C(0x0102030405060708) +
+                reg * UINT64_C(0x1111111111111111);
+        cpu.v[reg].d[1] = UINT64_C(0xf0e0d0c0b0a09080) ^
+                (reg * UINT64_C(0x0101010101010101));
+    }
+    if (rd != rn)
+        cpu.v[rd].q = ~(__uint128_t) 0;
+    cpu.v[rn] = source;
+
+    byte_t width = q ? 128 : 64;
+    byte_t element_size = (byte_t) (1U << size);
+    struct cpu_state expected = cpu;
+    expected.v[rd] = reference_neg(source, width, element_size);
+    expected.pc += 4;
+
+    execute_instruction(&cpu, encode_neg(q, size, rn, rd));
+    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+}
+
+static void test_neg_execution(void) {
+    const union aarch64_vector_reg source = {
+        .d = {
+            UINT64_C(0x800000007fffffff),
+            UINT64_C(0xffffffffffffffff),
+        },
+    };
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size = 0; size < 4; size++) {
+            if (!q && size == 3)
+                continue;
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    assert_neg_execution(q, (byte_t) size,
+                            (byte_t) rn, (byte_t) rd, source);
+                }
+            }
+        }
+    }
+
+    static const union aarch64_vector_reg boundaries[] = {
+        {.d = {0, 0}},
+        {.d = {UINT64_MAX, UINT64_MAX}},
+        {.d = {UINT64_C(0x8000000000000000), UINT64_C(1)}},
+        {.d = {UINT64_C(0x55aa55aa55aa55aa),
+                UINT64_C(0xaa55aa55aa55aa55)}},
+    };
+    for (unsigned index = 0;
+            index < sizeof(boundaries) / sizeof(boundaries[0]); index++) {
+        assert_neg_execution(true, 3, 31, 31, boundaries[index]);
+        assert_neg_execution(false, 2, 31, 29, boundaries[index]);
+    }
+}
+
 int main(void) {
     test_llvm_vectors();
     test_encoding_space();
     test_fixed_bits();
     test_addv_decode();
+    test_neg_decode();
     test_scalar_addp_decode();
     test_execution_space();
     test_scalar_addp_execution();
     test_addv_execution();
+    test_neg_execution();
     return 0;
 }

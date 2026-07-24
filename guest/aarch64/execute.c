@@ -715,6 +715,25 @@ static void execute_advsimd_addv(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_neg(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    byte_t element_size = instruction->operands.advsimd_unary.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_vector_element(&source, element_size, lane);
+        write_vector_element(&result, element_size,
+                lane, UINT64_C(0) - value);
+    }
+    // 无符号模减避免最小负数溢出；延迟写回同时保护别名与 Q=0 清高半。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_addp_scalar(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_unary.rd;
@@ -2160,6 +2179,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADDV:
             execute_advsimd_addv(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_NEG:
+            execute_advsimd_neg(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_ADDP_SCALAR:
             execute_advsimd_addp_scalar(cpu, instruction);
