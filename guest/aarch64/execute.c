@@ -696,6 +696,25 @@ static void execute_advsimd_add(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_addv(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_across_lanes.rd;
+    byte_t rn = instruction->operands.advsimd_across_lanes.rn;
+    byte_t element_size =
+            instruction->operands.advsimd_across_lanes.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+    qword_t sum = 0;
+
+    for (byte_t lane = 0; lane < lanes; lane++)
+        sum += read_vector_element(&source, element_size, lane);
+    write_vector_element(&result, element_size, 0, sum);
+    // 延迟整体写回保护 Vd == Vn，并清零标量目标的其余位。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_addp_scalar(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_unary.rd;
@@ -2138,6 +2157,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADD:
             execute_advsimd_add(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_ADDV:
+            execute_advsimd_addv(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_ADDP_SCALAR:
             execute_advsimd_addp_scalar(cpu, instruction);
