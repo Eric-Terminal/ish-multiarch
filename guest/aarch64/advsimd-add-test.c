@@ -7,6 +7,9 @@
 #define ADVSIMD_ADD_FIXED_MASK UINT32_C(0xbf20fc00)
 #define ADVSIMD_ADD_FIXED_BITS UINT32_C(0x0e208400)
 #define ADVSIMD_ADD_VARIABLE_MASK UINT32_C(0x40df03ff)
+#define ADVSIMD_ADDP_SCALAR_FIXED_MASK UINT32_C(0xfffffc00)
+#define ADVSIMD_ADDP_SCALAR_FIXED_BITS UINT32_C(0x5ef1b800)
+#define ADVSIMD_ADDP_SCALAR_VARIABLE_MASK UINT32_C(0x000003ff)
 
 static dword_t encode(bool q, byte_t size, byte_t rm, byte_t rn, byte_t rd) {
     return ADVSIMD_ADD_FIXED_BITS |
@@ -15,6 +18,11 @@ static dword_t encode(bool q, byte_t size, byte_t rm, byte_t rn, byte_t rd) {
             (dword_t) rm << 16 |
             (dword_t) rn << 5 |
             rd;
+}
+
+static dword_t encode_scalar_addp(byte_t rn, byte_t rd) {
+    return ADVSIMD_ADDP_SCALAR_FIXED_BITS |
+            (dword_t) rn << 5 | rd;
 }
 
 static struct aarch64_decoded decode(dword_t word) {
@@ -101,6 +109,74 @@ static void test_fixed_bits(void) {
         bool decoded = aarch64_decode(base ^ (UINT32_C(1) << bit),
                 &instruction);
         assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_ADD);
+    }
+}
+
+static void assert_scalar_addp_decode(
+        dword_t word, byte_t rd, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_ADDP_SCALAR);
+    assert(instruction.width == 64);
+    assert(instruction.operands.advsimd_unary.rd == rd);
+    assert(instruction.operands.advsimd_unary.rn == rn);
+}
+
+static void test_scalar_addp_decode(void) {
+    assert_scalar_addp_decode(UINT32_C(0x5ef1b820), 0, 1);
+    assert_scalar_addp_decode(UINT32_C(0x5ef1bbbf), 31, 29);
+    assert_scalar_addp_decode(UINT32_C(0x5ef1bbff), 31, 31);
+
+    assert((ADVSIMD_ADDP_SCALAR_FIXED_MASK &
+            ADVSIMD_ADDP_SCALAR_VARIABLE_MASK) == 0);
+    assert((ADVSIMD_ADDP_SCALAR_FIXED_MASK |
+            ADVSIMD_ADDP_SCALAR_VARIABLE_MASK) == UINT32_MAX);
+    unsigned decoded_count = 0;
+    for (unsigned rn = 0; rn < 32; rn++) {
+        for (unsigned rd = 0; rd < 32; rd++) {
+            assert_scalar_addp_decode(
+                    encode_scalar_addp((byte_t) rn, (byte_t) rd),
+                    (byte_t) rd, (byte_t) rn);
+            decoded_count++;
+        }
+    }
+    assert(decoded_count == 1024);
+
+    const dword_t base = encode_scalar_addp(29, 31);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((ADVSIMD_ADDP_SCALAR_FIXED_MASK &
+                (UINT32_C(1) << bit)) == 0)
+            continue;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(
+                base ^ (UINT32_C(1) << bit), &instruction);
+        assert(!decoded ||
+                instruction.opcode != AARCH64_OP_ADVSIMD_ADDP_SCALAR);
+    }
+
+    // 标量整数 ADDP 只有 2D arrangement。
+    for (unsigned size = 0; size < 3; size++) {
+        dword_t word = (base & ~UINT32_C(0x00c00000)) |
+                (dword_t) size << 22;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(word, &instruction);
+        assert(!decoded ||
+                instruction.opcode != AARCH64_OP_ADVSIMD_ADDP_SCALAR);
+    }
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x4ee2bc20), // 三操作数向量 ADDP。
+        UINT32_C(0x4eb1b820), // 向量横向 ADDV。
+        UINT32_C(0x7e30d820), // 标量浮点 FADDP S。
+        UINT32_C(0x7e70d820), // 标量浮点 FADDP D。
+        UINT32_C(0x7e70f820), // 标量浮点 FMAXP D。
+        UINT32_C(0x7ef0f820), // 标量浮点 FMINP D。
+    };
+    for (unsigned index = 0;
+            index < sizeof(neighbors) / sizeof(neighbors[0]); index++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[index], &instruction);
+        assert(!decoded ||
+                instruction.opcode != AARCH64_OP_ADVSIMD_ADDP_SCALAR);
     }
 }
 
@@ -192,10 +268,93 @@ static void test_execution_space(void) {
     }
 }
 
+static void assert_scalar_addp_execution(byte_t rn, byte_t rd,
+        qword_t left, qword_t right) {
+    struct cpu_state cpu = {
+        .cycle = UINT64_C(0x123456789abcdef0),
+        .sp = UINT64_C(0x1122334455667788),
+        .pc = UINT64_C(0x2000),
+        .nzcv = UINT32_C(0xa0000000),
+        .fpcr = UINT32_C(0x01000000),
+        .fpsr = UINT32_C(0x08000010),
+        .tpidr_el0 = UINT64_C(0x8877665544332211),
+        .segfault_addr = UINT64_C(0x1020304050607080),
+        .segfault_was_write = true,
+        .trapno = UINT32_C(0x12345678),
+        .single_step = true,
+        ._poked = true,
+    };
+    cpu.x[0] = UINT64_C(0xfedcba9876543210);
+    for (unsigned reg = 0; reg < 32; reg++) {
+        cpu.v[reg].d[0] = UINT64_C(0x0102030405060708) +
+                reg * UINT64_C(0x1111111111111111);
+        cpu.v[reg].d[1] = UINT64_C(0xf0e0d0c0b0a09080) ^
+                (reg * UINT64_C(0x0101010101010101));
+    }
+    if (rd != rn)
+        cpu.v[rd].q = ~(__uint128_t) 0;
+    cpu.v[rn].d[0] = left;
+    cpu.v[rn].d[1] = right;
+
+    struct cpu_state expected = cpu;
+    expected.v[rd] = (union aarch64_vector_reg) {
+        .d = {left + right, 0},
+    };
+    expected.pc += 4;
+
+    execute_instruction(&cpu, encode_scalar_addp(rn, rd));
+    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+}
+
+static void test_scalar_addp_execution(void) {
+    for (unsigned rn = 0; rn < 32; rn++) {
+        for (unsigned rd = 0; rd < 32; rd++) {
+            qword_t left = UINT64_MAX -
+                    rn * UINT64_C(0x0102030405060708);
+            qword_t right = UINT64_C(0x8000000000000001) +
+                    rd * UINT64_C(0x0001000100010001);
+            assert_scalar_addp_execution(
+                    (byte_t) rn, (byte_t) rd, left, right);
+        }
+    }
+
+    static const qword_t boundaries[][2] = {
+        {0, 0},
+        {1, 2},
+        {UINT64_MAX, 1},
+        {UINT64_C(0x8000000000000000),
+                UINT64_C(0x8000000000000000)},
+        {UINT64_C(0x7fffffffffffffff),
+                UINT64_C(0x7fffffffffffffff)},
+    };
+    static const byte_t registers[][2] = {
+        {1, 2},
+        {2, 2},
+        {29, 31},
+        {31, 29},
+        {31, 31},
+    };
+    for (unsigned value = 0;
+            value < sizeof(boundaries) / sizeof(boundaries[0]); value++) {
+        for (unsigned form = 0;
+                form < sizeof(registers) / sizeof(registers[0]); form++) {
+            assert_scalar_addp_execution(
+                    registers[form][0], registers[form][1],
+                    boundaries[value][0], boundaries[value][1]);
+        }
+    }
+
+    assert_scalar_addp_execution(
+            29, 31, UINT64_C(0x7f7f7f7f7f7e7f7f),
+            UINT64_C(0x7f7f7f7f7f7f7f7f));
+}
+
 int main(void) {
     test_llvm_vectors();
     test_encoding_space();
     test_fixed_bits();
+    test_scalar_addp_decode();
     test_execution_space();
+    test_scalar_addp_execution();
     return 0;
 }

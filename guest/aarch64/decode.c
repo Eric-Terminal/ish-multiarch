@@ -445,6 +445,18 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xfffffc00)) == UINT32_C(0x5ef1b800)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_ADDP_SCALAR,
+            .width = 64,
+            .operands.advsimd_unary = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e208400)) {
         bool q = ((word >> 30) & 1) != 0;
         byte_t size = (word >> 22) & 3;

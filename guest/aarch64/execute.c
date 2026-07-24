@@ -655,6 +655,18 @@ static void execute_advsimd_add(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_addp_scalar(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+    result.d[0] = source.d[0] + source.d[1];
+    // 延迟写回保护寄存器别名，并清零标量目标的高 64 位。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_table(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_table.rd;
@@ -2025,6 +2037,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADD:
             execute_advsimd_add(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_ADDP_SCALAR:
+            execute_advsimd_addp_scalar(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_TBL:
         case AARCH64_OP_ADVSIMD_TBX:
