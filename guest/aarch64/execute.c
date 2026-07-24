@@ -1743,7 +1743,7 @@ static bool execute_simd_load_multiple_4(struct cpu_state *cpu,
     return true;
 }
 
-static bool execute_simd_load_single_lane(struct cpu_state *cpu,
+static bool execute_simd_single_lane(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
     assert(tlb != NULL);
@@ -1754,12 +1754,18 @@ static bool execute_simd_load_single_lane(struct cpu_state *cpu,
     byte_t element_index =
             instruction->operands.advsimd_single_lane.element_index;
     guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
-    union aarch64_vector_reg value = cpu->v[rt];
-    if (!guest_tlb_read(tlb, address,
-            value.b + element_index * element_size, element_size,
-            GUEST_MEMORY_READ, fault))
+    if (instruction->opcode == AARCH64_OP_LOAD_SIMD_SINGLE_LANE) {
+        union aarch64_vector_reg value = cpu->v[rt];
+        if (!guest_tlb_read(tlb, address,
+                value.b + element_index * element_size, element_size,
+                GUEST_MEMORY_READ, fault))
+            return false;
+        cpu->v[rt] = value;
+    } else if (!guest_tlb_write(tlb, address,
+            cpu->v[rt].b + element_index * element_size,
+            element_size, fault)) {
         return false;
-    cpu->v[rt] = value;
+    }
     cpu->pc += 4;
     return true;
 }
@@ -2481,7 +2487,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;
         case AARCH64_OP_LOAD_SIMD_SINGLE_LANE:
-            if (!execute_simd_load_single_lane(
+        case AARCH64_OP_STORE_SIMD_SINGLE_LANE:
+            if (!execute_simd_single_lane(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

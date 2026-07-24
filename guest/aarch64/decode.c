@@ -1668,18 +1668,22 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     byte_t q = (word >> 30) & 1;
     byte_t s = (word >> 12) & 1;
     byte_t size = (word >> 10) & 3;
-    if ((word & UINT32_C(0xbfffe000)) == UINT32_C(0x0d400000)) {
+    bool load_single_lane = ((word >> 22) & 1) != 0;
+    // 单结构 lane 的加载与存储只由 L 位区分，共用同一合法排列。
+    dword_t normalized_single_lane = word | UINT32_C(0x00400000);
+    if ((normalized_single_lane & UINT32_C(0xbfffe000)) ==
+            UINT32_C(0x0d400000)) {
         element_size = 1;
         element_index = (byte_t) ((q << 3) | (s << 2) | size);
-    } else if ((word & UINT32_C(0xbfffe400)) ==
+    } else if ((normalized_single_lane & UINT32_C(0xbfffe400)) ==
             UINT32_C(0x0d404000)) {
         element_size = 2;
         element_index = (byte_t) ((q << 2) | (s << 1) | (size >> 1));
-    } else if ((word & UINT32_C(0xbfffec00)) ==
+    } else if ((normalized_single_lane & UINT32_C(0xbfffec00)) ==
             UINT32_C(0x0d408000)) {
         element_size = 4;
         element_index = (byte_t) ((q << 1) | s);
-    } else if ((word & UINT32_C(0xbffffc00)) ==
+    } else if ((normalized_single_lane & UINT32_C(0xbffffc00)) ==
             UINT32_C(0x0d408400)) {
         element_size = 8;
         element_index = q;
@@ -1689,7 +1693,9 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     }
     if (element_size != 0) {
         *decoded = (struct aarch64_decoded) {
-            .opcode = AARCH64_OP_LOAD_SIMD_SINGLE_LANE,
+            .opcode = load_single_lane ?
+                    AARCH64_OP_LOAD_SIMD_SINGLE_LANE :
+                    AARCH64_OP_STORE_SIMD_SINGLE_LANE,
             .width = 128,
             .operands.advsimd_single_lane = {
                 .rt = word & 0x1f,
