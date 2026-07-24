@@ -1529,6 +1529,16 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_advsimd_add', aarch64_advsimd_add_test)
 
+    aarch64_advsimd_sub_test = executable('aarch64_advsimd_sub_test', [
+            'guest/memory/address-space.c',
+            'guest/memory/tlb.c',
+            'guest/aarch64/decode.c',
+            'guest/aarch64/condition.c',
+            'guest/aarch64/execute.c',
+            'guest/aarch64/advsimd-sub-test.c',
+        ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+    test('aarch64_advsimd_sub', aarch64_advsimd_sub_test)
+
     aarch64_advsimd_table_test = executable('aarch64_advsimd_table_test', [
             'guest/memory/address-space.c',
             'guest/memory/tlb.c',
