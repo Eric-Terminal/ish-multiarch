@@ -1064,6 +1064,30 @@ static void execute_scalar_fp_binary(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_fused(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.data_processing_3source.rd;
+    byte_t rn = instruction->operands.data_processing_3source.rn;
+    byte_t rm = instruction->operands.data_processing_3source.rm;
+    byte_t ra = instruction->operands.data_processing_3source.ra;
+    bool negate_product =
+            instruction->opcode == AARCH64_OP_FMSUB_SCALAR ||
+            instruction->opcode == AARCH64_OP_FNMADD_SCALAR;
+    bool negate_addend =
+            instruction->opcode == AARCH64_OP_FNMADD_SCALAR ||
+            instruction->opcode == AARCH64_OP_FNMSUB_SCALAR;
+    struct aarch64_scalar_fp_result result =
+            aarch64_scalar_fp_fused_multiply_add(
+                    read_scalar_fp(cpu, rn, instruction->width),
+                    read_scalar_fp(cpu, rm, instruction->width),
+                    read_scalar_fp(cpu, ra, instruction->width),
+                    instruction->width, cpu->fpcr,
+                    negate_product, negate_addend);
+    write_scalar_fp(cpu, rd, instruction->width, result.bits);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_select(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     const byte_t source = aarch64_condition_holds(cpu->nzcv,
@@ -2102,6 +2126,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FMUL_SCALAR:
         case AARCH64_OP_FDIV_SCALAR:
             execute_scalar_fp_binary(cpu, instruction);
+            break;
+        case AARCH64_OP_FMADD_SCALAR:
+        case AARCH64_OP_FMSUB_SCALAR:
+        case AARCH64_OP_FNMADD_SCALAR:
+        case AARCH64_OP_FNMSUB_SCALAR:
+            execute_scalar_fp_fused(cpu, instruction);
             break;
         case AARCH64_OP_FCSEL_SCALAR:
             execute_scalar_fp_select(cpu, instruction);

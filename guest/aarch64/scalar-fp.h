@@ -622,6 +622,225 @@ static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_multiply(
     return result;
 }
 
+static inline __uint128_t aarch64_scalar_fp_shift_right_128(
+        __uint128_t value, unsigned shift, bool *tail) {
+    if (shift == 0)
+        return value;
+    if (shift >= 128) {
+        *tail |= value != 0;
+        return 0;
+    }
+    __uint128_t mask = (((__uint128_t) 1) << shift) - 1;
+    *tail |= (value & mask) != 0;
+    return value >> shift;
+}
+
+static inline int aarch64_scalar_fp_compare_scaled(
+        __uint128_t left, int left_scale,
+        __uint128_t right, int right_scale) {
+    unsigned left_top = aarch64_scalar_fp_top_bit(left);
+    unsigned right_top = aarch64_scalar_fp_top_bit(right);
+    int left_exponent = left_scale + (int) left_top;
+    int right_exponent = right_scale + (int) right_top;
+    if (left_exponent != right_exponent)
+        return left_exponent < right_exponent ? -1 : 1;
+
+    if (left_scale < right_scale)
+        right <<= (unsigned) (right_scale - left_scale);
+    else if (right_scale < left_scale)
+        left <<= (unsigned) (left_scale - right_scale);
+    if (left == right)
+        return 0;
+    return left < right ? -1 : 1;
+}
+
+/*
+ * 两个非零精确项先扩展到 128 位共同定点格，再统一舍入。较大项最高
+ * 只放到 bit126，为同号相加保留一位；超出格子的较小尾数只影响
+ * inexact 和恰好半途时的舍入方向。
+ */
+static inline struct aarch64_scalar_fp_result
+aarch64_scalar_fp_add_scaled(bool left_negative,
+        __uint128_t left, int left_scale, bool right_negative,
+        __uint128_t right, int right_scale,
+        const struct aarch64_scalar_fp_format *format, dword_t fpcr) {
+    int ordering = aarch64_scalar_fp_compare_scaled(
+            left, left_scale, right, right_scale);
+    if (ordering == 0 && left_negative != right_negative) {
+        bool negative = ((fpcr & AARCH64_FPCR_RMODE_MASK) >>
+                AARCH64_FPCR_RMODE_SHIFT) == 2;
+        return (struct aarch64_scalar_fp_result) {
+            .bits = negative ? format->sign_mask : 0,
+        };
+    }
+    if (ordering < 0) {
+        __uint128_t magnitude = left;
+        left = right;
+        right = magnitude;
+        int scale = left_scale;
+        left_scale = right_scale;
+        right_scale = scale;
+        bool negative = left_negative;
+        left_negative = right_negative;
+        right_negative = negative;
+    }
+
+    unsigned headroom = 126 - aarch64_scalar_fp_top_bit(left);
+    int common_scale = left_scale - (int) headroom;
+    left <<= headroom;
+
+    int right_shift = right_scale - common_scale;
+    bool tail = false;
+    if (right_shift >= 0) {
+        right <<= (unsigned) right_shift;
+    } else {
+        right = aarch64_scalar_fp_shift_right_128(
+                right, (unsigned) -right_shift, &tail);
+    }
+
+    __uint128_t magnitude;
+    if (left_negative == right_negative) {
+        magnitude = left + right;
+    } else {
+        magnitude = left - right;
+        if (tail)
+            magnitude--;
+    }
+    return aarch64_scalar_fp_round(left_negative, magnitude,
+            common_scale, tail, format, fpcr);
+}
+
+static inline struct aarch64_scalar_fp_result
+aarch64_scalar_fp_fused_multiply_add(qword_t left_bits,
+        qword_t right_bits, qword_t addend_bits, byte_t width,
+        dword_t fpcr, bool negate_product, bool negate_addend) {
+    struct aarch64_scalar_fp_format format =
+            aarch64_scalar_fp_format(width);
+    if (negate_product)
+        left_bits ^= format.sign_mask;
+    if (negate_addend)
+        addend_bits ^= format.sign_mask;
+
+    struct aarch64_scalar_fp_number left =
+            aarch64_scalar_fp_unpack(left_bits, &format);
+    struct aarch64_scalar_fp_number right =
+            aarch64_scalar_fp_unpack(right_bits, &format);
+    struct aarch64_scalar_fp_number addend =
+            aarch64_scalar_fp_unpack(addend_bits, &format);
+    dword_t exceptions = 0;
+    aarch64_scalar_fp_flush_input(
+            &left, &format, fpcr, &exceptions);
+    aarch64_scalar_fp_flush_input(
+            &right, &format, fpcr, &exceptions);
+    aarch64_scalar_fp_flush_input(
+            &addend, &format, fpcr, &exceptions);
+
+    const struct aarch64_scalar_fp_number *nan = NULL;
+    if (aarch64_scalar_fp_is_signaling_nan(&addend, &format))
+        nan = &addend;
+    else if (aarch64_scalar_fp_is_signaling_nan(&left, &format))
+        nan = &left;
+    else if (aarch64_scalar_fp_is_signaling_nan(&right, &format))
+        nan = &right;
+    if (nan != NULL) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (fpcr & AARCH64_FPCR_DN) != 0 ?
+                    format.default_nan : nan->bits | format.quiet_bit,
+            .exceptions = exceptions | AARCH64_FPSR_IOC,
+        };
+    }
+
+    bool left_infinity = aarch64_scalar_fp_is_infinity(&left, &format);
+    bool right_infinity = aarch64_scalar_fp_is_infinity(&right, &format);
+    bool left_zero = aarch64_scalar_fp_is_zero(&left);
+    bool right_zero = aarch64_scalar_fp_is_zero(&right);
+    if ((left_infinity && right_zero) ||
+            (right_infinity && left_zero)) {
+        struct aarch64_scalar_fp_result result =
+                aarch64_scalar_fp_default_nan(&format);
+        result.exceptions |= exceptions;
+        return result;
+    }
+
+    if (aarch64_scalar_fp_is_nan(&addend, &format))
+        nan = &addend;
+    else if (aarch64_scalar_fp_is_nan(&left, &format))
+        nan = &left;
+    else if (aarch64_scalar_fp_is_nan(&right, &format))
+        nan = &right;
+    if (nan != NULL) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (fpcr & AARCH64_FPCR_DN) != 0 ?
+                    format.default_nan : nan->bits,
+            .exceptions = exceptions,
+        };
+    }
+
+    bool product_negative = left.sign != right.sign;
+    bool product_infinity = left_infinity || right_infinity;
+    bool addend_infinity =
+            aarch64_scalar_fp_is_infinity(&addend, &format);
+    if (product_infinity && addend_infinity &&
+            product_negative != addend.sign) {
+        struct aarch64_scalar_fp_result result =
+                aarch64_scalar_fp_default_nan(&format);
+        result.exceptions |= exceptions;
+        return result;
+    }
+    if (product_infinity || addend_infinity) {
+        bool negative = product_infinity ?
+                product_negative : addend.sign;
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (negative ? format.sign_mask : 0) |
+                    format.exponent_mask,
+            .exceptions = exceptions,
+        };
+    }
+
+    bool product_zero = left_zero || right_zero;
+    bool addend_zero = aarch64_scalar_fp_is_zero(&addend);
+    if (product_zero) {
+        if (addend_zero) {
+            bool negative;
+            if (product_negative == addend.sign) {
+                negative = product_negative;
+            } else {
+                negative = ((fpcr & AARCH64_FPCR_RMODE_MASK) >>
+                        AARCH64_FPCR_RMODE_SHIFT) == 2;
+            }
+            return (struct aarch64_scalar_fp_result) {
+                .bits = negative ? format.sign_mask : 0,
+                .exceptions = exceptions,
+            };
+        }
+        return (struct aarch64_scalar_fp_result) {
+            .bits = addend.bits,
+            .exceptions = exceptions,
+        };
+    }
+
+    __uint128_t product =
+            (__uint128_t) aarch64_scalar_fp_significand(&left, &format) *
+            aarch64_scalar_fp_significand(&right, &format);
+    int product_scale = aarch64_scalar_fp_exponent(&left, &format) +
+            aarch64_scalar_fp_exponent(&right, &format) -
+            2 * (int) format.fraction_bits;
+    struct aarch64_scalar_fp_result result;
+    if (addend_zero) {
+        result = aarch64_scalar_fp_round(product_negative,
+                product, product_scale, false, &format, fpcr);
+    } else {
+        result = aarch64_scalar_fp_add_scaled(product_negative,
+                product, product_scale, addend.sign,
+                aarch64_scalar_fp_significand(&addend, &format),
+                aarch64_scalar_fp_exponent(&addend, &format) -
+                        (int) format.fraction_bits,
+                &format, fpcr);
+    }
+    result.exceptions |= exceptions;
+    return result;
+}
+
 static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_divide(
         qword_t left_bits, qword_t right_bits, byte_t width, dword_t fpcr) {
     struct aarch64_scalar_fp_format format =

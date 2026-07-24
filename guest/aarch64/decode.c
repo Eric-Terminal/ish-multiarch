@@ -285,6 +285,38 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         dword_t bits;
         enum aarch64_opcode opcode;
         byte_t width;
+    } scalar_fp_fused_operations[] = {
+        {UINT32_C(0x1f000000), AARCH64_OP_FMADD_SCALAR, 32},
+        {UINT32_C(0x1f400000), AARCH64_OP_FMADD_SCALAR, 64},
+        {UINT32_C(0x1f008000), AARCH64_OP_FMSUB_SCALAR, 32},
+        {UINT32_C(0x1f408000), AARCH64_OP_FMSUB_SCALAR, 64},
+        {UINT32_C(0x1f200000), AARCH64_OP_FNMADD_SCALAR, 32},
+        {UINT32_C(0x1f600000), AARCH64_OP_FNMADD_SCALAR, 64},
+        {UINT32_C(0x1f208000), AARCH64_OP_FNMSUB_SCALAR, 32},
+        {UINT32_C(0x1f608000), AARCH64_OP_FNMSUB_SCALAR, 64},
+    };
+    dword_t scalar_fp_fused = word & UINT32_C(0xffe08000);
+    for (unsigned i = 0; i < sizeof(scalar_fp_fused_operations) /
+            sizeof(scalar_fp_fused_operations[0]); i++) {
+        if (scalar_fp_fused != scalar_fp_fused_operations[i].bits)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = scalar_fp_fused_operations[i].opcode,
+            .width = scalar_fp_fused_operations[i].width,
+            .operands.data_processing_3source = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .ra = (word >> 10) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t width;
     } scalar_fp_binary_operations[] = {
         {UINT32_C(0x1e202800), AARCH64_OP_FADD_SCALAR, 32},
         {UINT32_C(0x1e602800), AARCH64_OP_FADD_SCALAR, 64},

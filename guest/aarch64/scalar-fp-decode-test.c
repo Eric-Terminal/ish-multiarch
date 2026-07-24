@@ -2,6 +2,7 @@
 
 #include "guest/aarch64/decode.h"
 
+#define FUSED_FIXED_MASK UINT32_C(0xffe08000)
 #define BINARY_FIXED_MASK UINT32_C(0xffe0fc00)
 #define SELECT_FIXED_MASK UINT32_C(0xffe00c00)
 #define UNARY_FIXED_MASK UINT32_C(0xfffffc00)
@@ -11,6 +12,12 @@
 #define COMPARE_ZERO_FIXED_MASK UINT32_C(0xfffffc1f)
 
 struct binary_case {
+    dword_t bits;
+    enum aarch64_opcode opcode;
+    byte_t width;
+};
+
+struct fused_case {
     dword_t bits;
     enum aarch64_opcode opcode;
     byte_t width;
@@ -55,6 +62,17 @@ static const struct binary_case binary_operations[] = {
     {UINT32_C(0x1e600800), AARCH64_OP_FMUL_SCALAR, 64},
     {UINT32_C(0x1e201800), AARCH64_OP_FDIV_SCALAR, 32},
     {UINT32_C(0x1e601800), AARCH64_OP_FDIV_SCALAR, 64},
+};
+
+static const struct fused_case fused_operations[] = {
+    {UINT32_C(0x1f000000), AARCH64_OP_FMADD_SCALAR, 32},
+    {UINT32_C(0x1f400000), AARCH64_OP_FMADD_SCALAR, 64},
+    {UINT32_C(0x1f008000), AARCH64_OP_FMSUB_SCALAR, 32},
+    {UINT32_C(0x1f408000), AARCH64_OP_FMSUB_SCALAR, 64},
+    {UINT32_C(0x1f200000), AARCH64_OP_FNMADD_SCALAR, 32},
+    {UINT32_C(0x1f600000), AARCH64_OP_FNMADD_SCALAR, 64},
+    {UINT32_C(0x1f208000), AARCH64_OP_FNMSUB_SCALAR, 32},
+    {UINT32_C(0x1f608000), AARCH64_OP_FNMSUB_SCALAR, 64},
 };
 
 static const struct unary_case unary_operations[] = {
@@ -112,6 +130,12 @@ static dword_t encode_binary(unsigned operation, byte_t rn, byte_t rm,
             (dword_t) rn << 5 | rd;
 }
 
+static dword_t encode_fused(unsigned operation, byte_t rn, byte_t rm,
+        byte_t ra, byte_t rd) {
+    return fused_operations[operation].bits | (dword_t) rm << 16 |
+            (dword_t) ra << 10 | (dword_t) rn << 5 | rd;
+}
+
 static dword_t encode_unary(unsigned operation, byte_t rn, byte_t rd) {
     return unary_operations[operation].bits | (dword_t) rn << 5 | rd;
 }
@@ -154,6 +178,10 @@ static dword_t encode_compare(unsigned comparison, byte_t rn, byte_t rm) {
 
 static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
     switch (opcode) {
+        case AARCH64_OP_FMADD_SCALAR:
+        case AARCH64_OP_FMSUB_SCALAR:
+        case AARCH64_OP_FNMADD_SCALAR:
+        case AARCH64_OP_FNMSUB_SCALAR:
         case AARCH64_OP_FADD_SCALAR:
         case AARCH64_OP_FSUB_SCALAR:
         case AARCH64_OP_FMUL_SCALAR:
@@ -176,6 +204,11 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
 }
 
 static bool is_scalar_fp_encoding(dword_t word) {
+    for (unsigned i = 0; i < sizeof(fused_operations) /
+            sizeof(fused_operations[0]); i++) {
+        if ((word & FUSED_FIXED_MASK) == fused_operations[i].bits)
+            return true;
+    }
     for (unsigned i = 0; i < sizeof(binary_operations) /
             sizeof(binary_operations[0]); i++) {
         if ((word & BINARY_FIXED_MASK) == binary_operations[i].bits)
@@ -236,6 +269,17 @@ static void assert_binary(dword_t word, unsigned operation, byte_t rd,
     assert(instruction.operands.data_processing_2source.rm == rm);
 }
 
+static void assert_fused(dword_t word, unsigned operation, byte_t rd,
+        byte_t rn, byte_t rm, byte_t ra) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == fused_operations[operation].opcode);
+    assert(instruction.width == fused_operations[operation].width);
+    assert(instruction.operands.data_processing_3source.rd == rd);
+    assert(instruction.operands.data_processing_3source.rn == rn);
+    assert(instruction.operands.data_processing_3source.rm == rm);
+    assert(instruction.operands.data_processing_3source.ra == ra);
+}
+
 static void assert_unary(dword_t word, unsigned operation, byte_t rd,
         byte_t rn) {
     struct aarch64_decoded instruction = decode(word);
@@ -292,6 +336,15 @@ static void assert_compare(dword_t word, unsigned comparison, byte_t rn,
 }
 
 static void test_apple_clang_vectors(void) {
+    assert_fused(UINT32_C(0x1f020c20), 0, 0, 1, 2, 3);
+    assert_fused(UINT32_C(0x1f4f7c1f), 1, 31, 0, 15, 31);
+    assert_fused(UINT32_C(0x1f069ca4), 2, 4, 5, 6, 7);
+    assert_fused(UINT32_C(0x1f56deb4), 3, 20, 21, 22, 23);
+    assert_fused(UINT32_C(0x1f2a2d28), 4, 8, 9, 10, 11);
+    assert_fused(UINT32_C(0x1f7a6f38), 5, 24, 25, 26, 27);
+    assert_fused(UINT32_C(0x1f2ebdac), 6, 12, 13, 14, 15);
+    assert_fused(UINT32_C(0x1f7effbc), 7, 28, 29, 30, 31);
+
     assert_binary(UINT32_C(0x1e2728a3), 0, 3, 5, 7);
     assert_binary(UINT32_C(0x1e6728a3), 1, 3, 5, 7);
     assert_binary(UINT32_C(0x1e2738a3), 2, 3, 5, 7);
@@ -343,6 +396,27 @@ static void test_apple_clang_vectors(void) {
     assert_compare(UINT32_C(0x1e6020a8), 5, 5, 0);
     assert_compare(UINT32_C(0x1e2020b8), 6, 5, 0);
     assert_compare(UINT32_C(0x1e6020b8), 7, 5, 0);
+}
+
+static void test_fused_encoding_space(void) {
+    unsigned decoded_count = 0;
+    for (unsigned operation = 0; operation < sizeof(fused_operations) /
+            sizeof(fused_operations[0]); operation++) {
+        for (unsigned rn = 0; rn < 32; rn++) {
+            for (unsigned rm = 0; rm < 32; rm++) {
+                for (unsigned ra = 0; ra < 32; ra++) {
+                    for (unsigned rd = 0; rd < 32; rd++) {
+                        assert_fused(encode_fused(operation, (byte_t) rn,
+                                (byte_t) rm, (byte_t) ra, (byte_t) rd),
+                                operation, (byte_t) rd, (byte_t) rn,
+                                (byte_t) rm, (byte_t) ra);
+                        decoded_count++;
+                    }
+                }
+            }
+        }
+    }
+    assert(decoded_count == 8388608);
 }
 
 static void test_binary_encoding_space(void) {
@@ -506,6 +580,14 @@ static void test_compare_encoding_space(void) {
 }
 
 static void test_fixed_bits(void) {
+    for (unsigned operation = 0; operation < sizeof(fused_operations) /
+            sizeof(fused_operations[0]); operation++) {
+        dword_t base = encode_fused(operation, 5, 7, 11, 3);
+        for (unsigned bit = 0; bit < 32; bit++) {
+            if (FUSED_FIXED_MASK & (UINT32_C(1) << bit))
+                assert_classification(base ^ (UINT32_C(1) << bit));
+        }
+    }
     for (unsigned operation = 0; operation < sizeof(binary_operations) /
             sizeof(binary_operations[0]); operation++) {
         dword_t base = encode_binary(operation, 5, 7, 3);
@@ -556,6 +638,7 @@ static void test_fixed_bits(void) {
                 assert_classification(base ^ (UINT32_C(1) << bit));
         }
     }
+    assert(FUSED_FIXED_MASK == UINT32_C(0xffe08000));
     assert(BINARY_FIXED_MASK == UINT32_C(0xffe0fc00));
     assert(SELECT_FIXED_MASK == UINT32_C(0xffe00c00));
     assert(UNARY_FIXED_MASK == UINT32_C(0xfffffc00));
@@ -570,6 +653,27 @@ static void test_rejected_neighbors(void) {
     // 当前 guest 不声明 FP16，保留精度和半精度 FDIV 必须进入 SIGILL。
     assert(!aarch64_decode(UINT32_C(0x1ebe181e), &instruction));
     assert(!aarch64_decode(UINT32_C(0x1efe181e), &instruction));
+
+    static const dword_t fused_words[] = {
+        // type=10 是保留精度，type=11 是当前 guest 未声明的 FP16。
+        UINT32_C(0x1f8724a3),
+        UINT32_C(0x1f87a4a3),
+        UINT32_C(0x1fa724a3),
+        UINT32_C(0x1fa7a4a3),
+        UINT32_C(0x1fc724a3),
+        UINT32_C(0x1fc7a4a3),
+        UINT32_C(0x1fe724a3),
+        UINT32_C(0x1fe7a4a3),
+        // 相邻前缀不属于标量三源浮点族。
+        UINT32_C(0x1e0724a3),
+        UINT32_C(0x1d0724a3),
+        UINT32_C(0x9f0724a3),
+    };
+    for (unsigned i = 0; i < sizeof(fused_words) /
+            sizeof(fused_words[0]); i++) {
+        assert(!aarch64_decode(fused_words[i], &instruction));
+        assert(!is_scalar_fp_encoding(fused_words[i]));
+    }
 
     // FP16、定点、向量和通用寄存器形式由不同编码族处理。
     static const dword_t words[] = {
@@ -682,6 +786,7 @@ static void test_rejected_neighbors(void) {
 
 int main(void) {
     test_apple_clang_vectors();
+    test_fused_encoding_space();
     test_binary_encoding_space();
     test_unary_encoding_space();
     test_rejected_unary_precision_spaces();
