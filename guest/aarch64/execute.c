@@ -912,6 +912,27 @@ static void execute_advsimd_compare_zero_scalar(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_compare_zero_vector(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    byte_t element_size = instruction->operands.advsimd_unary.element_size;
+    byte_t lanes = (byte_t) (instruction->width / (element_size * 8));
+    qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
+    qword_t true_value = vector_element_mask(element_size);
+    union aarch64_vector_reg result = {0};
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value =
+                read_vector_element(&cpu->v[rn], element_size, lane);
+        bool matches = value != 0 && (value & sign) == 0;
+        write_vector_element(&result, element_size, lane,
+                matches ? true_value : 0);
+    }
+    // 延迟整体写回保护自别名，并清零 Q=0 目标的高 64 位。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static qword_t advsimd_logical_word(enum aarch64_opcode opcode,
         qword_t old, qword_t left, qword_t right) {
     if (opcode == AARCH64_OP_ADVSIMD_AND)
@@ -2248,6 +2269,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_CMGE_ZERO_SCALAR:
             execute_advsimd_compare_zero_scalar(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR:
+            execute_advsimd_compare_zero_vector(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_AND:
         case AARCH64_OP_ADVSIMD_BIC:

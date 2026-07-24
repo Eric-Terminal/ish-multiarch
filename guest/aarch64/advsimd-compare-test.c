@@ -11,6 +11,9 @@
 #define ADVSIMD_CMGE_ZERO_SCALAR_FIXED_BITS UINT32_C(0x7ee08800)
 #define ADVSIMD_CMGE_ZERO_SCALAR_VARIABLE_MASK UINT32_C(0x000003ff)
 #define ADVSIMD_CMGE_ZERO_SCALAR_FAMILY_BITS UINT32_C(0x7e208800)
+#define ADVSIMD_CMGT_ZERO_VECTOR_FIXED_MASK UINT32_C(0xbf3ffc00)
+#define ADVSIMD_CMGT_ZERO_VECTOR_FIXED_BITS UINT32_C(0x0e208800)
+#define ADVSIMD_CMGT_ZERO_VECTOR_VARIABLE_MASK UINT32_C(0x40c003ff)
 
 static const dword_t family_bits[] = {
     UINT32_C(0x3400),
@@ -33,6 +36,15 @@ static dword_t encode(bool q, bool u, byte_t size,
 static dword_t encode_scalar_cmge_zero(
         byte_t size, byte_t rn, byte_t rd) {
     return ADVSIMD_CMGE_ZERO_SCALAR_FAMILY_BITS |
+            (dword_t) size << 22 |
+            (dword_t) rn << 5 |
+            rd;
+}
+
+static dword_t encode_vector_cmgt_zero(
+        bool q, byte_t size, byte_t rn, byte_t rd) {
+    return ADVSIMD_CMGT_ZERO_VECTOR_FIXED_BITS |
+            (dword_t) q << 30 |
             (dword_t) size << 22 |
             (dword_t) rn << 5 |
             rd;
@@ -185,6 +197,115 @@ static void test_scalar_cmge_zero_decode(void) {
         assert(!decoded ||
                 instruction.opcode !=
                 AARCH64_OP_ADVSIMD_CMGE_ZERO_SCALAR);
+    }
+}
+
+static void assert_vector_cmgt_zero_decode(dword_t word,
+        byte_t width, byte_t element_size, byte_t rd, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR);
+    assert(instruction.width == width);
+    assert(instruction.operands.advsimd_unary.rd == rd);
+    assert(instruction.operands.advsimd_unary.rn == rn);
+    assert(instruction.operands.advsimd_unary.element_size == element_size);
+}
+
+static void test_vector_cmgt_zero_decode(void) {
+    static const struct {
+        dword_t word;
+        byte_t width;
+        byte_t element_size;
+        byte_t rd;
+        byte_t rn;
+    } vectors[] = {
+        {UINT32_C(0x0e208820), 64, 1, 0, 1},
+        {UINT32_C(0x4e208862), 128, 1, 2, 3},
+        {UINT32_C(0x0e6088a4), 64, 2, 4, 5},
+        {UINT32_C(0x4e6088e6), 128, 2, 6, 7},
+        {UINT32_C(0x0ea08928), 64, 4, 8, 9},
+        {UINT32_C(0x4ea0896a), 128, 4, 10, 11},
+        // GCC cc1 实际触发的两 lane 64 位比较。
+        {UINT32_C(0x4ee08bfe), 128, 8, 30, 31},
+    };
+    for (unsigned index = 0;
+            index < sizeof(vectors) / sizeof(vectors[0]); index++) {
+        assert_vector_cmgt_zero_decode(vectors[index].word,
+                vectors[index].width, vectors[index].element_size,
+                vectors[index].rd, vectors[index].rn);
+    }
+
+    assert((ADVSIMD_CMGT_ZERO_VECTOR_FIXED_MASK &
+            ADVSIMD_CMGT_ZERO_VECTOR_VARIABLE_MASK) == 0);
+    assert((ADVSIMD_CMGT_ZERO_VECTOR_FIXED_MASK |
+            ADVSIMD_CMGT_ZERO_VECTOR_VARIABLE_MASK) == UINT32_MAX);
+
+    unsigned decoded_count = 0;
+    unsigned reserved_count = 0;
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size = 0; size < 4; size++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    dword_t word = encode_vector_cmgt_zero(
+                            q != 0, (byte_t) size,
+                            (byte_t) rn, (byte_t) rd);
+                    struct aarch64_decoded instruction;
+                    bool decoded = aarch64_decode(word, &instruction);
+                    bool expected = q != 0 || size != 3;
+                    assert(decoded == expected);
+                    if (!decoded) {
+                        reserved_count++;
+                        continue;
+                    }
+                    decoded_count++;
+                    assert(instruction.opcode ==
+                            AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR);
+                    assert(instruction.width == (q ? 128 : 64));
+                    assert(instruction.operands.advsimd_unary.rd == rd);
+                    assert(instruction.operands.advsimd_unary.rn == rn);
+                    assert(instruction.operands.advsimd_unary.element_size ==
+                            (1U << size));
+                }
+            }
+        }
+    }
+    assert(decoded_count == 7168);
+    assert(reserved_count == 1024);
+
+    unsigned fixed_count = 0;
+    const dword_t product = UINT32_C(0x4ee08bfe);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((ADVSIMD_CMGT_ZERO_VECTOR_FIXED_MASK &
+                (UINT32_C(1) << bit)) == 0)
+            continue;
+        fixed_count++;
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(
+                product ^ (UINT32_C(1) << bit), &instruction);
+        assert(!decoded ||
+                instruction.opcode !=
+                AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR);
+    }
+    assert(fixed_count == 19);
+
+    static const dword_t neighbors[] = {
+        UINT32_C(0x5ee08820), // 标量 CMGT #0。
+        UINT32_C(0x4ee23420), // 三操作数向量 CMGT。
+        UINT32_C(0x5ee23420), // 三操作数标量 CMGT。
+        UINT32_C(0x6ee08820), // 向量 CMGE #0。
+        UINT32_C(0x4ee09820), // 向量 CMEQ #0。
+        UINT32_C(0x6ee09820), // 向量 CMLE #0。
+        UINT32_C(0x4ee0a820), // 向量 CMLT #0。
+        UINT32_C(0x4ee0c820), // 向量浮点 FCMGT #0.0。
+        UINT32_C(0x5ee0c820), // 标量浮点 FCMGT #0.0。
+        UINT32_C(0x6ee2e420), // 三操作数向量浮点 FCMGT。
+    };
+    for (unsigned index = 0;
+            index < sizeof(neighbors) / sizeof(neighbors[0]); index++) {
+        struct aarch64_decoded instruction;
+        bool decoded = aarch64_decode(neighbors[index], &instruction);
+        assert(!decoded ||
+                instruction.opcode !=
+                AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR);
     }
 }
 
@@ -496,13 +617,101 @@ static void test_scalar_cmge_zero_execution(void) {
     }
 }
 
+static void assert_vector_cmgt_zero_execution(
+        bool q, byte_t size, byte_t rn, byte_t rd) {
+    struct cpu_state cpu = {
+        .cycle = UINT64_C(0x123456789abcdef0),
+        .sp = UINT64_C(0x1122334455667788),
+        .pc = UINT64_C(0x1c00),
+        .nzcv = UINT32_C(0xa0000000),
+        .fpcr = UINT32_C(0x00c00000),
+        .fpsr = UINT32_C(0x0800001f),
+        .tpidr_el0 = UINT64_C(0x8877665544332211),
+        .segfault_addr = UINT64_C(0x1020304050607080),
+        .segfault_was_write = true,
+        .trapno = UINT32_C(0x12345678),
+        .single_step = true,
+        ._poked = true,
+    };
+    for (unsigned reg = 0; reg < 31; reg++)
+        cpu.x[reg] = UINT64_C(0x0102030405060708) +
+                reg * UINT64_C(0x1111111111111111);
+    for (unsigned reg = 0; reg < 32; reg++) {
+        cpu.v[reg].d[0] = UINT64_C(0x1020304050607080) ^
+                (reg * UINT64_C(0x0101010101010101));
+        cpu.v[reg].d[1] = UINT64_C(0x8877665544332211) +
+                reg * UINT64_C(0x0010001000100010);
+    }
+
+    byte_t element_size = (byte_t) (1U << size);
+    byte_t lanes = (byte_t) ((q ? 128 : 64) / (element_size * 8));
+    qword_t mask = element_size == 8 ? UINT64_MAX :
+            (UINT64_C(1) << (element_size * 8)) - 1;
+    qword_t sign = UINT64_C(1) << (element_size * 8 - 1);
+    const qword_t boundaries[] = {
+        0,
+        1,
+        mask >> 1,
+        (mask >> 1) - 1,
+        sign,
+        sign + 1,
+        mask,
+        2,
+    };
+    union aarch64_vector_reg source = {
+        .d = {
+            UINT64_C(0x0123456789abcdef),
+            UINT64_C(0xfedcba9876543210),
+        },
+    };
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        unsigned value = (lane + rn + rd) %
+                (sizeof(boundaries) / sizeof(boundaries[0]));
+        write_lane(&source, element_size, lane, boundaries[value]);
+    }
+
+    cpu.v[rd].q = ~(__uint128_t) 0;
+    cpu.v[rn] = source;
+    struct cpu_state expected = cpu;
+    union aarch64_vector_reg result = {0};
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_lane(&source, element_size, lane);
+        bool matches = value != 0 && (value & sign) == 0;
+        write_lane(&result, element_size, lane, matches ? mask : 0);
+    }
+    expected.v[rd] = result;
+    expected.pc += 4;
+
+    execute_instruction(&cpu,
+            encode_vector_cmgt_zero(q, size, rn, rd));
+    assert(memcmp(&cpu, &expected, sizeof(cpu)) == 0);
+}
+
+static void test_vector_cmgt_zero_execution(void) {
+    for (unsigned q = 0; q < 2; q++) {
+        for (unsigned size = 0; size < 4; size++) {
+            if (q == 0 && size == 3)
+                continue;
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    assert_vector_cmgt_zero_execution(
+                            q != 0, (byte_t) size,
+                            (byte_t) rn, (byte_t) rd);
+                }
+            }
+        }
+    }
+}
+
 int main(void) {
     test_llvm_vectors();
     test_scalar_cmge_zero_decode();
+    test_vector_cmgt_zero_decode();
     test_encoding_space();
     test_fixed_and_opcode_bits();
     test_known_answers();
     test_execution_space();
     test_scalar_cmge_zero_execution();
+    test_vector_cmgt_zero_execution();
     return 0;
 }
