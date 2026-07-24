@@ -242,26 +242,35 @@ int generic_accessat(struct fd *dirfd, const char *path_raw, int mode) {
             current, dirfd, path_raw, mode, &identity);
 }
 
-int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw) {
-    char src[MAX_PATH];
-    int err = path_normalize(src_at, src_raw, src, N_SYMLINK_NOFOLLOW);
-    if (err < 0)
-        return err;
-    char dst[MAX_PATH];
-    err = path_normalize(dst_at, dst_raw, dst, N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
-    if (err < 0)
-        return err;
-    struct mount *mount = find_mount_and_trim_path(src);
-    struct mount *dst_mount = find_mount_and_trim_path(dst);
+int generic_link_normalized(
+        char source[MAX_PATH], char destination[MAX_PATH]) {
+    struct mount *mount = find_mount_and_trim_path(source);
+    struct mount *dst_mount = find_mount_and_trim_path(destination);
+    int err;
     if (mount != dst_mount)
         err = _EXDEV;
     else if (mount->fs->link == NULL)
         err = _EPERM;
     else
-        err = mount->fs->link(mount, src, dst);
+        err = mount->fs->link(mount, source, destination);
     mount_release(mount);
     mount_release(dst_mount);
     return err;
+}
+
+int generic_linkat(struct fd *src_at, const char *src_raw,
+        struct fd *dst_at, const char *dst_raw) {
+    char src[MAX_PATH];
+    int err = path_normalize(
+            src_at, src_raw, src, N_SYMLINK_NOFOLLOW);
+    if (err < 0)
+        return err;
+    char dst[MAX_PATH];
+    err = path_normalize(dst_at, dst_raw, dst,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
+    if (err < 0)
+        return err;
+    return generic_link_normalized(src, dst);
 }
 
 int generic_unlinkat_task(struct task *task,

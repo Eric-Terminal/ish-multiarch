@@ -89,6 +89,8 @@ struct kernel_probe {
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
     char last_mkdir_path[MAX_PATH];
+    char last_link_source[MAX_PATH];
+    char last_link_destination[MAX_PATH];
     char last_rename_source[MAX_PATH];
     char last_rename_destination[MAX_PATH];
     char last_symlink_target[MAX_PATH];
@@ -112,6 +114,7 @@ struct kernel_probe {
     unsigned unlink_calls;
     unsigned rmdir_calls;
     unsigned mkdir_calls;
+    unsigned link_calls;
     unsigned rename_calls;
     unsigned symlink_calls;
     unsigned fsync_calls;
@@ -594,6 +597,15 @@ static int probe_mkdir(
     return 0;
 }
 
+static int probe_link(struct mount *mount,
+        const char *source, const char *destination) {
+    struct kernel_probe *probe = mount->data;
+    probe->link_calls++;
+    strcpy(probe->last_link_source, source);
+    strcpy(probe->last_link_destination, destination);
+    return 0;
+}
+
 static int probe_rename(struct mount *mount,
         const char *source, const char *destination) {
     struct kernel_probe *probe = mount->data;
@@ -627,6 +639,7 @@ static const struct fs_ops probe_fs = {
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
+    .link = probe_link,
     .rename = probe_rename,
     .symlink = probe_symlink,
     .stat = probe_stat,
@@ -2509,6 +2522,133 @@ int main(void) {
             memory.read_calls == MAX_PATH &&
             kernel.symlink_calls == 3,
             "symlinkat 的 4096 个非 NUL 目标字节返回 ENAMETOOLONG 且不读链接路径");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset;
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset,
+            UINT64_C(0xabcdef0100001000));
+    CHECK(result == encoded_error(_EINVAL) && memory.read_calls == 0 &&
+            kernel.link_calls == 0,
+            "linkat 在访问路径前拒绝未实现的 EMPTY_PATH");
+
+    struct fd_state link_directory_state;
+    struct fd *link_directory = make_fixture_fd(&fixture,
+            &link_directory_state, &kernel, NULL,
+            "/explicit", S_IFDIR);
+    CHECK(link_directory != NULL, "linkat 显式目录 fd 创建成功");
+    fd_t link_directory_number =
+            f_install_task(&fixture.task, link_directory, 0);
+    CHECK(link_directory_number >= 0,
+            "linkat 显式目录 fd 安装成功");
+    qword_t encoded_link_directory =
+            UINT64_C(0xabcdef0100000000) |
+            (dword_t) link_directory_number;
+
+    static const char link_source[] = "metadata";
+    static const char link_destination[] = "hardlink";
+    memcpy(memory.bytes + path_offset,
+            link_source, sizeof(link_source));
+    memcpy(memory.bytes + rename_destination_offset,
+            link_destination, sizeof(link_destination));
+    reset_user_access(&memory);
+    memory.fail_read_at =
+            USER_BASE + rename_destination_offset +
+            sizeof(link_destination);
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            encoded_link_directory, USER_BASE + path_offset,
+            encoded_link_directory,
+            USER_BASE + rename_destination_offset,
+            UINT64_C(0xabcdef0100000000));
+    CHECK(result == 0 && kernel.link_calls == 1 &&
+            strcmp(kernel.last_link_source, "/explicit/metadata") == 0 &&
+            strcmp(kernel.last_link_destination,
+                    "/explicit/hardlink") == 0 &&
+            memory.read_calls ==
+                    sizeof(link_source) + sizeof(link_destination) &&
+            memory.read_bytes ==
+                    sizeof(link_source) + sizeof(link_destination),
+            "linkat 按低 32 位解码 libapk 共用的源与目标 dirfd");
+
+    static const char followed_source[] = "link";
+    static const char nofollow_destination[] = "nofollow-hardlink";
+    memcpy(memory.bytes + path_offset,
+            followed_source, sizeof(followed_source));
+    memcpy(memory.bytes + rename_destination_offset,
+            nofollow_destination, sizeof(nofollow_destination));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            encoded_link_directory,
+            USER_BASE + rename_destination_offset, 0);
+    CHECK(result == 0 && kernel.link_calls == 2 &&
+            strcmp(kernel.last_link_source, "/work/link") == 0 &&
+            strcmp(kernel.last_link_destination,
+                    "/explicit/nofollow-hardlink") == 0,
+            "linkat 的 flags=0 不跟随源路径末尾符号链接");
+
+    static const char followed_destination[] = "followed-hardlink";
+    memcpy(memory.bytes + rename_destination_offset,
+            followed_destination, sizeof(followed_destination));
+    reset_user_access(&memory);
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            encoded_link_directory,
+            USER_BASE + rename_destination_offset,
+            UINT64_C(0xabcdef0100000400));
+    CHECK(result == 0 && kernel.link_calls == 3 &&
+            strcmp(kernel.last_link_source, "/work/metadata") == 0 &&
+            strcmp(kernel.last_link_destination,
+                    "/explicit/followed-hardlink") == 0,
+            "linkat 覆盖 libapk 的 cwd 源与显式目标 dirfd 组合");
+
+    static const char faulted_destination[] = "faulted-hardlink";
+    memcpy(memory.bytes + path_offset,
+            link_source, sizeof(link_source));
+    memcpy(memory.bytes + rename_destination_offset,
+            faulted_destination, sizeof(faulted_destination));
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + rename_destination_offset + 4;
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            kernel.link_calls == 3 &&
+            memory.read_calls == sizeof(link_source) + 5 &&
+            memory.read_bytes == sizeof(link_source) + 4 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "linkat 保持目标路径的精确 guest fault 且不创建硬链接");
+
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + path_offset + 2;
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_EFAULT) &&
+            kernel.link_calls == 3 &&
+            memory.read_calls == 3 &&
+            memory.read_bytes == 2 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "linkat 的源路径故障阻止读取目标路径");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    memory.fail_read_at = USER_BASE + rename_destination_offset;
+    result = invoke_five(&fixture, &memory, &fault, 37,
+            AT_FDCWD_, USER_BASE + path_offset,
+            AT_FDCWD_, USER_BASE + rename_destination_offset, 0);
+    CHECK(result == encoded_error(_ENOENT) &&
+            kernel.link_calls == 3 &&
+            memory.read_calls == 1 &&
+            memory.read_bytes == 1,
+            "linkat 的空源路径先于目标路径故障返回 ENOENT");
+    CHECK(f_close_task(&fixture.task, link_directory_number) == 0,
+            "linkat 显式目录 fd 在用例结束后关闭");
 
     static const char rename_source[] = "rename-source";
     static const char rename_destination[] = "rename-destination";

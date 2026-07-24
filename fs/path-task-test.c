@@ -44,6 +44,8 @@ struct open_probe {
     char last_unlink_path[MAX_PATH];
     char last_rmdir_path[MAX_PATH];
     char last_mkdir_path[MAX_PATH];
+    char last_link_source[MAX_PATH];
+    char last_link_destination[MAX_PATH];
     char last_rename_source[MAX_PATH];
     char last_rename_destination[MAX_PATH];
     char last_symlink_target[MAX_PATH];
@@ -63,6 +65,7 @@ struct open_probe {
     unsigned unlinks;
     unsigned rmdirs;
     unsigned mkdirs;
+    unsigned links;
     unsigned renames;
     unsigned symlinks;
     unsigned setattrs;
@@ -324,6 +327,15 @@ static int probe_mkdir(
     return 0;
 }
 
+static int probe_link(struct mount *mount,
+        const char *source, const char *destination) {
+    struct open_probe *probe = mount->data;
+    probe->links++;
+    strcpy(probe->last_link_source, source);
+    strcpy(probe->last_link_destination, destination);
+    return 0;
+}
+
 static int probe_rename(struct mount *mount,
         const char *source, const char *destination) {
     struct open_probe *probe = mount->data;
@@ -349,6 +361,7 @@ static const struct fs_ops probe_fs = {
     .unlink = probe_unlink,
     .rmdir = probe_rmdir,
     .mkdir = probe_mkdir,
+    .link = probe_link,
     .rename = probe_rename,
     .symlink = probe_symlink,
     .stat = probe_stat,
@@ -1221,6 +1234,76 @@ int main(void) {
             strcmp(probe.last_symlink_target, "compat-target") == 0 &&
             strcmp(probe.last_symlink_link, "/decoy/compat-link") == 0,
             "兼容 symlinkat 入口仍使用 current 的 cwd");
+
+    CHECK(file_linkat_task(&target.task, 99, "",
+            99, "destination", false) == _ENOENT && probe.links == 0,
+            "linkat 空源路径优先返回 ENOENT");
+    CHECK(file_linkat_task(&target.task, 99, "source",
+            99, "", false) == _EBADF && probe.links == 0,
+            "linkat 先解析源路径再处理空目标路径");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "source",
+            99, "", false) == _ENOENT && probe.links == 0,
+            "linkat 在有效源路径之后拒绝空目标路径");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "source",
+            AT_FDCWD_, "destination", false) == 0 &&
+            probe.links == 1 &&
+            strcmp(probe.last_link_source, "/target/source") == 0 &&
+            strcmp(probe.last_link_destination,
+                    "/target/destination") == 0,
+            "linkat 的两端均使用目标任务 cwd");
+    unsigned explicit_refs = fd_refcount_read(explicit_dir);
+    CHECK(file_linkat_task(&target.task, 0, "source",
+            0, "destination", false) == 0 &&
+            probe.links == 2 &&
+            strcmp(probe.last_link_source, "/explicit/source") == 0 &&
+            strcmp(probe.last_link_destination,
+                    "/explicit/destination") == 0 &&
+            fd_refcount_read(explicit_dir) == explicit_refs,
+            "linkat 分别保活 libapk 共用的源与目标 dirfd");
+    CHECK(file_linkat_task(&target.task, 99, "source",
+            AT_FDCWD_, "destination", false) == _EBADF &&
+            probe.links == 2,
+            "linkat 拒绝无效源 dirfd");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "source",
+            99, "destination", false) == _EBADF &&
+            probe.links == 2,
+            "linkat 拒绝无效目标 dirfd");
+    CHECK(file_linkat_task(&target.task, cwd_fd, "source",
+            AT_FDCWD_, "destination", false) == _ENOTDIR &&
+            probe.links == 2,
+            "linkat 拒绝普通文件源 dirfd");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "source",
+            cwd_fd, "destination", false) == _ENOTDIR &&
+            probe.links == 2,
+            "linkat 拒绝普通文件目标 dirfd");
+    CHECK(file_linkat_task(&target.task, 99, "/source",
+            98, "/destination", false) == 0 && probe.links == 3 &&
+            strcmp(probe.last_link_source, "/sandbox/source") == 0 &&
+            strcmp(probe.last_link_destination,
+                    "/sandbox/destination") == 0,
+            "linkat 绝对路径使用目标 root 并忽略两端 dirfd");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "link",
+            AT_FDCWD_, "nofollow", false) == 0 && probe.links == 4 &&
+            strcmp(probe.last_link_source, "/target/link") == 0,
+            "linkat 默认不跟随源路径末尾符号链接");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "link",
+            AT_FDCWD_, "link", true) == 0 && probe.links == 5 &&
+            strcmp(probe.last_link_source, "/sandbox/absolute") == 0 &&
+            strcmp(probe.last_link_destination, "/target/link") == 0,
+            "linkat 的 SYMLINK_FOLLOW 只跟随源路径末尾符号链接");
+    CHECK(file_linkat_task(&target.task, AT_FDCWD_, "link",
+            0, "followed", true) == 0 && probe.links == 6 &&
+            strcmp(probe.last_link_source, "/sandbox/absolute") == 0 &&
+            strcmp(probe.last_link_destination,
+                    "/explicit/followed") == 0 &&
+            fd_refcount_read(explicit_dir) == explicit_refs,
+            "linkat 覆盖 libapk 的 cwd 源与显式目标 dirfd 组合");
+    CHECK(generic_linkat(AT_PWD, "source",
+            AT_PWD, "destination") == 0 && probe.links == 7 &&
+            strcmp(probe.last_link_source, "/decoy/source") == 0 &&
+            strcmp(probe.last_link_destination,
+                    "/decoy/destination") == 0,
+            "兼容 linkat 入口仍使用 current 的 cwd");
 
     CHECK(file_renameat_task(&target.task, 99, "",
             99, "destination") == _ENOENT && probe.renames == 0,

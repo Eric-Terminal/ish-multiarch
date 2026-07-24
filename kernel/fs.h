@@ -96,6 +96,10 @@ int file_unlinkat_task(struct task *task, fd_t dirfd,
         const char *path, bool remove_directory);
 int file_mkdirat_task(struct task *task, fd_t dirfd,
         const char *path, mode_t_ mode);
+int file_linkat_task(struct task *task,
+        fd_t source_dirfd, const char *source,
+        fd_t destination_dirfd, const char *destination,
+        bool follow_source_links);
 int file_renameat_task(struct task *task,
         fd_t source_dirfd, const char *source,
         fd_t destination_dirfd, const char *destination);
@@ -138,6 +142,7 @@ struct attr {
     ((struct attr) {.type = attr_##_type, ._type = thing})
 
 #define AT_SYMLINK_NOFOLLOW_ 0x100
+#define AT_SYMLINK_FOLLOW_ 0x400
 #define AT_NO_AUTOMOUNT_ 0x800
 #define AT_EMPTY_PATH_ 0x1000
 #define AT_STATX_FORCE_SYNC_ 0x2000
@@ -156,6 +161,9 @@ struct fd *generic_openat_exec_task(struct task *task,
 struct fd *generic_open_directory_task(struct task *task, const char *path);
 struct fd *generic_openat(struct fd *at, const char *path, int flags, int mode);
 int generic_getpath(struct fd *fd, char *buf);
+/* 两个缓冲必须已经按同一任务规范化；调用会裁剪其中的挂载点前缀。 */
+int generic_link_normalized(
+        char source[MAX_PATH], char destination[MAX_PATH]);
 int generic_linkat(struct fd *src_at, const char *src_raw, struct fd *dst_at, const char *dst_raw);
 int generic_unlinkat_task(struct task *task,
         struct fd *at, const char *path);

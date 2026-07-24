@@ -909,6 +909,71 @@ int file_mkdirat_task(struct task *task, fd_t dirfd,
     return result;
 }
 
+int file_linkat_task(struct task *task,
+        fd_t source_dirfd, const char *source,
+        fd_t destination_dirfd, const char *destination,
+        bool follow_source_links) {
+    if (source[0] == '\0')
+        return _ENOENT;
+
+    bool source_retained =
+            source[0] != '/' && source_dirfd != AT_FDCWD_;
+    struct fd *source_at = source_retained ?
+            f_get_task_retain(task, source_dirfd) : AT_PWD;
+    if (source_at == NULL)
+        return _EBADF;
+    if (source_at != AT_PWD && !S_ISDIR(source_at->type)) {
+        fd_close(source_at);
+        return _ENOTDIR;
+    }
+
+    char normalized_source[MAX_PATH];
+    int result = path_normalize_task(task,
+            source_at, source, normalized_source,
+            follow_source_links ?
+                    N_SYMLINK_FOLLOW : N_SYMLINK_NOFOLLOW);
+    if (result < 0) {
+        if (source_retained)
+            fd_close(source_at);
+        return result;
+    }
+    if (destination[0] == '\0') {
+        if (source_retained)
+            fd_close(source_at);
+        return _ENOENT;
+    }
+
+    bool destination_retained =
+            destination[0] != '/' && destination_dirfd != AT_FDCWD_;
+    struct fd *destination_at = destination_retained ?
+            f_get_task_retain(task, destination_dirfd) : AT_PWD;
+    if (destination_at == NULL) {
+        if (source_retained)
+            fd_close(source_at);
+        return _EBADF;
+    }
+    if (destination_at != AT_PWD && !S_ISDIR(destination_at->type)) {
+        if (destination_retained)
+            fd_close(destination_at);
+        if (source_retained)
+            fd_close(source_at);
+        return _ENOTDIR;
+    }
+
+    char normalized_destination[MAX_PATH];
+    result = path_normalize_task(task,
+            destination_at, destination, normalized_destination,
+            N_SYMLINK_NOFOLLOW | N_PARENT_DIR_WRITE);
+    if (result == 0)
+        result = generic_link_normalized(
+                normalized_source, normalized_destination);
+    if (destination_retained)
+        fd_close(destination_at);
+    if (source_retained)
+        fd_close(source_at);
+    return result;
+}
+
 int file_renameat_task(struct task *task,
         fd_t source_dirfd, const char *source,
         fd_t destination_dirfd, const char *destination) {

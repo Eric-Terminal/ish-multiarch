@@ -98,6 +98,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_MKDIRAT = 34,
     AARCH64_LINUX_SYS_UNLINKAT = 35,
     AARCH64_LINUX_SYS_SYMLINKAT = 36,
+    AARCH64_LINUX_SYS_LINKAT = 37,
     AARCH64_LINUX_SYS_RENAMEAT = 38,
     AARCH64_LINUX_SYS_FSTATFS = 44,
     AARCH64_LINUX_SYS_TRUNCATE = 45,
@@ -822,6 +823,32 @@ static qword_t dispatch_symlinkat(
         return copied;
     return syscall_result(file_symlinkat_task(task, target,
             syscall_fd(syscall->arguments[1]), link));
+}
+
+static qword_t dispatch_linkat(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    dword_t raw_flags = (dword_t) syscall->arguments[4];
+    if (raw_flags & ~(dword_t) AT_SYMLINK_FOLLOW_)
+        return syscall_result(_EINVAL);
+
+    char source[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[1], source, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    if (source[0] == '\0')
+        return syscall_result(_ENOENT);
+    char destination[MAX_PATH];
+    copied = copy_path_from_user(
+            context, syscall->arguments[3], destination, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+    return syscall_result(file_linkat_task(task,
+            syscall_fd(syscall->arguments[0]), source,
+            syscall_fd(syscall->arguments[2]), destination,
+            raw_flags == AT_SYMLINK_FOLLOW_));
 }
 
 static qword_t dispatch_renameat(
@@ -3906,6 +3933,8 @@ static qword_t dispatch_syscall_inner(
             return dispatch_unlinkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_SYMLINKAT:
             return dispatch_symlinkat(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_LINKAT:
+            return dispatch_linkat(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RENAMEAT:
             return dispatch_renameat(
                     context, syscall, task, fault, false);
