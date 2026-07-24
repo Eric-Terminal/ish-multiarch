@@ -397,6 +397,222 @@ final class iSHWatchUITests: XCTestCase {
             terminal: restartedTerminal)
     }
 
+    func testAArch64Python运行时() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let input = app.textFields["command-input"]
+        XCTAssertTrue(
+            input.waitForExistence(timeout: 180),
+            "命令输入框没有在期限内出现")
+        let ready = expectation(
+            for: NSPredicate(format: "enabled == true"),
+            evaluatedWith: input)
+        wait(for: [ready], timeout: 180)
+
+        let send = app.buttons["send-command"]
+        XCTAssertTrue(
+            send.waitForExistence(timeout: 10),
+            "发送按钮没有出现")
+        let terminal = app.staticTexts["terminal-output"]
+        XCTAssertTrue(
+            terminal.waitForExistence(timeout: 10),
+            "终端输出没有出现")
+
+        runGuestStage(
+            "INSTALL",
+            suite: "PYTHON",
+            command:
+                "if apk info -e 'python3=3.14.5-r0' " +
+                ">/dev/null 2>&1; then :; else " +
+                "timeout -k 30 3600 apk --cache-max-age 10080 " +
+                "add --no-progress 'python3=3.14.5-r0' >\"$l\" 2>&1; fi && " +
+                "apk info -e 'python3=3.14.5-r0' >>\"$l\" 2>&1 && " +
+                "timeout -k 30 900 python3 -I -c 'import platform, sys; " +
+                "assert platform.machine() == \"aarch64\"; " +
+                "assert sys.version_info[:3] == (3, 14, 5)' " +
+                ">>\"$l\" 2>&1",
+            timeout: 4680,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "STDLIB",
+            suite: "PYTHON",
+            command:
+                "timeout -k 15 300 python3 -I -c 'import hashlib, json, " +
+                "math, sqlite3, ssl, zlib; " +
+                "payload = {\"arch\": \"aarch64\", " +
+                "\"value\": 42}; assert json.loads(json.dumps(payload)) " +
+                "== payload; assert hashlib.sha256(b\"ish\").hexdigest() " +
+                "== \"b7d4d64a63e537b82a0340732bd0bc89649b6dd0f6c66416711f2dcd7de2b3a2\"; " +
+                "assert math.factorial(10) == 3628800; " +
+                "assert sqlite3.connect(\":memory:\").execute(" +
+                "\"select 6 * 7\").fetchone()[0] == 42; " +
+                "assert ssl.OPENSSL_VERSION.startswith(\"OpenSSL \"); " +
+                "assert zlib.decompress(zlib.compress(b\"python\")) " +
+                "== b\"python\"' >\"$l\" 2>&1",
+            timeout: 420,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "FILE",
+            suite: "PYTHON",
+            command:
+                "d=/root/.ish-python-gate-$t; export d; rm -rf \"$d\"; " +
+                "mkdir -p \"$d\" && timeout -k 15 300 python3 -I -c " +
+                "'from pathlib import Path; import os; " +
+                "p = Path(os.environ[\"d\"]); " +
+                "f = open(p / \"state\", \"wb\"); " +
+                "assert f.write(b\"python-watch\\n\" * 64) == 832; " +
+                "f.flush(); os.fsync(f.fileno()); f.close(); " +
+                "(p / \"state\").rename(p / \"renamed\")' " +
+                ">\"$l\" 2>&1 && timeout -k 15 300 python3 -I -c " +
+                "'from pathlib import Path; import os; " +
+                "p = Path(os.environ[\"d\"]); " +
+                "assert (p / \"renamed\").read_bytes() == " +
+                "b\"python-watch\\n\" * 64; " +
+                "assert (p / \"renamed\").stat().st_size == 832' " +
+                ">\"$l\" 2>&1 && sync && rm -rf \"$d\"",
+            timeout: 720,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "THREAD",
+            suite: "PYTHON",
+            command:
+                "timeout -k 15 300 python3 -I -c 'import queue, threading; " +
+                "gate = threading.Barrier(5, timeout=120); " +
+                "results = queue.Queue(); " +
+                "main_id = threading.get_native_id(); " +
+                "threads = [threading.Thread(target=lambda n=n: " +
+                "(gate.wait(), results.put((threading.get_native_id(), " +
+                "n * n))), daemon=True) for n in range(4)]; " +
+                "[thread.start() for thread in threads]; gate.wait(); " +
+                "[thread.join(60) for thread in threads]; " +
+                "assert all(not thread.is_alive() for thread in threads); " +
+                "pairs = [results.get_nowait() for _ in range(4)]; " +
+                "ids = [pair[0] for pair in pairs]; " +
+                "assert len(set(ids)) == 4 and main_id not in ids; " +
+                "assert sorted(pair[1] for pair in pairs) == " +
+                "[0, 1, 4, 9]' >\"$l\" 2>&1",
+            timeout: 420,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+    }
+
+    func testAArch64本地编译与Pthread线程() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let input = app.textFields["command-input"]
+        XCTAssertTrue(
+            input.waitForExistence(timeout: 180),
+            "命令输入框没有在期限内出现")
+        let ready = expectation(
+            for: NSPredicate(format: "enabled == true"),
+            evaluatedWith: input)
+        wait(for: [ready], timeout: 180)
+
+        let send = app.buttons["send-command"]
+        XCTAssertTrue(
+            send.waitForExistence(timeout: 10),
+            "发送按钮没有出现")
+        let terminal = app.staticTexts["terminal-output"]
+        XCTAssertTrue(
+            terminal.waitForExistence(timeout: 10),
+            "终端输出没有出现")
+
+        runGuestStage(
+            "INSTALL",
+            suite: "BUILD",
+            command:
+                "if apk info -e 'build-base=0.5-r4' " +
+                ">/dev/null 2>&1; then :; else " +
+                "timeout -k 30 7200 apk --cache-max-age 10080 " +
+                "add --no-progress 'build-base=0.5-r4' >\"$l\" 2>&1; fi && " +
+                "apk info -e 'build-base=0.5-r4' >>\"$l\" 2>&1 && " +
+                "command -v cc >>\"$l\" 2>&1 && " +
+                "test \"$(cc -dumpmachine)\" = aarch64-alpine-linux-musl",
+            timeout: 8280,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "C",
+            suite: "BUILD",
+            command:
+                "d=/root/.ish-build-c-$t; rm -rf \"$d\"; " +
+                "mkdir -p \"$d\" && printf '%s\\n' " +
+                "'#include <stdint.h>' '#include <stdio.h>' " +
+                "'int main(void) {' " +
+                "'    uint64_t value = 1;' " +
+                "'    for (uint64_t factor = 2; factor <= 10; factor++) {' " +
+                "'        value *= factor;' '    }' " +
+                "'    if (value != 3628800ULL) return 1;' " +
+                "'    printf(\"C_OK:%llu\\n\", " +
+                "(unsigned long long)value);' " +
+                "'    return 0;' '}' >\"$d/main.c\" && " +
+                "timeout -k 30 1800 cc -std=c11 -O2 -Wall -Wextra -Werror " +
+                "\"$d/main.c\" -o \"$d/main\" >>\"$l\" 2>&1 && " +
+                "timeout -k 15 300 \"$d/main\" >\"$d/result\" 2>>\"$l\" && " +
+                "cat \"$d/result\" >>\"$l\" && " +
+                "grep -qx 'C_OK:3628800' \"$d/result\" && rm -rf \"$d\"",
+            timeout: 2400,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        runGuestStage(
+            "PTHREAD",
+            suite: "BUILD",
+            command:
+                "d=/root/.ish-build-pthread-$t; rm -rf \"$d\"; " +
+                "mkdir -p \"$d\" && printf '%s\\n' " +
+                "'#define _POSIX_C_SOURCE 200809L' " +
+                "'#include <pthread.h>' '#include <stdint.h>' " +
+                "'#include <stdio.h>' " +
+                "'struct job { unsigned index; uint64_t result; };' " +
+                "'static void *worker(void *opaque) {' " +
+                "'    struct job *job = opaque;' " +
+                "'    job->result = (uint64_t)(job->index + 1U) * " +
+                "(job->index + 11U);' '    return job;' '}' " +
+                "'int main(void) {' '    pthread_t threads[4];' " +
+                "'    struct job jobs[4] = " +
+                "{{0, 0}, {1, 0}, {2, 0}, {3, 0}};' " +
+                "'    for (unsigned i = 0; i < 4; i++) {' " +
+                "'        if (pthread_create(&threads[i], 0, worker, " +
+                "&jobs[i]) != 0) return 10 + (int)i;' '    }' " +
+                "'    uint64_t total = 0;' " +
+                "'    for (unsigned i = 0; i < 4; i++) {' " +
+                "'        void *returned = 0;' " +
+                "'        if (pthread_join(threads[i], &returned) != 0 || " +
+                "returned != &jobs[i]) return 20 + (int)i;' " +
+                "'        total += jobs[i].result;' '    }' " +
+                "'    if (total != 130) return 30;' " +
+                "'    printf(\"PTHREAD_OK:%llu\\n\", " +
+                "(unsigned long long)total);' " +
+                "'    return 0;' '}' >\"$d/main.c\" && " +
+                "timeout -k 30 1800 cc -std=c11 -O2 -Wall -Wextra -Werror " +
+                "-pthread \"$d/main.c\" -o \"$d/main\" >>\"$l\" 2>&1 && " +
+                "timeout -k 15 300 \"$d/main\" >\"$d/result\" 2>>\"$l\" && " +
+                "cat \"$d/result\" >>\"$l\" && " +
+                "grep -qx 'PTHREAD_OK:130' \"$d/result\" && rm -rf \"$d\"",
+            timeout: 2400,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+    }
+
     private func runGuestStage(
         _ stage: String,
         suite: String = "NET",
