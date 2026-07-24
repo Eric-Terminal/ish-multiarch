@@ -2631,6 +2631,8 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             cpu->pc += 4;
             result.stop = AARCH64_EXECUTE_SYSCALL;
             break;
+        case AARCH64_OP_COUNT:
+            __builtin_unreachable();
     }
     if (result.stop == AARCH64_EXECUTE_DATA_FAULT)
         aarch64_clear_exclusive(cpu);

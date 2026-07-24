@@ -37,6 +37,10 @@ if aarch64_backend_option == 'threaded' and not aarch64_host_supports_threaded
 endif
 aarch64_threaded_default = aarch64_backend_option == 'threaded' or \
         (aarch64_backend_option == 'auto' and aarch64_host_supports_threaded)
+aarch64_threaded_profile = get_option('aarch64_threaded_profile')
+if aarch64_threaded_profile and not aarch64_threaded_default
+    error('threaded 画像要求默认启用 AArch64 threaded 后端')
+endif
 aarch64_backend_config = configuration_data()
 aarch64_backend_config.set10(
         'ISH_AARCH64_BACKEND_THREADED_DEFAULT', aarch64_threaded_default)
@@ -48,6 +52,11 @@ aarch64_backend_src = [
     'guest/aarch64/runner.c',
     'guest/aarch64/threaded.c',
 ]
+if aarch64_threaded_profile
+    add_project_arguments(
+            '-DISH_AARCH64_THREADED_PROFILE=1', language: 'c')
+    aarch64_backend_src += ['guest/aarch64/threaded-profile.c']
+endif
 
 aarch64_core_src = [
     'guest/memory/address-space.c',

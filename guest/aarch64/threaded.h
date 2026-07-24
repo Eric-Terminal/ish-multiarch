@@ -3,6 +3,10 @@
 
 #include "guest/aarch64/execute.h"
 
+#ifndef ISH_AARCH64_THREADED_PROFILE
+#define ISH_AARCH64_THREADED_PROFILE 0
+#endif
+
 #define AARCH64_THREADED_CACHE_BITS 6
 #define AARCH64_THREADED_CACHE_SIZE \
     (1U << AARCH64_THREADED_CACHE_BITS)
@@ -28,10 +32,21 @@ struct aarch64_threaded_stats {
     qword_t c_fallbacks;
 };
 
+#if ISH_AARCH64_THREADED_PROFILE
+struct aarch64_threaded_local_profile {
+    qword_t undefined_dispatches;
+    qword_t fallback_by_opcode[AARCH64_OP_COUNT];
+    dword_t representative_word_by_opcode[AARCH64_OP_COUNT];
+};
+#endif
+
 struct aarch64_threaded_cache {
     struct aarch64_threaded_cache_entry
             entries[AARCH64_THREADED_CACHE_SIZE];
     struct aarch64_threaded_stats stats;
+#if ISH_AARCH64_THREADED_PROFILE
+    struct aarch64_threaded_local_profile profile;
+#endif
 };
 
 _Static_assert(sizeof(struct aarch64_threaded_cache_entry) == 64,

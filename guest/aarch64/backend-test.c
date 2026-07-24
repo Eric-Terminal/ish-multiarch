@@ -1,7 +1,10 @@
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "guest/aarch64/runner.h"
+#include "guest/aarch64/threaded-profile.h"
 #include "aarch64-backend-config.h"
 
 #define CODE_PAGE UINT64_C(0x0000456789abc000)
@@ -1989,6 +1992,172 @@ static void test_shared_space_invalidation(void) {
         assert_stats(&runners[index], 1, 2, 3, 0);
     }
 }
+
+#if ISH_AARCH64_THREADED_PROFILE
+static void test_profile_aggregation(void) {
+    struct test_fixture first_fixture;
+    struct test_fixture second_fixture;
+    struct test_fixture c_fixture;
+    init_fixture(&first_fixture);
+    init_fixture(&second_fixture);
+    init_fixture(&c_fixture);
+    const dword_t alternate_load = UINT32_C(0xf9400024);
+    const dword_t second_runner_load = UINT32_C(0xf9400025);
+    write_instruction(&first_fixture.tlb, CODE_PAGE,
+            INSTRUCTION_LDR_X2);
+    write_instruction(&first_fixture.tlb, CODE_PAGE + 4,
+            alternate_load);
+    write_instruction(&first_fixture.tlb, CODE_PAGE + 8,
+            INSTRUCTION_NOP);
+    write_instruction(&second_fixture.tlb, CODE_PAGE,
+            INSTRUCTION_ADD_X3);
+    write_instruction(&second_fixture.tlb, CODE_PAGE + 4,
+            INSTRUCTION_UNDEFINED);
+    write_instruction(&second_fixture.tlb, CODE_PAGE + 8,
+            second_runner_load);
+    write_instruction(&c_fixture.tlb, CODE_PAGE,
+            INSTRUCTION_LDR_X2);
+
+    struct aarch64_runner first_runner;
+    struct aarch64_runner second_runner;
+    struct aarch64_runner c_runner;
+    assert(aarch64_runner_init_backend(&first_runner,
+            &first_fixture.tlb, AARCH64_BACKEND_THREADED));
+    assert(aarch64_runner_init_backend(&second_runner,
+            &second_fixture.tlb, AARCH64_BACKEND_THREADED));
+    assert(aarch64_runner_init_backend(
+            &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
+    struct cpu_state first_cpu = {.x[1] = DATA_PAGE};
+    struct cpu_state second_cpu = {.x[1] = DATA_PAGE};
+    struct cpu_state c_cpu = {.x[1] = DATA_PAGE};
+
+    for (unsigned iteration = 0; iteration < 2; iteration++) {
+        assert(run_at(&first_runner, &first_cpu, CODE_PAGE).stop ==
+                AARCH64_STEP_RETIRED);
+    }
+    assert(run_at(&first_runner, &first_cpu, CODE_PAGE + 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(run_at(&first_runner, &first_cpu, CODE_PAGE + 8).stop ==
+            AARCH64_STEP_RETIRED);
+    for (unsigned iteration = 0; iteration < 3; iteration++) {
+        assert(run_at(&second_runner, &second_cpu, CODE_PAGE).stop ==
+                AARCH64_STEP_RETIRED);
+    }
+    for (unsigned iteration = 0; iteration < 2; iteration++) {
+        assert(run_at(&second_runner, &second_cpu, CODE_PAGE + 4).stop ==
+                AARCH64_STEP_UNDEFINED);
+    }
+    assert(run_at(&second_runner, &second_cpu, CODE_PAGE + 8).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(run_at(&c_runner, &c_cpu, CODE_PAGE).stop ==
+            AARCH64_STEP_RETIRED);
+
+    aarch64_threaded_profile_reset_for_test();
+    aarch64_threaded_profile_merge(&c_runner.threaded_cache);
+    struct aarch64_threaded_profile_snapshot snapshot;
+    aarch64_threaded_profile_snapshot(&snapshot);
+    assert(snapshot.cache_hits == 0);
+    assert(snapshot.cache_misses == 0);
+    assert(snapshot.fast_dispatches == 0);
+    assert(snapshot.c_fallbacks == 0);
+    assert(snapshot.undefined_dispatches == 0);
+
+    aarch64_threaded_profile_reset_for_test();
+    aarch64_threaded_profile_merge(&first_runner.threaded_cache);
+    aarch64_threaded_profile_merge(&second_runner.threaded_cache);
+    aarch64_threaded_profile_merge(&c_runner.threaded_cache);
+    aarch64_threaded_profile_snapshot(&snapshot);
+    assert(snapshot.cache_hits == 4);
+    assert(snapshot.cache_misses == 6);
+    assert(snapshot.fast_dispatches == 1);
+    assert(snapshot.c_fallbacks == 7);
+    assert(snapshot.undefined_dispatches == 2);
+    assert(snapshot.cache_hits + snapshot.cache_misses ==
+            snapshot.fast_dispatches + snapshot.c_fallbacks +
+            snapshot.undefined_dispatches);
+    assert(snapshot.fallback_by_opcode[AARCH64_OP_LOAD_IMM12] == 4);
+    assert(snapshot.fallback_by_opcode[
+            AARCH64_OP_ADD_SHIFTED_REGISTER] == 3);
+    assert(snapshot.representative_word_by_opcode[
+            AARCH64_OP_LOAD_IMM12] ==
+            INSTRUCTION_LDR_X2);
+    assert(snapshot.representative_word_by_opcode[
+            AARCH64_OP_ADD_SHIFTED_REGISTER] == INSTRUCTION_ADD_X3);
+
+    qword_t fallback_sum = 0;
+    for (enum aarch64_opcode opcode = 0;
+            opcode < AARCH64_OP_COUNT; opcode++) {
+        fallback_sum += snapshot.fallback_by_opcode[opcode];
+    }
+    assert(fallback_sum == snapshot.c_fallbacks);
+
+    int profile_pipe[2];
+    assert(pipe(profile_pipe) == 0);
+    aarch64_threaded_profile_write_fd(profile_pipe[1]);
+    assert(close(profile_pipe[1]) == 0);
+    char output[2048];
+    size_t output_length = 0;
+    ssize_t bytes_read;
+    while ((bytes_read = read(profile_pipe[0],
+            output + output_length,
+            sizeof(output) - output_length - 1)) > 0) {
+        output_length += (size_t) bytes_read;
+    }
+    assert(bytes_read == 0);
+    assert(close(profile_pipe[0]) == 0);
+    output[output_length] = '\0';
+
+    const char *version_line = strstr(output,
+            "AARCH64_THREADED_PROFILE\tversion\t1\n");
+    const char *backend_line = strstr(output,
+            "AARCH64_THREADED_PROFILE\tbackend\tthreaded\n");
+    const char *totals_line = strstr(output,
+            "AARCH64_THREADED_PROFILE\ttotals"
+            "\tcache_hits\t4\tcache_misses\t6"
+            "\tfast_dispatches\t1\tc_fallbacks\t7"
+            "\tundefined_dispatches\t2\n");
+    char load_line[160];
+    char add_line[160];
+    assert(snprintf(load_line, sizeof(load_line),
+            "AARCH64_THREADED_PROFILE\topcode\t%u"
+            "\tcount\t4\trepresentative_word\t0xf9400022\n",
+            (unsigned) AARCH64_OP_LOAD_IMM12) > 0);
+    assert(snprintf(add_line, sizeof(add_line),
+            "AARCH64_THREADED_PROFILE\topcode\t%u"
+            "\tcount\t3\trepresentative_word\t0x8b000043\n",
+            (unsigned) AARCH64_OP_ADD_SHIFTED_REGISTER) > 0);
+    const char *load_output = strstr(output, load_line);
+    const char *add_output = strstr(output, add_line);
+    assert(version_line == output);
+    assert(backend_line != NULL);
+    assert(totals_line != NULL);
+    assert(load_output != NULL);
+    assert(add_output != NULL);
+    assert(backend_line > version_line);
+    assert(totals_line > backend_line);
+    assert(load_output > totals_line);
+    assert(add_output > load_output);
+    unsigned output_lines = 0;
+    for (const char *cursor = output; *cursor != '\0'; cursor++) {
+        if (*cursor == '\n')
+            output_lines++;
+    }
+    assert(output_lines == 5);
+
+    aarch64_threaded_profile_reset_for_test();
+    aarch64_threaded_profile_snapshot(&snapshot);
+    assert(snapshot.cache_hits == 0);
+    assert(snapshot.cache_misses == 0);
+    assert(snapshot.fast_dispatches == 0);
+    assert(snapshot.c_fallbacks == 0);
+    assert(snapshot.undefined_dispatches == 0);
+    for (enum aarch64_opcode opcode = 0;
+            opcode < AARCH64_OP_COUNT; opcode++) {
+        assert(snapshot.fallback_by_opcode[opcode] == 0);
+        assert(snapshot.representative_word_by_opcode[opcode] == 0);
+    }
+}
+#endif
 #endif
 
 int main(void) {
@@ -2004,6 +2173,9 @@ int main(void) {
     test_rwx_self_modifying_code();
     test_mapping_invalidation();
     test_shared_space_invalidation();
+#if ISH_AARCH64_THREADED_PROFILE
+    test_profile_aggregation();
+#endif
 #endif
     return 0;
 }

@@ -6,6 +6,7 @@
 #include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-stack.h"
+#include "guest/aarch64/threaded-profile.h"
 #include "guest/linux/auxv.h"
 #include "guest/memory/address-space.h"
 #include "guest/memory/page-table.h"
@@ -336,6 +337,9 @@ static void assert_empty_result_fields(
 }
 
 static void test_load_run_and_ownership(void) {
+#if ISH_AARCH64_THREADED_PROFILE
+    aarch64_threaded_profile_reset_for_test();
+#endif
     byte_t file[TEST_FILE_SIZE];
     make_test_elf(file);
     char executable[] = "/bin/process-test";
@@ -411,7 +415,30 @@ static void test_load_run_and_ownership(void) {
     assert(sink.calls == 1 && sink.saw_initial_stack);
     assert(memcmp(sink.data, "hi\n", 3) == 0);
     assert(signal.calls == 8);
+#if ISH_AARCH64_THREADED_PROFILE
+    struct aarch64_threaded_profile_snapshot snapshot;
+    aarch64_threaded_profile_snapshot(&snapshot);
+    assert(snapshot.cache_hits == 0);
+    assert(snapshot.cache_misses == 0);
+    assert(snapshot.fast_dispatches == 0);
+    assert(snapshot.c_fallbacks == 0);
+    assert(snapshot.undefined_dispatches == 0);
+#endif
     aarch64_linux_process_destroy(process);
+#if ISH_AARCH64_THREADED_PROFILE
+    aarch64_threaded_profile_snapshot(&snapshot);
+    assert(snapshot.cache_hits + snapshot.cache_misses > 0);
+    assert(snapshot.cache_hits + snapshot.cache_misses ==
+            snapshot.fast_dispatches + snapshot.c_fallbacks +
+            snapshot.undefined_dispatches);
+    qword_t fallback_sum = 0;
+    for (enum aarch64_opcode opcode = 0;
+            opcode < AARCH64_OP_COUNT; opcode++) {
+        fallback_sum += snapshot.fallback_by_opcode[opcode];
+    }
+    assert(fallback_sum == snapshot.c_fallbacks);
+    aarch64_threaded_profile_reset_for_test();
+#endif
     aarch64_linux_process_destroy(NULL);
 }
 

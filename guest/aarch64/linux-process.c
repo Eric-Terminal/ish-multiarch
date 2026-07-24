@@ -11,6 +11,7 @@
 #include "guest/aarch64/linux-signal-trampoline.h"
 #include "guest/aarch64/linux-stack.h"
 #include "guest/aarch64/runner.h"
+#include "guest/aarch64/threaded-profile.h"
 
 #define AARCH64_LINUX_PROCESS_ADDRESS_BITS 48
 #define AARCH64_LINUX_PROCESS_ADDRESS_LIMIT \
@@ -553,6 +554,9 @@ void aarch64_linux_process_destroy(
         struct aarch64_linux_process *process) {
     if (process == NULL)
         return;
+#if ISH_AARCH64_THREADED_PROFILE
+    aarch64_threaded_profile_merge(&process->runner.threaded_cache);
+#endif
     process_memory_release(process->memory);
     free(process);
 }

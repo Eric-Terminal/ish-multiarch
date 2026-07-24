@@ -280,14 +280,27 @@ bool aarch64_threaded_execute(struct aarch64_threaded_cache *cache,
         entry->valid = true;
     }
 
-    if (entry->handler == NULL)
+    if (entry->handler == NULL) {
+#if ISH_AARCH64_THREADED_PROFILE
+        cache->profile.undefined_dispatches++;
+#endif
         return false;
+    }
     *result = (struct aarch64_execute_result) {
         .stop = AARCH64_EXECUTE_RETIRED,
         .fault = {.kind = GUEST_MEMORY_FAULT_NONE},
     };
     if (entry->c_fallback) {
         cache->stats.c_fallbacks++;
+#if ISH_AARCH64_THREADED_PROFILE
+        assert(entry->decoded.opcode < AARCH64_OP_COUNT);
+        qword_t *count =
+                &cache->profile.fallback_by_opcode[entry->decoded.opcode];
+        if ((*count)++ == 0) {
+            cache->profile.representative_word_by_opcode[
+                    entry->decoded.opcode] = word;
+        }
+#endif
     } else {
         cache->stats.fast_dispatches++;
     }

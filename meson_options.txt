@@ -8,6 +8,8 @@ option('kconfig', type: 'array', value: [])
 option('aarch64_backend', type: 'combo',
     choices: ['auto', 'c', 'threaded'], value: 'auto',
     description: 'AArch64 客体执行后端')
+option('aarch64_threaded_profile', type: 'boolean', value: false,
+    description: '采集 AArch64 threaded 后端的动态 C 回落分布')
 
 option('vdso_c_args', type: 'string', value: '')
 

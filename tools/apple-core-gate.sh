@@ -70,11 +70,18 @@ verify_backend_config() {
     local expected_value=$3
     local config_header="$build_dir/aarch64-backend-config.h"
     local configured_backend
+    local configured_profile
 
     configured_backend=$("$MESON" configure "$build_dir" |
         awk '$1 == "aarch64_backend" { print $2 }')
     if [[ "$configured_backend" != auto ]]; then
         echo "错误：${name} 的 Meson AArch64 后端选项不是 auto。" >&2
+        exit 1
+    fi
+    configured_profile=$("$MESON" configure "$build_dir" |
+        awk '$1 == "aarch64_threaded_profile" { print $2 }')
+    if [[ "$configured_profile" != false ]]; then
+        echo "错误：${name} 不得携带 threaded profiling 采集代码。" >&2
         exit 1
     fi
 
@@ -109,6 +116,11 @@ verify_backend_archive() {
             exit 1
         fi
     done
+    if grep -q "threaded-profile" \
+            <<< "$archive_members"; then
+        echo "错误：${name} 意外包含 threaded profiling 对象。" >&2
+        exit 1
+    fi
 
     archive_symbols=$(xcrun nm -g "$archive")
     for required_symbol in \
@@ -123,6 +135,10 @@ verify_backend_archive() {
             exit 1
         fi
     done
+    if grep -q "aarch64_threaded_profile_" <<< "$archive_symbols"; then
+        echo "错误：${name} 意外导出 threaded profiling 符号。" >&2
+        exit 1
+    fi
 }
 
 build_slice() {
@@ -158,11 +174,13 @@ build_slice() {
     if [[ -d "$core_build_dir/meson-private" ]]; then
         "$MESON" setup --reconfigure "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true \
-            -Daarch64_backend=auto --buildtype=release
+            -Daarch64_backend=auto -Daarch64_threaded_profile=false \
+            --buildtype=release
     else
         "$MESON" setup "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true \
-            -Daarch64_backend=auto --buildtype=release
+            -Daarch64_backend=auto -Daarch64_threaded_profile=false \
+            --buildtype=release
     fi
     verify_backend_config "${name} core" "$core_build_dir" \
         "$expected_backend_value"
@@ -188,12 +206,12 @@ build_slice() {
         "$MESON" setup --reconfigure "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
-            --buildtype=release
+            -Daarch64_threaded_profile=false --buildtype=release
     else
         "$MESON" setup "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
-            --buildtype=release
+            -Daarch64_threaded_profile=false --buildtype=release
     fi
     verify_backend_config "${name} 完整构建" "$full_build_dir" \
         "$expected_backend_value"

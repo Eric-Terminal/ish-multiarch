@@ -44,6 +44,18 @@ Meson 选项 `-Daarch64_backend=auto|c|threaded` 控制 AArch64 guest 的默认�
 
 两种选择都会编译并保留 C 执行器。threaded-code 只加速已经独立实现并经过差分测试的指令，未提速指令继续回落到 C oracle；因此选择快速后端不会从归档中移除 `aarch64_execute`，`x86_64` Simulator 也始终具有可用的 C 路径。
 
+需要定位真实 Linux 工作负载中的 C 回落热点时，可以在原生 AArch64 主机上额外传入
+`-Daarch64_threaded_profile=true`；画像必须通过这个 Meson 选项统一开启，不能由单个
+翻译单元自行定义内部宏。该选项默认关闭；开启后，每个 AArch64 进程先在自己的 runner
+中记录回落次数，销毁时再合并，命令行产品正常退出时向启动时的标准错误副本写出制表符
+分隔的 `AARCH64_THREADED_PROFILE` 报告。终态快照累计当时已经析构的 runner；宿主异常
+终止或仍未完成退出清理的 runner 不在完整性承诺内。`opcode` 是
+`guest/aarch64/decode.h` 中的枚举值，`representative_word` 只是最先合并到全局结果的
+代表机器字，不保证是整棵进程树中按时间最早执行的指令。
+
+画像构建会增加运行时开销，只用于选择待优化的指令族，不能用于比较后端性能。Apple
+产品门禁要求该选项保持关闭，并检查最终归档不包含画像对象或符号。
+
 原生 AArch64 host 还会注册 `aarch64_backend_performance` 微基准。它在同一个二进制中显式运行 C oracle 与 threaded-code，覆盖纯快速分派、混合 C 回落和低解码成本的 NOP 调度三种稳定命中工作负载。请使用 release 构建运行：
 
 ```sh
@@ -62,7 +74,7 @@ Apple 门禁需要 Xcode SDK、Meson 与 Ninja。它构建以下五个 Apple 切
 - watchOS Simulator `arm64`，minOS 10.0；
 - watchOS Simulator `x86_64`，minOS 10.0。
 
-门禁显式使用 `aarch64_backend=auto`，并要求 iOS `arm64`、watchOS `arm64_32`/`arm64` 与 Simulator `arm64` 选择 threaded-code，Simulator `x86_64` 选择 C。它同时核对生成的配置宏、core 与完整归档中的 C/threaded 对象和公开符号，并对五个切片严格编译函数指针 ABI probe；iOS 还以 `arm64e -O2` 检查 threaded 间接调用的指针认证指令。
+门禁显式使用 `aarch64_backend=auto` 且关闭 threaded 画像，并要求 iOS `arm64`、watchOS `arm64_32`/`arm64` 与 Simulator `arm64` 选择 threaded-code，Simulator `x86_64` 选择 C。它同时核对生成的配置宏、core 与完整归档中的 C/threaded 对象和公开符号，拒绝画像对象与符号，并对五个切片严格编译函数指针 ABI probe；iOS 还以 `arm64e -O2` 检查 threaded 间接调用的指针认证指令。
 
 可以直接运行：
 
