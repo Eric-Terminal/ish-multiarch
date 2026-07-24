@@ -667,6 +667,38 @@ static void execute_advsimd_addp_scalar(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_pairwise_long(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_pairwise_long.rd;
+    byte_t rn = instruction->operands.advsimd_pairwise_long.rn;
+    byte_t source_size =
+            instruction->operands.advsimd_pairwise_long.source_element_size;
+    byte_t source_lanes =
+            (byte_t) (instruction->width / (source_size * 8));
+    bool is_signed =
+            instruction->opcode == AARCH64_OP_ADVSIMD_SADDLP;
+    qword_t source_sign = UINT64_C(1) << (source_size * 8 - 1);
+    qword_t source_mask = vector_element_mask(source_size);
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < source_lanes / 2; lane++) {
+        qword_t left = read_vector_element(
+                &source, source_size, (byte_t) (2 * lane));
+        qword_t right = read_vector_element(
+                &source, source_size, (byte_t) (2 * lane + 1));
+        if (is_signed && (left & source_sign))
+            left |= ~source_mask;
+        if (is_signed && (right & source_sign))
+            right |= ~source_mask;
+        write_vector_element(&result, source_size * 2,
+                lane, left + right);
+    }
+    // 延迟整体写回保护 Vd == Vn，Q=0 的目标高半保持清零。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_table(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_table.rd;
@@ -2064,6 +2096,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADDP_SCALAR:
             execute_advsimd_addp_scalar(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SADDLP:
+        case AARCH64_OP_ADVSIMD_UADDLP:
+            execute_advsimd_pairwise_long(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_TBL:
         case AARCH64_OP_ADVSIMD_TBX:

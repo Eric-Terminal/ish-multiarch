@@ -143,6 +143,8 @@ enum aarch64_opcode {
     AARCH64_OP_ADVSIMD_UMOV,
     AARCH64_OP_ADVSIMD_ADD,
     AARCH64_OP_ADVSIMD_ADDP_SCALAR,
+    AARCH64_OP_ADVSIMD_SADDLP,
+    AARCH64_OP_ADVSIMD_UADDLP,
     AARCH64_OP_ADVSIMD_TBL,
     AARCH64_OP_ADVSIMD_TBX,
     AARCH64_OP_ADVSIMD_EXT,
@@ -418,6 +420,11 @@ struct aarch64_decoded {
             byte_t rd;
             byte_t rn;
         } advsimd_unary;
+        struct {
+            byte_t rd;
+            byte_t rn;
+            byte_t source_element_size;
+        } advsimd_pairwise_long;
         struct {
             byte_t rd;
             byte_t rn;
