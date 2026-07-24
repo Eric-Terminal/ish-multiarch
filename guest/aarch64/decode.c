@@ -1002,6 +1002,21 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xffc0fc00)) == UINT32_C(0x5f400400)) {
+        byte_t immediate = (word >> 16) & UINT32_C(0x7f);
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_SSHR,
+            .width = 64,
+            .operands.advsimd_shift_immediate = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .element_size = 8,
+                .shift = 128 - immediate,
+            },
+        };
+        return true;
+    }
+
     if ((word & UINT32_C(0xff80fc00)) == UINT32_C(0x7f000400)) {
         byte_t immediate = (word >> 16) & UINT32_C(0x7f);
         // Advanced SIMD 标量 USHR 只定义 64 位 D 形式。

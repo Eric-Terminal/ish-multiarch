@@ -503,10 +503,18 @@ static void test_scalar_ushr_execution(void) {
     }
 }
 
+static bool is_vector_sshr(
+        const struct aarch64_decoded *instruction) {
+    return instruction->opcode == AARCH64_OP_ADVSIMD_SSHR &&
+            !(instruction->width == 64 &&
+            instruction->operands.advsimd_shift_immediate.
+                    element_size == 8);
+}
+
 static void assert_vector_sshr_decode(dword_t word, bool q,
         byte_t element_size, byte_t shift, byte_t rn, byte_t rd) {
     struct aarch64_decoded instruction = decode(word);
-    assert(instruction.opcode == AARCH64_OP_ADVSIMD_SSHR);
+    assert(is_vector_sshr(&instruction));
     assert(instruction.width == (q ? 128 : 64));
     assert(instruction.operands.advsimd_shift_immediate.rd == rd);
     assert(instruction.operands.advsimd_shift_immediate.rn == rn);
@@ -563,7 +571,7 @@ static void test_vector_sshr_decode(void) {
                             (dword_t) immediate << 16 |
                             (dword_t) rn << 5 | (dword_t) rd;
                     struct aarch64_decoded instruction = decode(word);
-                    assert(instruction.opcode != AARCH64_OP_ADVSIMD_SSHR);
+                    assert(!is_vector_sshr(&instruction));
                 }
             }
         }
@@ -589,7 +597,7 @@ static void test_vector_sshr_decode(void) {
         struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(
                 product ^ (UINT32_C(1) << bit), &instruction);
-        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_SSHR);
+        assert(!decoded || !is_vector_sshr(&instruction));
     }
 
     static const dword_t neighbors[] = {
@@ -605,7 +613,7 @@ static void test_vector_sshr_decode(void) {
     for (unsigned index = 0; index < array_size(neighbors); index++) {
         struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(neighbors[index], &instruction);
-        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_SSHR);
+        assert(!decoded || !is_vector_sshr(&instruction));
     }
 }
 
