@@ -1774,6 +1774,29 @@ static bool execute_simd_load_multiple(struct cpu_state *cpu,
     return true;
 }
 
+static bool execute_simd_load_replicate(struct cpu_state *cpu,
+        struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    byte_t rt = instruction->operands.advsimd_multiple.rt;
+    byte_t rn = instruction->operands.advsimd_multiple.rn;
+    byte_t element_size =
+            instruction->operands.advsimd_multiple.element_size;
+    byte_t vector_size = instruction->width / 8;
+    guest_addr_t address = rn == 31 ? cpu->sp : cpu->x[rn];
+    byte_t element[8];
+    if (!guest_tlb_read(tlb, address, element, element_size,
+            GUEST_MEMORY_READ, fault))
+        return false;
+
+    union aarch64_vector_reg value = {0};
+    for (byte_t offset = 0; offset < vector_size; offset += element_size)
+        memcpy(value.b + offset, element, element_size);
+    cpu->v[rt] = value;
+    cpu->pc += 4;
+    return true;
+}
+
 static bool execute_simd_single_lane(struct cpu_state *cpu,
         struct guest_tlb *tlb, const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -2519,6 +2542,11 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_LOAD_SIMD_MULTIPLE_2:
         case AARCH64_OP_LOAD_SIMD_MULTIPLE_4:
             if (!execute_simd_load_multiple(
+                    cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
+        case AARCH64_OP_LOAD_SIMD_REPLICATE_1:
+            if (!execute_simd_load_replicate(
                     cpu, tlb, instruction, &result.fault))
                 result.stop = AARCH64_EXECUTE_DATA_FAULT;
             break;

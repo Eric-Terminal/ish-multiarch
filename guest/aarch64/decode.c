@@ -1708,6 +1708,20 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
+    if ((word & UINT32_C(0xbffff000)) == UINT32_C(0x0d40c000)) {
+        byte_t size_shift = (word >> 10) & 3;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_LOAD_SIMD_REPLICATE_1,
+            .width = ((word >> 30) & 1) != 0 ? 128 : 64,
+            .operands.advsimd_multiple = {
+                .rt = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .element_size = (byte_t) (1U << size_shift),
+            },
+        };
+        return true;
+    }
+
     byte_t element_size;
     byte_t element_index;
     byte_t q = (word >> 30) & 1;
