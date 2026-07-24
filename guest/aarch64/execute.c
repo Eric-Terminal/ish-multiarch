@@ -556,7 +556,7 @@ static void write_vector_element(union aarch64_vector_reg *reg,
             ((value & mask) << shift);
 }
 
-static void execute_advsimd_vector_shift_right(struct cpu_state *cpu,
+static void execute_advsimd_vector_shift_immediate(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_shift_immediate.rd;
     byte_t rn = instruction->operands.advsimd_shift_immediate.rn;
@@ -566,6 +566,8 @@ static void execute_advsimd_vector_shift_right(struct cpu_state *cpu,
     byte_t element_bits = (byte_t) (element_size * 8);
     byte_t lanes = (byte_t) (instruction->width / element_bits);
     enum aarch64_shift_type shift_type =
+            instruction->opcode == AARCH64_OP_ADVSIMD_SHL ?
+                    AARCH64_SHIFT_LSL :
             instruction->opcode == AARCH64_OP_ADVSIMD_USHR ?
                     AARCH64_SHIFT_LSR : AARCH64_SHIFT_ASR;
     union aarch64_vector_reg source = cpu->v[rn];
@@ -2207,9 +2209,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_USHR_SCALAR:
             execute_advsimd_scalar_shift(cpu, instruction);
             break;
+        case AARCH64_OP_ADVSIMD_SHL:
         case AARCH64_OP_ADVSIMD_SSHR:
         case AARCH64_OP_ADVSIMD_USHR:
-            execute_advsimd_vector_shift_right(cpu, instruction);
+            execute_advsimd_vector_shift_immediate(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHL:
         case AARCH64_OP_ADVSIMD_USHL:
