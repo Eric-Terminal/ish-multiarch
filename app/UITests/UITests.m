@@ -146,4 +146,47 @@
                 timeout:1320];
 }
 
+- (void)testAArch64SQLite持久化 {
+    [self runGuestStage:@"SQLITE-INSTALL"
+                command:@"if apk info -e 'sqlite=3.53.2-r0' "
+                         ">/dev/null 2>&1; then :; else "
+                         "timeout -k 15 900 apk --cache-max-age 10080 "
+                         "add --no-progress 'sqlite=3.53.2-r0' "
+                         ">\"$l\" 2>&1; fi && "
+                         "apk info -e 'sqlite=3.53.2-r0' >/dev/null 2>>\"$l\" && "
+                         "sqlite3 --version >>\"$l\" 2>&1 && "
+                         "test \"$(sqlite3 --version | awk '{print $1}')\" = 3.53.2"
+                timeout:1020];
+    [self runGuestStage:@"SQLITE-WAL"
+                command:@"d=/root/.ish-ios-sqlite-gate; "
+                         "db=$d/matrix.db; o=$d/result; "
+                         "rm -rf \"$d\"; mkdir -p \"$d\" && "
+                         "sqlite3 \"$db\" 'PRAGMA journal_mode=WAL; "
+                         "CREATE TABLE values_under_test(value INTEGER); "
+                         "BEGIN; INSERT INTO values_under_test VALUES(40),(2); "
+                         "COMMIT; SELECT sum(value) FROM values_under_test; "
+                         "PRAGMA integrity_check;' >\"$o\" 2>\"$l\" && "
+                         "test \"$(sed -n '1p' \"$o\")\" = wal && "
+                         "test \"$(sed -n '2p' \"$o\")\" = 42 && "
+                         "test \"$(sed -n '3p' \"$o\")\" = ok && "
+                         "test -s \"$db\" && sync"
+                timeout:180];
+
+    // 终止宿主进程后再读同一数据库，避免把进程内缓存误当作持久化成功。
+    [self.app terminate];
+    [self.app launch];
+    XCTAssertTrue([self.app.webViews.firstMatch waitForExistenceWithTimeout:180],
+                  @"重启后终端界面没有在期限内出现");
+    [self waitForPromptWithTimeout:300];
+
+    [self runGuestStage:@"SQLITE-RESTART"
+                command:@"d=/root/.ish-ios-sqlite-gate; db=$d/matrix.db; "
+                         "command -v sqlite3 >\"$l\" 2>&1 && "
+                         "test \"$(sqlite3 \"$db\" 'SELECT sum(value) "
+                         "FROM values_under_test;')\" = 42 && "
+                         "test \"$(sqlite3 \"$db\" 'PRAGMA integrity_check;')\" = ok && "
+                         "rm -rf \"$d\""
+                timeout:180];
+}
+
 @end
