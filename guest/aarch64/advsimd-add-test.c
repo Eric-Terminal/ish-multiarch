@@ -105,6 +105,17 @@ static bool is_vector_add(const struct aarch64_decoded *instruction) {
             !is_scalar_add(instruction);
 }
 
+static bool is_scalar_neg(const struct aarch64_decoded *instruction) {
+    return instruction->opcode == AARCH64_OP_ADVSIMD_NEG &&
+            instruction->width == 64 &&
+            instruction->operands.advsimd_unary.element_size == 8;
+}
+
+static bool is_vector_neg(const struct aarch64_decoded *instruction) {
+    return instruction->opcode == AARCH64_OP_ADVSIMD_NEG &&
+            !is_scalar_neg(instruction);
+}
+
 static void test_llvm_vectors(void) {
     assert_decode(UINT32_C(0x0e258483), 64, 1, 3, 4, 5);
     assert_decode(UINT32_C(0x4e2884e6), 128, 1, 6, 7, 8);
@@ -389,7 +400,7 @@ static void test_neg_decode(void) {
         struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(base ^ (UINT32_C(1) << bit),
                 &instruction);
-        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_NEG);
+        assert(!decoded || !is_vector_neg(&instruction));
     }
 
     static const dword_t neighbors[] = {
@@ -405,7 +416,7 @@ static void test_neg_decode(void) {
             index < sizeof(neighbors) / sizeof(neighbors[0]); index++) {
         struct aarch64_decoded instruction;
         bool decoded = aarch64_decode(neighbors[index], &instruction);
-        assert(!decoded || instruction.opcode != AARCH64_OP_ADVSIMD_NEG);
+        assert(!decoded || !is_vector_neg(&instruction));
     }
 }
 
