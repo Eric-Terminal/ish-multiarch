@@ -932,6 +932,23 @@ static void execute_advsimd_logical(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_cnt(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_unary.rd;
+    byte_t rn = instruction->operands.advsimd_unary.rn;
+    byte_t bytes = instruction->width / 8;
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t index = 0; index < bytes; index++) {
+        for (byte_t bit = 0; bit < 8; bit++)
+            result.b[index] += (source.b[index] >> bit) & 1U;
+    }
+    // 延迟写回保护源目标别名，并让 8B 形态清零目标高半。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_not(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_unary.rd;
@@ -2222,6 +2239,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_BIT:
         case AARCH64_OP_ADVSIMD_BIF:
             execute_advsimd_logical(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_CNT:
+            execute_advsimd_cnt(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_NOT:
             execute_advsimd_not(cpu, instruction);
