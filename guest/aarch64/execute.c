@@ -583,6 +583,47 @@ static void execute_advsimd_vector_shift_right(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_variable_shift(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t element_bits = (byte_t) (element_size * 8);
+    byte_t lanes = (byte_t) (instruction->width / element_bits);
+    union aarch64_vector_reg source = cpu->v[rn];
+    union aarch64_vector_reg shifts = cpu->v[rm];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t value = read_vector_element(&source, element_size, lane);
+        byte_t encoded_shift = (byte_t) read_vector_element(
+                &shifts, element_size, lane);
+        int shift = encoded_shift < 128 ?
+                encoded_shift : (int) encoded_shift - 256;
+        enum aarch64_shift_type shift_type;
+        unsigned magnitude;
+        if (shift >= 0) {
+            shift_type = AARCH64_SHIFT_LSL;
+            magnitude = (unsigned) shift;
+        } else {
+            shift_type = instruction->opcode == AARCH64_OP_ADVSIMD_SSHL ?
+                    AARCH64_SHIFT_ASR : AARCH64_SHIFT_LSR;
+            magnitude = (unsigned) -shift;
+        }
+        byte_t amount = (byte_t) (magnitude < element_bits ?
+                magnitude : element_bits);
+        qword_t shifted = shift_register(
+                value, element_bits, shift_type, amount);
+        write_vector_element(
+                &result, element_size, lane, shifted);
+    }
+    // 两个源都先快照，保护 Vd 与任一源重叠；Q=0 高半保持清零。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_narrow(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_narrow.rd;
@@ -2072,6 +2113,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_SSHR:
         case AARCH64_OP_ADVSIMD_USHR:
             execute_advsimd_vector_shift_right(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_SSHL:
+        case AARCH64_OP_ADVSIMD_USHL:
+            execute_advsimd_variable_shift(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SSHLL:
         case AARCH64_OP_ADVSIMD_SSHLL2:

@@ -39,6 +39,8 @@
 #define INSTRUCTION_FMADD_D31_D0_D15_D31 UINT32_C(0x1f4f7c1f)
 /* GCC cc1 实际触发过的无符号配对加长指令。 */
 #define INSTRUCTION_UADDLP_V31_8H_V31_16B UINT32_C(0x6e202bff)
+/* GCC cc1 实际触发过的无符号逐 lane 可变移位指令。 */
+#define INSTRUCTION_USHL_V31_8H_V31_8H_V24_8H UINT32_C(0x6e7847ff)
 #define INSTRUCTION_UNDEFINED UINT32_C(0)
 
 struct test_memory {
@@ -851,6 +853,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 84, INSTRUCTION_FMADD_D31_D0_D15_D31);
     write_instruction(&c_fixture.tlb,
             CODE_PAGE + 88, INSTRUCTION_UADDLP_V31_8H_V31_16B);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 92, INSTRUCTION_USHL_V31_8H_V31_8H_V24_8H);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE, INSTRUCTION_LDAR_X2_X1);
     write_instruction(&threaded_fixture.tlb,
@@ -897,6 +901,8 @@ static void test_product_c_fallback(void) {
             CODE_PAGE + 84, INSTRUCTION_FMADD_D31_D0_D15_D31);
     write_instruction(&threaded_fixture.tlb,
             CODE_PAGE + 88, INSTRUCTION_UADDLP_V31_8H_V31_16B);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 92, INSTRUCTION_USHL_V31_8H_V31_8H_V24_8H);
 
     const qword_t original = UINT64_C(0x8877665544332211);
     memcpy(c_fixture.memory.data, &original, sizeof(original));
@@ -1284,6 +1290,26 @@ static void test_product_c_fallback(void) {
     assert(c_cpu.v[31].d[0] == UINT64_C(0x01fe00ff00ff00ff));
     assert(c_cpu.v[31].d[1] == UINT64_C(0x017e010001000000));
     assert_stats(&threaded_runner, 0, 23, 0, 23);
+
+    /*
+     * 每个半字只有低字节参与移位量解码；高字节使用不同噪声，
+     * 同时覆盖零、正负、等于 lane 位宽及越界计数。
+     */
+    c_cpu.v[24].d[0] = threaded_cpu.v[24].d[0] =
+            UINT64_C(0x3c08c3ff5a01a500);
+    c_cpu.v[24].d[1] = threaded_cpu.v[24].d[1] =
+            UINT64_C(0x2befd41181f07e10);
+    const union aarch64_vector_reg ushl_shifts = c_cpu.v[24];
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[31].d[0] == UINT64_C(0xfe00007f01fe00ff));
+    assert(c_cpu.v[31].d[1] == 0);
+    assert(memcmp(&c_cpu.v[24], &ushl_shifts, sizeof(ushl_shifts)) == 0);
+    assert_stats(&threaded_runner, 0, 24, 0, 24);
 }
 
 static void test_c_and_threaded_differential(void) {
