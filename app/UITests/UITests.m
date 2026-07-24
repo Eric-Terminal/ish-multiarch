@@ -320,4 +320,57 @@
                 timeout:2400];
 }
 
+- (void)testAArch64Git与SSH客户端 {
+    [self runGuestStage:@"GITSSH-INSTALL"
+                command:@"if apk info -e 'git=2.54.0-r0' >/dev/null 2>&1 && "
+                         "apk info -e 'openssh-client-default=10.3_p1-r0' "
+                         ">/dev/null 2>&1; then :; else "
+                         "timeout -k 30 14400 apk --cache-max-age 10080 "
+                         "add --no-progress 'git=2.54.0-r0' "
+                         "'openssh-client-default=10.3_p1-r0' >\"$l\" 2>&1; fi && "
+                         "apk info -e 'git=2.54.0-r0' >>\"$l\" 2>&1 && "
+                         "apk info -e 'openssh-client-default=10.3_p1-r0' "
+                         ">>\"$l\" 2>&1 && "
+                         "test \"$(git --version)\" = 'git version 2.54.0' && "
+                         "ssh -V 2>&1 | grep -F 'OpenSSH_10.3p1' >>\"$l\""
+                timeout:15600];
+    [self runGuestStage:@"GIT"
+                command:@"d=/root/.ish-ios-git-gate-$t; rm -rf \"$d\"; "
+                         "mkdir -p \"$d/repo\" && git -C \"$d/repo\" init -q && "
+                         "git -C \"$d/repo\" config user.name 'iSH iPhone Gate' && "
+                         "git -C \"$d/repo\" config user.email 'ios@localhost' && "
+                         "printf 'alpha\\n' >\"$d/repo/state.txt\" && "
+                         "git -C \"$d/repo\" add state.txt && "
+                         "git -C \"$d/repo\" commit -q -m initial && "
+                         "printf 'beta\\n' >>\"$d/repo/state.txt\" && "
+                         "git -C \"$d/repo\" commit -qam update && sync && "
+                         "test \"$(git -C \"$d/repo\" rev-list --count HEAD)\" = 2 && "
+                         "test \"$(git -C \"$d/repo\" cat-file -t HEAD)\" = commit && "
+                         "git -C \"$d/repo\" show HEAD:state.txt >\"$d/readback\" && "
+                         "test \"$(sed -n '1p' \"$d/readback\")\" = alpha && "
+                         "test \"$(sed -n '2p' \"$d/readback\")\" = beta && "
+                         "test -z \"$(sed -n '3p' \"$d/readback\")\" && "
+                         "test -z \"$(git -C \"$d/repo\" status --porcelain)\" && "
+                         "git -C \"$d/repo\" fsck --strict --full --no-dangling "
+                         ">>\"$l\" 2>&1 && rm -rf \"$d\""
+                timeout:900];
+    [self runGuestStage:@"SSH"
+                command:@"d=/root/.ish-ios-ssh-gate-$t; rm -rf \"$d\"; "
+                         "mkdir -m 700 \"$d\" && "
+                         "timeout -k 15 600 ssh-keygen -q -t ed25519 -N '' "
+                         "-C ish-ios -f \"$d/id_ed25519\" >>\"$l\" 2>&1 && "
+                         "test \"$(stat -c '%a' \"$d/id_ed25519\")\" = 600 && "
+                         "test \"$(stat -c '%a' \"$d/id_ed25519.pub\")\" = 644 && "
+                         "ssh-keygen -y -f \"$d/id_ed25519\" >\"$d/derived.pub\" && "
+                         "test \"$(cut -d ' ' -f 1-2 \"$d/derived.pub\")\" = "
+                         "\"$(cut -d ' ' -f 1-2 \"$d/id_ed25519.pub\")\" && "
+                         "ssh-keygen -lf \"$d/id_ed25519.pub\" >>\"$l\" 2>&1 && "
+                         "ssh -Q key | grep -qx ssh-ed25519 && "
+                         "ssh -G -F /dev/null -o BatchMode=yes -p 2222 "
+                         "example.invalid >\"$d/config\" 2>>\"$l\" && "
+                         "grep -qx 'port 2222' \"$d/config\" && "
+                         "grep -qx 'batchmode yes' \"$d/config\" && rm -rf \"$d\""
+                timeout:900];
+}
+
 @end
