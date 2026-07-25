@@ -23,6 +23,7 @@
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
 #define INSTRUCTION_LDR_X4_X3 UINT32_C(0xf9400064)
+#define INSTRUCTION_LDR_X4_X3_X2_LSL_3 UINT32_C(0xf8627864)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 
@@ -176,6 +177,14 @@ static void write_load_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
+static void write_load_register_offset_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_LDR_X4_X3_X2_LSL_3);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
 static void write_nop_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     for (unsigned index = 0; index < NOP_COUNT; index++)
         put_instruction(code + index * 4, INSTRUCTION_NOP);
@@ -262,6 +271,16 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_load_program,
     },
     {
+        .name = "LDR reg-offset 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = 11,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_load_register_offset_program,
+    },
+    {
         .name = "NOP 调度环",
         .instructions_per_iteration = NOP_COUNT + 2,
         .x1_increment_per_iteration = 0,
@@ -296,6 +315,7 @@ static void init_environment(struct benchmark_environment *environment,
     *environment = (struct benchmark_environment) {0};
     workload->write_program(environment->memory.code);
     environment->memory.data[0] = 7;
+    environment->memory.data[24] = 11;
     guest_address_space_init(&environment->address_space,
             &benchmark_address_space_ops, &environment->memory, 48);
     guest_tlb_init(&environment->tlb, &environment->address_space);
