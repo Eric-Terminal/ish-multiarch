@@ -183,6 +183,29 @@ static void execute_sub_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_csinc_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_CSINC);
+    byte_t width = instruction->width;
+    bool choose_rn = aarch64_condition_holds(cpu->nzcv,
+            instruction->operands.conditional_select.condition);
+    byte_t source = choose_rn ?
+            instruction->operands.conditional_select.rn :
+            instruction->operands.conditional_select.rm;
+    qword_t value = read_general_register(
+            cpu, source, width, false);
+    if (!choose_rn)
+        value = (value + 1) & register_mask(width);
+    write_general_register(cpu,
+            instruction->operands.conditional_select.rd,
+            width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_ccmp_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -648,6 +671,8 @@ static aarch64_threaded_handler select_handler(
             return execute_add_shifted_register_fast;
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
             return execute_sub_shifted_register_fast;
+        case AARCH64_OP_CSINC:
+            return execute_csinc_fast;
         case AARCH64_OP_CCMP:
             return execute_ccmp_fast;
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:
