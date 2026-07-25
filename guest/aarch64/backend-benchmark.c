@@ -24,8 +24,10 @@
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
 #define INSTRUCTION_LDR_X4_X3 UINT32_C(0xf9400064)
 #define INSTRUCTION_LDR_X4_X3_X2_LSL_3 UINT32_C(0xf8627864)
+#define INSTRUCTION_STR_X5_X3_32 UINT32_C(0xf9001065)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
+#define STORE_VALUE UINT64_C(0x8877665544332211)
 
 struct benchmark_memory {
     byte_t code[GUEST_MEMORY_PAGE_SIZE];
@@ -44,6 +46,9 @@ struct benchmark_workload {
     qword_t instructions_per_iteration;
     qword_t x1_increment_per_iteration;
     qword_t expected_x4;
+    size_t expected_store_offset;
+    byte_t expected_store_size;
+    qword_t expected_store_value;
     qword_t fast_per_iteration;
     qword_t fallback_per_iteration;
     size_t program_instruction_count;
@@ -95,7 +100,7 @@ static enum guest_memory_fault_kind resolve_benchmark_page(void *opaque,
     if (page_base == DATA_PAGE) {
         *view = (struct guest_page_view) {
             .host_page = memory->data,
-            .permissions = GUEST_MEMORY_READ,
+            .permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE,
         };
         return GUEST_MEMORY_FAULT_NONE;
     }
@@ -180,6 +185,13 @@ static void write_load_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
 static void write_load_register_offset_program(
         byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_LDR_X4_X3_X2_LSL_3);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_store_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_STR_X5_X3_32);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
@@ -281,6 +293,19 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_load_register_offset_program,
     },
     {
+        .name = "STR imm12 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = 0,
+        .expected_store_offset = 32,
+        .expected_store_size = 8,
+        .expected_store_value = STORE_VALUE,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_store_program,
+    },
+    {
         .name = "NOP 调度环",
         .instructions_per_iteration = NOP_COUNT + 2,
         .x1_increment_per_iteration = 0,
@@ -290,6 +315,20 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_nop_program,
     },
 };
+
+static void reset_benchmark_data(
+        byte_t data[GUEST_MEMORY_PAGE_SIZE]) {
+    memset(data, 0, GUEST_MEMORY_PAGE_SIZE);
+    data[0] = 7;
+    data[24] = 11;
+    memset(data + 32, 0xa5, 8);
+}
+
+static void store_little_endian(
+        byte_t *destination, byte_t size, qword_t value) {
+    for (byte_t index = 0; index < size; index++)
+        destination[index] = (byte_t) (value >> (index * 8));
+}
 
 static qword_t scaled_count(const struct benchmark_workload *workload,
         qword_t iterations, qword_t per_iteration, qword_t tail) {
@@ -314,8 +353,7 @@ static void init_environment(struct benchmark_environment *environment,
         enum aarch64_backend backend) {
     *environment = (struct benchmark_environment) {0};
     workload->write_program(environment->memory.code);
-    environment->memory.data[0] = 7;
-    environment->memory.data[24] = 11;
+    reset_benchmark_data(environment->memory.data);
     guest_address_space_init(&environment->address_space,
             &benchmark_address_space_ops, &environment->memory, 48);
     guest_tlb_init(&environment->tlb, &environment->address_space);
@@ -418,7 +456,9 @@ static void verify_stats(const struct benchmark_workload *workload,
 }
 
 static void verify_run(const struct benchmark_workload *workload,
-        qword_t iterations, const struct benchmark_run *run) {
+        qword_t iterations,
+        const struct benchmark_environment *environment,
+        const struct benchmark_run *run) {
     qword_t expected_cycles = scaled_count(workload, iterations,
             workload->instructions_per_iteration, 1);
     qword_t expected_x1 = scaled_count(workload, iterations,
@@ -429,23 +469,38 @@ static void verify_run(const struct benchmark_workload *workload,
     require(run->cpu.cycle == expected_cycles && run->cpu.x[0] == 0 &&
                     run->cpu.x[1] == expected_x1 && run->cpu.x[2] == 3 &&
                     run->cpu.x[3] == DATA_PAGE &&
-                    run->cpu.x[4] == workload->expected_x4,
+                    run->cpu.x[4] == workload->expected_x4 &&
+                    run->cpu.x[5] == STORE_VALUE,
             workload->name, "循环次数或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
                     workload->program_instruction_count * 4 &&
                     run->cpu.nzcv == UINT32_C(0x60000000),
             workload->name, "PC 或 NZCV 最终状态不符");
+
+    byte_t expected_data[GUEST_MEMORY_PAGE_SIZE];
+    reset_benchmark_data(expected_data);
+    if (workload->expected_store_size != 0) {
+        store_little_endian(
+                expected_data + workload->expected_store_offset,
+                workload->expected_store_size,
+                workload->expected_store_value);
+    }
+    require(memcmp(environment->memory.data,
+                    expected_data, sizeof(expected_data)) == 0,
+            workload->name, "数据页最终内容不符");
 }
 
 static struct benchmark_run run_workload(
         struct benchmark_environment *environment,
         const struct benchmark_workload *workload, qword_t iterations,
         enum benchmark_cache_state cache_state) {
+    reset_benchmark_data(environment->memory.data);
     struct cpu_state cpu = {
         .x[0] = iterations,
         .x[1] = 7,
         .x[2] = 3,
         .x[3] = DATA_PAGE,
+        .x[5] = STORE_VALUE,
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),
     };
@@ -471,7 +526,7 @@ static struct benchmark_run run_workload(
         .cpu = cpu,
         .final_step = step,
     };
-    verify_run(workload, iterations, &run);
+    verify_run(workload, iterations, environment, &run);
     return run;
 }
 

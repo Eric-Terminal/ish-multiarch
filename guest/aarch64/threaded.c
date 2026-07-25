@@ -267,6 +267,32 @@ static void execute_scalar_load_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_store_imm12_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_STORE_IMM12);
+    assert(instruction->operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    byte_t rt = instruction->operands.load_store.rt;
+    byte_t rn = instruction->operands.load_store.rn;
+    byte_t size = instruction->operands.load_store.size;
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t address = base +
+            (qword_t) instruction->operands.load_store.offset;
+    qword_t value = read_general_register(
+            cpu, rt, instruction->width, false);
+    byte_t bytes[8];
+    for (byte_t index = 0; index < size; index++)
+        bytes[index] = (byte_t) (value >> (index * 8));
+    if (!guest_tlb_write(tlb, address, bytes, size, &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+    cpu->pc += 4;
+}
+
 static void execute_branch_immediate_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -378,6 +404,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_LOAD_IMM12:
         case AARCH64_OP_LOAD_REGISTER_OFFSET:
             return execute_scalar_load_fast;
+        case AARCH64_OP_STORE_IMM12:
+            return execute_store_imm12_fast;
         case AARCH64_OP_B:
         case AARCH64_OP_BL:
             return execute_branch_immediate_fast;
