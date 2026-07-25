@@ -17,6 +17,7 @@
 #define INSTRUCTION_ADD_X3 UINT32_C(0x8b000043)
 #define INSTRUCTION_ADDS_X3 UINT32_C(0xab000043)
 #define INSTRUCTION_ORR_X3_XZR_X0 UINT32_C(0xaa0003e3)
+#define INSTRUCTION_EOR_X5_X3_X6 UINT32_C(0xca060065)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define INSTRUCTION_USHLL_V31 UINT32_C(0x2f20a7ff)
 #define INSTRUCTION_LDAR_X2_X1 UINT32_C(0xc8dffc22)
@@ -305,22 +306,45 @@ static dword_t encode_add_shifted(bool is_64,
             ((dword_t) rn << 5) | rd;
 }
 
-static dword_t encode_orr_shifted(bool is_64, bool invert,
+static dword_t encode_logical_shifted(enum aarch64_opcode opcode,
+        bool is_64, bool invert,
         enum aarch64_shift_type shift_type, byte_t shift,
         byte_t rm, byte_t rn, byte_t rd) {
+    byte_t operation;
+    if (opcode == AARCH64_OP_ORR_SHIFTED_REGISTER) {
+        operation = 1;
+    } else {
+        assert(opcode == AARCH64_OP_EOR_SHIFTED_REGISTER);
+        operation = 2;
+    }
     byte_t width = is_64 ? 64 : 32;
     assert(shift_type <= AARCH64_SHIFT_ROR);
     assert(shift < width);
     assert(rm < 32);
     assert(rn < 32);
     assert(rd < 32);
-    return UINT32_C(0x2a000000) |
+    return UINT32_C(0x0a000000) |
             ((dword_t) is_64 << 31) |
+            ((dword_t) operation << 29) |
             ((dword_t) shift_type << 22) |
             ((dword_t) invert << 21) |
             ((dword_t) rm << 16) |
             ((dword_t) shift << 10) |
             ((dword_t) rn << 5) | rd;
+}
+
+static dword_t encode_orr_shifted(bool is_64, bool invert,
+        enum aarch64_shift_type shift_type, byte_t shift,
+        byte_t rm, byte_t rn, byte_t rd) {
+    return encode_logical_shifted(AARCH64_OP_ORR_SHIFTED_REGISTER,
+            is_64, invert, shift_type, shift, rm, rn, rd);
+}
+
+static dword_t encode_eor_shifted(bool is_64, bool invert,
+        enum aarch64_shift_type shift_type, byte_t shift,
+        byte_t rm, byte_t rn, byte_t rd) {
+    return encode_logical_shifted(AARCH64_OP_EOR_SHIFTED_REGISTER,
+            is_64, invert, shift_type, shift, rm, rn, rd);
 }
 
 static dword_t encode_move_wide(bool is_64, enum aarch64_opcode opcode,
@@ -873,15 +897,137 @@ static void test_fast_orr_shifted_differential(void) {
     assert(result.x[6] == UINT32_MAX);
 }
 
+static void test_fast_eor_shifted_differential(void) {
+    const enum aarch64_shift_type shift_types[] = {
+        AARCH64_SHIFT_LSL,
+        AARCH64_SHIFT_LSR,
+        AARCH64_SHIFT_ASR,
+        AARCH64_SHIFT_ROR,
+    };
+    for (unsigned width_index = 0; width_index < 2; width_index++) {
+        bool is_64 = width_index != 0;
+        byte_t width = is_64 ? 64 : 32;
+        const byte_t shifts[] = {0, 1, (byte_t) (width - 1)};
+        for (unsigned type_index = 0;
+                type_index < array_size(shift_types); type_index++) {
+            for (unsigned shift_index = 0;
+                    shift_index < array_size(shifts); shift_index++) {
+                for (unsigned invert = 0; invert < 2; invert++) {
+                    struct cpu_state initial;
+                    init_differential_cpu(&initial);
+                    initial.x[4] = UINT64_C(0x8123456789abcdef);
+                    initial.x[5] = UINT64_C(0xfedcba9886543211);
+                    struct cpu_state result = run_fast_differential(
+                            encode_eor_shifted(is_64, invert != 0,
+                                    shift_types[type_index],
+                                    shifts[shift_index], 5, 4, 6),
+                            initial, AARCH64_STEP_RETIRED);
+                    assert(result.pc == CODE_PAGE + 4);
+                    assert(result.cycle == initial.cycle + 1);
+                    assert(result.nzcv == initial.nzcv);
+                    assert(result.fpcr == initial.fpcr);
+                    assert(result.fpsr == initial.fpsr);
+                    assert(result.x[4] == initial.x[4]);
+                    assert(result.x[5] == initial.x[5]);
+                }
+            }
+        }
+    }
+
+    struct cpu_state initial;
+    init_differential_cpu(&initial);
+    initial.x[3] = UINT64_C(0xf0f0f0f0f0f0f0f0);
+    initial.x[6] = UINT64_C(0xff00ff00ff00ff00);
+    aarch64_set_exclusive(&initial, DATA_PAGE + 0x40, 8, false,
+            UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+    assert(encode_eor_shifted(true, false, AARCH64_SHIFT_LSL,
+            0, 6, 3, 5) == INSTRUCTION_EOR_X5_X3_X6);
+    struct cpu_state result = run_fast_differential(
+            INSTRUCTION_EOR_X5_X3_X6,
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[5] == UINT64_C(0x0ff00ff00ff00ff0));
+    assert(result.sp == initial.sp);
+    assert(result.nzcv == initial.nzcv);
+    assert(result.fpcr == initial.fpcr);
+    assert(result.fpsr == initial.fpsr);
+    assert(result.exclusive.valid);
+    assert(result.exclusive.address == DATA_PAGE + 0x40);
+    assert(result.exclusive.write_epoch == 5);
+    assert(result.exclusive.sync_identity == 7);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = 1;
+    result = run_fast_differential(encode_eor_shifted(
+            true, true, AARCH64_SHIFT_LSL, 0, 31, 4, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == UINT64_MAX - 1);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x123456789abcdef0);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_LSL, 0, 4, 4, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == 0);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0xff);
+    initial.x[5] = UINT64_C(0x0f);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_LSL, 0, 5, 4, 4),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[4] == UINT64_C(0xf0));
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0xff);
+    initial.x[5] = UINT64_C(0x0f);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_LSL, 0, 5, 4, 5),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[5] == UINT64_C(0xf0));
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0xaaaaaaaaffff0000);
+    initial.x[5] = UINT64_C(0x5555555500ff00ff);
+    initial.x[6] = UINT64_MAX;
+    result = run_fast_differential(encode_eor_shifted(
+            false, false, AARCH64_SHIFT_LSL, 0, 5, 4, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == UINT64_C(0x00000000ff0000ff));
+
+    init_differential_cpu(&initial);
+    initial.x[5] = UINT64_C(0x123456789abcdef0);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_LSL, 0, 5, 31, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == initial.x[5]);
+    assert(result.sp == initial.sp);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x123456789abcdef0);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_ROR, 17, 31, 4, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == initial.x[4]);
+    assert(result.sp == initial.sp);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x123456789abcdef0);
+    initial.x[5] = UINT64_C(0x0fedcba987654321);
+    result = run_fast_differential(encode_eor_shifted(
+            true, false, AARCH64_SHIFT_LSL, 4, 5, 4, 31),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[4] == initial.x[4]);
+    assert(result.x[5] == initial.x[5]);
+    assert(result.sp == initial.sp);
+}
+
 static void test_logical_shifted_sibling_fallback(void) {
     const dword_t instructions[] = {
         UINT32_C(0x8a020020),
-        UINT32_C(0xca020020),
         UINT32_C(0xea020020),
     };
     const enum aarch64_opcode opcodes[] = {
         AARCH64_OP_AND_SHIFTED_REGISTER,
-        AARCH64_OP_EOR_SHIFTED_REGISTER,
         AARCH64_OP_ANDS_SHIFTED_REGISTER,
     };
     struct test_fixture fixture;
@@ -1094,6 +1240,8 @@ static void test_fast_dispatch_structure(void) {
     const dword_t hot_instructions[] = {
         INSTRUCTION_ORR_X3_XZR_X0,
         encode_add_shifted(true, AARCH64_SHIFT_LSL, 0, 2, 0, 3),
+        encode_eor_shifted(true, false, AARCH64_SHIFT_LSL,
+                0, 2, 0, 4),
         INSTRUCTION_NOP,
         encode_add_sub_immediate(true, false, false, 1, 0, 0),
         encode_add_sub_immediate(true, false, true, 1, 0, 0),
@@ -1114,8 +1262,8 @@ static void test_fast_dispatch_structure(void) {
         encode_test_branch(true, 42, 4, 9),
         UINT32_C(0xd4000541),
     };
-    _Static_assert(array_size(hot_instructions) == 21,
-            "threaded 热点结构门必须覆盖全部 21 个 opcode");
+    _Static_assert(array_size(hot_instructions) == 22,
+            "threaded 热点结构门必须覆盖全部 22 个 opcode");
     qword_t seen_opcodes = 0;
     for (unsigned index = 0; index < array_size(hot_instructions); index++) {
         struct aarch64_decoded decoded;
@@ -1183,6 +1331,15 @@ static void test_fast_dispatch_structure(void) {
     assert(cpu.x[3] == 30);
     assert_stats(&runner, 3, array_size(hot_instructions) + 1,
             array_size(hot_instructions) + 2, 2);
+
+    cpu.x[0] = UINT64_C(0xff00);
+    cpu.x[2] = UINT64_C(0x0ff0);
+    cpu.x[4] = UINT64_C(0xdeadbeefdeadbeef);
+    assert(run_at(&runner, &cpu, CODE_PAGE + 8).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[4] == UINT64_C(0xf0f0));
+    assert_stats(&runner, 4, array_size(hot_instructions) + 1,
+            array_size(hot_instructions) + 3, 2);
 }
 
 static void test_product_c_fallback(void) {
@@ -2517,6 +2674,7 @@ int main(void) {
     test_fast_add_shifted_differential();
     test_add_shifted_sibling_fallback();
     test_fast_orr_shifted_differential();
+    test_fast_eor_shifted_differential();
     test_logical_shifted_sibling_fallback();
     test_fast_branch_differential();
     test_fast_svc_differential();

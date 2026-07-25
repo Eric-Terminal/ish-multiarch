@@ -18,6 +18,7 @@
 #define INSTRUCTION_ADD_X1_SHIFTED UINT32_C(0x8b020021)
 #define INSTRUCTION_ADDS_X1_SHIFTED UINT32_C(0xab020021)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
+#define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 
@@ -133,6 +134,13 @@ static void write_orr_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
+static void write_eor_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_EOR_X1_XZR_X1);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
 static void write_nop_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     for (unsigned index = 0; index < NOP_COUNT; index++)
         put_instruction(code + index * 4, INSTRUCTION_NOP);
@@ -178,6 +186,15 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
         .write_program = write_orr_program,
+    },
+    {
+        .name = "EOR/MOV 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_eor_program,
     },
     {
         .name = "NOP 调度环",

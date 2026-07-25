@@ -161,7 +161,7 @@ static void execute_add_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static void execute_orr_shifted_register_fast(struct cpu_state *cpu,
+static void execute_logical_shifted_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct aarch64_execute_result *result) {
@@ -179,7 +179,14 @@ static void execute_orr_shifted_register_fast(struct cpu_state *cpu,
             instruction->operands.logical_shifted.shift);
     if (instruction->operands.logical_shifted.invert)
         right = ~right & mask;
-    write_general_register(cpu, rd, width, false, left | right);
+    qword_t value;
+    if (instruction->opcode == AARCH64_OP_ORR_SHIFTED_REGISTER) {
+        value = left | right;
+    } else {
+        assert(instruction->opcode == AARCH64_OP_EOR_SHIFTED_REGISTER);
+        value = left ^ right;
+    }
+    write_general_register(cpu, rd, width, false, value);
     cpu->pc += 4;
 }
 
@@ -286,7 +293,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_ADD_SHIFTED_REGISTER:
             return execute_add_shifted_register_fast;
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
-            return execute_orr_shifted_register_fast;
+        case AARCH64_OP_EOR_SHIFTED_REGISTER:
+            return execute_logical_shifted_register_fast;
         case AARCH64_OP_B:
         case AARCH64_OP_BL:
             return execute_branch_immediate_fast;
