@@ -161,6 +161,43 @@ static void execute_add_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_add_extended_register_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_ADD_EXTENDED_REGISTER);
+    byte_t width = instruction->width;
+    enum aarch64_extend_type extend_type =
+            instruction->operands.add_sub_extended.extend_type;
+    unsigned source_width =
+            8U << ((unsigned) extend_type & 3U);
+    if (source_width > width)
+        source_width = width;
+    qword_t source_mask = source_width == 64 ? UINT64_MAX :
+            (UINT64_C(1) << source_width) - UINT64_C(1);
+    qword_t right = read_general_register(cpu,
+            instruction->operands.add_sub_extended.rm,
+            width, false) & source_mask;
+    if (extend_type >= AARCH64_EXTEND_SXTB) {
+        qword_t sign = UINT64_C(1) << (source_width - 1);
+        right = (right ^ sign) - sign;
+    }
+    right = (right <<
+            instruction->operands.add_sub_extended.shift) &
+            register_mask(width);
+    qword_t left = read_general_register(cpu,
+            instruction->operands.add_sub_extended.rn,
+            width, true);
+    qword_t value = (left + right) & register_mask(width);
+
+    write_general_register(cpu,
+            instruction->operands.add_sub_extended.rd,
+            width, true, value);
+    cpu->pc += 4;
+}
+
 static void execute_sub_shifted_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -692,6 +729,8 @@ static aarch64_threaded_handler select_handler(
             return execute_add_sub_immediate_fast;
         case AARCH64_OP_ADD_SHIFTED_REGISTER:
             return execute_add_shifted_register_fast;
+        case AARCH64_OP_ADD_EXTENDED_REGISTER:
+            return execute_add_extended_register_fast;
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
             return execute_sub_shifted_register_fast;
         case AARCH64_OP_CSINC:

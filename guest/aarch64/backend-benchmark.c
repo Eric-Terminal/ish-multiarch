@@ -26,6 +26,8 @@
 #define INSTRUCTION_CSINC_W6_WZR_WZR_EQ UINT32_C(0x1a9f07e6)
 #define INSTRUCTION_REV32_X4_X5 UINT32_C(0xdac008a4)
 #define INSTRUCTION_REV_W6_W2 UINT32_C(0x5ac00846)
+#define INSTRUCTION_ADD_X4_X5_W3_SXTW_3 UINT32_C(0x8b23cca4)
+#define INSTRUCTION_ADD_W6_W2_W3_UXTW_3 UINT32_C(0x0b234c46)
 #define INSTRUCTION_SUBS_W4_W0_W2_LSL_2 UINT32_C(0x6b020804)
 #define INSTRUCTION_SUBS_X0_X0_X2_LSR_1 UINT32_C(0xeb420400)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
@@ -193,6 +195,15 @@ static void write_csinc_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
 static void write_rev32_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_REV32_X4_X5);
     put_instruction(code + 4, INSTRUCTION_REV_W6_W2);
+    put_instruction(code + 8, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 12, encode_conditional_branch(-12, 1));
+    put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
+static void write_add_extended_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADD_X4_X5_W3_SXTW_3);
+    put_instruction(code + 4, INSTRUCTION_ADD_W6_W2_W3_UXTW_3);
     put_instruction(code + 8, INSTRUCTION_SUBS_X0);
     put_instruction(code + 12, encode_conditional_branch(-12, 1));
     put_instruction(code + 16, INSTRUCTION_SVC);
@@ -382,6 +393,17 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 5,
         .write_program = write_rev32_program,
+    },
+    {
+        .name = "ADD extended 双宽度热点环",
+        .instructions_per_iteration = 4,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = UINT64_C(0x887766519191a211),
+        .expected_x6 = UINT32_C(0x4d5e8003),
+        .fast_per_iteration = 4,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 5,
+        .write_program = write_add_extended_program,
     },
     {
         .name = "SUBS shifted 热点环",
