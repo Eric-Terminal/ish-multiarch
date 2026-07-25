@@ -162,6 +162,27 @@ static void execute_add_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static qword_t extend_general_register(const struct cpu_state *cpu,
+        byte_t rm, byte_t width, enum aarch64_extend_type extend_type,
+        byte_t shift) {
+    assert(extend_type <= AARCH64_EXTEND_SXTX);
+    assert(shift <= 4);
+    unsigned source_width =
+            8U << ((unsigned) extend_type & 3U);
+    // UXTX/SXTX 在 W 形式中仍是合法编码，但源宽度按 32 位截断。
+    if (source_width > width)
+        source_width = width;
+    qword_t source_mask = source_width == 64 ? UINT64_MAX :
+            (UINT64_C(1) << source_width) - UINT64_C(1);
+    qword_t value =
+            read_general_register(cpu, rm, width, false) & source_mask;
+    if (extend_type >= AARCH64_EXTEND_SXTB) {
+        qword_t sign = UINT64_C(1) << (source_width - 1);
+        value = (value ^ sign) - sign;
+    }
+    return (value << shift) & register_mask(width);
+}
+
 static void execute_add_extended_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -172,22 +193,10 @@ static void execute_add_extended_register_fast(struct cpu_state *cpu,
     byte_t width = instruction->width;
     enum aarch64_extend_type extend_type =
             instruction->operands.add_sub_extended.extend_type;
-    unsigned source_width =
-            8U << ((unsigned) extend_type & 3U);
-    if (source_width > width)
-        source_width = width;
-    qword_t source_mask = source_width == 64 ? UINT64_MAX :
-            (UINT64_C(1) << source_width) - UINT64_C(1);
-    qword_t right = read_general_register(cpu,
+    qword_t right = extend_general_register(cpu,
             instruction->operands.add_sub_extended.rm,
-            width, false) & source_mask;
-    if (extend_type >= AARCH64_EXTEND_SXTB) {
-        qword_t sign = UINT64_C(1) << (source_width - 1);
-        right = (right ^ sign) - sign;
-    }
-    right = (right <<
-            instruction->operands.add_sub_extended.shift) &
-            register_mask(width);
+            width, extend_type,
+            instruction->operands.add_sub_extended.shift);
     qword_t left = read_general_register(cpu,
             instruction->operands.add_sub_extended.rn,
             width, true);
@@ -196,6 +205,29 @@ static void execute_add_extended_register_fast(struct cpu_state *cpu,
     write_general_register(cpu,
             instruction->operands.add_sub_extended.rd,
             width, true, value);
+    cpu->pc += 4;
+}
+
+static void execute_subs_extended_register_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_SUBS_EXTENDED_REGISTER);
+    byte_t rd = instruction->operands.add_sub_extended.rd;
+    byte_t rn = instruction->operands.add_sub_extended.rn;
+    byte_t rm = instruction->operands.add_sub_extended.rm;
+    byte_t width = instruction->width;
+    qword_t left = read_general_register(cpu, rn, width, true);
+    qword_t right = extend_general_register(cpu, rm, width,
+            instruction->operands.add_sub_extended.extend_type,
+            instruction->operands.add_sub_extended.shift);
+    qword_t value = (left - right) & register_mask(width);
+
+    aarch64_set_nzcv(
+            cpu, subtraction_flags(left, right, value, width));
+    write_general_register(cpu, rd, width, false, value);
     cpu->pc += 4;
 }
 
@@ -941,6 +973,8 @@ static aarch64_threaded_handler select_handler(
             return execute_add_shifted_register_fast;
         case AARCH64_OP_ADD_EXTENDED_REGISTER:
             return execute_add_extended_register_fast;
+        case AARCH64_OP_SUBS_EXTENDED_REGISTER:
+            return execute_subs_extended_register_fast;
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
             return execute_sub_shifted_register_fast;
         case AARCH64_OP_CSEL:

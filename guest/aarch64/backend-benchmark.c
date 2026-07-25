@@ -89,6 +89,10 @@
 #define INSTRUCTION_STR_Q31_X0_32 UINT32_C(0x3d80081f)
 #define INSTRUCTION_SUB_X0_X0_16 UINT32_C(0xd1004000)
 #define INSTRUCTION_ADD_X0_X0_16 UINT32_C(0x91004000)
+#define INSTRUCTION_AND_W2_W1_FF UINT32_C(0x12001c22)
+#define INSTRUCTION_SUBS_WZR_W2_W1_UXTB UINT32_C(0x6b21005f)
+#define INSTRUCTION_CSINC_X1_X1_X1_NE UINT32_C(0x9a811421)
+#define INSTRUCTION_ORR_W2_WZR_3 UINT32_C(0x320007e2)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -351,6 +355,18 @@ static void write_store_simd_imm12_program(
     put_instruction(code + 4, INSTRUCTION_SUB_X0_X0_16);
     put_instruction(code + 8, INSTRUCTION_STR_Q31_X0_32);
     put_instruction(code + 12, INSTRUCTION_ADD_X0_X0_16);
+    put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 20, encode_conditional_branch(-20, 1));
+    put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_subs_extended_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_AND_W2_W1_FF);
+    put_instruction(code + 4, INSTRUCTION_SUBS_WZR_W2_W1_UXTB);
+    // 只有目标 CMP 把旧 NE 改为 EQ，CSINC 才会增加 X1。
+    put_instruction(code + 8, INSTRUCTION_CSINC_X1_X1_X1_NE);
+    put_instruction(code + 12, INSTRUCTION_ORR_W2_WZR_3);
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, encode_conditional_branch(-20, 1));
     put_instruction(code + 24, INSTRUCTION_SVC);
@@ -936,6 +952,18 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 7,
         .write_program = write_store_simd_imm12_program,
+    },
+    {
+        .name = "SUBS extended 画像标志依赖热点环",
+        .instructions_per_iteration = 6,
+        .x1_increment_per_iteration = 1,
+        .iteration_register = 4,
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 6,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 7,
+        .write_program = write_subs_extended_program,
     },
 };
 
