@@ -39,6 +39,8 @@
 #define INSTRUCTION_LDRB_W6_X3_PRE_NEG_8 UINT32_C(0x385f8c66)
 #define INSTRUCTION_SUBS_W4_W0_W2_LSL_2 UINT32_C(0x6b020804)
 #define INSTRUCTION_SUBS_X0_X0_X2_LSR_1 UINT32_C(0xeb420400)
+#define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
+#define INSTRUCTION_SUB_X1_X1_X7 UINT32_C(0xcb070021)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
 #define INSTRUCTION_ADRP_X6_PLUS_122_PAGES UINT32_C(0xd00003c6)
 #define INSTRUCTION_AND_X4_X5_FFFFFFFFFFFFFFF0 UINT32_C(0x927ceca4)
@@ -268,6 +270,14 @@ static void write_subs_shifted_program(
     put_instruction(code + 4, INSTRUCTION_SUBS_X0_X0_X2_LSR_1);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_adr_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADR_X1_PLUS_12);
+    put_instruction(code + 4, INSTRUCTION_SUB_X1_X1_X7);
+    put_instruction(code + 8, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 12, INSTRUCTION_B_NE_NEG_12);
+    put_instruction(code + 16, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -770,6 +780,16 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = NOP_COUNT + 3,
         .write_program = write_nop_program,
+    },
+    {
+        .name = "ADR 画像结果依赖热点环",
+        .instructions_per_iteration = 4,
+        .x1_increment_per_iteration = 0,
+        .initial_x7 = CODE_PAGE + 5,
+        .fast_per_iteration = 4,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 5,
+        .write_program = write_adr_program,
     },
 };
 
