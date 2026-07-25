@@ -62,6 +62,10 @@
 #define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
 #define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
+#define INSTRUCTION_MOV_W11_W2 UINT32_C(0x2a0203eb)
+#define INSTRUCTION_MOV_X8_X1 UINT32_C(0xaa0103e8)
+#define INSTRUCTION_UMADDL_X1_W0_W11_XZR UINT32_C(0x9bab7c01)
+#define INSTRUCTION_UMADDL_X1_W1_W2_X8 UINT32_C(0x9ba22021)
 #define INSTRUCTION_LSLV_X5_X7_X1 UINT32_C(0x9ac120e5)
 #define INSTRUCTION_ADD_X7_X5_1 UINT32_C(0x910004a7)
 #define INSTRUCTION_LSLV_W0_W0_W1 UINT32_C(0x1ac12000)
@@ -324,6 +328,17 @@ static void write_orr_immediate_program(
     put_instruction(code + 20, INSTRUCTION_SUBS_X0);
     put_instruction(code + 24, encode_conditional_branch(-24, 1));
     put_instruction(code + 28, INSTRUCTION_SVC);
+}
+
+static void write_umaddl_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_W11_W2);
+    put_instruction(code + 4, INSTRUCTION_MOV_X8_X1);
+    put_instruction(code + 8, INSTRUCTION_UMADDL_X1_W0_W11_XZR);
+    put_instruction(code + 12, INSTRUCTION_UMADDL_X1_W1_W2_X8);
+    put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 20, encode_conditional_branch(-20, 1));
+    put_instruction(code + 24, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -875,6 +890,19 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 8,
         .write_program = write_orr_immediate_program,
+    },
+    {
+        .name = "UMADDL/UMULL 双形态画像跨轮依赖热点环",
+        .instructions_per_iteration = 6,
+        .x1_increment_per_iteration = 45,
+        .iteration_register = 4,
+        .initial_x0 = UINT64_C(0xaaaaaaaa00000005),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 6,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 7,
+        .write_program = write_umaddl_program,
     },
 };
 
