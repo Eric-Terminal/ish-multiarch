@@ -16,6 +16,7 @@
 #define INSTRUCTION_NOP UINT32_C(0xd503201f)
 #define INSTRUCTION_ADD_X1_IMMEDIATE UINT32_C(0x91000421)
 #define INSTRUCTION_ADD_X1_SHIFTED UINT32_C(0x8b020021)
+#define INSTRUCTION_ADDS_X1_SHIFTED UINT32_C(0xab020021)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
@@ -110,8 +111,16 @@ static void write_fast_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
-static void write_mixed_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+static void write_add_shifted_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_ADD_X1_SHIFTED);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_mixed_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADDS_X1_SHIFTED);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
@@ -142,6 +151,15 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
         .write_program = write_fast_program,
+    },
+    {
+        .name = "ADD shifted 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 3,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_add_shifted_program,
     },
     {
         .name = "混合回落环",

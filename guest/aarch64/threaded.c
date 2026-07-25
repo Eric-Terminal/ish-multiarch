@@ -140,6 +140,27 @@ static void execute_add_sub_immediate_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_add_shifted_register_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    byte_t rd = instruction->operands.add_sub_shifted.rd;
+    byte_t rn = instruction->operands.add_sub_shifted.rn;
+    byte_t rm = instruction->operands.add_sub_shifted.rm;
+    byte_t width = instruction->width;
+    qword_t left = read_general_register(cpu, rn, width, false);
+    qword_t right = shift_register(
+            read_general_register(cpu, rm, width, false),
+            width, instruction->operands.add_sub_shifted.shift_type,
+            instruction->operands.add_sub_shifted.shift);
+    qword_t value = (left + right) & register_mask(width);
+
+    write_general_register(cpu, rd, width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_orr_shifted_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -262,6 +283,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_SUB_IMMEDIATE:
         case AARCH64_OP_SUBS_IMMEDIATE:
             return execute_add_sub_immediate_fast;
+        case AARCH64_OP_ADD_SHIFTED_REGISTER:
+            return execute_add_shifted_register_fast;
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
             return execute_orr_shifted_register_fast;
         case AARCH64_OP_B:
