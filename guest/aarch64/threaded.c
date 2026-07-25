@@ -192,6 +192,28 @@ static void execute_logical_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_extract_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_EXTR);
+    byte_t width = instruction->width;
+    qword_t high = read_general_register(cpu,
+            instruction->operands.extract.rn, width, false);
+    qword_t low = read_general_register(cpu,
+            instruction->operands.extract.rm, width, false);
+    byte_t lsb = instruction->operands.extract.lsb;
+    assert(lsb < width);
+    qword_t value = low;
+    if (lsb != 0)
+        value = (low >> lsb) | (high << (width - lsb));
+    write_general_register(cpu,
+            instruction->operands.extract.rd, width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_load_imm12_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -331,6 +353,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
         case AARCH64_OP_EOR_SHIFTED_REGISTER:
             return execute_logical_shifted_register_fast;
+        case AARCH64_OP_EXTR:
+            return execute_extract_fast;
         case AARCH64_OP_LOAD_IMM12:
             return execute_load_imm12_fast;
         case AARCH64_OP_B:

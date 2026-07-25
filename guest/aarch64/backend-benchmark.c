@@ -19,6 +19,7 @@
 #define INSTRUCTION_ADD_X1_SHIFTED UINT32_C(0x8b020021)
 #define INSTRUCTION_ADDS_X1_SHIFTED UINT32_C(0xab020021)
 #define INSTRUCTION_AND_X4_X1_X2_LSL_2 UINT32_C(0x8a020824)
+#define INSTRUCTION_EXTR_W4_W1_W1_19 UINT32_C(0x13814c24)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
 #define INSTRUCTION_LDR_X4_X3 UINT32_C(0xf9400064)
@@ -147,6 +148,13 @@ static void write_and_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
+static void write_extract_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_EXTR_W4_W1_W1_19);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
 static void write_orr_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_ORR_X1_XZR_X1);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
@@ -214,6 +222,16 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
         .write_program = write_and_program,
+    },
+    {
+        .name = "EXTR/ROR 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = UINT64_C(0xe000),
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_extract_program,
     },
     {
         .name = "ORR/MOV 热点环",
