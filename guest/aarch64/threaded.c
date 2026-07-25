@@ -700,19 +700,24 @@ static void execute_store_simd_pair_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static void execute_store_imm12_fast(struct cpu_state *cpu,
+static void execute_scalar_store_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct aarch64_execute_result *result) {
-    assert(instruction->opcode == AARCH64_OP_STORE_IMM12);
-    assert(instruction->operands.load_store.address_mode ==
-            AARCH64_ADDRESS_OFFSET);
+    assert(instruction->opcode == AARCH64_OP_STORE_IMM12 ||
+            instruction->opcode == AARCH64_OP_STORE_IMM9);
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store.address_mode;
+    assert(instruction->opcode == AARCH64_OP_STORE_IMM9 ||
+            address_mode == AARCH64_ADDRESS_OFFSET);
     byte_t rt = instruction->operands.load_store.rt;
     byte_t rn = instruction->operands.load_store.rn;
     byte_t size = instruction->operands.load_store.size;
     guest_addr_t base = read_general_register(cpu, rn, 64, true);
-    guest_addr_t address = base +
+    guest_addr_t adjusted = base +
             (qword_t) instruction->operands.load_store.offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
     qword_t value = read_general_register(
             cpu, rt, instruction->width, false);
     byte_t bytes[8];
@@ -723,6 +728,8 @@ static void execute_store_imm12_fast(struct cpu_state *cpu,
         result->stop = AARCH64_EXECUTE_DATA_FAULT;
         return;
     }
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_general_register(cpu, rn, 64, true, adjusted);
     cpu->pc += 4;
 }
 
@@ -946,7 +953,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_STORE_SIMD_PAIR:
             return execute_store_simd_pair_fast;
         case AARCH64_OP_STORE_IMM12:
-            return execute_store_imm12_fast;
+        case AARCH64_OP_STORE_IMM9:
+            return execute_scalar_store_fast;
         case AARCH64_OP_STORE_REGISTER_OFFSET:
             return execute_store_register_offset_fast;
         case AARCH64_OP_ADR:

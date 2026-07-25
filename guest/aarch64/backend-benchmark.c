@@ -41,6 +41,11 @@
 #define INSTRUCTION_SUBS_X0_X0_X2_LSR_1 UINT32_C(0xeb420400)
 #define INSTRUCTION_ANDS_XZR_X0_X5 UINT32_C(0xea05001f)
 #define INSTRUCTION_ANDS_WZR_W0_W2 UINT32_C(0x6a02001f)
+#define INSTRUCTION_SUB_X2_X7_10 UINT32_C(0xd10028e2)
+#define INSTRUCTION_STR_XZR_X2_POST_8 UINT32_C(0xf800845f)
+#define INSTRUCTION_ADD_X7_X2_2 UINT32_C(0x91000847)
+#define INSTRUCTION_STURH_WZR_X7_NEG_2 UINT32_C(0x781fe0ff)
+#define INSTRUCTION_SUB_X2_X1_4 UINT32_C(0xd1001022)
 #define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
 #define INSTRUCTION_SUB_X1_X1_X7 UINT32_C(0xcb070021)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
@@ -291,6 +296,18 @@ static void write_ands_shifted_program(
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, encode_conditional_branch(-20, 1));
     put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_store_imm9_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_SUB_X2_X7_10);
+    put_instruction(code + 4, INSTRUCTION_STR_XZR_X2_POST_8);
+    put_instruction(code + 8, INSTRUCTION_ADD_X7_X2_2);
+    put_instruction(code + 12, INSTRUCTION_STURH_WZR_X7_NEG_2);
+    put_instruction(code + 16, INSTRUCTION_SUB_X2_X1_4);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 24, encode_conditional_branch(-24, 1));
+    put_instruction(code + 28, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -815,6 +832,21 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 7,
         .write_program = write_ands_shifted_program,
+    },
+    {
+        .name = "STORE imm9 双画像写回依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = 0,
+        .initial_x7 = DATA_PAGE + 42,
+        .expected_store_offset = 32,
+        .expected_store_size = 16,
+        .expected_store_values = {
+            0, UINT64_C(0xa5a5a5a5a5a50000),
+        },
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_store_imm9_program,
     },
 };
 
