@@ -398,6 +398,30 @@ static void execute_ubfm_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_sbfm_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_SBFM);
+    byte_t width = instruction->width;
+    qword_t source = read_general_register(cpu,
+            instruction->operands.bitfield_move.rn, width, false);
+    qword_t rotated = shift_register(source, width, AARCH64_SHIFT_ROR,
+            instruction->operands.bitfield_move.immr);
+    bool sign =
+            (source >> instruction->operands.bitfield_move.imms) & 1;
+    qword_t top = sign ? register_mask(width) : 0;
+    qword_t top_mask = instruction->operands.bitfield_move.top_mask;
+    qword_t value = (top & ~top_mask) |
+            (rotated & instruction->operands.bitfield_move.write_mask &
+                    top_mask);
+    write_general_register(cpu,
+            instruction->operands.bitfield_move.rd, width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_extract_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -800,6 +824,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_AND_IMMEDIATE:
         case AARCH64_OP_ANDS_IMMEDIATE:
             return execute_and_immediate_fast;
+        case AARCH64_OP_SBFM:
+            return execute_sbfm_fast;
         case AARCH64_OP_UBFM:
             return execute_ubfm_fast;
         case AARCH64_OP_EXTR:
