@@ -206,6 +206,29 @@ static void execute_csinc_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_rev32_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_REV32);
+    byte_t width = instruction->width;
+    qword_t source = read_general_register(cpu,
+            instruction->operands.data_processing_1source.rn,
+            width, false);
+    qword_t value =
+            ((source & UINT64_C(0x000000ff000000ff)) << 24) |
+            ((source & UINT64_C(0x0000ff000000ff00)) << 8) |
+            ((source & UINT64_C(0x00ff000000ff0000)) >> 8) |
+            ((source & UINT64_C(0xff000000ff000000)) >> 24);
+
+    write_general_register(cpu,
+            instruction->operands.data_processing_1source.rd,
+            width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_ccmp_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -673,6 +696,8 @@ static aarch64_threaded_handler select_handler(
             return execute_sub_shifted_register_fast;
         case AARCH64_OP_CSINC:
             return execute_csinc_fast;
+        case AARCH64_OP_REV32:
+            return execute_rev32_fast;
         case AARCH64_OP_CCMP:
             return execute_ccmp_fast;
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:
