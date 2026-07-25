@@ -706,6 +706,30 @@ static void execute_store_simd_pair_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_store_simd_imm12_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_STORE_SIMD_IMM12);
+    assert(instruction->operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    byte_t rt = instruction->operands.load_store.rt;
+    byte_t rn = instruction->operands.load_store.rn;
+    byte_t size = instruction->operands.load_store.size;
+    assert(size == 1 || size == 2 || size == 4 || size == 8 ||
+            size == sizeof(union aarch64_vector_reg));
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t address = base +
+            (qword_t) instruction->operands.load_store.offset;
+    if (!guest_tlb_write(tlb, address, cpu->v[rt].b, size,
+            &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+    cpu->pc += 4;
+}
+
 static void execute_scalar_store_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -960,6 +984,8 @@ static aarch64_threaded_handler select_handler(
             return execute_store_pair_fast;
         case AARCH64_OP_STORE_SIMD_PAIR:
             return execute_store_simd_pair_fast;
+        case AARCH64_OP_STORE_SIMD_IMM12:
+            return execute_store_simd_imm12_fast;
         case AARCH64_OP_STORE_IMM12:
         case AARCH64_OP_STORE_IMM9:
             return execute_scalar_store_fast;

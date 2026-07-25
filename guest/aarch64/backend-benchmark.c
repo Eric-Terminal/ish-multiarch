@@ -85,6 +85,10 @@
 #define INSTRUCTION_STR_XZR_X3_X1_LSL_3 UINT32_C(0xf821787f)
 #define INSTRUCTION_STP_X5_X2_X3_32 UINT32_C(0xa9020865)
 #define INSTRUCTION_STP_Q0_Q0_X3_32 UINT32_C(0xad010060)
+#define INSTRUCTION_STR_Q0_X0 UINT32_C(0x3d800000)
+#define INSTRUCTION_STR_Q31_X0_32 UINT32_C(0x3d80081f)
+#define INSTRUCTION_SUB_X0_X0_16 UINT32_C(0xd1004000)
+#define INSTRUCTION_ADD_X0_X0_16 UINT32_C(0x91004000)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -336,6 +340,17 @@ static void write_umaddl_program(
     put_instruction(code + 4, INSTRUCTION_MOV_X8_X1);
     put_instruction(code + 8, INSTRUCTION_UMADDL_X1_W0_W11_XZR);
     put_instruction(code + 12, INSTRUCTION_UMADDL_X1_W1_W2_X8);
+    put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 20, encode_conditional_branch(-20, 1));
+    put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_store_simd_imm12_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_STR_Q0_X0);
+    put_instruction(code + 4, INSTRUCTION_SUB_X0_X0_16);
+    put_instruction(code + 8, INSTRUCTION_STR_Q31_X0_32);
+    put_instruction(code + 12, INSTRUCTION_ADD_X0_X0_16);
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, encode_conditional_branch(-20, 1));
     put_instruction(code + 24, INSTRUCTION_SVC);
@@ -903,6 +918,24 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 7,
         .write_program = write_umaddl_program,
+    },
+    {
+        .name = "STORE SIMD imm12 双画像地址往返热点环",
+        .instructions_per_iteration = 6,
+        .x1_increment_per_iteration = 0,
+        .iteration_register = 4,
+        .initial_x0 = DATA_PAGE + 16,
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .expected_store_offset = 16,
+        .expected_store_size = 32,
+        .expected_store_values = {
+            STORE_VALUE, PAIR_FIRST_VALUE, 0, 0,
+        },
+        .fast_per_iteration = 6,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 7,
+        .write_program = write_store_simd_imm12_program,
     },
 };
 
