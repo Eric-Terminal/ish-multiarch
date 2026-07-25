@@ -183,13 +183,14 @@ static qword_t extend_general_register(const struct cpu_state *cpu,
     return (value << shift) & register_mask(width);
 }
 
-static void execute_add_extended_register_fast(struct cpu_state *cpu,
+static void execute_add_sub_extended_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct aarch64_execute_result *result) {
     (void) tlb;
     (void) result;
-    assert(instruction->opcode == AARCH64_OP_ADD_EXTENDED_REGISTER);
+    assert(instruction->opcode == AARCH64_OP_ADD_EXTENDED_REGISTER ||
+            instruction->opcode == AARCH64_OP_SUB_EXTENDED_REGISTER);
     byte_t width = instruction->width;
     enum aarch64_extend_type extend_type =
             instruction->operands.add_sub_extended.extend_type;
@@ -200,7 +201,10 @@ static void execute_add_extended_register_fast(struct cpu_state *cpu,
     qword_t left = read_general_register(cpu,
             instruction->operands.add_sub_extended.rn,
             width, true);
-    qword_t value = (left + right) & register_mask(width);
+    bool subtract =
+            instruction->opcode == AARCH64_OP_SUB_EXTENDED_REGISTER;
+    qword_t value =
+            (subtract ? left - right : left + right) & register_mask(width);
 
     write_general_register(cpu,
             instruction->operands.add_sub_extended.rd,
@@ -972,7 +976,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_ADD_SHIFTED_REGISTER:
             return execute_add_shifted_register_fast;
         case AARCH64_OP_ADD_EXTENDED_REGISTER:
-            return execute_add_extended_register_fast;
+        case AARCH64_OP_SUB_EXTENDED_REGISTER:
+            return execute_add_sub_extended_register_fast;
         case AARCH64_OP_SUBS_EXTENDED_REGISTER:
             return execute_subs_extended_register_fast;
         case AARCH64_OP_SUB_SHIFTED_REGISTER:

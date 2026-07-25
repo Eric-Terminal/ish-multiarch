@@ -93,6 +93,10 @@
 #define INSTRUCTION_SUBS_WZR_W2_W1_UXTB UINT32_C(0x6b21005f)
 #define INSTRUCTION_CSINC_X1_X1_X1_NE UINT32_C(0x9a811421)
 #define INSTRUCTION_ORR_W2_WZR_3 UINT32_C(0x320007e2)
+#define INSTRUCTION_ADD_SP_X7_16 UINT32_C(0x910040ff)
+#define INSTRUCTION_SUB_SP_SP_X0 UINT32_C(0xcb2063ff)
+#define INSTRUCTION_SUB_X6_SP_W10_SXTW_4 UINT32_C(0xcb2ad3e6)
+#define INSTRUCTION_CSINC_X1_X1_X1_EQ UINT32_C(0x9a810421)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -123,6 +127,7 @@ struct benchmark_workload {
     qword_t initial_x10;
     qword_t expected_x4;
     qword_t expected_x6;
+    qword_t expected_sp;
     size_t expected_store_offset;
     byte_t expected_store_size;
     qword_t expected_store_values[4];
@@ -367,6 +372,18 @@ static void write_subs_extended_program(
     // 只有目标 CMP 把旧 NE 改为 EQ，CSINC 才会增加 X1。
     put_instruction(code + 8, INSTRUCTION_CSINC_X1_X1_X1_NE);
     put_instruction(code + 12, INSTRUCTION_ORR_W2_WZR_3);
+    put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 20, encode_conditional_branch(-20, 1));
+    put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_sub_extended_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADD_SP_X7_16);
+    put_instruction(code + 4, INSTRUCTION_SUB_SP_SP_X0);
+    put_instruction(code + 8, INSTRUCTION_SUB_X6_SP_W10_SXTW_4);
+    // 两次目标 SUB 都不改旗时，旧 NE 才会让 X1 增加。
+    put_instruction(code + 12, INSTRUCTION_CSINC_X1_X1_X1_EQ);
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, encode_conditional_branch(-20, 1));
     put_instruction(code + 24, INSTRUCTION_SVC);
@@ -965,6 +982,23 @@ static const struct benchmark_workload workloads[] = {
         .program_instruction_count = 7,
         .write_program = write_subs_extended_program,
     },
+    {
+        .name = "SUB extended 栈指针扩展与标志保持热点环",
+        .instructions_per_iteration = 6,
+        .x1_increment_per_iteration = 1,
+        .iteration_register = 4,
+        .initial_x0 = 16,
+        .initial_x6 = STORE_VALUE,
+        .initial_x7 = UINT64_C(0xfffffffffffffff0),
+        .initial_x10 = UINT64_C(0x00000000ffffffff),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .expected_sp = UINT64_C(0xfffffffffffffff0),
+        .fast_per_iteration = 6,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 7,
+        .write_program = write_sub_extended_program,
+    },
 };
 
 static void store_little_endian(
@@ -1129,8 +1163,9 @@ static void verify_run(const struct benchmark_workload *workload,
                     run->cpu.x[5] == STORE_VALUE &&
                     run->cpu.x[6] == workload->expected_x6 &&
                     run->cpu.x[7] == workload->initial_x7 &&
-                    run->cpu.x[10] == workload->initial_x10,
-            workload->name, "循环次数或通用寄存器结果不符");
+                    run->cpu.x[10] == workload->initial_x10 &&
+                    run->cpu.sp == workload->expected_sp,
+            workload->name, "循环次数、栈指针或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
                     workload->program_instruction_count * 4 &&
                     run->cpu.nzcv == UINT32_C(0x60000000),
