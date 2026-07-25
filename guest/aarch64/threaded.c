@@ -329,6 +329,44 @@ static void execute_load_pair_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_store_pair_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_STORE_PAIR);
+    assert(!instruction->operands.load_store_pair.signed_load);
+    byte_t rt = instruction->operands.load_store_pair.rt;
+    byte_t rt2 = instruction->operands.load_store_pair.rt2;
+    byte_t rn = instruction->operands.load_store_pair.rn;
+    byte_t size = (byte_t) (instruction->width / 8);
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store_pair.offset;
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store_pair.address_mode;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+    qword_t first = read_general_register(
+            cpu, rt, instruction->width, false);
+    qword_t second = read_general_register(
+            cpu, rt2, instruction->width, false);
+    byte_t bytes[16];
+    for (byte_t index = 0; index < size; index++) {
+        bytes[index] = (byte_t) (first >> (index * 8));
+        bytes[size + index] = (byte_t) (second >> (index * 8));
+    }
+    if (!guest_tlb_write(tlb, address, bytes, (size_t) size * 2,
+            &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_general_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+}
+
 static void execute_store_imm12_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -470,6 +508,8 @@ static aarch64_threaded_handler select_handler(
             return execute_scalar_load_fast;
         case AARCH64_OP_LOAD_PAIR:
             return execute_load_pair_fast;
+        case AARCH64_OP_STORE_PAIR:
+            return execute_store_pair_fast;
         case AARCH64_OP_STORE_IMM12:
             return execute_store_imm12_fast;
         case AARCH64_OP_B:
