@@ -22,6 +22,8 @@
 #define INSTRUCTION_SUBS_X0_X0_X2_LSR_1 UINT32_C(0xeb420400)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
 #define INSTRUCTION_ADRP_X6_PLUS_122_PAGES UINT32_C(0xd00003c6)
+#define INSTRUCTION_AND_X4_X5_FFFFFFFFFFFFFFF0 UINT32_C(0x927ceca4)
+#define INSTRUCTION_AND_W6_W3_7FFFFFFF UINT32_C(0x12007866)
 #define INSTRUCTION_AND_X4_X1_X2_LSL_2 UINT32_C(0x8a020824)
 #define INSTRUCTION_UBFM_W4_W0_28_27 UINT32_C(0x531c6c04)
 #define INSTRUCTION_EXTR_W4_W1_W1_19 UINT32_C(0x13814c24)
@@ -167,6 +169,15 @@ static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 16, INSTRUCTION_SVC);
 }
 
+static void write_and_immediate_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_AND_X4_X5_FFFFFFFFFFFFFFF0);
+    put_instruction(code + 4, INSTRUCTION_AND_W6_W3_7FFFFFFF);
+    put_instruction(code + 8, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 12, encode_conditional_branch(-12, 1));
+    put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
 static void write_mixed_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_ADDS_X1_SHIFTED);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
@@ -297,6 +308,17 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 5,
         .write_program = write_adrp_program,
+    },
+    {
+        .name = "AND immediate 双掩码热缓存环",
+        .instructions_per_iteration = 4,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = UINT64_C(0x8877665544332210),
+        .expected_x6 = UINT64_C(0x0000000009abd000),
+        .fast_per_iteration = 4,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 5,
+        .write_program = write_and_immediate_program,
     },
     {
         .name = "混合回落环",

@@ -216,6 +216,23 @@ static void execute_logical_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_and_immediate_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_AND_IMMEDIATE);
+    byte_t rd = instruction->operands.logical_immediate.rd;
+    byte_t rn = instruction->operands.logical_immediate.rn;
+    byte_t width = instruction->width;
+    qword_t value = read_general_register(cpu, rn, width, false) &
+            instruction->operands.logical_immediate.immediate;
+
+    write_general_register(cpu, rd, width, true, value);
+    cpu->pc += 4;
+}
+
 static void execute_ubfm_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -542,6 +559,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
         case AARCH64_OP_EOR_SHIFTED_REGISTER:
             return execute_logical_shifted_register_fast;
+        case AARCH64_OP_AND_IMMEDIATE:
+            return execute_and_immediate_fast;
         case AARCH64_OP_UBFM:
             return execute_ubfm_fast;
         case AARCH64_OP_EXTR:

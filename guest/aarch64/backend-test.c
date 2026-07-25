@@ -21,6 +21,11 @@
 #define INSTRUCTION_ADRP_X1_PLUS_86_PAGES UINT32_C(0xd00002a1)
 #define INSTRUCTION_ADRP_X2_PLUS_122_PAGES UINT32_C(0xd00003c2)
 #define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
+#define INSTRUCTION_AND_SP_X0_FFFFFFFFFFFFFFF0 UINT32_C(0x927cec1f)
+#define INSTRUCTION_AND_W0_W3_7FFFFFFF UINT32_C(0x12007860)
+#define INSTRUCTION_ORR_W2_W3_88888888 UINT32_C(0x3201e062)
+#define INSTRUCTION_EOR_X10_X11_0000FFFF0000FFFF UINT32_C(0xd2003d6a)
+#define INSTRUCTION_ANDS_XZR_X12_8000000000000001 UINT32_C(0xf241059f)
 #define INSTRUCTION_AND_X2_X2_X6 UINT32_C(0x8a060042)
 #define INSTRUCTION_AND_W1_W24_W1 UINT32_C(0x0a010301)
 #define INSTRUCTION_UBFM_X1_X1_1_63 UINT32_C(0xd341fc21)
@@ -367,6 +372,67 @@ static dword_t encode_adrp(int64_t page_displacement, byte_t rd) {
     return UINT32_C(0x90000000) |
             (dword_t) (immediate & 3) << 29 |
             (dword_t) (immediate >> 2) << 5 | rd;
+}
+
+// 测试侧从规范化元素独立生成编码与掩码，不复用生产 decoder。
+static qword_t reference_low_ones(byte_t count) {
+    assert(count > 0 && count <= 64);
+    return count == 64 ? UINT64_MAX :
+            (UINT64_C(1) << count) - 1;
+}
+
+static qword_t reference_logical_immediate(bool is_64,
+        byte_t element_size, byte_t ones, byte_t rotation) {
+    byte_t width = is_64 ? 64 : 32;
+    assert(element_size >= 2 && element_size <= width);
+    assert((element_size & (element_size - 1)) == 0);
+    assert(ones > 0 && ones < element_size);
+    assert(rotation < element_size);
+    qword_t element_mask = reference_low_ones(element_size);
+    qword_t element = reference_low_ones(ones);
+    if (rotation != 0) {
+        element = ((element >> rotation) |
+                (element << (element_size - rotation))) &
+                element_mask;
+    }
+    qword_t immediate = 0;
+    for (byte_t offset = 0; offset < width; offset += element_size)
+        immediate |= element << offset;
+    return immediate;
+}
+
+static dword_t encode_logical_immediate(enum aarch64_opcode opcode,
+        bool is_64, byte_t element_size, byte_t ones, byte_t rotation,
+        byte_t rn, byte_t rd) {
+    byte_t operation;
+    if (opcode == AARCH64_OP_AND_IMMEDIATE) {
+        operation = 0;
+    } else if (opcode == AARCH64_OP_ORR_IMMEDIATE) {
+        operation = 1;
+    } else if (opcode == AARCH64_OP_EOR_IMMEDIATE) {
+        operation = 2;
+    } else {
+        assert(opcode == AARCH64_OP_ANDS_IMMEDIATE);
+        operation = 3;
+    }
+    byte_t width = is_64 ? 64 : 32;
+    assert(element_size >= 2 && element_size <= width);
+    assert((element_size & (element_size - 1)) == 0);
+    assert(ones > 0 && ones < element_size);
+    assert(rotation < element_size);
+    assert(rn < 32);
+    assert(rd < 32);
+    bool n = element_size == 64;
+    byte_t imms = (byte_t) (
+            (~((unsigned) element_size * 2 - 1) & 0x3f) |
+            (ones - 1));
+    return UINT32_C(0x12000000) |
+            ((dword_t) is_64 << 31) |
+            ((dword_t) operation << 29) |
+            ((dword_t) n << 22) |
+            ((dword_t) rotation << 16) |
+            ((dword_t) imms << 10) |
+            ((dword_t) rn << 5) | rd;
 }
 
 static dword_t encode_logical_shifted(enum aarch64_opcode opcode,
@@ -1315,6 +1381,197 @@ static void test_adr_sibling_fallback(void) {
     assert(cpu.x[1] == CODE_PAGE + 12);
     assert(cpu.pc == CODE_PAGE + 4);
     assert_stats(&runner, 0, 1, 0, 1);
+}
+
+static void test_fast_and_immediate_differential(void) {
+    unsigned case_count = 0;
+    for (unsigned width_index = 0; width_index < 2; width_index++) {
+        bool is_64 = width_index != 0;
+        byte_t width = is_64 ? 64 : 32;
+        for (byte_t element_size = 2;
+                element_size <= width; element_size *= 2) {
+            const byte_t ones[] = {
+                1,
+                (byte_t) (element_size - 1),
+            };
+            const byte_t rotations[] = {
+                0,
+                (byte_t) (element_size - 1),
+            };
+            for (unsigned ones_index = 0;
+                    ones_index < array_size(ones); ones_index++) {
+                for (unsigned rotation_index = 0;
+                        rotation_index < array_size(rotations);
+                        rotation_index++) {
+                    qword_t immediate = reference_logical_immediate(
+                            is_64, element_size, ones[ones_index],
+                            rotations[rotation_index]);
+                    dword_t instruction = encode_logical_immediate(
+                            AARCH64_OP_AND_IMMEDIATE,
+                            is_64, element_size, ones[ones_index],
+                            rotations[rotation_index], 4, 6);
+                    struct aarch64_decoded decoded;
+                    assert(aarch64_decode(instruction, &decoded));
+                    assert(decoded.opcode ==
+                            AARCH64_OP_AND_IMMEDIATE);
+                    assert(decoded.width == width);
+                    assert(decoded.operands.logical_immediate.rn == 4);
+                    assert(decoded.operands.logical_immediate.rd == 6);
+                    assert(decoded.operands.logical_immediate.immediate ==
+                            immediate);
+
+                    struct cpu_state initial;
+                    init_differential_cpu(&initial);
+                    initial.x[4] = UINT64_C(0x8123456789abcdef);
+                    initial.x[6] = UINT64_MAX;
+                    aarch64_set_exclusive(&initial,
+                            DATA_PAGE + 0x40, 8, false,
+                            UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+                    struct cpu_state result = run_fast_differential(
+                            instruction, initial,
+                            AARCH64_STEP_RETIRED);
+                    qword_t expected = initial.x[4] & immediate;
+                    for (unsigned register_index = 0;
+                            register_index < array_size(result.x);
+                            register_index++) {
+                        assert(result.x[register_index] ==
+                                (register_index == 6 ?
+                                        expected :
+                                        initial.x[register_index]));
+                    }
+                    assert(result.pc == CODE_PAGE + 4);
+                    assert(result.cycle == initial.cycle + 1);
+                    assert(result.sp == initial.sp);
+                    assert(result.nzcv == initial.nzcv);
+                    assert(result.fpcr == initial.fpcr);
+                    assert(result.fpsr == initial.fpsr);
+                    assert(result.tpidr_el0 == initial.tpidr_el0);
+                    assert(memcmp(result.v, initial.v,
+                            sizeof(result.v)) == 0);
+                    assert(result.exclusive.valid);
+                    assert(result.exclusive.address ==
+                            DATA_PAGE + 0x40);
+                    assert(result.exclusive.write_epoch == 5);
+                    assert(result.exclusive.sync_identity == 7);
+                    case_count++;
+                }
+            }
+        }
+    }
+    assert(case_count == 44);
+
+    struct cpu_state initial;
+    init_differential_cpu(&initial);
+    initial.x[0] = UINT64_C(0x123456789abcdefb);
+    assert(encode_logical_immediate(AARCH64_OP_AND_IMMEDIATE,
+            true, 64, 60, 60, 0, 31) ==
+            INSTRUCTION_AND_SP_X0_FFFFFFFFFFFFFFF0);
+    struct cpu_state result = run_fast_differential(
+            INSTRUCTION_AND_SP_X0_FFFFFFFFFFFFFFF0,
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.sp == UINT64_C(0x123456789abcdef0));
+    assert(result.x[0] == initial.x[0]);
+    assert(result.nzcv == initial.nzcv);
+
+    init_differential_cpu(&initial);
+    initial.x[3] = UINT64_C(0xffffffff89abcdef);
+    assert(encode_logical_immediate(AARCH64_OP_AND_IMMEDIATE,
+            false, 32, 31, 0, 3, 0) ==
+            INSTRUCTION_AND_W0_W3_7FFFFFFF);
+    result = run_fast_differential(
+            INSTRUCTION_AND_W0_W3_7FFFFFFF,
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[0] == UINT64_C(0x0000000009abcdef));
+    assert(result.x[3] == initial.x[3]);
+    assert(result.sp == initial.sp);
+
+    init_differential_cpu(&initial);
+    initial.x[16] = UINT64_C(0xabcdef12ffffffff);
+    assert(encode_logical_immediate(AARCH64_OP_AND_IMMEDIATE,
+            false, 32, 28, 28, 16, 31) ==
+            UINT32_C(0x121c6e1f));
+    result = run_fast_differential(
+            UINT32_C(0x121c6e1f),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.sp == UINT64_C(0x00000000fffffff0));
+    assert(result.x[16] == initial.x[16]);
+    assert(result.nzcv == initial.nzcv);
+
+    init_differential_cpu(&initial);
+    initial.x[6] = UINT64_MAX;
+    result = run_fast_differential(encode_logical_immediate(
+            AARCH64_OP_AND_IMMEDIATE,
+            true, 16, 8, 0, 31, 6),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[6] == 0);
+    assert(result.sp == initial.sp);
+    assert(result.nzcv == initial.nzcv);
+
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x123456789abcdef0);
+    qword_t overlap_mask = reference_logical_immediate(
+            true, 16, 8, 8);
+    result = run_fast_differential(encode_logical_immediate(
+            AARCH64_OP_AND_IMMEDIATE,
+            true, 16, 8, 8, 4, 4),
+            initial, AARCH64_STEP_RETIRED);
+    assert(result.x[4] == (initial.x[4] & overlap_mask));
+    assert(result.sp == initial.sp);
+    assert(result.nzcv == initial.nzcv);
+}
+
+static void test_logical_immediate_sibling_fallback(void) {
+    const dword_t instructions[] = {
+        INSTRUCTION_ORR_W2_W3_88888888,
+        INSTRUCTION_EOR_X10_X11_0000FFFF0000FFFF,
+        INSTRUCTION_ANDS_XZR_X12_8000000000000001,
+    };
+    const enum aarch64_opcode opcodes[] = {
+        AARCH64_OP_ORR_IMMEDIATE,
+        AARCH64_OP_EOR_IMMEDIATE,
+        AARCH64_OP_ANDS_IMMEDIATE,
+    };
+    struct test_fixture fixture;
+    init_fixture(&fixture);
+    for (unsigned index = 0; index < array_size(instructions); index++) {
+        struct aarch64_decoded decoded;
+        assert(aarch64_decode(instructions[index], &decoded));
+        assert(decoded.opcode == opcodes[index]);
+        write_instruction(&fixture.tlb, CODE_PAGE + index * 4,
+                instructions[index]);
+    }
+
+    struct aarch64_runner runner;
+    assert(aarch64_runner_init_backend(
+            &runner, &fixture.tlb, AARCH64_BACKEND_THREADED));
+    struct cpu_state cpu;
+    init_differential_cpu(&cpu);
+    cpu.x[3] = UINT64_C(0xffffffff11111111);
+    cpu.x[11] = UINT64_C(0xffff0000ffff0000);
+    cpu.x[12] = UINT64_C(0x8000000000000000);
+    aarch64_set_exclusive(&cpu, DATA_PAGE + 0x40, 8, false,
+            UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+    qword_t sp = cpu.sp;
+
+    assert(run_at(&runner, &cpu, CODE_PAGE).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[2] == UINT64_C(0x0000000099999999));
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+    assert(run_at(&runner, &cpu, CODE_PAGE + 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[10] == UINT64_MAX);
+    assert(cpu.nzcv == UINT32_C(0xa0000000));
+    assert(run_at(&runner, &cpu, CODE_PAGE + 8).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[12] == UINT64_C(0x8000000000000000));
+    assert(cpu.sp == sp);
+    assert(cpu.nzcv == UINT32_C(0x80000000));
+    assert(cpu.exclusive.valid);
+    assert(cpu.exclusive.address == DATA_PAGE + 0x40);
+    assert(cpu.exclusive.write_epoch == 5);
+    assert(cpu.exclusive.sync_identity == 7);
+    assert_stats(&runner, 0, array_size(instructions),
+            0, array_size(instructions));
 }
 
 static void test_add_sub_shifted_sibling_fallback(void) {
@@ -3699,10 +3956,11 @@ static void test_fast_dispatch_structure(void) {
         INSTRUCTION_UBFM_X1_X1_1_63,
         INSTRUCTION_SUBS_XZR_X2_X5,
         INSTRUCTION_ADRP_X2_PLUS_122_PAGES,
+        INSTRUCTION_AND_W0_W3_7FFFFFFF,
         UINT32_C(0xd4000541),
     };
-    _Static_assert(array_size(hot_instructions) == 32,
-            "threaded 热点结构门必须覆盖全部 32 个 opcode");
+    _Static_assert(array_size(hot_instructions) == 33,
+            "threaded 热点结构门必须覆盖全部 33 个 opcode");
     bool seen_opcodes[AARCH64_OP_COUNT] = {false};
     for (unsigned index = 0; index < array_size(hot_instructions); index++) {
         struct aarch64_decoded decoded;
@@ -3874,6 +4132,14 @@ static void test_fast_dispatch_structure(void) {
             UINT64_C(122) * GUEST_MEMORY_PAGE_SIZE);
     assert_stats(&runner, 14, array_size(hot_instructions) + 1,
             array_size(hot_instructions) + 13, 2);
+
+    cpu.x[0] = UINT64_MAX;
+    cpu.x[3] = UINT64_C(0xffffffff89abcdef);
+    assert(run_at(&runner, &cpu, CODE_PAGE + 31 * 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[0] == UINT64_C(0x0000000009abcdef));
+    assert_stats(&runner, 15, array_size(hot_instructions) + 1,
+            array_size(hot_instructions) + 14, 2);
 }
 
 static void test_product_c_fallback(void) {
@@ -5049,7 +5315,7 @@ static void test_profile_aggregation(void) {
     write_instruction(&first_fixture.tlb, CODE_PAGE + 4,
             alternate_store);
     write_instruction(&first_fixture.tlb, CODE_PAGE + 8,
-            INSTRUCTION_ADRP_X2_PLUS_122_PAGES);
+            INSTRUCTION_AND_W0_W3_7FFFFFFF);
     write_instruction(&second_fixture.tlb, CODE_PAGE,
             INSTRUCTION_ADDS_X3);
     write_instruction(&second_fixture.tlb, CODE_PAGE + 4,
@@ -5068,7 +5334,10 @@ static void test_profile_aggregation(void) {
             &second_fixture.tlb, AARCH64_BACKEND_THREADED));
     assert(aarch64_runner_init_backend(
             &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
-    struct cpu_state first_cpu = {.x[1] = DATA_PAGE};
+    struct cpu_state first_cpu = {
+        .x[1] = DATA_PAGE,
+        .x[3] = UINT64_C(0xffffffff89abcdef),
+    };
     struct cpu_state second_cpu = {.x[1] = DATA_PAGE};
     struct cpu_state c_cpu = {.x[1] = DATA_PAGE};
 
@@ -5080,8 +5349,7 @@ static void test_profile_aggregation(void) {
             AARCH64_STEP_RETIRED);
     assert(run_at(&first_runner, &first_cpu, CODE_PAGE + 8).stop ==
             AARCH64_STEP_RETIRED);
-    assert(first_cpu.x[2] == CODE_PAGE +
-            UINT64_C(122) * GUEST_MEMORY_PAGE_SIZE);
+    assert(first_cpu.x[0] == UINT64_C(0x0000000009abcdef));
     for (unsigned iteration = 0; iteration < 3; iteration++) {
         assert(run_at(&second_runner, &second_cpu, CODE_PAGE).stop ==
                 AARCH64_STEP_RETIRED);
@@ -5128,6 +5396,8 @@ static void test_profile_aggregation(void) {
             AARCH64_OP_SUBS_SHIFTED_REGISTER] == 0);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_ADRP] == 0);
     assert(snapshot.fallback_by_opcode[
+            AARCH64_OP_AND_IMMEDIATE] == 0);
+    assert(snapshot.fallback_by_opcode[
             AARCH64_OP_ADDS_SHIFTED_REGISTER] == 3);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_STORE_REGISTER_OFFSET] ==
@@ -5143,6 +5413,8 @@ static void test_profile_aggregation(void) {
             AARCH64_OP_SUBS_SHIFTED_REGISTER] == 0);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_ADRP] == 0);
+    assert(snapshot.representative_word_by_opcode[
+            AARCH64_OP_AND_IMMEDIATE] == 0);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_ADDS_SHIFTED_REGISTER] == INSTRUCTION_ADDS_X3);
 
@@ -5232,6 +5504,8 @@ int main(void) {
     test_add_sub_shifted_sibling_fallback();
     test_fast_adrp_differential();
     test_adr_sibling_fallback();
+    test_fast_and_immediate_differential();
+    test_logical_immediate_sibling_fallback();
     test_fast_and_shifted_differential();
     test_fast_ubfm_differential();
     test_bitfield_sibling_fallback();
