@@ -46,6 +46,7 @@
 #define INSTRUCTION_AND_X4_X1_X2_LSL_2 UINT32_C(0x8a020824)
 #define INSTRUCTION_UBFM_W4_W0_28_27 UINT32_C(0x531c6c04)
 #define INSTRUCTION_SXTW_X2_W2 UINT32_C(0x93407c42)
+#define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
 #define INSTRUCTION_EXTR_W4_W1_W1_19 UINT32_C(0x13814c24)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
@@ -80,6 +81,8 @@ struct benchmark_workload {
     const char *name;
     qword_t instructions_per_iteration;
     qword_t x1_increment_per_iteration;
+    qword_t initial_x4;
+    qword_t initial_x10;
     qword_t expected_x4;
     qword_t expected_x6;
     size_t expected_store_offset;
@@ -294,6 +297,13 @@ static void write_ubfm_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
 
 static void write_sbfm_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_SXTW_X2_W2);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_lsrv_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_LSRV_W4_W10_W4);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
@@ -561,6 +571,18 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
         .write_program = write_sbfm_program,
+    },
+    {
+        .name = "LSRV 画像结果依赖热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .initial_x4 = 4,
+        .initial_x10 = UINT64_C(0xaaaaaaaa80000040),
+        .expected_x4 = UINT32_C(0x08000004),
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_lsrv_program,
     },
     {
         .name = "EXTR/ROR 热点环",
@@ -847,7 +869,8 @@ static void verify_run(const struct benchmark_workload *workload,
                     run->cpu.x[3] == DATA_PAGE &&
                     run->cpu.x[4] == workload->expected_x4 &&
                     run->cpu.x[5] == STORE_VALUE &&
-                    run->cpu.x[6] == workload->expected_x6,
+                    run->cpu.x[6] == workload->expected_x6 &&
+                    run->cpu.x[10] == workload->initial_x10,
             workload->name, "循环次数或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
                     workload->program_instruction_count * 4 &&
@@ -882,7 +905,9 @@ static struct benchmark_run run_workload(
         .x[1] = 7,
         .x[2] = 3,
         .x[3] = DATA_PAGE,
+        .x[4] = workload->initial_x4,
         .x[5] = STORE_VALUE,
+        .x[10] = workload->initial_x10,
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),
     };
