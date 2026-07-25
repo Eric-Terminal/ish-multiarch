@@ -26,6 +26,11 @@
 #define INSTRUCTION_CSINC_W6_WZR_WZR_EQ UINT32_C(0x1a9f07e6)
 #define INSTRUCTION_CSEL_X4_X5_X2_EQ UINT32_C(0x9a8200a4)
 #define INSTRUCTION_CSEL_W6_W4_W3_NE UINT32_C(0x1a831086)
+#define INSTRUCTION_ANDS_X4_X0_FF UINT32_C(0xf2401c04)
+#define INSTRUCTION_TST_W4_2 UINT32_C(0x721f009f)
+#define INSTRUCTION_CCMP_X2_3_0_EQ UINT32_C(0xfa430840)
+#define INSTRUCTION_SUB_X0_X0_1 UINT32_C(0xd1000400)
+#define INSTRUCTION_CBNZ_X0_NEG_16 UINT32_C(0xb5ffff80)
 #define INSTRUCTION_REV32_X4_X5 UINT32_C(0xdac008a4)
 #define INSTRUCTION_REV_W6_W2 UINT32_C(0x5ac00846)
 #define INSTRUCTION_ADD_X4_X5_W3_SXTW_3 UINT32_C(0x8b23cca4)
@@ -202,6 +207,16 @@ static void write_csel_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 8, INSTRUCTION_CSEL_W6_W4_W3_NE);
     put_instruction(code + 12, encode_conditional_branch(-12, 1));
     put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
+static void write_ands_immediate_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ANDS_X4_X0_FF);
+    put_instruction(code + 4, INSTRUCTION_TST_W4_2);
+    put_instruction(code + 8, INSTRUCTION_CCMP_X2_3_0_EQ);
+    put_instruction(code + 12, INSTRUCTION_SUB_X0_X0_1);
+    put_instruction(code + 16, INSTRUCTION_CBNZ_X0_NEG_16);
+    put_instruction(code + 20, INSTRUCTION_SVC);
 }
 
 static void write_rev32_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -414,6 +429,17 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 5,
         .write_program = write_csel_program,
+    },
+    {
+        .name = "ANDS immediate 双宽度标志依赖热点环",
+        .instructions_per_iteration = 5,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = 1,
+        .expected_x6 = 0,
+        .fast_per_iteration = 5,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 6,
+        .write_program = write_ands_immediate_program,
     },
     {
         .name = "REV32 双宽度热点环",
