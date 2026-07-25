@@ -190,6 +190,39 @@ static void execute_logical_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_load_imm12_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_LOAD_IMM12);
+    assert(instruction->operands.load_store.address_mode ==
+            AARCH64_ADDRESS_OFFSET);
+    byte_t rt = instruction->operands.load_store.rt;
+    byte_t rn = instruction->operands.load_store.rn;
+    byte_t size = instruction->operands.load_store.size;
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t address = base +
+            (qword_t) instruction->operands.load_store.offset;
+    byte_t bytes[8];
+    if (!guest_tlb_read(tlb, address, bytes, size,
+            GUEST_MEMORY_READ, &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+
+    qword_t value = 0;
+    for (byte_t index = 0; index < size; index++)
+        value |= (qword_t) bytes[index] << (index * 8);
+    if (instruction->operands.load_store.signed_load) {
+        byte_t bits = (byte_t) (size * 8);
+        qword_t sign = UINT64_C(1) << (bits - 1);
+        value = (value ^ sign) - sign;
+    }
+    write_general_register(cpu, rt, instruction->width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_branch_immediate_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -295,6 +328,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_ORR_SHIFTED_REGISTER:
         case AARCH64_OP_EOR_SHIFTED_REGISTER:
             return execute_logical_shifted_register_fast;
+        case AARCH64_OP_LOAD_IMM12:
+            return execute_load_imm12_fast;
         case AARCH64_OP_B:
         case AARCH64_OP_BL:
             return execute_branch_immediate_fast;

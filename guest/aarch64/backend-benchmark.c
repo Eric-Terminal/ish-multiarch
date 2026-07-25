@@ -7,6 +7,7 @@
 #include "guest/aarch64/runner.h"
 
 #define CODE_PAGE UINT64_C(0x0000456789abc000)
+#define DATA_PAGE (CODE_PAGE + GUEST_MEMORY_PAGE_SIZE)
 #define SAMPLE_COUNT 10
 #define TARGET_SAMPLE_NS UINT64_C(100000000)
 #define BASELINE_MAD_WARNING_PERCENT 10.0
@@ -19,11 +20,13 @@
 #define INSTRUCTION_ADDS_X1_SHIFTED UINT32_C(0xab020021)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
+#define INSTRUCTION_LDR_X4_X3 UINT32_C(0xf9400064)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 
 struct benchmark_memory {
     byte_t code[GUEST_MEMORY_PAGE_SIZE];
+    byte_t data[GUEST_MEMORY_PAGE_SIZE];
 };
 
 struct benchmark_environment {
@@ -37,6 +40,7 @@ struct benchmark_workload {
     const char *name;
     qword_t instructions_per_iteration;
     qword_t x1_increment_per_iteration;
+    qword_t expected_x4;
     qword_t fast_per_iteration;
     qword_t fallback_per_iteration;
     size_t program_instruction_count;
@@ -73,22 +77,30 @@ static void require(bool condition, const char *workload,
         fail(workload, message);
 }
 
-static enum guest_memory_fault_kind resolve_code_page(void *opaque,
+static enum guest_memory_fault_kind resolve_benchmark_page(void *opaque,
         guest_addr_t page_base, enum guest_memory_access access,
         struct guest_page_view *view) {
     struct benchmark_memory *memory = opaque;
     (void) access;
-    if (page_base != CODE_PAGE)
-        return GUEST_MEMORY_FAULT_UNMAPPED;
-    *view = (struct guest_page_view) {
-        .host_page = memory->code,
-        .permissions = GUEST_MEMORY_EXECUTE,
-    };
-    return GUEST_MEMORY_FAULT_NONE;
+    if (page_base == CODE_PAGE) {
+        *view = (struct guest_page_view) {
+            .host_page = memory->code,
+            .permissions = GUEST_MEMORY_EXECUTE,
+        };
+        return GUEST_MEMORY_FAULT_NONE;
+    }
+    if (page_base == DATA_PAGE) {
+        *view = (struct guest_page_view) {
+            .host_page = memory->data,
+            .permissions = GUEST_MEMORY_READ,
+        };
+        return GUEST_MEMORY_FAULT_NONE;
+    }
+    return GUEST_MEMORY_FAULT_UNMAPPED;
 }
 
 static const struct guest_address_space_ops benchmark_address_space_ops = {
-    .resolve_page = resolve_code_page,
+    .resolve_page = resolve_benchmark_page,
 };
 
 static void put_instruction(byte_t *destination, dword_t instruction) {
@@ -136,6 +148,13 @@ static void write_orr_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
 
 static void write_eor_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_EOR_X1_XZR_X1);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_load_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_LDR_X4_X3);
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
@@ -197,6 +216,16 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_eor_program,
     },
     {
+        .name = "LDR imm12 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = 7,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_load_program,
+    },
+    {
         .name = "NOP 调度环",
         .instructions_per_iteration = NOP_COUNT + 2,
         .x1_increment_per_iteration = 0,
@@ -230,6 +259,7 @@ static void init_environment(struct benchmark_environment *environment,
         enum aarch64_backend backend) {
     *environment = (struct benchmark_environment) {0};
     workload->write_program(environment->memory.code);
+    environment->memory.data[0] = 7;
     guest_address_space_init(&environment->address_space,
             &benchmark_address_space_ops, &environment->memory, 48);
     guest_tlb_init(&environment->tlb, &environment->address_space);
@@ -341,7 +371,9 @@ static void verify_run(const struct benchmark_workload *workload,
                     run->final_step.instruction == INSTRUCTION_SVC,
             workload->name, "程序没有停在预期的 SVC 边界");
     require(run->cpu.cycle == expected_cycles && run->cpu.x[0] == 0 &&
-                    run->cpu.x[1] == expected_x1 && run->cpu.x[2] == 3,
+                    run->cpu.x[1] == expected_x1 && run->cpu.x[2] == 3 &&
+                    run->cpu.x[3] == DATA_PAGE &&
+                    run->cpu.x[4] == workload->expected_x4,
             workload->name, "循环次数或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
                     workload->program_instruction_count * 4 &&
@@ -357,6 +389,7 @@ static struct benchmark_run run_workload(
         .x[0] = iterations,
         .x[1] = 7,
         .x[2] = 3,
+        .x[3] = DATA_PAGE,
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),
     };
