@@ -49,6 +49,11 @@
 #define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
 #define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
+#define INSTRUCTION_LSLV_X5_X7_X1 UINT32_C(0x9ac120e5)
+#define INSTRUCTION_ADD_X7_X5_1 UINT32_C(0x910004a7)
+#define INSTRUCTION_LSLV_W0_W0_W1 UINT32_C(0x1ac12000)
+#define INSTRUCTION_ADD_W0_W0_1 UINT32_C(0x11000400)
+#define INSTRUCTION_ORR_X5_XZR_X6 UINT32_C(0xaa0603e5)
 #define INSTRUCTION_SUBS_X4_X4_1 UINT32_C(0xf1000484)
 #define INSTRUCTION_B_NE_NEG_12 UINT32_C(0x54ffffa1)
 #define INSTRUCTION_EXTR_W4_W1_W1_19 UINT32_C(0x13814c24)
@@ -89,6 +94,7 @@ struct benchmark_workload {
     qword_t initial_x0;
     qword_t initial_x4;
     qword_t initial_x6;
+    qword_t initial_x7;
     qword_t initial_x10;
     qword_t expected_x4;
     qword_t expected_x6;
@@ -322,6 +328,17 @@ static void write_madd_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 8, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 12, INSTRUCTION_B_NE_NEG_12);
     put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
+static void write_lslv_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_LSLV_X5_X7_X1);
+    put_instruction(code + 4, INSTRUCTION_ADD_X7_X5_1);
+    put_instruction(code + 8, INSTRUCTION_LSLV_W0_W0_W1);
+    put_instruction(code + 12, INSTRUCTION_ADD_W0_W0_1);
+    put_instruction(code + 16, INSTRUCTION_ORR_X5_XZR_X6);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 24, encode_conditional_branch(-24, 1));
+    put_instruction(code + 28, INSTRUCTION_SVC);
 }
 
 static void write_extract_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -614,6 +631,21 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_madd_program,
     },
     {
+        .name = "LSLV 双宽度画像结果依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = 0,
+        .iteration_register = 4,
+        .initial_x0 = UINT32_C(0x10204081),
+        .initial_x6 = STORE_VALUE,
+        .initial_x7 = UINT64_C(0x8102040810204081),
+        .expected_x4 = 0,
+        .expected_x6 = STORE_VALUE,
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_lslv_program,
+    },
+    {
         .name = "EXTR/ROR 热点环",
         .instructions_per_iteration = 3,
         .x1_increment_per_iteration = 0,
@@ -902,6 +934,7 @@ static void verify_run(const struct benchmark_workload *workload,
                     run->cpu.x[4] == workload->expected_x4 &&
                     run->cpu.x[5] == STORE_VALUE &&
                     run->cpu.x[6] == workload->expected_x6 &&
+                    run->cpu.x[7] == workload->initial_x7 &&
                     run->cpu.x[10] == workload->initial_x10,
             workload->name, "循环次数或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
@@ -940,6 +973,7 @@ static struct benchmark_run run_workload(
         .x[4] = workload->initial_x4,
         .x[5] = STORE_VALUE,
         .x[6] = workload->initial_x6,
+        .x[7] = workload->initial_x7,
         .x[10] = workload->initial_x10,
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),

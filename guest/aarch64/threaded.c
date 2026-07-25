@@ -446,6 +446,30 @@ static void execute_lsrv_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_lslv_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_LSLV);
+    byte_t width = instruction->width;
+    qword_t left = read_general_register(cpu,
+            instruction->operands.data_processing_2source.rn,
+            width, false);
+    qword_t right = read_general_register(cpu,
+            instruction->operands.data_processing_2source.rm,
+            width, false);
+    byte_t amount = (byte_t) (right & (width - 1));
+    qword_t value = shift_register(
+            left, width, AARCH64_SHIFT_LSL, amount);
+
+    write_general_register(cpu,
+            instruction->operands.data_processing_2source.rd,
+            width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_madd_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -877,6 +901,8 @@ static aarch64_threaded_handler select_handler(
             return execute_sbfm_fast;
         case AARCH64_OP_UBFM:
             return execute_ubfm_fast;
+        case AARCH64_OP_LSLV:
+            return execute_lslv_fast;
         case AARCH64_OP_LSRV:
             return execute_lsrv_fast;
         case AARCH64_OP_MADD:
