@@ -183,6 +183,36 @@ static void execute_sub_shifted_register_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_ccmp_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_CCMP);
+    byte_t width = instruction->width;
+    byte_t condition =
+            instruction->operands.conditional_compare.condition;
+
+    if (aarch64_condition_holds(cpu->nzcv, condition)) {
+        qword_t left = read_general_register(cpu,
+                instruction->operands.conditional_compare.rn,
+                width, false);
+        qword_t right = instruction->operands.conditional_compare.immediate ?
+                instruction->operands.conditional_compare.operand :
+                read_general_register(cpu,
+                        instruction->operands.conditional_compare.operand,
+                        width, false);
+        qword_t value = (left - right) & register_mask(width);
+        aarch64_set_nzcv(cpu,
+                subtraction_flags(left, right, value, width));
+    } else {
+        aarch64_set_nzcv(cpu,
+                (dword_t) instruction->operands.conditional_compare.nzcv << 28);
+    }
+    cpu->pc += 4;
+}
+
 static void execute_subs_shifted_register_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -577,6 +607,8 @@ static aarch64_threaded_handler select_handler(
             return execute_add_shifted_register_fast;
         case AARCH64_OP_SUB_SHIFTED_REGISTER:
             return execute_sub_shifted_register_fast;
+        case AARCH64_OP_CCMP:
+            return execute_ccmp_fast;
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:
             return execute_subs_shifted_register_fast;
         case AARCH64_OP_AND_SHIFTED_REGISTER:

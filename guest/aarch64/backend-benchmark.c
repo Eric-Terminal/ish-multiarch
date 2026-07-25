@@ -20,6 +20,8 @@
 #define INSTRUCTION_ADDS_X1_SHIFTED UINT32_C(0xab020021)
 #define INSTRUCTION_SUB_X4_X5_X2 UINT32_C(0xcb0200a4)
 #define INSTRUCTION_SUB_W6_W3_W2 UINT32_C(0x4b020066)
+#define INSTRUCTION_CCMP_W3_W2_4_NE UINT32_C(0x7a421064)
+#define INSTRUCTION_CCMP_W1_1_4_LS UINT32_C(0x7a419824)
 #define INSTRUCTION_SUBS_W4_W0_W2_LSL_2 UINT32_C(0x6b020804)
 #define INSTRUCTION_SUBS_X0_X0_X2_LSR_1 UINT32_C(0xeb420400)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
@@ -162,6 +164,15 @@ static void write_sub_shifted_program(
     put_instruction(code + 8, INSTRUCTION_SUBS_X0);
     put_instruction(code + 12, encode_conditional_branch(-12, 1));
     put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
+static void write_ccmp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_CCMP_W3_W2_4_NE);
+    put_instruction(code + 4, INSTRUCTION_CCMP_W1_1_4_LS);
+    put_instruction(code + 8, encode_conditional_branch(12, 1));
+    put_instruction(code + 12, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 16, encode_conditional_branch(-16, 1));
+    put_instruction(code + 20, INSTRUCTION_SVC);
 }
 
 static void write_subs_shifted_program(
@@ -307,6 +318,15 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 5,
         .write_program = write_sub_shifted_program,
+    },
+    {
+        .name = "CCMP 条件结果依赖热缓存环",
+        .instructions_per_iteration = 5,
+        .x1_increment_per_iteration = 0,
+        .fast_per_iteration = 5,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 6,
+        .write_program = write_ccmp_program,
     },
     {
         .name = "SUBS shifted 热点环",
