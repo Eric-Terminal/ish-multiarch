@@ -97,6 +97,8 @@
 #define INSTRUCTION_SUB_SP_SP_X0 UINT32_C(0xcb2063ff)
 #define INSTRUCTION_SUB_X6_SP_W10_SXTW_4 UINT32_C(0xcb2ad3e6)
 #define INSTRUCTION_CSINC_X1_X1_X1_EQ UINT32_C(0x9a810421)
+#define INSTRUCTION_MOV_W6_W2 UINT32_C(0x2a0203e6)
+#define INSTRUCTION_MSUB_W6_W6_W5_W10 UINT32_C(0x1b05a8c6)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -387,6 +389,17 @@ static void write_sub_extended_program(
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, encode_conditional_branch(-20, 1));
     put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_msub_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_W6_W2);
+    put_instruction(code + 4, INSTRUCTION_MSUB_W6_W6_W5_W10);
+    // MSUB 保留 Z=0 时，CSINC 才会在每轮增加 X1。
+    put_instruction(code + 8, INSTRUCTION_CSINC_X1_X1_X1_EQ);
+    put_instruction(code + 12, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 16, encode_conditional_branch(-16, 1));
+    put_instruction(code + 20, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -998,6 +1011,20 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 7,
         .write_program = write_sub_extended_program,
+    },
+    {
+        .name = "MSUB 画像减法与标志保持热点环",
+        .instructions_per_iteration = 5,
+        .x1_increment_per_iteration = 1,
+        .iteration_register = 4,
+        .initial_x6 = STORE_VALUE,
+        .initial_x10 = UINT64_C(0xaaaaaaaacc996633),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 5,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 6,
+        .write_program = write_msub_program,
     },
 };
 

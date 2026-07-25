@@ -525,6 +525,7 @@ static void execute_multiply_add_fast(struct cpu_state *cpu,
     (void) tlb;
     (void) result;
     assert(instruction->opcode == AARCH64_OP_MADD ||
+            instruction->opcode == AARCH64_OP_MSUB ||
             instruction->opcode == AARCH64_OP_UMADDL);
     byte_t width = instruction->width;
     byte_t source_width =
@@ -538,7 +539,9 @@ static void execute_multiply_add_fast(struct cpu_state *cpu,
     qword_t accumulator = read_general_register(cpu,
             instruction->operands.data_processing_3source.ra,
             width, false);
-    qword_t value = left * right + accumulator;
+    qword_t product = left * right;
+    qword_t value = instruction->opcode == AARCH64_OP_MSUB ?
+            accumulator - product : accumulator + product;
 
     write_general_register(cpu,
             instruction->operands.data_processing_3source.rd,
@@ -1009,6 +1012,7 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_LSRV:
             return execute_lsrv_fast;
         case AARCH64_OP_MADD:
+        case AARCH64_OP_MSUB:
         case AARCH64_OP_UMADDL:
             return execute_multiply_add_fast;
         case AARCH64_OP_EXTR:
