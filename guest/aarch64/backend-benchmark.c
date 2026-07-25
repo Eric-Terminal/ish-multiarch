@@ -46,6 +46,10 @@
 #define INSTRUCTION_ADD_X7_X2_2 UINT32_C(0x91000847)
 #define INSTRUCTION_STURH_WZR_X7_NEG_2 UINT32_C(0x781fe0ff)
 #define INSTRUCTION_SUB_X2_X1_4 UINT32_C(0xd1001022)
+#define INSTRUCTION_ORR_W10_W10_1 UINT32_C(0x3200014a)
+#define INSTRUCTION_ORR_W5_WZR_7FFFFFFE UINT32_C(0x321f77e5)
+#define INSTRUCTION_ADD_W4_W10_W5 UINT32_C(0x0b050144)
+#define INSTRUCTION_SUB_W10_W10_1 UINT32_C(0x5100054a)
 #define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
 #define INSTRUCTION_SUB_X1_X1_X7 UINT32_C(0xcb070021)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
@@ -305,6 +309,18 @@ static void write_store_imm9_program(
     put_instruction(code + 8, INSTRUCTION_ADD_X7_X2_2);
     put_instruction(code + 12, INSTRUCTION_STURH_WZR_X7_NEG_2);
     put_instruction(code + 16, INSTRUCTION_SUB_X2_X1_4);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 24, encode_conditional_branch(-24, 1));
+    put_instruction(code + 28, INSTRUCTION_SVC);
+}
+
+static void write_orr_immediate_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ORR_W10_W10_1);
+    put_instruction(code + 4, INSTRUCTION_ORR_W5_WZR_7FFFFFFE);
+    put_instruction(code + 8, INSTRUCTION_ADD_W4_W10_W5);
+    put_instruction(code + 12, INSTRUCTION_SUB_W10_W10_1);
+    put_instruction(code + 16, INSTRUCTION_ORR_X5_XZR_X6);
     put_instruction(code + 20, INSTRUCTION_SUBS_X0);
     put_instruction(code + 24, encode_conditional_branch(-24, 1));
     put_instruction(code + 28, INSTRUCTION_SVC);
@@ -847,6 +863,18 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 8,
         .write_program = write_store_imm9_program,
+    },
+    {
+        .name = "ORR immediate 双画像结果依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = 0,
+        .initial_x6 = STORE_VALUE,
+        .expected_x4 = UINT32_C(0x7fffffff),
+        .expected_x6 = STORE_VALUE,
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_orr_immediate_program,
     },
 };
 
