@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <string.h>
 
 #include "guest/aarch64/condition.h"
 #include "guest/aarch64/threaded.h"
@@ -560,6 +561,39 @@ static void execute_store_pair_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_store_simd_pair_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_STORE_SIMD_PAIR);
+    byte_t rt = instruction->operands.load_store_pair.rt;
+    byte_t rt2 = instruction->operands.load_store_pair.rt2;
+    byte_t rn = instruction->operands.load_store_pair.rn;
+    byte_t size = (byte_t) (instruction->width / 8);
+    assert(size == 4 || size == 8 ||
+            size == sizeof(union aarch64_vector_reg));
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store_pair.offset;
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store_pair.address_mode;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+    byte_t bytes[2 * sizeof(union aarch64_vector_reg)];
+    memcpy(bytes, cpu->v[rt].b, size);
+    memcpy(bytes + size, cpu->v[rt2].b, size);
+    if (!guest_tlb_write(tlb, address, bytes, (size_t) size * 2,
+            &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_general_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+}
+
 static void execute_store_imm12_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -778,6 +812,8 @@ static aarch64_threaded_handler select_handler(
             return execute_load_pair_fast;
         case AARCH64_OP_STORE_PAIR:
             return execute_store_pair_fast;
+        case AARCH64_OP_STORE_SIMD_PAIR:
+            return execute_store_simd_pair_fast;
         case AARCH64_OP_STORE_IMM12:
             return execute_store_imm12_fast;
         case AARCH64_OP_STORE_REGISTER_OFFSET:

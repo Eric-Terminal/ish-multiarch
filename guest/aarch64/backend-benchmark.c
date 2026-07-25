@@ -56,6 +56,7 @@
 #define INSTRUCTION_STR_X5_X3_X4_LSL_3 UINT32_C(0xf8247865)
 #define INSTRUCTION_STR_XZR_X3_X1_LSL_3 UINT32_C(0xf821787f)
 #define INSTRUCTION_STP_X5_X2_X3_32 UINT32_C(0xa9020865)
+#define INSTRUCTION_STP_Q0_Q0_X3_32 UINT32_C(0xad010060)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -82,8 +83,7 @@ struct benchmark_workload {
     qword_t expected_x6;
     size_t expected_store_offset;
     byte_t expected_store_size;
-    qword_t expected_store_value;
-    qword_t expected_store_second_value;
+    qword_t expected_store_values[4];
     qword_t fast_per_iteration;
     qword_t fallback_per_iteration;
     size_t program_instruction_count;
@@ -352,6 +352,14 @@ static void write_store_pair_program(
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
+static void write_store_simd_pair_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_STP_Q0_Q0_X3_32);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
 static void write_load_pair_program(
         byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code, INSTRUCTION_LDP_X4_X6_X3_48);
@@ -592,7 +600,7 @@ static const struct benchmark_workload workloads[] = {
         .expected_x4 = 0,
         .expected_store_offset = 32,
         .expected_store_size = 8,
-        .expected_store_value = STORE_VALUE,
+        .expected_store_values = {STORE_VALUE},
         .fast_per_iteration = 3,
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
@@ -605,8 +613,7 @@ static const struct benchmark_workload workloads[] = {
         .expected_x4 = 6,
         .expected_store_offset = 48,
         .expected_store_size = 16,
-        .expected_store_value = STORE_VALUE,
-        .expected_store_second_value = 0,
+        .expected_store_values = {STORE_VALUE, 0},
         .fast_per_iteration = 5,
         .fallback_per_iteration = 0,
         .program_instruction_count = 6,
@@ -619,12 +626,30 @@ static const struct benchmark_workload workloads[] = {
         .expected_x4 = 0,
         .expected_store_offset = 32,
         .expected_store_size = 16,
-        .expected_store_value = STORE_VALUE,
-        .expected_store_second_value = 3,
+        .expected_store_values = {STORE_VALUE, 3},
         .fast_per_iteration = 3,
         .fallback_per_iteration = 0,
         .program_instruction_count = 4,
         .write_program = write_store_pair_program,
+    },
+    {
+        .name = "STP SIMD Q 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .expected_store_offset = 32,
+        .expected_store_size = 32,
+        .expected_store_values = {
+            STORE_VALUE,
+            PAIR_FIRST_VALUE,
+            STORE_VALUE,
+            PAIR_FIRST_VALUE,
+        },
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_store_simd_pair_program,
     },
     {
         .name = "LDP 热点环",
@@ -815,17 +840,14 @@ static void verify_run(const struct benchmark_workload *workload,
     byte_t expected_data[GUEST_MEMORY_PAGE_SIZE];
     reset_benchmark_data(expected_data);
     if (workload->expected_store_size != 0) {
-        byte_t first_size = workload->expected_store_size > 8 ?
-                8 : workload->expected_store_size;
-        store_little_endian(
-                expected_data + workload->expected_store_offset,
-                first_size,
-                workload->expected_store_value);
-        if (workload->expected_store_size > first_size) {
+        for (byte_t offset = 0;
+                offset < workload->expected_store_size; offset += 8) {
+            byte_t remaining =
+                    (byte_t) (workload->expected_store_size - offset);
+            byte_t size = remaining < 8 ? remaining : 8;
             store_little_endian(expected_data +
-                    workload->expected_store_offset + first_size,
-                    workload->expected_store_size - first_size,
-                    workload->expected_store_second_value);
+                    workload->expected_store_offset + offset,
+                    size, workload->expected_store_values[offset / 8]);
         }
     }
     require(memcmp(environment->memory.data,
@@ -847,6 +869,8 @@ static struct benchmark_run run_workload(
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),
     };
+    cpu.v[0].d[0] = STORE_VALUE;
+    cpu.v[0].d[1] = PAIR_FIRST_VALUE;
     enum aarch64_backend backend =
             aarch64_runner_backend(&environment->runner);
     struct aarch64_threaded_stats before =
