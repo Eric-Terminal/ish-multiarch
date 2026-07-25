@@ -47,6 +47,10 @@
 #define INSTRUCTION_UBFM_W4_W0_28_27 UINT32_C(0x531c6c04)
 #define INSTRUCTION_SXTW_X2_W2 UINT32_C(0x93407c42)
 #define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
+#define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
+#define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
+#define INSTRUCTION_SUBS_X4_X4_1 UINT32_C(0xf1000484)
+#define INSTRUCTION_B_NE_NEG_12 UINT32_C(0x54ffffa1)
 #define INSTRUCTION_EXTR_W4_W1_W1_19 UINT32_C(0x13814c24)
 #define INSTRUCTION_ORR_X1_XZR_X1 UINT32_C(0xaa0103e1)
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
@@ -81,7 +85,10 @@ struct benchmark_workload {
     const char *name;
     qword_t instructions_per_iteration;
     qword_t x1_increment_per_iteration;
+    byte_t iteration_register;
+    qword_t initial_x0;
     qword_t initial_x4;
+    qword_t initial_x6;
     qword_t initial_x10;
     qword_t expected_x4;
     qword_t expected_x6;
@@ -307,6 +314,14 @@ static void write_lsrv_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 4, INSTRUCTION_SUBS_X0);
     put_instruction(code + 8, encode_conditional_branch(-8, 1));
     put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
+static void write_madd_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MUL_X6_X6_X0);
+    put_instruction(code + 4, INSTRUCTION_MUL_W2_W0_W2);
+    put_instruction(code + 8, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 12, INSTRUCTION_B_NE_NEG_12);
+    put_instruction(code + 16, INSTRUCTION_SVC);
 }
 
 static void write_extract_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -585,6 +600,20 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_lsrv_program,
     },
     {
+        .name = "MADD/MUL 双宽度画像热点环",
+        .instructions_per_iteration = 4,
+        .x1_increment_per_iteration = 0,
+        .iteration_register = 4,
+        .initial_x0 = 1,
+        .initial_x6 = PAIR_FIRST_VALUE,
+        .expected_x4 = 0,
+        .expected_x6 = PAIR_FIRST_VALUE,
+        .fast_per_iteration = 4,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 5,
+        .write_program = write_madd_program,
+    },
+    {
         .name = "EXTR/ROR 热点环",
         .instructions_per_iteration = 3,
         .x1_increment_per_iteration = 0,
@@ -861,10 +890,13 @@ static void verify_run(const struct benchmark_workload *workload,
             workload->instructions_per_iteration, 1);
     qword_t expected_x1 = scaled_count(workload, iterations,
             workload->x1_increment_per_iteration, 7);
+    qword_t expected_x0 = workload->iteration_register == 0 ?
+            0 : workload->initial_x0;
     require(run->final_step.stop == AARCH64_STEP_SYSCALL &&
                     run->final_step.instruction == INSTRUCTION_SVC,
             workload->name, "程序没有停在预期的 SVC 边界");
-    require(run->cpu.cycle == expected_cycles && run->cpu.x[0] == 0 &&
+    require(run->cpu.cycle == expected_cycles &&
+                    run->cpu.x[0] == expected_x0 &&
                     run->cpu.x[1] == expected_x1 && run->cpu.x[2] == 3 &&
                     run->cpu.x[3] == DATA_PAGE &&
                     run->cpu.x[4] == workload->expected_x4 &&
@@ -901,16 +933,18 @@ static struct benchmark_run run_workload(
         enum benchmark_cache_state cache_state) {
     reset_benchmark_data(environment->memory.data);
     struct cpu_state cpu = {
-        .x[0] = iterations,
+        .x[0] = workload->initial_x0,
         .x[1] = 7,
         .x[2] = 3,
         .x[3] = DATA_PAGE,
         .x[4] = workload->initial_x4,
         .x[5] = STORE_VALUE,
+        .x[6] = workload->initial_x6,
         .x[10] = workload->initial_x10,
         .pc = CODE_PAGE,
         .nzcv = UINT32_C(0x90000000),
     };
+    cpu.x[workload->iteration_register] = iterations;
     cpu.v[0].d[0] = STORE_VALUE;
     cpu.v[0].d[1] = PAIR_FIRST_VALUE;
     enum aarch64_backend backend =

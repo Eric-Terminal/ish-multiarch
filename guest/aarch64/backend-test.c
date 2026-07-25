@@ -56,8 +56,19 @@
 #define INSTRUCTION_LSLV_W12_W13_W14 UINT32_C(0x1ace21ac)
 #define INSTRUCTION_ASRV_W24_W25_W26 UINT32_C(0x1ada2b38)
 #define INSTRUCTION_RORV_X0_X1_X2 UINT32_C(0x9ac22c20)
+#define INSTRUCTION_LSLV_X5_X7_X1 UINT32_C(0x9ac120e5)
+#define INSTRUCTION_LSLV_W0_W0_W1 UINT32_C(0x1ac12000)
+#define INSTRUCTION_MADD_W0_W1_W2_W3 UINT32_C(0x1b020c20)
+#define INSTRUCTION_MADD_X4_X5_X6_X7 UINT32_C(0x9b061ca4)
 #define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
+#define INSTRUCTION_MSUB_X24_X25_X26_X27 UINT32_C(0x9b1aef38)
+#define INSTRUCTION_SMADDL_X6_W7_W8_X9 UINT32_C(0x9b2824e6)
+#define INSTRUCTION_SMSUBL_X10_W11_W12_X13 UINT32_C(0x9b2cb56a)
+#define INSTRUCTION_UMADDL_X14_W15_W16_X17 UINT32_C(0x9bb045ee)
+#define INSTRUCTION_UMSUBL_X18_W19_W20_X21 UINT32_C(0x9bb4d672)
+#define INSTRUCTION_SMULH_X8_X9_X10 UINT32_C(0x9b4a7d28)
+#define INSTRUCTION_UMULH_X11_X12_X13 UINT32_C(0x9bcd7d8b)
 #define INSTRUCTION_EXTR_W3_W1_W1_19 UINT32_C(0x13814c23)
 #define INSTRUCTION_EXTR_W2_W1_W1_29 UINT32_C(0x13817422)
 #define INSTRUCTION_LDR_X4_X3_X2_LSL_3 UINT32_C(0xf8627864)
@@ -502,6 +513,19 @@ static dword_t encode_lsrv(
     return UINT32_C(0x1ac02400) |
             ((dword_t) is_64 << 31) |
             ((dword_t) rm << 16) |
+            ((dword_t) rn << 5) | rd;
+}
+
+static dword_t encode_madd(bool is_64,
+        byte_t rn, byte_t rm, byte_t ra, byte_t rd) {
+    assert(rn < 32);
+    assert(rm < 32);
+    assert(ra < 32);
+    assert(rd < 32);
+    return UINT32_C(0x1b000000) |
+            ((dword_t) is_64 << 31) |
+            ((dword_t) rm << 16) |
+            ((dword_t) ra << 10) |
             ((dword_t) rn << 5) | rd;
 }
 
@@ -3526,6 +3550,265 @@ static void test_fast_lsrv_differential(void) {
                 expected_data, sizeof(expected_data)) == 0);
     }
     assert(shift_case_count + array_size(roles) == 110);
+}
+
+static void test_fast_madd_differential(void) {
+    assert(encode_madd(false, 0, 0, 0, 0) ==
+            UINT32_C(0x1b000000));
+    assert(encode_madd(false, 31, 31, 31, 31) ==
+            UINT32_C(0x1b1f7fff));
+    assert(encode_madd(true, 0, 0, 0, 0) ==
+            UINT32_C(0x9b000000));
+    assert(encode_madd(true, 31, 31, 31, 31) ==
+            UINT32_C(0x9b1f7fff));
+
+    static const struct {
+        dword_t instruction;
+        bool is_64;
+        byte_t rd;
+        byte_t rn;
+        byte_t rm;
+        byte_t ra;
+        qword_t rn_value;
+        qword_t rm_value;
+        qword_t ra_value;
+        qword_t expected;
+    } cases[] = {
+        {
+            INSTRUCTION_MADD_W0_W1_W2_W3,
+            false, 0, 1, 2, 3,
+            UINT64_C(0xaaaaaaaaffffffff),
+            UINT64_C(0xbbbbbbbb00000002),
+            UINT64_C(0xcccccccc00000003),
+            1,
+        },
+        {
+            INSTRUCTION_MADD_X4_X5_X6_X7,
+            true, 4, 5, 6, 7,
+            UINT64_MAX, 2, 3, 1,
+        },
+        {
+            INSTRUCTION_MUL_X6_X6_X0,
+            true, 6, 6, 0, 31,
+            7, 9, 0, 63,
+        },
+        {
+            INSTRUCTION_MUL_W2_W0_W2,
+            false, 2, 0, 2, 31,
+            UINT64_C(0xaaaaaaaa00000003),
+            UINT64_C(0xbbbbbbbb80000001),
+            0, UINT32_C(0x80000003),
+        },
+        {
+            UINT32_C(0x9b0b2549),
+            true, 9, 10, 11, 9,
+            6, 7, 8, 50,
+        },
+        {
+            UINT32_C(0x9b092928),
+            true, 8, 9, 9, 10,
+            4, 4, 5, 21,
+        },
+        {
+            UINT32_C(0x9b0a2528),
+            true, 8, 9, 10, 9,
+            4, 5, 4, 24,
+        },
+        {
+            UINT32_C(0x9b0a2928),
+            true, 8, 9, 10, 10,
+            4, 5, 5, 25,
+        },
+        {
+            UINT32_C(0x9b071ce7),
+            true, 7, 7, 7, 7,
+            3, 3, 3, 12,
+        },
+        {
+            UINT32_C(0x9b092be8),
+            true, 8, 31, 9, 10,
+            0, 7, 13, 13,
+        },
+        {
+            UINT32_C(0x9b1f2928),
+            true, 8, 9, 31, 10,
+            7, 0, 13, 13,
+        },
+        {
+            UINT32_C(0x9b0c357f),
+            true, 31, 11, 12, 13,
+            6, 7, 8, 0,
+        },
+    };
+    _Static_assert(array_size(cases) == 12,
+            "MADD 绝对差分专例数量必须保持稳定");
+    for (unsigned index = 0; index < array_size(cases); index++) {
+        assert(encode_madd(cases[index].is_64,
+                cases[index].rn, cases[index].rm,
+                cases[index].ra, cases[index].rd) ==
+                cases[index].instruction);
+        if (cases[index].rn == cases[index].rm)
+            assert(cases[index].rn_value == cases[index].rm_value);
+        if (cases[index].rn == cases[index].ra)
+            assert(cases[index].rn_value == cases[index].ra_value);
+        if (cases[index].rm == cases[index].ra)
+            assert(cases[index].rm_value == cases[index].ra_value);
+
+        struct cpu_state initial;
+        init_differential_cpu(&initial);
+        initial.sp = DATA_PAGE + 0x381;
+        if (cases[index].rd != 31)
+            initial.x[cases[index].rd] = UINT64_MAX;
+        if (cases[index].rn != 31)
+            initial.x[cases[index].rn] = cases[index].rn_value;
+        if (cases[index].rm != 31)
+            initial.x[cases[index].rm] = cases[index].rm_value;
+        if (cases[index].ra != 31)
+            initial.x[cases[index].ra] = cases[index].ra_value;
+        aarch64_set_exclusive(&initial,
+                DATA_PAGE + 0x60, 8, false,
+                UINT64_C(0x3344), 0, NULL, 4, 6, 8);
+
+        struct test_fixture c_fixture;
+        struct test_fixture threaded_fixture;
+        init_fixture(&c_fixture);
+        init_fixture(&threaded_fixture);
+        write_instruction(&c_fixture.tlb,
+                CODE_PAGE, cases[index].instruction);
+        write_instruction(&threaded_fixture.tlb,
+                CODE_PAGE, cases[index].instruction);
+        memset(c_fixture.memory.data, 0xa5,
+                sizeof(c_fixture.memory.data));
+        memset(threaded_fixture.memory.data, 0xa5,
+                sizeof(threaded_fixture.memory.data));
+        byte_t expected_data[GUEST_MEMORY_PAGE_SIZE];
+        memcpy(expected_data, c_fixture.memory.data,
+                sizeof(expected_data));
+
+        struct cpu_state result =
+                run_fast_differential_fixtures(
+                        cases[index].instruction, initial,
+                        AARCH64_STEP_RETIRED,
+                        &c_fixture, &threaded_fixture, NULL);
+        struct cpu_state expected_cpu = initial;
+        expected_cpu.pc = CODE_PAGE + 4;
+        expected_cpu.cycle++;
+        if (cases[index].rd != 31)
+            expected_cpu.x[cases[index].rd] =
+                    cases[index].expected;
+        assert_cpu_equal(&result, &expected_cpu);
+        assert(memcmp(c_fixture.memory.data,
+                expected_data, sizeof(expected_data)) == 0);
+        assert(memcmp(threaded_fixture.memory.data,
+                expected_data, sizeof(expected_data)) == 0);
+    }
+}
+
+static void test_multiply_add_sibling_fallback(void) {
+    static const struct {
+        dword_t instruction;
+        enum aarch64_opcode opcode;
+        qword_t rn_value;
+        qword_t rm_value;
+        qword_t ra_value;
+        qword_t expected;
+    } cases[] = {
+        {
+            INSTRUCTION_MSUB_X24_X25_X26_X27,
+            AARCH64_OP_MSUB,
+            2, 3, 1, UINT64_C(0xfffffffffffffffb),
+        },
+        {
+            INSTRUCTION_SMADDL_X6_W7_W8_X9,
+            AARCH64_OP_SMADDL,
+            UINT64_C(0xffffffff80000000), UINT64_MAX, UINT64_MAX,
+            UINT64_C(0x000000007fffffff),
+        },
+        {
+            INSTRUCTION_SMSUBL_X10_W11_W12_X13,
+            AARCH64_OP_SMSUBL,
+            1, 1, UINT64_C(0x8000000000000000),
+            UINT64_C(0x7fffffffffffffff),
+        },
+        {
+            INSTRUCTION_UMADDL_X14_W15_W16_X17,
+            AARCH64_OP_UMADDL,
+            UINT64_MAX, UINT64_MAX, UINT64_MAX,
+            UINT64_C(0xfffffffe00000000),
+        },
+        {
+            INSTRUCTION_UMSUBL_X18_W19_W20_X21,
+            AARCH64_OP_UMSUBL,
+            UINT64_MAX, UINT64_MAX, 0,
+            UINT64_C(0x00000001ffffffff),
+        },
+        {
+            INSTRUCTION_SMULH_X8_X9_X10,
+            AARCH64_OP_SMULH,
+            UINT64_C(0x8000000000000000), 2, 0,
+            UINT64_MAX,
+        },
+        {
+            INSTRUCTION_UMULH_X11_X12_X13,
+            AARCH64_OP_UMULH,
+            UINT64_MAX, UINT64_MAX, 0,
+            UINT64_C(0xfffffffffffffffe),
+        },
+    };
+    _Static_assert(array_size(cases) == 7,
+            "三源乘法 sibling 指令数量必须保持稳定");
+
+    struct test_fixture fixture;
+    init_fixture(&fixture);
+    memset(fixture.memory.data, 0xa5,
+            sizeof(fixture.memory.data));
+    byte_t expected_data[GUEST_MEMORY_PAGE_SIZE];
+    memcpy(expected_data, fixture.memory.data,
+            sizeof(expected_data));
+    for (unsigned index = 0; index < array_size(cases); index++) {
+        struct aarch64_decoded decoded;
+        assert(aarch64_decode(cases[index].instruction, &decoded));
+        assert(decoded.opcode == cases[index].opcode);
+        write_instruction(&fixture.tlb,
+                CODE_PAGE + index * 4, cases[index].instruction);
+    }
+
+    struct aarch64_runner runner;
+    assert(aarch64_runner_init_backend(
+            &runner, &fixture.tlb, AARCH64_BACKEND_THREADED));
+    struct cpu_state cpu;
+    init_differential_cpu(&cpu);
+    aarch64_set_exclusive(&cpu,
+            DATA_PAGE + 0x60, 8, false,
+            UINT64_C(0x3344), 0, NULL, 4, 6, 8);
+
+    for (unsigned index = 0; index < array_size(cases); index++) {
+        struct aarch64_decoded decoded;
+        assert(aarch64_decode(cases[index].instruction, &decoded));
+        byte_t rn = decoded.operands.data_processing_3source.rn;
+        byte_t rm = decoded.operands.data_processing_3source.rm;
+        byte_t ra = decoded.operands.data_processing_3source.ra;
+        byte_t rd = decoded.operands.data_processing_3source.rd;
+        if (rn != 31)
+            cpu.x[rn] = cases[index].rn_value;
+        if (rm != 31)
+            cpu.x[rm] = cases[index].rm_value;
+        if (ra != 31)
+            cpu.x[ra] = cases[index].ra_value;
+
+        struct cpu_state expected_cpu = cpu;
+        expected_cpu.pc = CODE_PAGE + (index + 1) * 4;
+        expected_cpu.cycle++;
+        if (rd != 31)
+            expected_cpu.x[rd] = cases[index].expected;
+        assert(run_at(&runner, &cpu,
+                CODE_PAGE + index * 4).stop ==
+                AARCH64_STEP_RETIRED);
+        assert_cpu_equal(&cpu, &expected_cpu);
+        assert(memcmp(fixture.memory.data,
+                expected_data, sizeof(expected_data)) == 0);
+        assert_stats(&runner, 0, index + 1, 0, index + 1);
+    }
 }
 
 static void test_data_processing_2source_sibling_fallback(void) {
@@ -6906,10 +7189,11 @@ static void test_fast_dispatch_structure(void) {
         INSTRUCTION_STP_Q0_Q0_X3_32,
         INSTRUCTION_SXTW_X2_W2,
         INSTRUCTION_LSRV_W4_W10_W4,
+        INSTRUCTION_MUL_X6_X6_X0,
         UINT32_C(0xd4000541),
     };
-    _Static_assert(array_size(hot_instructions) == 45,
-            "threaded 热点结构门必须覆盖全部 45 个 opcode");
+    _Static_assert(array_size(hot_instructions) == 46,
+            "threaded 热点结构门必须覆盖全部 46 个 opcode");
     bool seen_opcodes[AARCH64_OP_COUNT] = {false};
     for (unsigned index = 0; index < array_size(hot_instructions); index++) {
         struct aarch64_decoded decoded;
@@ -6966,6 +7250,10 @@ static void test_fast_dispatch_structure(void) {
             cpu.x[4] = 4;
             cpu.x[10] = UINT64_C(0xaaaaaaaa80000040);
         }
+        if (index == 44) {
+            cpu.x[6] = 7;
+            cpu.x[0] = 9;
+        }
         enum aarch64_step_stop expected =
                 index + 1 == array_size(hot_instructions) ?
                 AARCH64_STEP_SYSCALL : AARCH64_STEP_RETIRED;
@@ -6974,6 +7262,7 @@ static void test_fast_dispatch_structure(void) {
     }
     assert(cpu.x[2] == UINT64_C(0xffffffff80000001));
     assert(cpu.x[4] == UINT32_C(0x08000004));
+    assert(cpu.x[6] == 63);
     assert(cpu.x[10] == UINT64_C(0xaaaaaaaa80000040));
     assert(cpu.x[3] == DATA_PAGE + 0x500);
     assert(cpu.x[1] == UINT64_C(0x1111222233334444));
@@ -6989,20 +7278,22 @@ static void test_fast_dispatch_structure(void) {
     const guest_addr_t fallback_pc =
             CODE_PAGE + array_size(hot_instructions) * 4;
     write_instruction(&fixture.tlb,
-            fallback_pc, INSTRUCTION_MUL_X6_X6_X0);
-    cpu.x[6] = 7;
-    cpu.x[0] = 9;
+            fallback_pc, INSTRUCTION_LSLV_X5_X7_X1);
+    cpu.x[5] = UINT64_MAX;
+    cpu.x[7] = 3;
+    cpu.x[1] = 4;
     assert(run_at(&runner, &cpu, fallback_pc).stop ==
             AARCH64_STEP_RETIRED);
-    assert(cpu.x[6] == 63);
+    assert(cpu.x[5] == 48);
     assert_stats(&runner, 0, array_size(hot_instructions) + 1,
             array_size(hot_instructions), 1);
 
-    cpu.x[6] = 5;
-    cpu.x[0] = 11;
+    cpu.x[5] = UINT64_MAX;
+    cpu.x[7] = 5;
+    cpu.x[1] = 2;
     assert(run_at(&runner, &cpu, fallback_pc).stop ==
             AARCH64_STEP_RETIRED);
-    assert(cpu.x[6] == 55);
+    assert(cpu.x[5] == 20);
     assert_stats(&runner, 1, array_size(hot_instructions) + 1,
             array_size(hot_instructions), 2);
 
@@ -7277,6 +7568,14 @@ static void test_fast_dispatch_structure(void) {
     assert(cpu.x[10] == UINT64_C(0xaaaaaaaa80000040));
     assert_stats(&runner, 27, array_size(hot_instructions) + 1,
             array_size(hot_instructions) + 26, 2);
+
+    cpu.x[6] = 5;
+    cpu.x[0] = 11;
+    assert(run_at(&runner, &cpu, CODE_PAGE + 44 * 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[6] == 55);
+    assert_stats(&runner, 28, array_size(hot_instructions) + 1,
+            array_size(hot_instructions) + 27, 2);
 }
 
 static void test_product_c_fallback(void) {
@@ -8446,17 +8745,17 @@ static void test_profile_aggregation(void) {
     init_fixture(&second_fixture);
     init_fixture(&c_fixture);
     write_instruction(&first_fixture.tlb, CODE_PAGE,
-            INSTRUCTION_LSRV_W4_W10_W4);
-    write_instruction(&first_fixture.tlb, CODE_PAGE + 4,
             INSTRUCTION_MUL_X6_X6_X0);
+    write_instruction(&first_fixture.tlb, CODE_PAGE + 4,
+            INSTRUCTION_LSLV_X5_X7_X1);
     write_instruction(&second_fixture.tlb, CODE_PAGE,
             INSTRUCTION_ADDS_X3);
     write_instruction(&second_fixture.tlb, CODE_PAGE + 4,
             INSTRUCTION_UNDEFINED);
     write_instruction(&second_fixture.tlb, CODE_PAGE + 8,
-            INSTRUCTION_LSRV_W0_W0_W2);
-    write_instruction(&second_fixture.tlb, CODE_PAGE + 12,
             INSTRUCTION_MUL_W2_W0_W2);
+    write_instruction(&second_fixture.tlb, CODE_PAGE + 12,
+            INSTRUCTION_LSLV_W0_W0_W1);
     write_instruction(&c_fixture.tlb, CODE_PAGE,
             INSTRUCTION_LDR_X2);
 
@@ -8473,25 +8772,24 @@ static void test_profile_aggregation(void) {
     struct cpu_state second_cpu = {0};
     struct cpu_state c_cpu = {.x[1] = DATA_PAGE};
 
-    first_cpu.x[4] = 4;
-    first_cpu.x[10] = UINT64_C(0xaaaaaaaa80000040);
-    assert(run_at(&first_runner, &first_cpu, CODE_PAGE).stop ==
-            AARCH64_STEP_RETIRED);
-    assert(first_cpu.x[4] == UINT32_C(0x08000004));
-    assert(first_cpu.x[10] == UINT64_C(0xaaaaaaaa80000040));
-
-    first_cpu.x[4] = 31;
-    first_cpu.x[10] = UINT64_C(0xaaaaaaaa7fffffff);
-    assert(run_at(&first_runner, &first_cpu, CODE_PAGE).stop ==
-            AARCH64_STEP_RETIRED);
-    assert(first_cpu.x[4] == 0);
-    assert(first_cpu.x[10] == UINT64_C(0xaaaaaaaa7fffffff));
-
     first_cpu.x[6] = 7;
     first_cpu.x[0] = 9;
-    assert(run_at(&first_runner, &first_cpu, CODE_PAGE + 4).stop ==
+    assert(run_at(&first_runner, &first_cpu, CODE_PAGE).stop ==
             AARCH64_STEP_RETIRED);
     assert(first_cpu.x[6] == 63);
+
+    first_cpu.x[6] = 5;
+    first_cpu.x[0] = 11;
+    assert(run_at(&first_runner, &first_cpu, CODE_PAGE).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(first_cpu.x[6] == 55);
+
+    first_cpu.x[5] = UINT64_MAX;
+    first_cpu.x[7] = 3;
+    first_cpu.x[1] = 4;
+    assert(run_at(&first_runner, &first_cpu, CODE_PAGE + 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(first_cpu.x[5] == 48);
     assert_stats(&first_runner, 1, 2, 2, 1);
 
     for (unsigned iteration = 0; iteration < 3; iteration++) {
@@ -8502,19 +8800,19 @@ static void test_profile_aggregation(void) {
         assert(run_at(&second_runner, &second_cpu, CODE_PAGE + 4).stop ==
                 AARCH64_STEP_UNDEFINED);
     }
-    second_cpu.x[0] = UINT64_C(0xaaaaaaaa80000000);
-    second_cpu.x[2] = 4;
+    second_cpu.x[0] = UINT64_C(0xaaaaaaaa0000000b);
+    second_cpu.x[2] = UINT64_C(0xbbbbbbbb00000005);
     assert(run_at(&second_runner, &second_cpu, CODE_PAGE + 8).stop ==
             AARCH64_STEP_RETIRED);
-    assert(second_cpu.x[0] == UINT32_C(0x08000000));
-    assert(second_cpu.x[2] == 4);
+    assert(second_cpu.x[0] == UINT64_C(0xaaaaaaaa0000000b));
+    assert(second_cpu.x[2] == 55);
 
-    second_cpu.x[0] = 11;
-    second_cpu.x[2] = 5;
+    second_cpu.x[0] = UINT64_C(0xaaaaaaaa00000003);
+    second_cpu.x[1] = 4;
     assert(run_at(&second_runner, &second_cpu, CODE_PAGE + 12).stop ==
             AARCH64_STEP_RETIRED);
-    assert(second_cpu.x[0] == 11);
-    assert(second_cpu.x[2] == 55);
+    assert(second_cpu.x[0] == 48);
+    assert(second_cpu.x[1] == 4);
     assert_stats(&second_runner, 3, 4, 1, 4);
     assert(run_at(&c_runner, &c_cpu, CODE_PAGE).stop ==
             AARCH64_STEP_RETIRED);
@@ -8556,7 +8854,8 @@ static void test_profile_aggregation(void) {
             AARCH64_OP_STORE_SIMD_PAIR] == 0);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_SBFM] == 0);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_LSRV] == 0);
-    assert(snapshot.fallback_by_opcode[AARCH64_OP_MADD] == 2);
+    assert(snapshot.fallback_by_opcode[AARCH64_OP_MADD] == 0);
+    assert(snapshot.fallback_by_opcode[AARCH64_OP_LSLV] == 2);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_STORE_IMM12] == 0);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_LOAD_PAIR] == 0);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_UBFM] == 0);
@@ -8589,8 +8888,9 @@ static void test_profile_aggregation(void) {
             AARCH64_OP_STORE_SIMD_PAIR] == 0);
     assert(snapshot.representative_word_by_opcode[AARCH64_OP_SBFM] == 0);
     assert(snapshot.representative_word_by_opcode[AARCH64_OP_LSRV] == 0);
-    assert(snapshot.representative_word_by_opcode[AARCH64_OP_MADD] ==
-            INSTRUCTION_MUL_X6_X6_X0);
+    assert(snapshot.representative_word_by_opcode[AARCH64_OP_MADD] == 0);
+    assert(snapshot.representative_word_by_opcode[AARCH64_OP_LSLV] ==
+            INSTRUCTION_LSLV_X5_X7_X1);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_STORE_IMM12] == 0);
     assert(snapshot.representative_word_by_opcode[
@@ -8643,27 +8943,27 @@ static void test_profile_aggregation(void) {
             "\tcache_hits\t4\tcache_misses\t6"
             "\tfast_dispatches\t3\tc_fallbacks\t5"
             "\tundefined_dispatches\t2\n");
-    char madd_line[160];
+    char lslv_line[160];
     char adds_line[160];
-    assert(snprintf(madd_line, sizeof(madd_line),
+    assert(snprintf(lslv_line, sizeof(lslv_line),
             "AARCH64_THREADED_PROFILE\topcode\t%u"
-            "\tcount\t2\trepresentative_word\t0x9b007cc6\n",
-            (unsigned) AARCH64_OP_MADD) > 0);
+            "\tcount\t2\trepresentative_word\t0x9ac120e5\n",
+            (unsigned) AARCH64_OP_LSLV) > 0);
     assert(snprintf(adds_line, sizeof(adds_line),
             "AARCH64_THREADED_PROFILE\topcode\t%u"
             "\tcount\t3\trepresentative_word\t0xab000043\n",
             (unsigned) AARCH64_OP_ADDS_SHIFTED_REGISTER) > 0);
-    const char *madd_output = strstr(output, madd_line);
+    const char *lslv_output = strstr(output, lslv_line);
     const char *adds_output = strstr(output, adds_line);
     assert(version_line == output);
     assert(backend_line != NULL);
     assert(totals_line != NULL);
-    assert(madd_output != NULL);
+    assert(lslv_output != NULL);
     assert(adds_output != NULL);
     assert(backend_line > version_line);
     assert(totals_line > backend_line);
     assert(adds_output > totals_line);
-    assert(madd_output > adds_output);
+    assert(lslv_output > adds_output);
     unsigned output_lines = 0;
     for (const char *cursor = output; *cursor != '\0'; cursor++) {
         if (*cursor == '\n')
@@ -8713,6 +9013,8 @@ int main(void) {
     test_fast_ubfm_differential();
     test_fast_sbfm_differential();
     test_fast_lsrv_differential();
+    test_fast_madd_differential();
+    test_multiply_add_sibling_fallback();
     test_data_processing_2source_sibling_fallback();
     test_bitfield_sibling_fallback();
     test_fast_extract_differential();
