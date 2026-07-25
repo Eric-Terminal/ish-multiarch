@@ -24,10 +24,13 @@
 #define INSTRUCTION_EOR_X1_XZR_X1 UINT32_C(0xca0103e1)
 #define INSTRUCTION_LDR_X4_X3 UINT32_C(0xf9400064)
 #define INSTRUCTION_LDR_X4_X3_X2_LSL_3 UINT32_C(0xf8627864)
+#define INSTRUCTION_LDP_X4_X6_X3_48 UINT32_C(0xa9431864)
 #define INSTRUCTION_STR_X5_X3_32 UINT32_C(0xf9001065)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
+#define PAIR_FIRST_VALUE UINT64_C(0x0123456789abcdef)
+#define PAIR_SECOND_VALUE UINT64_C(0xfedcba9876543210)
 
 struct benchmark_memory {
     byte_t code[GUEST_MEMORY_PAGE_SIZE];
@@ -46,6 +49,7 @@ struct benchmark_workload {
     qword_t instructions_per_iteration;
     qword_t x1_increment_per_iteration;
     qword_t expected_x4;
+    qword_t expected_x6;
     size_t expected_store_offset;
     byte_t expected_store_size;
     qword_t expected_store_value;
@@ -197,6 +201,14 @@ static void write_store_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 12, INSTRUCTION_SVC);
 }
 
+static void write_load_pair_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_LDP_X4_X6_X3_48);
+    put_instruction(code + 4, INSTRUCTION_SUBS_X0);
+    put_instruction(code + 8, encode_conditional_branch(-8, 1));
+    put_instruction(code + 12, INSTRUCTION_SVC);
+}
+
 static void write_nop_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     for (unsigned index = 0; index < NOP_COUNT; index++)
         put_instruction(code + index * 4, INSTRUCTION_NOP);
@@ -306,6 +318,17 @@ static const struct benchmark_workload workloads[] = {
         .write_program = write_store_program,
     },
     {
+        .name = "LDP 热点环",
+        .instructions_per_iteration = 3,
+        .x1_increment_per_iteration = 0,
+        .expected_x4 = PAIR_FIRST_VALUE,
+        .expected_x6 = PAIR_SECOND_VALUE,
+        .fast_per_iteration = 3,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 4,
+        .write_program = write_load_pair_program,
+    },
+    {
         .name = "NOP 调度环",
         .instructions_per_iteration = NOP_COUNT + 2,
         .x1_increment_per_iteration = 0,
@@ -316,18 +339,20 @@ static const struct benchmark_workload workloads[] = {
     },
 };
 
+static void store_little_endian(
+        byte_t *destination, byte_t size, qword_t value) {
+    for (byte_t index = 0; index < size; index++)
+        destination[index] = (byte_t) (value >> (index * 8));
+}
+
 static void reset_benchmark_data(
         byte_t data[GUEST_MEMORY_PAGE_SIZE]) {
     memset(data, 0, GUEST_MEMORY_PAGE_SIZE);
     data[0] = 7;
     data[24] = 11;
     memset(data + 32, 0xa5, 8);
-}
-
-static void store_little_endian(
-        byte_t *destination, byte_t size, qword_t value) {
-    for (byte_t index = 0; index < size; index++)
-        destination[index] = (byte_t) (value >> (index * 8));
+    store_little_endian(data + 48, 8, PAIR_FIRST_VALUE);
+    store_little_endian(data + 56, 8, PAIR_SECOND_VALUE);
 }
 
 static qword_t scaled_count(const struct benchmark_workload *workload,
@@ -470,7 +495,8 @@ static void verify_run(const struct benchmark_workload *workload,
                     run->cpu.x[1] == expected_x1 && run->cpu.x[2] == 3 &&
                     run->cpu.x[3] == DATA_PAGE &&
                     run->cpu.x[4] == workload->expected_x4 &&
-                    run->cpu.x[5] == STORE_VALUE,
+                    run->cpu.x[5] == STORE_VALUE &&
+                    run->cpu.x[6] == workload->expected_x6,
             workload->name, "循环次数或通用寄存器结果不符");
     require(run->cpu.pc == CODE_PAGE +
                     workload->program_instruction_count * 4 &&

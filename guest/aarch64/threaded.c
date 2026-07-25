@@ -267,6 +267,48 @@ static void execute_scalar_load_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_load_pair_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    assert(instruction->opcode == AARCH64_OP_LOAD_PAIR);
+    byte_t rt = instruction->operands.load_store_pair.rt;
+    byte_t rt2 = instruction->operands.load_store_pair.rt2;
+    byte_t rn = instruction->operands.load_store_pair.rn;
+    bool signed_load = instruction->operands.load_store_pair.signed_load;
+    byte_t size = signed_load ? 4 : (byte_t) (instruction->width / 8);
+    guest_addr_t base = read_general_register(cpu, rn, 64, true);
+    guest_addr_t adjusted = base +
+            (qword_t) instruction->operands.load_store_pair.offset;
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store_pair.address_mode;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
+    byte_t bytes[16];
+    if (!guest_tlb_read(tlb, address, bytes, (size_t) size * 2,
+            GUEST_MEMORY_READ, &result->fault)) {
+        aarch64_clear_exclusive(cpu);
+        result->stop = AARCH64_EXECUTE_DATA_FAULT;
+        return;
+    }
+
+    qword_t values[2] = {0};
+    for (byte_t index = 0; index < size; index++) {
+        values[0] |= (qword_t) bytes[index] << (index * 8);
+        values[1] |= (qword_t) bytes[size + index] << (index * 8);
+    }
+    if (signed_load) {
+        qword_t sign = UINT64_C(1) << 31;
+        values[0] = (values[0] ^ sign) - sign;
+        values[1] = (values[1] ^ sign) - sign;
+    }
+    write_general_register(cpu, rt, instruction->width, false, values[0]);
+    write_general_register(cpu, rt2, instruction->width, false, values[1]);
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_general_register(cpu, rn, 64, true, adjusted);
+    cpu->pc += 4;
+}
+
 static void execute_store_imm12_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -404,6 +446,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_LOAD_IMM12:
         case AARCH64_OP_LOAD_REGISTER_OFFSET:
             return execute_scalar_load_fast;
+        case AARCH64_OP_LOAD_PAIR:
+            return execute_load_pair_fast;
         case AARCH64_OP_STORE_IMM12:
             return execute_store_imm12_fast;
         case AARCH64_OP_B:

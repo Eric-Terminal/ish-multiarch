@@ -26,6 +26,13 @@
 #define INSTRUCTION_STR_W0_X1_32 UINT32_C(0xb9002020)
 #define INSTRUCTION_LDXR_X2_X1 UINT32_C(0xc85f7c22)
 #define INSTRUCTION_STXR_W4_X3_X1 UINT32_C(0xc8047c23)
+#define INSTRUCTION_STXR_W6_X3_X1 UINT32_C(0xc8067c23)
+#define INSTRUCTION_LDP_X6_X1_SP_400 UINT32_C(0xa95907e6)
+#define INSTRUCTION_LDP_X29_X30_SP_POST_16 UINT32_C(0xa8c17bfd)
+#define INSTRUCTION_LDP_X4_X5_X1 UINT32_C(0xa9401424)
+#define INSTRUCTION_STP_XZR_XZR_X9 UINT32_C(0xa9007d3f)
+#define INSTRUCTION_LDP_Q30_Q31_X1 UINT32_C(0xad407c3e)
+#define INSTRUCTION_LDXP_X4_X5_X1 UINT32_C(0xc87f1424)
 #define INSTRUCTION_STR_X0_X1_XZR UINT32_C(0xf83f6820)
 #define INSTRUCTION_STR_XZR_X1_XZR UINT32_C(0xf83f683f)
 #define INSTRUCTION_ORR_X3_XZR_X0 UINT32_C(0xaa0003e3)
@@ -418,6 +425,36 @@ static dword_t encode_store_imm12(byte_t size_shift,
     return UINT32_C(0x39000000) |
             ((dword_t) size_shift << 30) |
             ((dword_t) immediate << 10) |
+            ((dword_t) rn << 5) | rt;
+}
+
+static dword_t encode_load_pair(byte_t operation,
+        enum aarch64_address_mode address_mode, int64_t offset,
+        byte_t rn, byte_t rt, byte_t rt2) {
+    assert(operation <= 2);
+    assert(rn < 32);
+    assert(rt < 32);
+    assert(rt2 < 32);
+    assert(rt != rt2);
+    byte_t size = operation == 2 ? 8 : 4;
+    assert(offset % size == 0);
+    int64_t scaled_offset = offset / size;
+    assert(scaled_offset >= -64 && scaled_offset <= 63);
+    byte_t mode;
+    if (address_mode == AARCH64_ADDRESS_POST_INDEX)
+        mode = 1;
+    else if (address_mode == AARCH64_ADDRESS_OFFSET)
+        mode = 2;
+    else {
+        assert(address_mode == AARCH64_ADDRESS_PRE_INDEX);
+        mode = 3;
+    }
+    assert(mode == 2 || rn == 31 || (rn != rt && rn != rt2));
+    return UINT32_C(0x28400000) |
+            ((dword_t) operation << 30) |
+            ((dword_t) mode << 23) |
+            (((dword_t) scaled_offset & UINT32_C(0x7f)) << 15) |
+            ((dword_t) rt2 << 10) |
             ((dword_t) rn << 5) | rt;
 }
 
@@ -1931,6 +1968,324 @@ static void test_fast_store_imm12_exclusive_invalidation(void) {
             expected, sizeof(expected)) == 0);
 }
 
+static void test_fast_load_pair_differential(void) {
+    const qword_t first_source = UINT64_C(0x8877665589abcdef);
+    const qword_t second_source = UINT64_C(0x1122334401234567);
+    const guest_addr_t target = DATA_PAGE + 0x300;
+    const struct {
+        byte_t operation;
+        enum aarch64_address_mode address_mode;
+        int64_t offset;
+        byte_t rn;
+        byte_t rt;
+        byte_t rt2;
+        dword_t expected_word;
+    } cases[] = {
+        {0, AARCH64_ADDRESS_OFFSET, 252, 5, 4, 6, 0},
+        {0, AARCH64_ADDRESS_PRE_INDEX, -256, 7, 8, 9, 0},
+        {0, AARCH64_ADDRESS_POST_INDEX, 4, 31, 10, 11, 0},
+        {2, AARCH64_ADDRESS_OFFSET, 400, 31, 6, 1,
+                INSTRUCTION_LDP_X6_X1_SP_400},
+        {2, AARCH64_ADDRESS_POST_INDEX, 16, 31, 29, 30,
+                INSTRUCTION_LDP_X29_X30_SP_POST_16},
+        {2, AARCH64_ADDRESS_PRE_INDEX, -512, 12, 13, 14, 0},
+        {1, AARCH64_ADDRESS_OFFSET, 252, 15, 16, 17, 0},
+        {1, AARCH64_ADDRESS_PRE_INDEX, -256, 18, 19, 20, 0},
+        {2, AARCH64_ADDRESS_OFFSET, 0, 4, 4, 21, 0},
+        {2, AARCH64_ADDRESS_OFFSET, 0, 22, 23, 22, 0},
+        {2, AARCH64_ADDRESS_OFFSET, 0, 24, 31, 25, 0},
+    };
+
+    for (unsigned index = 0; index < array_size(cases); index++) {
+        byte_t size = cases[index].operation == 2 ? 8 : 4;
+        dword_t instruction = encode_load_pair(
+                cases[index].operation, cases[index].address_mode,
+                cases[index].offset, cases[index].rn,
+                cases[index].rt, cases[index].rt2);
+        if (cases[index].expected_word != 0)
+            assert(instruction == cases[index].expected_word);
+
+        struct test_fixture c_fixture;
+        struct test_fixture threaded_fixture;
+        init_fixture(&c_fixture);
+        init_fixture(&threaded_fixture);
+        put_value(c_fixture.memory.data + 0x300,
+                size, first_source);
+        put_value(c_fixture.memory.data + 0x300 + size,
+                size, second_source);
+        put_value(threaded_fixture.memory.data + 0x300,
+                size, first_source);
+        put_value(threaded_fixture.memory.data + 0x300 + size,
+                size, second_source);
+        write_instruction(&c_fixture.tlb, CODE_PAGE, instruction);
+        write_instruction(&threaded_fixture.tlb,
+                CODE_PAGE, instruction);
+
+        struct cpu_state initial;
+        init_differential_cpu(&initial);
+        if (cases[index].rt != 31)
+            initial.x[cases[index].rt] = UINT64_MAX;
+        if (cases[index].rt2 != 31)
+            initial.x[cases[index].rt2] = UINT64_MAX;
+        guest_addr_t base =
+                cases[index].address_mode ==
+                        AARCH64_ADDRESS_POST_INDEX ?
+                target : target - (qword_t) cases[index].offset;
+        if (cases[index].rn == 31)
+            initial.sp = base;
+        else
+            initial.x[cases[index].rn] = base;
+        aarch64_set_exclusive(&initial, DATA_PAGE + 0x80,
+                8, false, UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+
+        struct cpu_state result = run_fast_differential_fixtures(
+                instruction, initial, AARCH64_STEP_RETIRED,
+                &c_fixture, &threaded_fixture, NULL);
+        qword_t expected_first = first_source;
+        qword_t expected_second = second_source;
+        if (cases[index].operation != 2) {
+            expected_first &= UINT32_MAX;
+            expected_second &= UINT32_MAX;
+        }
+        if (cases[index].operation == 1) {
+            qword_t sign = UINT64_C(1) << 31;
+            expected_first = (expected_first ^ sign) - sign;
+            expected_second = (expected_second ^ sign) - sign;
+        }
+        if (cases[index].rt != 31)
+            assert(result.x[cases[index].rt] == expected_first);
+        if (cases[index].rt2 != 31)
+            assert(result.x[cases[index].rt2] == expected_second);
+
+        guest_addr_t expected_base = base;
+        if (cases[index].address_mode != AARCH64_ADDRESS_OFFSET)
+            expected_base += (qword_t) cases[index].offset;
+        if (cases[index].rn == 31) {
+            assert(result.sp == expected_base);
+        } else if (cases[index].rn != cases[index].rt &&
+                cases[index].rn != cases[index].rt2) {
+            assert(result.x[cases[index].rn] == expected_base);
+        }
+        assert(result.pc == CODE_PAGE + 4);
+        assert(result.cycle == initial.cycle + 1);
+        assert(result.exclusive.valid);
+        assert(result.exclusive.write_epoch == 5);
+        assert(result.exclusive.sync_identity == 7);
+    }
+
+    struct test_fixture c_fixture;
+    struct test_fixture threaded_fixture;
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    const dword_t cross_page = encode_load_pair(
+            2, AARCH64_ADDRESS_OFFSET, 0, 4, 6, 7);
+    byte_t pair_bytes[16];
+    put_value(pair_bytes, 8, first_source);
+    put_value(pair_bytes + 8, 8, second_source);
+    memcpy(c_fixture.memory.primary_code +
+            GUEST_MEMORY_PAGE_SIZE - 5, pair_bytes, 5);
+    memcpy(c_fixture.memory.data, pair_bytes + 5, 11);
+    memcpy(threaded_fixture.memory.primary_code +
+            GUEST_MEMORY_PAGE_SIZE - 5, pair_bytes, 5);
+    memcpy(threaded_fixture.memory.data, pair_bytes + 5, 11);
+    write_instruction(&c_fixture.tlb, CODE_PAGE, cross_page);
+    write_instruction(&threaded_fixture.tlb, CODE_PAGE, cross_page);
+    struct cpu_state initial;
+    init_differential_cpu(&initial);
+    initial.x[4] = DATA_PAGE - 5;
+    struct cpu_state result = run_fast_differential_fixtures(
+            cross_page, initial, AARCH64_STEP_RETIRED,
+            &c_fixture, &threaded_fixture, NULL);
+    assert(result.x[6] == first_source);
+    assert(result.x[7] == second_source);
+}
+
+static void test_fast_load_pair_faults(void) {
+    const dword_t post_index = encode_load_pair(
+            2, AARCH64_ADDRESS_POST_INDEX, 16, 5, 4, 6);
+    struct test_fixture c_fixture;
+    struct test_fixture threaded_fixture;
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    write_instruction(&c_fixture.tlb, CODE_PAGE, post_index);
+    write_instruction(&threaded_fixture.tlb, CODE_PAGE, post_index);
+    struct cpu_state initial;
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x1020304050607080);
+    initial.x[5] = DATA_PAGE + GUEST_MEMORY_PAGE_SIZE - 8;
+    initial.x[6] = UINT64_C(0x8877665544332211);
+    aarch64_set_exclusive(&initial, DATA_PAGE + 0x80,
+            8, false, UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+    struct aarch64_step_result step;
+    struct cpu_state result = run_fast_differential_fixtures(
+            post_index, initial, AARCH64_STEP_DATA_FAULT,
+            &c_fixture, &threaded_fixture, &step);
+    assert(step.fault.address == DATA_PAGE + GUEST_MEMORY_PAGE_SIZE);
+    assert(step.fault.access == GUEST_MEMORY_READ);
+    assert(step.fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(result.x[4] == initial.x[4]);
+    assert(result.x[5] == initial.x[5]);
+    assert(result.x[6] == initial.x[6]);
+    assert(result.pc == CODE_PAGE);
+    assert(result.cycle == initial.cycle);
+    assert(!result.exclusive.valid);
+
+    const dword_t pre_index = encode_load_pair(
+            2, AARCH64_ADDRESS_PRE_INDEX, -16, 5, 4, 6);
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    write_instruction(&c_fixture.tlb, CODE_PAGE, pre_index);
+    write_instruction(&threaded_fixture.tlb, CODE_PAGE, pre_index);
+    c_fixture.memory.code_permissions = GUEST_MEMORY_EXECUTE;
+    threaded_fixture.memory.code_permissions = GUEST_MEMORY_EXECUTE;
+    guest_address_space_changed(&c_fixture.space);
+    guest_address_space_changed(&threaded_fixture.space);
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x1020304050607080);
+    initial.x[5] = CODE_PAGE + 0x110;
+    initial.x[6] = UINT64_C(0x8877665544332211);
+    aarch64_set_exclusive(&initial, DATA_PAGE + 0x80,
+            8, false, UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+    result = run_fast_differential_fixtures(
+            pre_index, initial, AARCH64_STEP_DATA_FAULT,
+            &c_fixture, &threaded_fixture, &step);
+    assert(step.fault.address == CODE_PAGE + 0x100);
+    assert(step.fault.access == GUEST_MEMORY_READ);
+    assert(step.fault.kind == GUEST_MEMORY_FAULT_PERMISSION);
+    assert(result.x[4] == initial.x[4]);
+    assert(result.x[5] == initial.x[5]);
+    assert(result.x[6] == initial.x[6]);
+    assert(result.pc == CODE_PAGE);
+    assert(result.cycle == initial.cycle);
+    assert(!result.exclusive.valid);
+
+    const dword_t address_size = encode_load_pair(
+            2, AARCH64_ADDRESS_OFFSET, 0, 5, 4, 6);
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    write_instruction(&c_fixture.tlb, CODE_PAGE, address_size);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE, address_size);
+    init_differential_cpu(&initial);
+    initial.x[4] = UINT64_C(0x1020304050607080);
+    initial.x[5] = (UINT64_C(1) << 48) - 8;
+    initial.x[6] = UINT64_C(0x8877665544332211);
+    aarch64_set_exclusive(&initial, DATA_PAGE + 0x80,
+            8, false, UINT64_C(0x1122), 0, NULL, 3, 5, 7);
+    result = run_fast_differential_fixtures(
+            address_size, initial, AARCH64_STEP_DATA_FAULT,
+            &c_fixture, &threaded_fixture, &step);
+    assert(step.fault.address == (UINT64_C(1) << 48));
+    assert(step.fault.access == GUEST_MEMORY_READ);
+    assert(step.fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE);
+    assert(result.x[4] == initial.x[4]);
+    assert(result.x[5] == initial.x[5]);
+    assert(result.x[6] == initial.x[6]);
+    assert(result.pc == CODE_PAGE);
+    assert(result.cycle == initial.cycle);
+    assert(!result.exclusive.valid);
+}
+
+static void test_fast_load_pair_preserves_exclusive(void) {
+    struct test_fixture c_fixture;
+    struct test_fixture threaded_fixture;
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    const dword_t instructions[] = {
+        INSTRUCTION_LDXR_X2_X1,
+        INSTRUCTION_LDP_X4_X5_X1,
+        INSTRUCTION_STXR_W6_X3_X1,
+    };
+    for (unsigned index = 0; index < array_size(instructions); index++) {
+        write_instruction(&c_fixture.tlb,
+                CODE_PAGE + index * 4, instructions[index]);
+        write_instruction(&threaded_fixture.tlb,
+                CODE_PAGE + index * 4, instructions[index]);
+    }
+    put_value(c_fixture.memory.data + 0x180, 8,
+            UINT64_C(0x1020304050607080));
+    put_value(c_fixture.memory.data + 0x188, 8,
+            UINT64_C(0x8877665544332211));
+    memcpy(threaded_fixture.memory.data + 0x180,
+            c_fixture.memory.data + 0x180, 16);
+
+    struct aarch64_runner c_runner;
+    struct aarch64_runner threaded_runner;
+    assert(aarch64_runner_init_backend(
+            &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
+    assert(aarch64_runner_init_backend(&threaded_runner,
+            &threaded_fixture.tlb, AARCH64_BACKEND_THREADED));
+    struct cpu_state c_cpu;
+    struct cpu_state threaded_cpu;
+    init_differential_cpu(&c_cpu);
+    init_differential_cpu(&threaded_cpu);
+    c_cpu.x[1] = threaded_cpu.x[1] = DATA_PAGE + 0x180;
+    c_cpu.x[3] = threaded_cpu.x[3] =
+            UINT64_C(0xaabbccddeeff0011);
+
+    for (unsigned index = 0; index < array_size(instructions); index++) {
+        struct aarch64_step_result c_result =
+                aarch64_run_one(&c_runner, &c_cpu);
+        struct aarch64_step_result threaded_result =
+                aarch64_run_one(&threaded_runner, &threaded_cpu);
+        assert(c_result.stop == AARCH64_STEP_RETIRED);
+        assert_step_equal(&c_result, &threaded_result);
+        assert_cpu_equal(&c_cpu, &threaded_cpu);
+        assert_memory_equal(&c_fixture.memory,
+                &threaded_fixture.memory);
+        if (index == 1) {
+            assert(c_cpu.exclusive.valid);
+            assert_stats(&threaded_runner, 0, 2, 1, 1);
+        }
+    }
+    assert(c_cpu.x[2] == UINT64_C(0x1020304050607080));
+    assert(c_cpu.x[4] == UINT64_C(0x1020304050607080));
+    assert(c_cpu.x[5] == UINT64_C(0x8877665544332211));
+    assert(c_cpu.x[6] == 0);
+    assert(!c_cpu.exclusive.valid);
+    assert_stats(&threaded_runner, 0, 3, 1, 2);
+    const byte_t expected[] = {
+        0x11, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa,
+    };
+    assert(memcmp(c_fixture.memory.data + 0x180,
+            expected, sizeof(expected)) == 0);
+}
+
+static void test_load_pair_sibling_fallback(void) {
+    struct test_fixture fixture;
+    init_fixture(&fixture);
+    const dword_t instructions[] = {
+        INSTRUCTION_STP_XZR_XZR_X9,
+        INSTRUCTION_LDP_Q30_Q31_X1,
+        INSTRUCTION_LDXP_X4_X5_X1,
+    };
+    const enum aarch64_opcode opcodes[] = {
+        AARCH64_OP_STORE_PAIR,
+        AARCH64_OP_LOAD_SIMD_PAIR,
+        AARCH64_OP_LDXP,
+    };
+    for (unsigned index = 0; index < array_size(instructions); index++) {
+        struct aarch64_decoded decoded;
+        assert(aarch64_decode(instructions[index], &decoded));
+        assert(decoded.opcode == opcodes[index]);
+        write_instruction(&fixture.tlb,
+                CODE_PAGE + index * 4, instructions[index]);
+    }
+    struct aarch64_runner runner;
+    assert(aarch64_runner_init_backend(
+            &runner, &fixture.tlb, AARCH64_BACKEND_THREADED));
+    struct cpu_state cpu;
+    init_differential_cpu(&cpu);
+    cpu.x[1] = DATA_PAGE;
+    cpu.x[9] = DATA_PAGE;
+    for (unsigned index = 0; index < array_size(instructions); index++) {
+        assert(run_at(&runner, &cpu, CODE_PAGE + index * 4).stop ==
+                AARCH64_STEP_RETIRED);
+    }
+    assert_stats(&runner, 0, array_size(instructions),
+            0, array_size(instructions));
+}
+
 static void test_fast_load_register_offset_differential(void) {
     static const enum aarch64_extend_type extend_types[] = {
         AARCH64_EXTEND_UXTW,
@@ -2482,10 +2837,11 @@ static void test_fast_dispatch_structure(void) {
         encode_compare_branch(true, true, 4, 8),
         encode_test_branch(false, 7, 4, 9),
         encode_test_branch(true, 42, 4, 9),
+        INSTRUCTION_LDP_X6_X1_SP_400,
         UINT32_C(0xd4000541),
     };
-    _Static_assert(array_size(hot_instructions) == 27,
-            "threaded 热点结构门必须覆盖全部 27 个 opcode");
+    _Static_assert(array_size(hot_instructions) == 28,
+            "threaded 热点结构门必须覆盖全部 28 个 opcode");
     bool seen_opcodes[AARCH64_OP_COUNT] = {false};
     for (unsigned index = 0; index < array_size(hot_instructions); index++) {
         struct aarch64_decoded decoded;
@@ -2603,6 +2959,17 @@ static void test_fast_dispatch_structure(void) {
             expected_store, sizeof(expected_store)) == 0);
     assert_stats(&runner, 9, array_size(hot_instructions) + 1,
             array_size(hot_instructions) + 8, 2);
+
+    const qword_t pair_first = UINT64_C(0x0123456789abcdef);
+    const qword_t pair_second = UINT64_C(0xfedcba9876543210);
+    put_value(fixture.memory.data + 0x490, 8, pair_first);
+    put_value(fixture.memory.data + 0x498, 8, pair_second);
+    assert(run_at(&runner, &cpu, CODE_PAGE + 26 * 4).stop ==
+            AARCH64_STEP_RETIRED);
+    assert(cpu.x[6] == pair_first);
+    assert(cpu.x[1] == pair_second);
+    assert_stats(&runner, 10, array_size(hot_instructions) + 1,
+            array_size(hot_instructions) + 9, 2);
 }
 
 static void test_product_c_fallback(void) {
@@ -3778,7 +4145,7 @@ static void test_profile_aggregation(void) {
     write_instruction(&first_fixture.tlb, CODE_PAGE + 4,
             alternate_store);
     write_instruction(&first_fixture.tlb, CODE_PAGE + 8,
-            INSTRUCTION_NOP);
+            INSTRUCTION_LDP_X6_X1_SP_400);
     write_instruction(&second_fixture.tlb, CODE_PAGE,
             INSTRUCTION_ADDS_X3);
     write_instruction(&second_fixture.tlb, CODE_PAGE + 4,
@@ -3797,7 +4164,10 @@ static void test_profile_aggregation(void) {
             &second_fixture.tlb, AARCH64_BACKEND_THREADED));
     assert(aarch64_runner_init_backend(
             &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
-    struct cpu_state first_cpu = {.x[1] = DATA_PAGE};
+    struct cpu_state first_cpu = {
+        .x[1] = DATA_PAGE,
+        .sp = DATA_PAGE,
+    };
     struct cpu_state second_cpu = {.x[1] = DATA_PAGE};
     struct cpu_state c_cpu = {.x[1] = DATA_PAGE};
 
@@ -3848,6 +4218,7 @@ static void test_profile_aggregation(void) {
     assert(snapshot.fallback_by_opcode[
             AARCH64_OP_STORE_REGISTER_OFFSET] == 2);
     assert(snapshot.fallback_by_opcode[AARCH64_OP_STORE_IMM12] == 0);
+    assert(snapshot.fallback_by_opcode[AARCH64_OP_LOAD_PAIR] == 0);
     assert(snapshot.fallback_by_opcode[
             AARCH64_OP_ADDS_SHIFTED_REGISTER] == 3);
     assert(snapshot.representative_word_by_opcode[
@@ -3855,6 +4226,8 @@ static void test_profile_aggregation(void) {
             alternate_store);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_STORE_IMM12] == 0);
+    assert(snapshot.representative_word_by_opcode[
+            AARCH64_OP_LOAD_PAIR] == 0);
     assert(snapshot.representative_word_by_opcode[
             AARCH64_OP_ADDS_SHIFTED_REGISTER] == INSTRUCTION_ADDS_X3);
 
@@ -3952,6 +4325,10 @@ int main(void) {
     test_fast_store_imm12_differential();
     test_fast_store_imm12_faults();
     test_fast_store_imm12_exclusive_invalidation();
+    test_fast_load_pair_differential();
+    test_fast_load_pair_faults();
+    test_fast_load_pair_preserves_exclusive();
+    test_load_pair_sibling_fallback();
     test_fast_load_register_offset_differential();
     test_fast_load_register_offset_aliases();
     test_fast_load_register_offset_faults();
