@@ -417,6 +417,23 @@ static void execute_store_imm12_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_adrp_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_ADRP);
+    assert(instruction->width == 64);
+    qword_t page = cpu->pc & ~UINT64_C(0xfff);
+    qword_t value = page +
+            (qword_t) instruction->operands.pc_relative.displacement;
+
+    write_general_register(cpu,
+            instruction->operands.pc_relative.rd, 64, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_branch_immediate_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -538,6 +555,8 @@ static aarch64_threaded_handler select_handler(
             return execute_store_pair_fast;
         case AARCH64_OP_STORE_IMM12:
             return execute_store_imm12_fast;
+        case AARCH64_OP_ADRP:
+            return execute_adrp_fast;
         case AARCH64_OP_B:
         case AARCH64_OP_BL:
             return execute_branch_immediate_fast;
