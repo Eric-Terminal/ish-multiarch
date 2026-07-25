@@ -415,15 +415,19 @@ static void execute_scalar_load_fast(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction,
         struct aarch64_execute_result *result) {
     assert(instruction->opcode == AARCH64_OP_LOAD_IMM12 ||
+            instruction->opcode == AARCH64_OP_LOAD_IMM9 ||
             instruction->opcode == AARCH64_OP_LOAD_REGISTER_OFFSET);
-    assert(instruction->operands.load_store.address_mode ==
-            AARCH64_ADDRESS_OFFSET);
+    enum aarch64_address_mode address_mode =
+            instruction->operands.load_store.address_mode;
+    assert(instruction->opcode == AARCH64_OP_LOAD_IMM9 ||
+            address_mode == AARCH64_ADDRESS_OFFSET);
     byte_t rt = instruction->operands.load_store.rt;
     byte_t rn = instruction->operands.load_store.rn;
     byte_t size = instruction->operands.load_store.size;
     guest_addr_t base = read_general_register(cpu, rn, 64, true);
     qword_t offset;
-    if (instruction->opcode == AARCH64_OP_LOAD_IMM12) {
+    if (instruction->opcode == AARCH64_OP_LOAD_IMM12 ||
+            instruction->opcode == AARCH64_OP_LOAD_IMM9) {
         offset = (qword_t) instruction->operands.load_store.offset;
     } else {
         enum aarch64_extend_type extend_type =
@@ -442,7 +446,9 @@ static void execute_scalar_load_fast(struct cpu_state *cpu,
         }
         offset <<= instruction->operands.load_store.shift;
     }
-    guest_addr_t address = base + offset;
+    guest_addr_t adjusted = base + offset;
+    guest_addr_t address = address_mode == AARCH64_ADDRESS_POST_INDEX ?
+            base : adjusted;
     byte_t bytes[8];
     if (!guest_tlb_read(tlb, address, bytes, size,
             GUEST_MEMORY_READ, &result->fault)) {
@@ -460,6 +466,8 @@ static void execute_scalar_load_fast(struct cpu_state *cpu,
         value = (value ^ sign) - sign;
     }
     write_general_register(cpu, rt, instruction->width, false, value);
+    if (address_mode != AARCH64_ADDRESS_OFFSET)
+        write_general_register(cpu, rn, 64, true, adjusted);
     cpu->pc += 4;
 }
 
@@ -752,6 +760,7 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_EXTR:
             return execute_extract_fast;
         case AARCH64_OP_LOAD_IMM12:
+        case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_LOAD_REGISTER_OFFSET:
             return execute_scalar_load_fast;
         case AARCH64_OP_LOAD_PAIR:
