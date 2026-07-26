@@ -1708,6 +1708,9 @@ static qword_t dispatch_recvmsg(
         goto out;
     }
     message_flags |= flags & AARCH64_LINUX_MSG_CMSG_CLOEXEC;
+    // 内部缓冲可大于 guest iovec，截断状态必须按 guest 可见容量计算。
+    if (full_datagram_length && (qword_t) received > total)
+        message_flags |= MSG_TRUNC_;
 
     size_t payload_length = (qword_t) received < total ?
             (size_t) received : (size_t) total;
