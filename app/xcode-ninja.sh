@@ -4,6 +4,8 @@ set -euo pipefail
 # Try to figure out the user's PATH to pick up their installed utilities.
 export PATH="$PATH:$(sudo -u "$USER" -i printenv PATH)"
 source "$SRCROOT/tools/apple-meson-arch.sh"
+source "$SRCROOT/tools/reproducible-build-env.sh"
+ish_reproducible_build_environment "$SRCROOT"
 
 architectures=()
 while IFS= read -r architecture; do

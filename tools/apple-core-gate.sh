@@ -1,9 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 BUILD_ROOT=${1:-"$ROOT/build-apple-core"}
 source "$ROOT/tools/apple-meson-arch.sh"
+source "$ROOT/tools/reproducible-build-env.sh"
+ish_reproducible_build_environment "$ROOT"
 
 if [[ -z "${MESON:-}" ]]; then
     MESON=$(command -v meson || true)
@@ -141,6 +143,43 @@ verify_backend_archive() {
     fi
 }
 
+verify_reproducible_archive_paths() {
+    local name=$1
+    local archive=$2
+    local expected_source=${3:-}
+
+    if ! TZ=UTC LC_ALL=C "$AR" -tv "$archive" | /usr/bin/awk '
+            NF < 8 || $2 != "0/0" ||
+                    $4 != "Jan" || $5 != "1" ||
+                    $6 != "00:00" || $7 != "1970" { invalid = 1 }
+            END { exit NR == 0 || invalid }
+        '; then
+        echo "错误：${name} 的归档成员元数据不具备可复现性。" >&2
+        exit 1
+    fi
+    if ! /usr/bin/strings "$archive" >/dev/null; then
+        echo "错误：无法读取 ${name} 的字符串表。" >&2
+        exit 1
+    fi
+    if /usr/bin/strings "$archive" | /usr/bin/grep -F "$ROOT" >/dev/null; then
+        echo "错误：${name} 泄露了源码 checkout 的绝对路径。" >&2
+        exit 1
+    fi
+    if [[ -n "$expected_source" ]] &&
+            ! /usr/bin/strings "$archive" |
+                /usr/bin/grep -Fx "$expected_source" >/dev/null; then
+        echo "错误：${name} 缺少规范化后的诊断源码路径 ${expected_source}。" >&2
+        exit 1
+    fi
+    if [[ -n "$expected_source" ]] &&
+            /usr/bin/strings "$archive" |
+                /usr/bin/grep -F "$expected_source" |
+                /usr/bin/grep -E '(^|/)\.\./' >/dev/null; then
+        echo "错误：${name} 仍包含未规范化的相对源码路径。" >&2
+        exit 1
+    fi
+}
+
 build_slice() {
     local name=$1
     local sdk=$2
@@ -188,6 +227,8 @@ build_slice() {
         libish_aarch64_core.a aarch64_core_link_smoke
     verify_backend_archive "${name} core 归档" \
         "$core_build_dir/libish_aarch64_core.a"
+    verify_reproducible_archive_paths "${name} core 归档" \
+        "$core_build_dir/libish_aarch64_core.a"
 
     local sysroot
     local float80_object="$core_build_dir/float80-compile.o"
@@ -221,6 +262,12 @@ build_slice() {
         apple_watch_runtime_link_smoke \
         apple_runtime_force_link_smoke
     verify_backend_archive "${name} libish.a" "$full_build_dir/libish.a"
+    verify_reproducible_archive_paths "${name} libish.a" \
+        "$full_build_dir/libish.a" "kernel/mmap.c"
+    verify_reproducible_archive_paths "${name} libish_emu.a" \
+        "$full_build_dir/libish_emu.a" "asbestos/asbestos.c"
+    verify_reproducible_archive_paths "${name} libfakefs.a" \
+        "$full_build_dir/libfakefs.a"
 
     local abi_probe="$full_build_dir/apple-abi-probe.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \

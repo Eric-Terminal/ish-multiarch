@@ -1,6 +1,19 @@
 project('ish', 'c',
+    meson_version: '>=1.3.0',
     default_options: ['default_library=static', 'c_std=gnu11', 'warning_level=2'])
 cc = meson.get_compiler('c')
+fs = import('fs')
+
+# 诊断宏与调试信息只能记录稳定的仓库内路径，不能泄露 checkout 位置。
+source_root = meson.project_source_root()
+relative_source_root = fs.relative_to(source_root, meson.project_build_root())
+foreach path_prefix : [source_root, relative_source_root]
+    prefix_map = '-ffile-prefix-map=' + path_prefix + '=.'
+    if not cc.has_argument(prefix_map)
+        error('C 编译器不支持可复现源码路径映射')
+    endif
+    add_project_arguments(prefix_map, language: 'c')
+endforeach
 
 if cc.get_id() == 'clang'
     add_project_arguments('-Wimplicit-fallthrough', '-Wtautological-constant-in-range-compare', language: 'c')
@@ -923,6 +936,9 @@ endforeach
 if not meson.is_cross_build()
     apple_meson_arch_test = find_program('tools/apple-meson-arch-test.sh')
     test('apple_meson_arch', apple_meson_arch_test)
+    reproducible_build_env_test = find_program(
+        'tools/reproducible-build-env-test.sh')
+    test('reproducible_build_env', reproducible_build_env_test)
 
     # test for floating point library
     float80_test = executable('float80_test',
