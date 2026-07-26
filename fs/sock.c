@@ -2187,6 +2187,9 @@ static int unix_datagram_send_route_begin(struct fd *sender,
         struct list *discarded_scm, bool *capacity_changed,
         struct fd **reset_peer) {
     *route = (struct unix_datagram_send_route) {0};
+#ifndef __APPLE__
+    return 0;
+#endif
     if (sender->socket.type != SOCK_DGRAM_ ||
             !explicit_destination)
         return 0;

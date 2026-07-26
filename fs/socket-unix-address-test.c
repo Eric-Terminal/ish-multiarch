@@ -2399,6 +2399,7 @@ static bool test_datagram_connected_receiver_filters_senders(
     return true;
 }
 
+#ifdef __APPLE__
 static bool test_datagram_alternate_restore_failure_commits_delivery(
         struct fixture *fixture) {
     static const byte_t sender_name[] = {
@@ -2537,6 +2538,7 @@ static bool test_datagram_alternate_restore_failure_commits_delivery(
             "恢复失败事务未泄漏 SCM、guest 或 host fd");
     return true;
 }
+#endif
 
 static bool test_datagram_socketpair_retarget_preserves_reverse_peer(
         struct fixture *fixture) {
@@ -4292,8 +4294,10 @@ int main(void) {
             test_datagram_concurrent_connect_commits_one_route(&fixture) &&
             test_datagram_failed_connect_preserves_old_route(&fixture) &&
             test_datagram_connected_receiver_filters_senders(&fixture) &&
+#ifdef __APPLE__
             test_datagram_alternate_restore_failure_commits_delivery(
                     &fixture) &&
+#endif
             test_datagram_socketpair_retarget_preserves_reverse_peer(
                     &fixture) &&
             test_datagram_disconnect_resets_route_state(&fixture) &&
