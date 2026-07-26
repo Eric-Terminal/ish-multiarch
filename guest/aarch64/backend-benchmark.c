@@ -100,6 +100,10 @@
 #define INSTRUCTION_STP_X5_X2_X3_32 UINT32_C(0xa9020865)
 #define INSTRUCTION_STP_Q0_Q0_X3_32 UINT32_C(0xad010060)
 #define INSTRUCTION_ADD_SP_X3_300 UINT32_C(0x910c007f)
+#define INSTRUCTION_LDR_Q31_X0_D60 UINT32_C(0x3dc3581f)
+#define INSTRUCTION_STR_Q31_X3_200 UINT32_C(0x3d80807f)
+#define INSTRUCTION_LDR_D31_SP_60 UINT32_C(0xfd4033ff)
+#define INSTRUCTION_STR_Q31_X3_210 UINT32_C(0x3d80847f)
 #define INSTRUCTION_LDP_Q30_Q29_SP_80 UINT32_C(0xad42f7fe)
 #define INSTRUCTION_STP_Q30_Q29_X3_200 UINT32_C(0xad10747e)
 #define INSTRUCTION_LDP_Q30_Q31_SP_80 UINT32_C(0xad42fffe)
@@ -519,6 +523,18 @@ static void write_smaddl_program(
     put_instruction(code + 32, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 36, INSTRUCTION_B_NE_NEG_36);
     put_instruction(code + 40, INSTRUCTION_SVC);
+}
+
+static void write_load_simd_imm12_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADD_SP_X3_300);
+    put_instruction(code + 4, INSTRUCTION_LDR_Q31_X0_D60);
+    put_instruction(code + 8, INSTRUCTION_STR_Q31_X3_200);
+    put_instruction(code + 12, INSTRUCTION_LDR_D31_SP_60);
+    put_instruction(code + 16, INSTRUCTION_STR_Q31_X3_210);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 24, INSTRUCTION_B_NE_NEG_24);
+    put_instruction(code + 28, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1266,6 +1282,28 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 11,
         .write_program = write_smaddl_program,
+    },
+    {
+        .name = "LOAD SIMD imm12 向量与标量高位结果依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = 0,
+        .iteration_register = 4,
+        .initial_x0 = DATA_PAGE - UINT64_C(0xa10),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .expected_sp = DATA_PAGE + UINT64_C(0x300),
+        .expected_store_offset = 0x200,
+        .expected_store_size = 32,
+        .expected_store_values = {
+            PAIR_FIRST_VALUE,
+            PAIR_SECOND_VALUE,
+            STORE_VALUE,
+            0,
+        },
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_load_simd_imm12_program,
     },
 };
 
