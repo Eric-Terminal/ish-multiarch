@@ -2183,7 +2183,7 @@
 			);
 			name = "Compile JavaScript";
 			outputPaths = (
-				"$(SRCROOT)/deps/hterm/dist/js/hterm_all.js",
+				"$(SRCROOT)/deps/libapps/hterm/dist/js/hterm_all.js",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = "/bin/sh -e";
@@ -2273,7 +2273,7 @@
 			);
 			name = "Compile JavaScript";
 			outputPaths = (
-				"$(SRCROOT)/deps/hterm/dist/js/hterm_all.js",
+				"$(SRCROOT)/deps/libapps/hterm/dist/js/hterm_all.js",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = "/bin/sh -e";

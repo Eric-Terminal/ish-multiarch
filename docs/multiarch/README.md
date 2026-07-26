@@ -239,11 +239,32 @@ section；普通源码成员到 notice 摘录的选择经过人工内容审计�
 中的所有者占位符会原样保留，避免在固定源码没有给出所有者声明时自行推断。详细边界见
 `third_party/alpine/3.24.1-aarch64/LICENSE-NOTICES.md`。
 
+Apple 宿主第三方输入使用独立的 target-aware 锁，不能与 guest seed 的
+Alpine 闭包混为一谈：
+
+```sh
+python3 tools/apple-host-delivery-inputs.py check-locks
+```
+
+该只读门禁固定 `deps/libarchive`、`deps/libapps` 与可选 Linux 产品所用
+`deps/linux` 的 gitlink、版本来源、实际构建输入路径集合、许可复核输入
+及 target 路由，并拒绝三个既有 gitlink 未声明进入主工程构建 phase。
+普通 `iSH` 携带 `libarchive.a` 与 `hterm_all.js`；
+后者的静态 concat 闭包同时包含 hterm、libdot、intl-segmenter 和
+wcwidth。Watch 与 FileProvider 没有这两项 vendored 输入，Watch 的显式
+外部链接项只按 Apple SDK 边界登记。完整格式与非目标见
+`third_party/apple-host/README.md`。
+
+这仍只是技术输入身份锁：libarchive 源内的控制性声明只作为后续复核点，
+尚未生成宿主 notices，也没有替 LGPL 方案、项目自身 GPL 入口或法律审查
+作出结论。`iSH+Linux` 的 Linux GPLv2 范围、在线 root 下载与产品声明仍
+按未决发行产品单独处理。
+
 当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入
 iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 target 归属门禁
 及公开 CI 的 bundle 字节比较覆盖；不携带固定 AArch64 seed 的 iSH+Linux 明确
-排除该资源。对应源码 tar 尚未在本 fork 的 release 位置公开，宿主侧第三方组件
-也尚未完成审计，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
+排除该资源。对应源码 tar 尚未在本 fork 的 release 位置公开，宿主 notices
+也尚未生成，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
 中 21 个输入与 pax-utils `elf.h` 的原始 notice 明确采用
 LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、没有指定版本。发行门禁还
 必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节转换，或同时提供
