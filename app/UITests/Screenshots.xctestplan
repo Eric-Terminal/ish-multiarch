@@ -17,6 +17,7 @@
         "Screenshots\/testEditorsInTmux",
         "Screenshots\/testEmacs",
         "Screenshots\/testLanguages",
+        "ThirdPartyNoticesUITests",
         "UITests"
       ],
       "target" : {

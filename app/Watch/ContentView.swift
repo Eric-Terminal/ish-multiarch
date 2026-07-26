@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var runtime: WatchRuntime
     @State private var command = ""
+    @State private var isShowingThirdPartyNotices = false
 
     var body: some View {
         VStack(spacing: 6) {
@@ -17,6 +18,16 @@ struct ContentView: View {
                     .lineLimit(1)
                     .accessibilityIdentifier("runtime-status")
                 Spacer(minLength: 0)
+                Button {
+                    isShowingThirdPartyNotices = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Alpine AArch64 许可声明")
+                .accessibilityIdentifier("third-party-notices-button")
             }
 
             ScrollViewReader { proxy in
@@ -60,6 +71,9 @@ struct ContentView: View {
             .disabled(!runtime.acceptsInput)
         }
         .padding(.horizontal, 4)
+        .sheet(isPresented: $isShowingThirdPartyNotices) {
+            ThirdPartyNoticesView()
+        }
         .task(id: scenePhase) {
             if scenePhase == .active {
                 await runtime.run()

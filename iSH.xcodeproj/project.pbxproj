@@ -39,6 +39,11 @@
 		A1D000000000000000000017 /* WatchRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000012 /* WatchRuntime.swift */; };
 		A1D000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB792B5C1F96D90D00FFB7A4 /* Assets.xcassets */; };
 		A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000000F /* iSHWatchUITests.swift */; };
+		A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
+		A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
+		A1F000000000000000000006 /* ThirdPartyNoticesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */; };
+		A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000007 /* ThirdPartyNoticesView.swift */; };
+		A1F00000000000000000000A /* ThirdPartyNoticesUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */; };
 		0FC2383C2991FBA6004C09EC /* mmx.c in Sources */ = {isa = PBXBuildFile; fileRef = 0FC2383B2991FB82004C09EC /* mmx.c */; };
 		491B31E62883BF22008EEFB0 /* ThemeViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 491B31E52883BF22008EEFB0 /* ThemeViewController.m */; };
 		49302D8E277669D300C9885A /* ish.c in Sources */ = {isa = PBXBuildFile; fileRef = 49302D8D277669D300C9885A /* ish.c */; };
@@ -498,6 +503,11 @@
 		A1E000000000000000000002 /* iSHWatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iSHWatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1E00000000000000000000E /* WatchUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchUITests.xcconfig; sourceTree = "<group>"; };
 		A1E00000000000000000000F /* iSHWatchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iSHWatchUITests.swift; sourceTree = "<group>"; };
+		A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "THIRD-PARTY-NOTICES.txt"; path = "third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
+		A1F000000000000000000004 /* ThirdPartyNoticesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ThirdPartyNoticesViewController.h; sourceTree = "<group>"; };
+		A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesViewController.m; sourceTree = "<group>"; };
+		A1F000000000000000000007 /* ThirdPartyNoticesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThirdPartyNoticesView.swift; sourceTree = "<group>"; };
+		A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesUITests.m; sourceTree = "<group>"; };
 		0FC2383B2991FB82004C09EC /* mmx.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mmx.c; sourceTree = "<group>"; };
 		408A2639236440F8008A4E81 /* iOSFS.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = iOSFS.m; sourceTree = "<group>"; };
 		408A263B23644102008A4E81 /* iOSFS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = iOSFS.h; sourceTree = "<group>"; };
@@ -918,6 +928,7 @@
 			children = (
 				A1D00000000000000000000F /* iSHWatchApp.swift */,
 				A1D000000000000000000010 /* ContentView.swift */,
+				A1F000000000000000000007 /* ThirdPartyNoticesView.swift */,
 				A1D000000000000000000011 /* TerminalDecoder.swift */,
 				A1D000000000000000000012 /* WatchRuntime.swift */,
 				A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */,
@@ -1098,6 +1109,7 @@
 			isa = PBXGroup;
 			children = (
 				BB41591E255EF9E300E0950C /* UITests.m */,
+				A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */,
 				BBD23D5E258DA450003DCB40 /* Screenshots.m */,
 				BBD23D76258DA4BC003DCB40 /* SnapshotHelper.swift */,
 				BBD23D95258DEF6B003DCB40 /* Screenshots.xctestplan */,
@@ -1138,6 +1150,7 @@
 			isa = PBXGroup;
 			children = (
 				BB792B521F96D90D00FFB7A4 /* app */,
+				A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */,
 				BB9C7B88240A343400F5D4F0 /* iSH.xcconfig */,
 				BB4A53931FAA393B00A72ACE /* most of the code */,
 				BB18B27F1F97F2590059FCD8 /* Scripts */,
@@ -1458,6 +1471,8 @@
 				BB1D9D92234A8FE100F364E8 /* AboutNavigationController.m */,
 				BBFB5577215876CD00DFE6DE /* AboutViewController.h */,
 				BBFB5578215876CD00DFE6DE /* AboutViewController.m */,
+				A1F000000000000000000004 /* ThirdPartyNoticesViewController.h */,
+				A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */,
 				BB267FA423A48F1500ED7CAF /* AltIconViewController.h */,
 				BB267FA523A48F1500ED7CAF /* AltIconViewController.m */,
 				BB101B362364CF57000A93BC /* FontPickerViewController.h */,
@@ -1948,6 +1963,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1D000000000000000000018 /* Assets.xcassets in Resources */,
+				A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1976,6 +1992,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */,
 				BB38599627BCEE6B000A1082 /* idollarhash.png in Resources */,
 				BB3859A227BCEE6B000A1082 /* dollarblock2.png in Resources */,
 				BB3859A727BCEE6B000A1082 /* uninspired.png in Resources */,
@@ -2311,6 +2328,7 @@
 			files = (
 				A1D000000000000000000014 /* iSHWatchApp.swift in Sources */,
 				A1D000000000000000000015 /* ContentView.swift in Sources */,
+				A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */,
 				A1D000000000000000000016 /* TerminalDecoder.swift in Sources */,
 				A1D000000000000000000017 /* WatchRuntime.swift in Sources */,
 			);
@@ -2446,6 +2464,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB41591F255EF9E300E0950C /* UITests.m in Sources */,
+				A1F00000000000000000000A /* ThirdPartyNoticesUITests.m in Sources */,
 				BBD23D5F258DA450003DCB40 /* Screenshots.m in Sources */,
 				BBD23D77258DA4BC003DCB40 /* SnapshotHelper.swift in Sources */,
 			);
@@ -2490,6 +2509,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB28C79226896B1F00BDC834 /* AboutAppearanceViewController.m in Sources */,
+				A1F000000000000000000006 /* ThirdPartyNoticesViewController.m in Sources */,
 				BB28C79326896B1F00BDC834 /* AltIconViewController.m in Sources */,
 				491B31E62883BF22008EEFB0 /* ThemeViewController.m in Sources */,
 				BB28C7B226896C4600BDC834 /* main.m in Sources */,

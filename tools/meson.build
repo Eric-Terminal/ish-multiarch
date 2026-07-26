@@ -45,8 +45,12 @@ if not meson.is_cross_build()
         test('apple_aarch64_rootfs_licenses',
             apple_aarch64_rootfs_licenses_test,
             args: [python3_cli.full_path()], timeout: 60)
+        apple_license_notices_app_test = files(
+            'apple-license-notices-app-test.py')
+        test('apple_license_notices_app', python3_cli,
+            args: apple_license_notices_app_test, timeout: 30)
     else
-        warning('未找到 Python 3，跳过 AArch64 对应源码包与许可输入测试')
+        warning('未找到 Python 3，跳过 AArch64 对应源码包、许可输入与 App 接线测试')
     endif
 endif
 

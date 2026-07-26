@@ -60,7 +60,7 @@ jobs:
             -Dengine=asbestos -Dkernel=ish
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
             apple_aarch64_rootfs apple_aarch64_source_bundle \
-            apple_aarch64_rootfs_licenses \
+            apple_aarch64_rootfs_licenses apple_license_notices_app \
             apple_meson_project_options \
             apple_rootfs_seed apple_resolver \
             pty_lifecycle \
@@ -71,11 +71,27 @@ jobs:
             --print-errorlogs
       - name: Build
         if: matrix.kernel == 'ish'
-        run: xcodebuild -project iSH.xcodeproj -scheme iSH -arch arm64 -sdk iphoneos CODE_SIGNING_ALLOWED=NO
+        shell: bash
+        run: |
+          set -euo pipefail
+          derived="$RUNNER_TEMP/ish-ios-derived"
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSH \
+            -configuration Release \
+            -arch arm64 \
+            -sdk iphoneos \
+            -derivedDataPath "$derived" \
+            CODE_SIGNING_ALLOWED=NO
+          app="$derived/Build/Products/Release-iphoneos/iSH.app"
+          test -x "$app/iSH"
+          cmp -s \
+            third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
+            "$app/THIRD-PARTY-NOTICES.txt"
       - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
-      - name: 验证 watchOS Xcode 最终链接
+      - name: 验证 watchOS 四切片最终链接与完整 App
         if: matrix.kernel == 'ish'
         shell: bash
         run: |
@@ -122,6 +138,40 @@ jobs:
           verify_slice "$device" arm64 WATCHOS 26.0
           verify_slice "$simulator" arm64 WATCHOSSIMULATOR 10.0
           verify_slice "$simulator" x86_64 WATCHOSSIMULATOR 10.0
+
+          app_products="$RUNNER_TEMP/ish-watch-app-products"
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSHWatch \
+            -configuration Release \
+            -sdk watchsimulator \
+            ARCHS=arm64 \
+            WATCHOS_DEPLOYMENT_TARGET=10.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+            SYMROOT="$app_products" \
+            build
+
+          watch_app="$app_products/Release-watchsimulator/iSHWatch.app"
+          test -x "$watch_app/iSHWatch"
+          cmp -s \
+            third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
+            "$watch_app/THIRD-PARTY-NOTICES.txt"
       - name: Build
         if: matrix.kernel == 'linux'
-        run: xcodebuild -project iSH.xcodeproj -scheme iSH+Linux -arch x86_64 -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO
+        shell: bash
+        run: |
+          set -euo pipefail
+          derived="$RUNNER_TEMP/ish-linux-derived"
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSH+Linux \
+            -configuration ReleaseLinux \
+            -arch x86_64 \
+            -sdk iphonesimulator \
+            -derivedDataPath "$derived" \
+            CODE_SIGNING_ALLOWED=NO
+          app="$derived/Build/Products/ReleaseLinux-iphonesimulator/iSH.app"
+          test -x "$app/iSH"
+          test -z "$(find "$app" -name THIRD-PARTY-NOTICES.txt -print -quit)"

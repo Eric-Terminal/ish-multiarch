@@ -41,6 +41,9 @@
                <Test
                   Identifier = "Screenshots">
                </Test>
+               <Test
+                  Identifier = "ThirdPartyNoticesUITests">
+               </Test>
             </SkippedTests>
          </TestableReference>
       </Testables>

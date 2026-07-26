@@ -31,16 +31,23 @@
 @property (weak, nonatomic) IBOutlet UIView *upgradeApkBadge;
 @property (weak, nonatomic) IBOutlet UITableViewCell *exportContainerCell;
 @property (weak, nonatomic) IBOutlet UITableViewCell *resetMountsCell;
+@property (weak, nonatomic) IBOutlet UITableViewCell *thirdPartyNoticesCell;
 
 @property (weak, nonatomic) IBOutlet UILabel *versionLabel;
 
 @property (weak, nonatomic) IBOutlet NSLayoutConstraint *saddamHussein;
+
+@property (nonatomic) BOOL hasThirdPartyNotices;
 
 @end
 
 @implementation AboutViewController
 
 - (void)viewDidLoad {
+    // UITableViewController 可能在父类加载流程中查询静态行数，因此先缓存资源状态。
+    self.hasThirdPartyNotices =
+            [NSBundle.mainBundle URLForResource:@"THIRD-PARTY-NOTICES"
+                                  withExtension:@"txt"] != nil;
     [super viewDidLoad];
     [self _updateUI];
     if (self.recoveryMode) {
@@ -122,6 +129,8 @@
 #if !ISH_LINUX
         iosfs_clear_all_bookmarks();
 #endif
+    } else if (cell == self.thirdPartyNoticesCell) {
+        [self performSegueWithIdentifier:@"showThirdPartyNotices" sender:cell];
     }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
@@ -144,6 +153,14 @@
     if (!self.includeDebugPanel)
         sections--;
     return sections;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSInteger rows = [super tableView:tableView numberOfRowsInSection:section];
+    // 第三段最后一行由共享 storyboard 提供，只在 App 实际打包声明时显示。
+    if (section == 2 && !self.hasThirdPartyNotices)
+        rows--;
+    return rows;
 }
 
 - (IBAction)disableDimmingChanged:(id)sender {
