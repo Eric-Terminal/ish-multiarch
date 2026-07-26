@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import stat
 import sys
 import tarfile
@@ -21,6 +23,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT = ROOT / "third_party" / "alpine" / "3.24.1-aarch64"
 DEFAULT_PACKAGES = SOURCE_ROOT / "packages.tsv"
+DEFAULT_STATIC_LINK_SOURCES = SOURCE_ROOT / "static-link-sources.tsv"
 DEFAULT_ORIGINS = SOURCE_ROOT / "origins.tsv"
 DEFAULT_ASSETS = SOURCE_ROOT / "source-assets.tsv"
 DEFAULT_BINARY_REFERENCE = SOURCE_ROOT / "binary-reference.tsv"
@@ -34,6 +37,25 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX128 = re.compile(r"^[0-9a-f]{128}$")
 ORIGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9+._-]*$")
+VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~-]*$")
+PRODUCTION_STATIC_LINK_SOURCES = frozenset(
+    {
+        (
+            "busybox@1.37.0-r31",
+            "skalibs-static",
+            "2.14.5.0-r0",
+            "skalibs",
+            "ISC",
+        ),
+        (
+            "busybox@1.37.0-r31",
+            "utmps-static",
+            "0.1.3.2-r0",
+            "utmps",
+            "ISC",
+        ),
+    }
+)
 
 
 class SourceBundleError(Exception):
@@ -61,24 +83,94 @@ class Asset:
 
 
 @dataclass(frozen=True)
+class StaticLinkSource:
+    binary_package: str
+    source_package: str
+    source_version: str
+    source_origin: str
+    source_license: str
+    snapshot_commit: str
+
+
+@dataclass(frozen=True)
 class Locks:
     packages_bytes: bytes
+    static_link_sources_bytes: bytes
     origins_bytes: bytes
     assets_bytes: bytes
     binary_reference_bytes: bytes
     readme_bytes: bytes
     origins: dict[str, Origin]
     assets: tuple[Asset, ...]
+    static_link_sources: tuple[StaticLinkSource, ...]
+
+
+def open_safe_file(path: Path, description: str) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        raise SourceBundleError(
+            "当前平台不支持安全的目录相对打开，无法验证源码输入。"
+        )
+    common_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | nofollow
+    )
+    try:
+        parent_descriptor = os.open(path.parent, common_flags | directory)
+    except OSError as error:
+        raise SourceBundleError(f"无法打开{description}的父目录：{error}") from error
+    try:
+        try:
+            descriptor = os.open(
+                path.name, common_flags, dir_fd=parent_descriptor
+            )
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                raise SourceBundleError(
+                    f"{description}不存在或是符号链接：{path}"
+                ) from error
+            raise SourceBundleError(f"无法打开{description}：{error}") from error
+    finally:
+        os.close(parent_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        os.close(descriptor)
+        raise SourceBundleError(f"无法读取{description}元数据：{error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise SourceBundleError(f"{description}必须是普通文件：{path}")
+    return descriptor
+
+
+def read_descriptor(descriptor: int, maximum_size: int | None = None) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        read_size = 1024 * 1024
+        if maximum_size is not None:
+            read_size = min(read_size, maximum_size + 1 - size)
+            if read_size <= 0:
+                break
+        chunk = os.read(descriptor, read_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return b"".join(chunks)
 
 
 def read_lock(path: Path, description: str) -> bytes:
+    descriptor = open_safe_file(path, description)
     try:
-        metadata = path.lstat()
-    except FileNotFoundError as error:
-        raise SourceBundleError(f"{description}不存在：{path}") from error
-    if not stat.S_ISREG(metadata.st_mode):
-        raise SourceBundleError(f"{description}必须是普通文件：{path}")
-    data = path.read_bytes()
+        data = read_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
     if not data or not data.endswith(b"\n") or b"\r" in data:
         raise SourceBundleError(f"{description}必须使用非空的 LF 结尾格式。")
     try:
@@ -98,36 +190,132 @@ def split_tsv(data: bytes, header: str, description: str) -> list[list[str]]:
     return rows
 
 
-def parse_packages(data: bytes) -> tuple[int, dict[str, str]]:
+def parse_packages(
+    data: bytes,
+) -> tuple[int, dict[str, str], dict[str, str]]:
     rows = split_tsv(
         data,
         "package\tversion\torigin\tlicense\taports_commit",
         "二进制包清单",
     )
     packages: set[str] = set()
+    package_keys: dict[str, str] = {}
     origins: dict[str, str] = {}
     previous_package = ""
     for row in rows:
         if len(row) != 5 or any(not field for field in row):
             raise SourceBundleError("二进制包清单含空字段或列数错误。")
-        package, _version, origin, _license, commit = row
+        package, version, origin, _license, commit = row
         if (
-            not ORIGIN_NAME.fullmatch(origin)
+            not ORIGIN_NAME.fullmatch(package)
+            or not VERSION.fullmatch(version)
+            or not ORIGIN_NAME.fullmatch(origin)
             or not HEX40.fullmatch(commit)
             or package in packages
             or package <= previous_package
         ):
             raise SourceBundleError("二进制包清单未按唯一包名排序或来源格式非法。")
         packages.add(package)
+        package_keys[f"{package}@{version}"] = commit
         previous_package = package
         known_commit = origins.setdefault(origin, commit)
         if known_commit != commit:
             raise SourceBundleError("同一 apk origin 不能对应多个 aports 提交。")
-    return len(packages), origins
+    return len(packages), origins, package_keys
+
+
+def parse_static_link_sources(
+    data: bytes,
+    package_origins: dict[str, str],
+    package_keys: dict[str, str],
+    enforce_production_model: bool,
+) -> tuple[tuple[StaticLinkSource, ...], dict[str, str]]:
+    rows = split_tsv(
+        data,
+        (
+            "binary_package\tsource_package\tsource_version\tsource_origin"
+            "\tsource_license\taports_snapshot_commit"
+        ),
+        "静态链接来源清单",
+    )
+    sources: list[StaticLinkSource] = []
+    origin_commits: dict[str, str] = {}
+    source_origins: set[str] = set()
+    previous_row: tuple[str, ...] | None = None
+    for row in rows:
+        if len(row) != 6 or any(not field for field in row):
+            raise SourceBundleError("静态链接来源清单含空字段或列数错误。")
+        row_tuple = tuple(row)
+        (
+            binary_package,
+            source_package,
+            source_version,
+            source_origin,
+            source_license,
+            snapshot_commit,
+        ) = row
+        if previous_row is not None and row_tuple <= previous_row:
+            raise SourceBundleError("静态链接来源清单未按完整记录唯一排序。")
+        if binary_package not in package_keys:
+            raise SourceBundleError(
+                f"静态链接来源声明了未知二进制包：{binary_package}"
+            )
+        if (
+            not ORIGIN_NAME.fullmatch(source_package)
+            or not VERSION.fullmatch(source_version)
+            or not ORIGIN_NAME.fullmatch(source_origin)
+            or source_package != f"{source_origin}-static"
+            or source_license != "ISC"
+            or not HEX40.fullmatch(snapshot_commit)
+        ):
+            raise SourceBundleError(
+                "静态链接来源的包、版本、origin、许可或快照格式非法。"
+            )
+        if source_origin in package_origins:
+            raise SourceBundleError(
+                "静态链接源码 origin 不能冒充二进制包 origin。"
+            )
+        if snapshot_commit != package_keys[binary_package]:
+            raise SourceBundleError(
+                "静态链接来源的 aports snapshot 与目标二进制包不一致。"
+            )
+        if source_origin in source_origins:
+            raise SourceBundleError(
+                "固定静态链接模型中每个源码 origin 必须恰有一条记录。"
+            )
+        source_origins.add(source_origin)
+        origin_commits[source_origin] = snapshot_commit
+        sources.append(
+            StaticLinkSource(
+                binary_package,
+                source_package,
+                source_version,
+                source_origin,
+                source_license,
+                snapshot_commit,
+            )
+        )
+        previous_row = row_tuple
+    if enforce_production_model:
+        actual_model = frozenset(
+            (
+                source.binary_package,
+                source.source_package,
+                source.source_version,
+                source.source_origin,
+                source.source_license,
+            )
+            for source in sources
+        )
+        if actual_model != PRODUCTION_STATIC_LINK_SOURCES:
+            raise SourceBundleError("固定 Alpine 静态链接来源语义集合不一致。")
+    return tuple(sources), origin_commits
 
 
 def parse_origins(
-    data: bytes, package_origins: dict[str, str]
+    data: bytes,
+    package_origins: dict[str, str],
+    static_origin_commits: dict[str, str],
 ) -> dict[str, Origin]:
     rows = split_tsv(
         data,
@@ -155,21 +343,38 @@ def parse_origins(
             name, commit, aports_path, tree_sha1, int(count_text)
         )
         previous_origin = name
-    if set(origins) != set(package_origins):
-        raise SourceBundleError("aports origin 清单与二进制包来源集合不一致。")
-    for name, commit in package_origins.items():
+    # 静态源码 origin 锁定消费方构建时的 aports 全树快照，
+    # 不代表依赖 APK 的构建提交。
+    expected_commits = {**package_origins, **static_origin_commits}
+    if set(origins) != set(expected_commits):
+        raise SourceBundleError(
+            "aports origin 清单与二进制包及静态链接源码集合不一致。"
+        )
+    for name, commit in expected_commits.items():
         if origins[name].commit != commit:
-            raise SourceBundleError("aports origin 提交与二进制包清单不一致。")
+            raise SourceBundleError(
+                "aports origin 的锁定提交与包提交或静态链接源码快照不一致。"
+            )
     return origins
 
 
 def validate_url(url: str, allow_local_sources: bool) -> None:
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.fragment or any(character.isspace() for character in url):
-        raise SourceBundleError("源码 URL 含片段或空白字符。")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError as error:
+        raise SourceBundleError("源码 URL 格式非法。") from error
+    if (
+        parsed.fragment
+        or "#" in url
+        or any(character.isspace() for character in url)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in url)
+    ):
+        raise SourceBundleError("源码 URL 含片段、空白或控制字符。")
     if parsed.scheme == "https":
         if (
-            not parsed.hostname
+            not hostname
             or parsed.username is not None
             or parsed.password is not None
         ):
@@ -192,6 +397,11 @@ def validate_bundle_path(path_text: str) -> PurePosixPath:
         path.is_absolute()
         or str(path) != path_text
         or any(part in ("", ".", "..") for part in path.parts)
+        or "\\" in path_text
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in path_text
+        )
     ):
         raise SourceBundleError("源码包相对路径非法。")
     return path
@@ -258,7 +468,7 @@ def parse_assets(
         paths.add(path_text)
         previous_path = path_text
     if aports_origins != set(origins):
-        raise SourceBundleError("每个二进制包 origin 必须恰有一份 aports 资产。")
+        raise SourceBundleError("每个锁定 origin 必须恰有一份 aports 资产。")
     return tuple(assets)
 
 
@@ -336,9 +546,20 @@ def parse_binary_reference(
 
 def load_locks(args: argparse.Namespace) -> Locks:
     packages_bytes = read_lock(args.packages, "二进制包清单")
-    package_count, package_origins = parse_packages(packages_bytes)
+    package_count, package_origins, package_keys = parse_packages(packages_bytes)
+    static_link_sources_bytes = read_lock(
+        args.static_link_sources, "静态链接来源清单"
+    )
+    static_sources, static_origin_commits = parse_static_link_sources(
+        static_link_sources_bytes,
+        package_origins,
+        package_keys,
+        not args.allow_local_sources,
+    )
     origins_bytes = read_lock(args.origins, "aports origin 清单")
-    origins = parse_origins(origins_bytes, package_origins)
+    origins = parse_origins(
+        origins_bytes, package_origins, static_origin_commits
+    )
     assets_bytes = read_lock(args.assets, "源码资产清单")
     assets = parse_assets(
         assets_bytes, origins, args.allow_local_sources
@@ -350,17 +571,19 @@ def load_locks(args: argparse.Namespace) -> Locks:
         binary_reference_bytes,
         packages_bytes,
         package_count,
-        len(origins),
+        len(package_origins),
     )
     readme_bytes = read_lock(args.readme, "源码包说明")
     return Locks(
         packages_bytes,
+        static_link_sources_bytes,
         origins_bytes,
         assets_bytes,
         binary_reference_bytes,
         readme_bytes,
         origins,
         assets,
+        static_sources,
     )
 
 
@@ -432,7 +655,10 @@ def parse_apkbuild_sha512sums(
 
 
 def validate_aports_archive(
-    source, asset: Asset, origin: Origin
+    source,
+    asset: Asset,
+    origin: Origin,
+    static_source: StaticLinkSource | None = None,
 ) -> set[tuple[str, str, str]]:
     expected_root = (
         f"aports-{origin.commit}-{origin.commit}-main-{origin.name}"
@@ -536,6 +762,34 @@ def validate_aports_archive(
         raise SourceBundleError(
             f"{asset.bundle_path} 的规范 Git tree SHA-1 不匹配。"
         )
+    if static_source is not None:
+        version, separator, release = static_source.source_version.rpartition(
+            "-r"
+        )
+        apkbuild = regular_files["APKBUILD"]
+        expected_assignments = (
+            (b"pkgname=", f"pkgname={origin.name}\n".encode()),
+            (b"pkgver=", f"pkgver={version}\n".encode()),
+            (b"pkgrel=", f"pkgrel={release}\n".encode()),
+        )
+        apkbuild_lines = apkbuild.splitlines(keepends=True)
+        if (
+            not separator
+            or not version
+            or not release.isdecimal()
+            or any(
+                [
+                    line
+                    for line in apkbuild_lines
+                    if line.startswith(prefix)
+                ]
+                != [expected]
+                for prefix, expected in expected_assignments
+            )
+        ):
+            raise SourceBundleError(
+                f"{origin.name} 的静态链接来源版本与 APKBUILD 不一致。"
+            )
     return parse_apkbuild_sha512sums(
         regular_files["APKBUILD"], regular_files, origin
     )
@@ -568,63 +822,176 @@ def validate_upstream_closure(
         )
 
 
-def sha512_file(path: Path) -> tuple[int, str]:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode):
-        raise SourceBundleError(f"源码资产必须是普通文件：{path}")
-    digest = hashlib.sha512()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return metadata.st_size, digest.hexdigest()
-
-
-def validate_asset_file(
-    path: Path, asset: Asset, locks: Locks
+def validate_asset_bytes(
+    data: bytes, asset: Asset, locks: Locks
 ) -> set[tuple[str, str, str]]:
-    try:
-        size, digest = sha512_file(path)
-    except FileNotFoundError as error:
-        raise SourceBundleError(f"源码资产不存在：{path}") from error
-    if size != asset.size or digest != asset.sha512:
-        raise SourceBundleError(f"源码资产大小或 SHA-512 不匹配：{path}")
+    if (
+        len(data) != asset.size
+        or hashlib.sha512(data).hexdigest() != asset.sha512
+    ):
+        raise SourceBundleError(
+            f"源码资产大小或 SHA-512 不匹配：{asset.bundle_path}"
+        )
     if asset.kind == "aports":
+        static_source = next(
+            (
+                source
+                for source in locks.static_link_sources
+                if source.source_origin == asset.origin
+            ),
+            None,
+        )
         return validate_aports_archive(
-            path, asset, locks.origins[asset.origin]
+            io.BytesIO(data),
+            asset,
+            locks.origins[asset.origin],
+            static_source,
         )
     return set()
 
 
-def safe_asset_path(cache: Path, asset: Asset, create: bool) -> Path:
-    if cache.exists():
-        if cache.is_symlink() or not cache.is_dir():
-            raise SourceBundleError(f"源码缓存必须是实体目录：{cache}")
-    elif create:
-        cache.mkdir(parents=True)
-    else:
-        raise SourceBundleError(f"源码缓存不存在：{cache}")
-    current = cache
-    for part in PurePosixPath(asset.bundle_path).parts[:-1]:
-        current = current / part
-        if current.exists():
-            if current.is_symlink() or not current.is_dir():
-                raise SourceBundleError(f"源码缓存父路径类型非法：{current}")
-        elif create:
-            current.mkdir()
-        else:
-            raise SourceBundleError(f"源码缓存父路径不存在：{current}")
-    return cache.joinpath(*PurePosixPath(asset.bundle_path).parts)
+def open_cache_parent(cache: Path, relative: str, create: bool) -> tuple[int, str]:
+    path = validate_bundle_path(relative)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        raise SourceBundleError(
+            "当前平台不支持安全的目录相对打开，无法访问源码缓存。"
+        )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | nofollow
+        | directory
+    )
+    if create:
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise SourceBundleError(f"无法创建源码缓存：{cache}") from error
+    try:
+        current_descriptor = os.open(cache, directory_flags)
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            raise SourceBundleError(f"源码缓存不存在：{cache}") from error
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise SourceBundleError(f"源码缓存必须是实体目录：{cache}") from error
+        raise SourceBundleError(f"无法打开源码缓存：{error}") from error
+    try:
+        for part in path.parts[:-1]:
+            try:
+                next_descriptor = os.open(
+                    part, directory_flags, dir_fd=current_descriptor
+                )
+            except OSError as error:
+                if error.errno == errno.ENOENT and create:
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=current_descriptor)
+                    except FileExistsError:
+                        pass
+                    try:
+                        next_descriptor = os.open(
+                            part, directory_flags, dir_fd=current_descriptor
+                        )
+                    except OSError as open_error:
+                        error = open_error
+                    else:
+                        os.close(current_descriptor)
+                        current_descriptor = next_descriptor
+                        continue
+                if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                    raise SourceBundleError(
+                        "源码缓存父路径不存在、含符号链接或非实体目录："
+                        f"{relative}"
+                    ) from error
+                raise SourceBundleError(
+                    f"无法打开源码缓存父目录：{error}"
+                ) from error
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        return current_descriptor, path.name
+    except BaseException:
+        os.close(current_descriptor)
+        raise
+
+
+def read_asset_snapshot(
+    cache: Path, asset: Asset, locks: Locks
+) -> tuple[bytes, set[tuple[str, str, str]]]:
+    parent_descriptor, leaf_name = open_cache_parent(
+        cache, asset.bundle_path, False
+    )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        try:
+            descriptor = os.open(
+                leaf_name, flags, dir_fd=parent_descriptor
+            )
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                raise SourceBundleError(
+                    f"源码资产不存在或是符号链接：{asset.bundle_path}"
+                ) from error
+            raise SourceBundleError(
+                f"无法打开源码资产 {asset.bundle_path}：{error}"
+            ) from error
+    finally:
+        os.close(parent_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SourceBundleError(
+                f"源码资产必须是普通文件：{asset.bundle_path}"
+            )
+        if metadata.st_size != asset.size:
+            raise SourceBundleError(
+                f"源码资产大小或 SHA-512 不匹配：{asset.bundle_path}"
+            )
+        data = read_descriptor(descriptor, asset.size)
+    finally:
+        os.close(descriptor)
+    closure = validate_asset_bytes(data, asset, locks)
+    return data, closure
 
 
 def download_asset(
-    destination: Path, asset: Asset, locks: Locks
+    cache: Path, asset: Asset, locks: Locks
 ) -> set[tuple[str, str, str]]:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".source-download.", dir=destination.parent
+    parent_descriptor, leaf_name = open_cache_parent(
+        cache, asset.bundle_path, True
     )
-    temporary = Path(temporary_name)
+    descriptor: int | None = None
+    temporary_name: str | None = None
     try:
-        with os.fdopen(descriptor, "wb") as output:
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for _attempt in range(100):
+            candidate = f".source-download.{secrets.token_hex(8)}"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    flags,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        if descriptor is None or temporary_name is None:
+            raise SourceBundleError("无法创建唯一的源码下载临时文件。")
+        with os.fdopen(os.dup(descriptor), "wb") as output:
             request = urllib.request.Request(
                 asset.source_url,
                 headers={"User-Agent": "ish-multiarch-source-bundle/1"},
@@ -647,13 +1014,44 @@ def download_asset(
             raise SourceBundleError(
                 f"下载的源码资产大小或 SHA-512 不匹配：{asset.bundle_path}"
             )
-        closure = validate_asset_file(temporary, asset, locks)
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, destination)
+        if os.fstat(descriptor).st_size != asset.size:
+            raise SourceBundleError(
+                f"下载的源码资产大小或 SHA-512 不匹配：{asset.bundle_path}"
+            )
+        data = read_descriptor(descriptor, asset.size)
+        closure = validate_asset_bytes(data, asset, locks)
+        os.fchmod(descriptor, 0o644)
+        os.replace(
+            temporary_name,
+            leaf_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = None
         return closure
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    finally:
+        cleanup_error: OSError | None = None
+        active_error = sys.exc_info()[0] is not None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                cleanup_error = error
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                cleanup_error = cleanup_error or error
+        try:
+            os.close(parent_descriptor)
+        except OSError as error:
+            cleanup_error = cleanup_error or error
+        if cleanup_error is not None and not active_error:
+            raise SourceBundleError(
+                f"清理源码下载临时资源失败：{cleanup_error}"
+            ) from cleanup_error
 
 
 def fetch_command(args: argparse.Namespace) -> None:
@@ -661,21 +1059,16 @@ def fetch_command(args: argparse.Namespace) -> None:
     cache = Path(args.cache).absolute()
     requirements: set[tuple[str, str, str]] = set()
     for asset in locks.assets:
-        destination = safe_asset_path(cache, asset, True)
-        if destination.exists() or destination.is_symlink():
-            try:
-                closure = validate_asset_file(destination, asset, locks)
-                requirements.update(closure)
-                print(f"复用源码资产：{asset.bundle_path}")
-                continue
-            except SourceBundleError:
-                if args.offline:
-                    raise
-        elif args.offline:
-            raise SourceBundleError(
-                f"离线模式缺少源码资产：{asset.bundle_path}"
-            )
-        closure = download_asset(destination, asset, locks)
+        try:
+            _data, closure = read_asset_snapshot(cache, asset, locks)
+            requirements.update(closure)
+            print(f"复用源码资产：{asset.bundle_path}")
+            del _data
+            continue
+        except SourceBundleError:
+            if args.offline:
+                raise
+        closure = download_asset(cache, asset, locks)
         requirements.update(closure)
         print(f"已取得源码资产：{asset.bundle_path}")
     validate_upstream_closure(requirements, locks)
@@ -703,31 +1096,33 @@ def metadata_members(locks: Locks) -> dict[str, bytes]:
         f"{BUNDLE_ROOT}/manifest/origins.tsv": locks.origins_bytes,
         f"{BUNDLE_ROOT}/manifest/packages.tsv": locks.packages_bytes,
         f"{BUNDLE_ROOT}/manifest/source-assets.tsv": locks.assets_bytes,
+        f"{BUNDLE_ROOT}/manifest/static-link-sources.tsv": (
+            locks.static_link_sources_bytes
+        ),
     }
 
 
 def build_bundle(output: Path, cache: Path, locks: Locks) -> None:
-    asset_paths: dict[str, Path] = {}
-    requirements: set[tuple[str, str, str]] = set()
-    for asset in locks.assets:
-        path = safe_asset_path(cache, asset, False)
-        closure = validate_asset_file(path, asset, locks)
-        requirements.update(closure)
-        asset_paths[f"{BUNDLE_ROOT}/{asset.bundle_path}"] = path
-    validate_upstream_closure(requirements, locks)
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{output.name}.", dir=output.parent
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as raw:
+        with os.fdopen(descriptor, "w+b") as raw:
+            requirements: set[tuple[str, str, str]] = set()
             with tarfile.open(
                 fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT
             ) as archive:
                 members = [
                     *metadata_members(locks).items(),
-                    *asset_paths.items(),
+                    *(
+                        (
+                            f"{BUNDLE_ROOT}/{asset.bundle_path}",
+                            asset,
+                        )
+                        for asset in locks.assets
+                    ),
                 ]
                 for archive_name, source in sorted(members):
                     if isinstance(source, bytes):
@@ -736,14 +1131,20 @@ def build_bundle(output: Path, cache: Path, locks: Locks) -> None:
                             io.BytesIO(source),
                         )
                     else:
-                        with source.open("rb") as source_file:
-                            archive.addfile(
-                                tar_info(archive_name, source.stat().st_size),
-                                source_file,
-                            )
-        os.chmod(temporary, 0o644)
-        with temporary.open("rb") as source:
-            verify_bundle_contents(source, locks)
+                        data, closure = read_asset_snapshot(
+                            cache, source, locks
+                        )
+                        requirements.update(closure)
+                        archive.addfile(
+                            tar_info(archive_name, len(data)),
+                            io.BytesIO(data),
+                        )
+                        del data
+            validate_upstream_closure(requirements, locks)
+            raw.flush()
+            raw.seek(0)
+            verify_bundle_contents(raw, locks)
+            os.fchmod(raw.fileno(), 0o644)
         os.replace(temporary, output)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -818,9 +1219,19 @@ def verify_bundle_contents(source, locks: Locks) -> None:
                         f"源码包成员 SHA-512 不一致：{member.name}"
                     )
                 if aports_data is not None:
+                    static_source = next(
+                        (
+                            source
+                            for source in locks.static_link_sources
+                            if source.source_origin == asset.origin
+                        ),
+                        None,
+                    )
                     closure = validate_aports_archive(
-                        io.BytesIO(aports_data), asset,
-                        locks.origins[asset.origin]
+                        io.BytesIO(aports_data),
+                        asset,
+                        locks.origins[asset.origin],
+                        static_source,
                     )
                     requirements.update(closure)
             validate_upstream_closure(requirements, locks)
@@ -829,11 +1240,9 @@ def verify_bundle_contents(source, locks: Locks) -> None:
 
 
 def sha256_file(path: Path) -> str:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode):
-        raise SourceBundleError(f"对应源码包必须是普通文件：{path}")
+    descriptor = open_safe_file(path, "对应源码包")
     digest = hashlib.sha256()
-    with path.open("rb") as source:
+    with os.fdopen(descriptor, "rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -861,15 +1270,8 @@ def verify_command(args: argparse.Namespace) -> None:
     locks = load_locks(args)
     bundle = Path(args.bundle).absolute()
     expected = parse_checksum(Path(args.checksum), bundle.name)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(bundle, flags)
-    except OSError as error:
-        raise SourceBundleError(f"无法打开对应源码包：{bundle}") from error
+    descriptor = open_safe_file(bundle, "对应源码包")
     with os.fdopen(descriptor, "rb") as source:
-        metadata = os.fstat(source.fileno())
-        if not stat.S_ISREG(metadata.st_mode):
-            raise SourceBundleError(f"对应源码包必须是普通文件：{bundle}")
         digest = hashlib.sha256()
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -887,6 +1289,11 @@ def check_locks_command(args: argparse.Namespace) -> None:
 
 def add_lock_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--packages", type=Path, default=DEFAULT_PACKAGES)
+    parser.add_argument(
+        "--static-link-sources",
+        type=Path,
+        default=DEFAULT_STATIC_LINK_SOURCES,
+    )
     parser.add_argument("--origins", type=Path, default=DEFAULT_ORIGINS)
     parser.add_argument("--assets", type=Path, default=DEFAULT_ASSETS)
     parser.add_argument(
@@ -898,7 +1305,10 @@ def add_lock_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-local-sources",
         action="store_true",
-        help="只用于本地测试夹具，允许 file:// 源码 URL",
+        help=(
+            "只用于本地测试夹具，允许 file:// 源码 URL，"
+            "并跳过固定生产静态来源集合"
+        ),
     )
 
 

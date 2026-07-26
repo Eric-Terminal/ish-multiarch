@@ -164,11 +164,16 @@ apk origin、apk 元数据声明的许可证表达式和 aports commit 字段。
 交付第三方许可证文本或完整对应源码；发行前仍须完成下文的来源与许可门禁。
 
 对应源码门禁与日常 App 构建分离。`binary-reference.tsv` 把包清单关联到固定二进制归档和
-apk installed 数据库，`origins.tsv` 锁定 10 个 aports commit/path/tree，
-`source-assets.tsv` 则锁定 10 份 aports 目录归档及 9 份上游 distfile 的 URL、大小和
-SHA-512。生成与验证还会严格解析每份 `APKBUILD` 的 `sha512sums`：目录内文件就地重算，
-目录外要求则必须与上游资产清单双向闭合。以下命令会先检查受跟踪锁，再显式顺序取得资产、
-生成只有普通文件且元数据固定的 59,217,920 字节 tar，并按受跟踪 SHA-256 做纯离线复核：
+apk installed 数据库；`static-link-sources.tsv` 另行记录 BusyBox 静态吸收的 utmps 与
+skalibs，不把它们冒充成 minirootfs 内的二进制包。`origins.tsv` 因而锁定 10 个二进制包
+origin 和 2 个静态源码 origin，`source-assets.tsv` 锁定 12 份 aports 目录归档及 11 份
+上游 distfile 的 URL、大小和 SHA-512。静态源码使用 BusyBox 构建点的 aports 全树快照；
+该快照不是对两只依赖 APK 自身 build commit 的声明。
+
+生成与验证还会严格解析每份 `APKBUILD` 的 `sha512sums`：目录内文件就地重算，目录外要求
+则必须与上游资产清单双向闭合；静态源码版本还会与快照中 `pkgver/pkgrel` 的规范字面值
+一致。以下命令会先检查受跟踪锁，再显式顺序取得资产、生成只有普通文件且元数据固定的
+确定性 tar，并按受跟踪 SHA-256 做纯离线复核：
 
 ```sh
 python3 tools/apple-aarch64-rootfs-sources.py check-locks
@@ -181,11 +186,37 @@ python3 tools/apple-aarch64-rootfs-sources.py verify \
     build/alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar
 ```
 
-确定性 tar 的 SHA-256 为
-`54dd3ad02d2363c48d9910533b8f2559b14ad223ebb1f135ebe732586c869bca`。它包含 19 份真实
-源码载荷和内嵌锁表，不进入 Xcode rootfs phase、seed 或 App Resources。当前仓库只是锁定
-并可复现生成该外部源码制品；在它真正随 release 发布，并补齐许可证正文、版权 notices 与
-双端 App 内查看入口前，不能声称来源与许可交付已经完成。
+确定性 tar 包含 23 份真实源码载荷和内嵌锁表，不进入 Xcode rootfs phase、seed 或 App
+Resources。它的当前 SHA-256 由
+`third_party/alpine/3.24.1-aarch64/corresponding-source.sha256` 唯一锁定。
+
+许可证输入与对应源码共用同一份 16 个已安装包、12 个源码 origin 和 23 份源码资产闭包。
+`license-inputs.tsv` 把每项包版本及其 apk 许可证表达式映射到固定的 aports 成员、上游成员
+或受跟踪权威文本；两只静态源码则只能映射回声明的 BusyBox consumer 及其 ISC 许可。
+清单锁定输入大小、SHA-256、声明 section 和 section SHA-256。
+`THIRD-PARTY-NOTICES.txt` 的 19 个具名 section 只允许空行出现在 marker 之外。完整
+GPLv2 正文来自锁定的 pax-utils COPYING，完整 LGPL 2.1 正文来自受跟踪权威文本；apk-tools
+中内容异常的 LICENSE 只保留为来源证据。以下第一条
+命令只读受跟踪文件，第二条还会纯离线核对现有源码缓存；两者都不联网、不构建 guest：
+
+```sh
+python3 tools/apple-aarch64-rootfs-licenses.py check-locks
+python3 tools/apple-aarch64-rootfs-licenses.py validate-sources \
+    build/alpine-source-cache
+```
+
+该门禁验证包、源码成员、权威文本和声明正文各自的字节身份，并逐字验证权威文本进入目标
+section；普通源码成员到 notice 摘录的选择经过人工内容审计，不把机器锁误称为通用许可
+解释器。它不会把 APKBUILD maintainer 当成版权所有者，也不替代法律审查。通用 MIT 模板
+中的所有者占位符会原样保留，避免在固定源码没有给出所有者声明时自行推断。详细边界见
+`third_party/alpine/3.24.1-aarch64/LICENSE-NOTICES.md`。
+
+当前仓库已经锁定对应源码制品和 Alpine 声明正文；在对应源码真正随 release 公开、声明文件
+进入 iPhone 与 Watch App 资源并提供可访问的查看入口，以及宿主侧第三方组件一并完成审计
+之前，不能声称来源与许可交付已经完成。BusyBox `volume_id` 中 21 个输入与 pax-utils
+`elf.h` 的原始 notice 明确采用 LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、
+没有指定版本。发行门禁还必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节
+转换，或同时提供未转换条款要求的可重新链接材料。
 
 Apple 端的 `ish_apple_rootfs_seed_install` 只负责把前述只读 fakefs rootfs seed 首次安装到
 调用者提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、

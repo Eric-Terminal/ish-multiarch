@@ -60,6 +60,7 @@ jobs:
             -Dengine=asbestos -Dkernel=ish
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
             apple_aarch64_rootfs apple_aarch64_source_bundle \
+            apple_aarch64_rootfs_licenses \
             apple_rootfs_seed apple_resolver \
             pty_lifecycle \
             pty_read_lifecycle tty_real_lifecycle \
