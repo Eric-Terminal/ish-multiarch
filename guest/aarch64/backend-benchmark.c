@@ -53,6 +53,9 @@
 #define INSTRUCTION_EOR_W0_W4_1 UINT32_C(0x52000080)
 #define INSTRUCTION_ADD_X1_X1_X0 UINT32_C(0x8b000021)
 #define INSTRUCTION_MOV_X0_X10 UINT32_C(0xaa0a03e0)
+#define INSTRUCTION_MOV_X2_X7 UINT32_C(0xaa0703e2)
+#define INSTRUCTION_CLZ_W2_W2 UINT32_C(0x5ac01042)
+#define INSTRUCTION_CLZ_W0_W0 UINT32_C(0x5ac01000)
 #define INSTRUCTION_EOR_X2_X7_0000FFFF0000FFFF UINT32_C(0xd2003ce2)
 #define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
 #define INSTRUCTION_SUB_X1_X1_X7 UINT32_C(0xcb070021)
@@ -131,6 +134,7 @@
 #define INSTRUCTION_B_NE_NEG_20 UINT32_C(0x54ffff61)
 #define INSTRUCTION_B_NE_NEG_24 UINT32_C(0x54ffff41)
 #define INSTRUCTION_B_NE_NEG_28 UINT32_C(0x54ffff21)
+#define INSTRUCTION_B_NE_NEG_32 UINT32_C(0x54ffff01)
 #define INSTRUCTION_B_NE_NEG_36 UINT32_C(0x54fffee1)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
@@ -535,6 +539,19 @@ static void write_load_simd_imm12_program(
     put_instruction(code + 20, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 24, INSTRUCTION_B_NE_NEG_24);
     put_instruction(code + 28, INSTRUCTION_SVC);
+}
+
+static void write_clz_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_X0_X10);
+    put_instruction(code + 4, INSTRUCTION_MOV_X2_X7);
+    put_instruction(code + 8, INSTRUCTION_CLZ_W2_W2);
+    put_instruction(code + 12, INSTRUCTION_CLZ_W0_W0);
+    put_instruction(code + 16, INSTRUCTION_ADD_X1_SHIFTED);
+    put_instruction(code + 20, INSTRUCTION_ADD_X1_X1_X0);
+    put_instruction(code + 24, INSTRUCTION_ORR_W2_WZR_3);
+    put_instruction(code + 28, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 32, INSTRUCTION_B_NE_NEG_32);
+    put_instruction(code + 36, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1304,6 +1321,21 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 8,
         .write_program = write_load_simd_imm12_program,
+    },
+    {
+        .name = "CLZ 双画像零输入与宽度结果依赖热点环",
+        .instructions_per_iteration = 9,
+        .x1_increment_per_iteration = 48,
+        .iteration_register = 4,
+        .initial_x0 = 16,
+        .initial_x7 = UINT64_C(0x8000000000000000),
+        .initial_x10 = UINT64_C(0x8000000000008000),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 9,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 10,
+        .write_program = write_clz_program,
     },
 };
 

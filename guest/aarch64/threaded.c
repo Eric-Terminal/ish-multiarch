@@ -304,6 +304,28 @@ static void execute_rev32_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_clz_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_CLZ);
+    byte_t width = instruction->width;
+    assert(width == 32 || width == 64);
+    qword_t source = read_general_register(cpu,
+            instruction->operands.data_processing_1source.rn,
+            width, false);
+    unsigned leading_zeroes = source == 0 ? (unsigned) width :
+            (unsigned) __builtin_clzll((unsigned long long) source) -
+                    (64U - (unsigned) width);
+
+    write_general_register(cpu,
+            instruction->operands.data_processing_1source.rd,
+            width, false, (qword_t) leading_zeroes);
+    cpu->pc += 4;
+}
+
 static void execute_ccmp_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -1123,6 +1145,8 @@ static aarch64_threaded_handler select_handler(
             return execute_conditional_select_fast;
         case AARCH64_OP_REV32:
             return execute_rev32_fast;
+        case AARCH64_OP_CLZ:
+            return execute_clz_fast;
         case AARCH64_OP_CCMP:
             return execute_ccmp_fast;
         case AARCH64_OP_SUBS_SHIFTED_REGISTER:

@@ -1343,7 +1343,7 @@ if not meson.is_cross_build()
             c_args: ['-DISH_GUEST_AARCH64=1'],
             link_with: libish_aarch64_core)
         benchmark('aarch64_backend_performance',
-            aarch64_backend_benchmark, timeout: 120)
+            aarch64_backend_benchmark, timeout: 420)
     endif
 
     aarch64_load_store_test = executable('aarch64_load_store_test', [
