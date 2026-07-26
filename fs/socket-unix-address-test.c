@@ -132,10 +132,12 @@ struct datagram_connect_call {
     int result;
 };
 
+#ifdef __APPLE__
 struct drain_recvmsg_probe {
     unsigned calls;
     bool reset_injected;
 };
+#endif
 
 _Static_assert(sizeof(struct guest_rights) ==
         sizeof(struct cmsghdr_) + sizeof(fd_t),
@@ -184,6 +186,7 @@ static int scm_probe_close(struct fd *fd) {
     return 0;
 }
 
+#ifdef __APPLE__
 static ssize_t inject_drain_reset_once(
         int fd, struct msghdr *message, int flags, void *opaque) {
     struct drain_recvmsg_probe *probe = opaque;
@@ -195,6 +198,7 @@ static ssize_t inject_drain_reset_once(
     }
     return recvmsg(fd, message, flags);
 }
+#endif
 
 static const struct fd_ops scm_probe_ops = {
     .close = scm_probe_close,
@@ -2870,6 +2874,7 @@ static bool test_datagram_disconnect_resets_route_state(
     return true;
 }
 
+#ifdef __APPLE__
 static bool test_datagram_drain_continues_after_reset(
         struct fixture *fixture) {
     static const byte_t receiver_name[] = {
@@ -2959,6 +2964,7 @@ static bool test_datagram_drain_continues_after_reset(
             "reset 排空回归未泄漏 SCM、guest 或 host fd");
     return true;
 }
+#endif
 
 static bool test_datagram_self_retarget_does_not_reset(
         struct fixture *fixture) {
@@ -4301,7 +4307,9 @@ int main(void) {
             test_datagram_socketpair_retarget_preserves_reverse_peer(
                     &fixture) &&
             test_datagram_disconnect_resets_route_state(&fixture) &&
+#ifdef __APPLE__
             test_datagram_drain_continues_after_reset(&fixture) &&
+#endif
             test_datagram_self_retarget_does_not_reset(&fixture) &&
             test_datagram_dead_route_disconnects_host(&fixture) &&
             test_unconnected_shutdown_preserves_queue(&fixture) &&
