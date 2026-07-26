@@ -1,6 +1,6 @@
 # [iSH](https://ish.app)
 
-> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。Apple 门禁目前覆盖一个 iOS device 切片（`arm64`）和四个 watchOS 切片：device `arm64_32`、device `arm64`、Simulator `arm64`、Simulator `x86_64`。其中 watchOS device `arm64` 的最低系统版本为 26.0，其余三个 watchOS 切片为 10.0。门禁会检查普通静态库消费者、强制解析全部归档成员的消费者、宿主 ABI、重定位、Mach-O 平台与最低版本，并生成三份仅含二进制库切片的 XCFramework；这些产物没有公共头文件、模块映射或稳定 API 承诺，不是可直接接入其他应用的公共 SDK。真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建与 Xcode 验收命令、产物路径和已知限制见[多架构实现说明](docs/multiarch/README.md)。
+> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。普通 iPhone App 和独立的 SwiftUI Watch App 都会安装固定 Alpine AArch64 种子并启动同一套 iSH 兼容内核；专用 iPhone/Watch Simulator 已通过 shell、文件、进程、信号、线程、DNS、HTTP/HTTPS、包管理、SQLite、Python、本地 C/pthread、本地 Git 与离线 SSH 客户端固定软件矩阵。Apple 构建门禁同时覆盖 iOS device `arm64`、watchOS device `arm64_32`/`arm64` 和 Watch Simulator `arm64`/`x86_64`；实体设备签名运行与 App Store 交付仍待最终验证。门禁生成的 XCFramework 没有公共头文件、模块映射或稳定 API 承诺，不是公共 SDK。它不是官方 iSH 发行版，完整状态、复现命令和已知边界见[多架构实现说明](docs/multiarch/README.md)。
 
 [![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
@@ -16,6 +16,9 @@
 This branch retains the i386 Linux guest through usermode x86 emulation and adds an experimental AArch64 Linux guest path with syscall translation.
 
 For the current status of the project, check the issues tab, and the commit logs.
+
+以下 App Store、TestFlight、Wiki 与社区链接属于上游 iSH；它们不表示本分支的
+AArch64 或 Watch App 已经通过这些渠道发布。
 
 - [App Store page](https://apps.apple.com/us/app/ish-shell/id1436902243)
 - [TestFlight beta](https://testflight.apple.com/join/97i7KM8O)
@@ -40,9 +43,15 @@ You'll need these things to build the project:
 
 Open the project in Xcode, open iSH.xcconfig, and change `ROOT_BUNDLE_IDENTIFIER` to something unique. You'll also need to update the development team ID in the project (not target!) build settings. Then click Run. There are scripts that should do everything else automatically. If you run into any problems, open an issue and I'll try to help.
 
-## 验证 watchOS 核心
+## 构建与验证 watchOS App
 
-共享 Scheme `iSHCore-watchOS` 是跨架构静态库与 XCFramework 的打包门禁，本身没有 Xcode 可运行产品；`iSHWatchLinkSmoke` 是只有一个 C 入口的最终链接夹具，用来确认 Xcode 能为指定的 watchOS device 或 Simulator 切片链接三份静态库。LinkSmoke 没有界面，不启动 guest，也不代表已经具备可交付的 watchOS App。请使用[多架构实现说明](docs/multiarch/README.md#xcode-scheme-验收)中的逐切片命令，尤其不要把最低版本不同的两个 device 切片合并成一次含糊的验收。
+共享 Scheme `iSHWatch` 构建真正的 SwiftUI Watch App，包含终端、AArch64
+rootfs 首次安装和 Linux runtime；`iSHWatchUITests` 覆盖启动、终端快捷键和
+固定软件矩阵。`iSHCore-watchOS` 仍是跨架构静态库与 XCFramework 打包门禁，
+`iSHWatchLinkSmoke` 则只验证最终链接闭包。请使用
+[多架构实现说明](docs/multiarch/README.md#xcode-scheme-验收)中的完整 App
+与逐切片元数据核验命令；fat 产物必须分别检查各架构的平台和最低系统版本，
+也不要把无签名 SDK 构建当作实体设备运行证据。
 
 ## Build command line tool for testing
 

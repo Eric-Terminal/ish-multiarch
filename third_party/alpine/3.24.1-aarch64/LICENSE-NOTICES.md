@@ -62,5 +62,7 @@ tools/apple-aarch64-rootfs-licenses-test.sh "$(command -v python3)"
 musl 的 `crypt_sha256.c`、`crypt_sha512.c` 与 `fmtmsg.c` 只声明 public domain、没有要求
 保留的 notice，其源码字节仍在对应源码包中。
 
-这些检查不构成法律意见，也不证明最终发行包已经提供了查看入口。公开发行前仍须把声明资源
-接入 iPhone 与 Watch App、审计宿主侧依赖，并在 release 位置同时提供固定的对应源码制品。
+这些检查不构成法律意见。声明资源与只读查看入口已经接入 iPhone 和 Watch App，并由静态
+归属门禁、双端 UI 用例及公开 CI 的 bundle 字节比较覆盖；iSH+Linux 明确排除该资源。
+公开发行前仍须审计宿主侧依赖、解决上述 LGPL 发行决策，并在 release 位置同时提供固定的
+对应源码制品。

@@ -1,6 +1,6 @@
 # [iSH](https://ish.app)
 
-> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。新增的可复用核心目前通过 iOS `arm64`、watchOS `arm64_32` 和 watchOS `arm64` 编译门禁；真实 Alpine AArch64 环境已覆盖 shell、文件、进程、信号与本机 TCP 冒烟。它不是官方 iSH 发行版，功能覆盖仍在扩展。架构边界、构建方法和已知限制见[多架构实现说明](docs/multiarch/README.md)。
+> **多架构实验分支：** 本仓库保留官方 iSH 的完整历史、i386 guest 与原有许可，并独立增加 AArch64 Linux guest。普通 iPhone App 和独立的 SwiftUI Watch App 都会安装固定 Alpine AArch64 种子并启动同一套 iSH 兼容内核；专用 iPhone/Watch Simulator 已通过 shell、文件、进程、信号、线程、DNS、HTTP/HTTPS、包管理、SQLite、Python、本地 C/pthread、本地 Git 与离线 SSH 客户端固定软件矩阵。Apple 构建门禁同时覆盖 iOS device `arm64`、watchOS device `arm64_32`/`arm64` 和 Watch Simulator `arm64`/`x86_64`；实体设备签名运行与 App Store 交付仍待最终验证。它不是官方 iSH 发行版，完整状态、复现命令和已知边界见[多架构实现说明](docs/multiarch/README.md)。
 
 [![Build Status](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Eric-Terminal/ish-multiarch/actions/workflows/ci.yml)
 [![goto counter](https://img.shields.io/github/search/ish-app/ish/goto.svg)](https://github.com/ish-app/ish/search?q=goto)
@@ -16,6 +16,9 @@
 本分支通过 x86 用户模式仿真保留 i386 Linux guest，并新增实验性的 AArch64 Linux guest 执行路径和对应的系统调用翻译。
 
 请查看 issue 和提交记录以了解本项目当前的状态。
+
+以下 App Store、TestFlight、Wiki 与社区链接属于上游 iSH；它们不表示本分支的
+AArch64 或 Watch App 已经通过这些渠道发布。
 
 - [App Store 页面](https://apps.apple.com/us/app/ish-shell/id1436902243)
 - [Testflight 测试](https://testflight.apple.com/join/97i7KM8O)
@@ -40,11 +43,20 @@
 
 使用 Xcode 打开项目，选择 iSH.xcconfig，并且修改 `ROOT_BUNDLE_IDENTIFIER` 为你的[唯一值](https://help.apple.com/xcode/mac/current/#/dev91fe7130a)。此外，还需要在项目（project）的构建设置（build settings）中更新开发团队 ID，注意这里指的不是目标（target）的构建设置（build settings）。然后点击 `运行`，之后应该有脚本帮你自动执行相关操作。如果遇到了任何问题，请提交 issue，我们会帮你解决。
 
+## 构建与验证 watchOS App
+
+共享 Scheme `iSHWatch` 构建真正的 SwiftUI Watch App，包含终端、AArch64
+rootfs 首次安装和 Linux runtime；`iSHWatchUITests` 覆盖启动、终端快捷键和
+固定软件矩阵。`iSHCore-watchOS` 是跨架构静态库与 XCFramework 打包门禁，
+`iSHWatchLinkSmoke` 只验证最终链接闭包。完整 App 与逐切片命令见
+[多架构实现说明](docs/multiarch/README.md#xcode-scheme-验收)。无签名 SDK
+构建不等于实体设备运行证据。
+
 ## 为测试构建命令行工具
 
 在项目目录中运行命令 `meson build`，之后 `build` 目录会被创建。进入到 `build` 目录并运行命令 `ninja`。
 
-为了建立一个自有的 Alpine linux 文件系统，请从 [Alpine 网站](https://alpinelinux.org/downloads/) 下载 `Alpine minirotfs tarball for i386` 并运行 `tools/fakefsify` 。将 minirotfs tarball 指定为第一个参数，将输出目录的名称（如`alpine`）指定为第二个参数，即 `tools/fakefsify $MinirotfsTarballFilename alpine` 然后在 Alpine 文件系统中运行 `/ish -f alpine/bin/sh`。如果 `build` 目录下找不到 `tools/fakefsify`，可能是系统上找不到 `libarchive` 的依赖（请参照前面的章节进行安装）。
+为了建立一个自有的 Alpine linux 文件系统，请从 [Alpine 网站](https://alpinelinux.org/downloads/) 下载 `Alpine minirotfs tarball for i386` 并运行 `tools/fakefsify` 。将 minirotfs tarball 指定为第一个参数，将输出目录的名称（如`alpine`）指定为第二个参数，即 `tools/fakefsify $MinirotfsTarballFilename alpine`，然后在 Alpine 文件系统中运行 `./ish -f alpine /bin/sh`。如果 `build` 目录下找不到 `tools/fakefsify`，可能是系统上找不到 `libarchive` 的依赖（请参照前面的章节进行安装）。
 
 除了可以使用 `ish`，你也可以使用 `tools/ptraceomatic` 替代它，以便在某个真实进程中单步比较寄存器。我通常使用它来进行调试（需要 64 位 Linux 4.11 或更高版本）。
 

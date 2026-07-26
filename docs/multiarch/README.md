@@ -2,9 +2,19 @@
 
 ## 范围与状态
 
-本分支基于官方 iSH 历史继续开发，保留原有 i386 guest，并增加独立的 AArch64 Linux guest 执行路径。当前目标是逐步形成可嵌入 iOS 与 watchOS 应用的可移植核心，而不是替代完整的 iSH 应用层。现阶段生成的静态库和 XCFramework 是构建、ABI 与最终链接验证产物，并非已经发布的公共 SDK。
+本分支基于官方 iSH 历史继续开发，保留原有 i386 guest，并增加独立的
+AArch64 Linux guest 执行路径。AArch64 已接入普通 iPhone App，同时提供
+独立的 SwiftUI Watch App；两端都会从固定 Alpine 种子安装真实文件系统，
+启动 PID 1，并通过各自终端交互。静态库和 XCFramework 仍只是构建、ABI
+与最终链接验证产物，并非已经发布的公共 SDK。
 
-该实现仍处于实验阶段。真实 Alpine AArch64 环境已经验证 shell、基础文件操作、进程创建与等待、信号投递、本机 TCP 连接，以及完全本地的 UDP DNS 解析与主机名 HTTP 获取，但尚未覆盖完整的 AArch64 指令集与 Linux 系统调用集合。
+该实现仍处于实验阶段，但不再只有 core 冒烟。专用 iPhone 与 Watch
+Simulator 产品已经运行固定的 shell、文件、进程、信号、线程、DNS、
+HTTP/HTTPS、包管理、SQLite、Python、本地 C/pthread、本地 Git 与离线 SSH
+客户端软件矩阵。
+iOS `arm64`、watchOS `arm64_32`/`arm64` 以及 Watch Simulator
+`arm64`/`x86_64` 产品构建也已通过。尚未完成的是实体 iPhone/Watch 的签名
+运行、App Store 交付，以及超出该软件矩阵的完整 ISA/系统调用兼容认证。
 
 ## 架构边界
 
@@ -13,7 +23,7 @@
 | guest 指令集 | i386、AArch64 | 两套 CPU 状态与执行路径相互隔离 |
 | guest Linux ABI | i386 32 位、AArch64 64 位 | 系统调用号、结构体与寄存器约定按 guest 架构编码 |
 | host 平台 | macOS 测试、iOS、watchOS | host 指针宽度不能泄漏进 guest ABI |
-| Apple 切片 | iOS device `arm64`；watchOS device `arm64_32`、`arm64`；watchOS Simulator `arm64`、`x86_64` | `arm64_32` 是 watchOS host ABI，不是 32 位 AArch64 guest；device `arm64` 的 minOS 为 26.0，其余 watchOS 切片为 10.0 |
+| Apple 切片 | iOS device `arm64`；watchOS device `arm64_32`、`arm64`；watchOS Simulator `arm64`、`x86_64` | `arm64_32` 是 watchOS host ABI，不是 32 位 AArch64 guest；watchOS device `arm64` 的 minOS 为 26.0，其余 watchOS 切片为 10.0 |
 
 guest 地址、host 指针和 Linux wire 数据分别使用明确宽度的类型。AArch64 guest 使用稀疏 48 位地址空间，内存访问通过页表和用户内存复制边界完成；文件、任务和信号服务继续复用官方内核对象，但不直接暴露架构特定的数据布局。
 
@@ -24,7 +34,8 @@ guest 地址、host 指针和 Linux wire 数据分别使用明确宽度的类型
 - `guest/linux/`：与 guest 架构无关的内存、文件和系统调用服务边界。
 - `kernel/aarch64*.c`：将 AArch64 进程生命周期接入官方任务、文件系统、信号与调度设施。
 - `tools/apple-core-gate.sh`：构建一个 iOS device 切片和四个 watchOS 切片，检查严格 core、完整静态库消费者、宿主 ABI 与 Apple 二进制元数据，并生成 watchOS device/Simulator XCFramework。
-- `tools/apple-watch-package.sh`：供 Xcode 打包 Scheme 调用 Apple 门禁，并把当前 Xcode 平台的通用静态库放入构建产品目录。
+- `tools/apple-watch-package.sh`：默认为 Xcode 构建四个 Watch 核心切片并复制当前平台的通用静态库；公开 CI 在已经完成完整门禁后使用显式 `prebuilt` 模式复用同一批产物。
+- `app/Watch/`：SwiftUI Watch 终端、rootfs 安装、Linux runtime 生命周期与第三方声明入口。
 - `tests/aarch64/`：指令、ABI、运行时、并发和真实发行版冒烟测试。
 
 ## 构建与测试
@@ -211,12 +222,15 @@ section；普通源码成员到 notice 摘录的选择经过人工内容审计�
 中的所有者占位符会原样保留，避免在固定源码没有给出所有者声明时自行推断。详细边界见
 `third_party/alpine/3.24.1-aarch64/LICENSE-NOTICES.md`。
 
-当前仓库已经锁定对应源码制品和 Alpine 声明正文；在对应源码真正随 release 公开、声明文件
-进入 iPhone 与 Watch App 资源并提供可访问的查看入口，以及宿主侧第三方组件一并完成审计
-之前，不能声称来源与许可交付已经完成。BusyBox `volume_id` 中 21 个输入与 pax-utils
-`elf.h` 的原始 notice 明确采用 LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、
-没有指定版本。发行门禁还必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节
-转换，或同时提供未转换条款要求的可重新链接材料。
+当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入
+iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 target 归属门禁
+及公开 CI 的 bundle 字节比较覆盖；不携带固定 AArch64 seed 的 iSH+Linux 明确
+排除该资源。对应源码 tar 尚未在本 fork 的 release 位置公开，宿主侧第三方组件
+也尚未完成审计，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
+中 21 个输入与 pax-utils `elf.h` 的原始 notice 明确采用
+LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、没有指定版本。发行门禁还
+必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节转换，或同时提供
+未转换条款要求的可重新链接材料。
 
 Apple 端的 `ish_apple_rootfs_seed_install` 只负责把前述只读 fakefs rootfs seed 首次安装到
 调用者提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、
@@ -233,30 +247,38 @@ seed、重放初始 hardlink 或拒绝 guest 后来创建的 FIFO、WAL/SHM 与�
 更新不会隐式重置用户 Linux 环境。
 
 该接口成功时通过结果枚举区分“本次安装”和“已经存在”，失败返回正数 POSIX errno。
-它不 mount fakefs、不创建 PID 1、不配置 TTY，也不执行 guest ELF；这些仍属于后续公共
-runtime adapter 与真实 iPhone/Watch 产品 Target。安全边界假定 seed 来自签名 App bundle、
-持久父目录位于应用私有容器，且没有绕过 installer lock 的同 UID 写者。
+它本身不 mount fakefs、不创建 PID 1、不配置 TTY，也不执行 guest ELF；普通 iPhone App
+与 `iSHWatch` target 已在该安装事务成功后分别完成这些 runtime 生命周期步骤。安全边界
+假定 seed 来自签名 App bundle、持久父目录位于应用私有容器，且没有绕过 installer lock
+的同 UID 写者。
 
 ### Xcode Scheme 验收
 
-工程提供两个共享 Scheme：
+工程提供三个相关共享 Scheme：
 
 - `iSHCore-watchOS` 是 aggregate 打包 Scheme。它调用 `tools/apple-watch-package.sh`，生成四个 watchOS 切片、通用静态库和三份 XCFramework；它本身没有 Xcode 可运行产品。
 - `iSHWatchLinkSmoke` 是最小 watchOS application 类型的链接夹具。它只有一个 C 入口，依赖 `iSHCore-watchOS`，并最终链接 `libish.a`、`libish_emu.a`、`libfakefs.a` 及系统 SQLite。它没有 SwiftUI、图标或用户界面，不会在构建时运行 guest，也不代表完整或可交付的 Watch App。
+- `iSHWatch` 是真正的 SwiftUI Watch App，包含终端、AArch64 rootfs、Linux runtime 与持久容器；其 UI 测试由 `iSHWatchUITests` target 提供。
 
-先验证打包 Scheme：
+普通 Xcode 开发构建无需设置额外模式：`iSHWatch` 的 target 依赖会先构建核心，
+再复制当前平台的通用归档。做发布型构建验收时，应只运行一次显式门禁，再让后续
+LinkSmoke 和完整 App 以 `prebuilt` 模式复用同一个产物根，避免每个 Xcode 命令
+重建四个核心切片。下面依次覆盖 Apple 五切片 core、Watch 四切片 LinkSmoke 和
+Watch Simulator `arm64` 完整 App；只验 Watch core 四切片时，可在门禁命令前增加
+`APPLE_SKIP_IOS=1`：
 
 ```sh
-xcodebuild \
-    -project iSH.xcodeproj \
-    -scheme iSHCore-watchOS \
-    -configuration Release \
-    -sdk watchos \
-    CODE_SIGNING_ALLOWED=NO \
-    build
+artifacts="$PWD/build-apple-core"
+products="$PWD/build-apple-products"
+rootfs_cache="$PWD/build/apple-rootfs-cache"
+MESON="$(command -v meson)" \
+NINJA="$(command -v ninja)" \
+tools/apple-core-gate.sh "$artifacts"
 ```
 
-随后按切片验证最终 Xcode 链接。两个 watchOS device 切片具有不同的 minOS，因此必须分别执行：
+随后各构建一个 device 和 Simulator fat LinkSmoke。device 的两个切片最低系统
+版本不同；一次构建 fat 产物是允许的，但必须在产物上逐架构核验元数据，不能只检查
+整体架构集合：
 
 ```sh
 xcodebuild \
@@ -264,35 +286,12 @@ xcodebuild \
     -scheme iSHWatchLinkSmoke \
     -configuration Release \
     -sdk watchos \
-    ARCHS=arm64_32 \
+    ARCHS="arm64_32 arm64" \
     WATCHOS_DEPLOYMENT_TARGET=10.0 \
     ONLY_ACTIVE_ARCH=NO \
-    CODE_SIGNING_ALLOWED=NO \
-    build
-
-xcodebuild \
-    -project iSH.xcodeproj \
-    -scheme iSHWatchLinkSmoke \
-    -configuration Release \
-    -sdk watchos \
-    ARCHS=arm64 \
-    WATCHOS_DEPLOYMENT_TARGET=26.0 \
-    ONLY_ACTIVE_ARCH=NO \
-    CODE_SIGNING_ALLOWED=NO \
-    build
-```
-
-Simulator 两个切片同为 minOS 10.0，也逐一执行以保留清晰的架构证据：
-
-```sh
-xcodebuild \
-    -project iSH.xcodeproj \
-    -scheme iSHWatchLinkSmoke \
-    -configuration Release \
-    -sdk watchsimulator \
-    ARCHS=arm64 \
-    WATCHOS_DEPLOYMENT_TARGET=10.0 \
-    ONLY_ACTIVE_ARCH=NO \
+    ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+    ISH_WATCH_PACKAGE_MODE=prebuilt \
+    SYMROOT="$products" \
     CODE_SIGNING_ALLOWED=NO \
     build
 
@@ -301,14 +300,55 @@ xcodebuild \
     -scheme iSHWatchLinkSmoke \
     -configuration Release \
     -sdk watchsimulator \
-    ARCHS=x86_64 \
+    ARCHS="arm64 x86_64" \
     WATCHOS_DEPLOYMENT_TARGET=10.0 \
     ONLY_ACTIVE_ARCH=NO \
+    ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+    ISH_WATCH_PACKAGE_MODE=prebuilt \
+    SYMROOT="$products" \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+
+device="$products/Release-watchos/iSHWatchLinkSmoke.app/iSHWatchLinkSmoke"
+simulator="$products/Release-watchsimulator/iSHWatchLinkSmoke.app/iSHWatchLinkSmoke"
+xcrun lipo "$device" -verify_arch arm64_32 arm64
+xcrun lipo "$simulator" -verify_arch arm64 x86_64
+xcrun vtool -arch arm64_32 -show-build "$device"
+xcrun vtool -arch arm64 -show-build "$device"
+xcrun vtool -arch arm64 -show-build "$simulator"
+xcrun vtool -arch x86_64 -show-build "$simulator"
+```
+
+`vtool` 输出必须分别为 watchOS `arm64_32` minOS 10.0、watchOS `arm64`
+minOS 26.0，以及两个 Watch Simulator 切片 minOS 10.0。
+
+最后构建完整 Watch App。它还会生成固定 AArch64 rootfs seed，但不会启动
+Simulator 或 guest；显式缓存目录会让后续产品构建复用同一份已校验归档：
+
+```sh
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatch \
+    -configuration Release \
+    -sdk watchsimulator \
+    ARCHS=arm64 \
+    WATCHOS_DEPLOYMENT_TARGET=10.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+    ISH_WATCH_PACKAGE_MODE=prebuilt \
+    ISH_AARCH64_ROOTFS_CACHE="$rootfs_cache" \
+    SYMROOT="$products" \
     CODE_SIGNING_ALLOWED=NO \
     build
 ```
 
-这些命令只使用 SDK 进行编译和链接，不要求安装或启动 Simulator runtime。Xcode Scheme 的交叉构建中间产物位于 `ISH_WATCH_ARTIFACT_ROOT`，默认展开为 DerivedData 下的：
+两次 LinkSmoke 命令只使用 SDK 编译和链接；完整 App 的 rootfs phase 会在
+缓存无效时下载并核验固定归档，同时构建并运行宿主 `fakefsify`。缓存已经通过
+摘要校验时，可为完整 App 命令再增加 `ISH_AARCH64_ROOTFS_OFFLINE=1`，保证不会
+联网。上述命令都不要求安装或启动 Simulator runtime。完整验收把核心产物固定在
+`build-apple-core/`，把 Xcode 产品固定在 `build-apple-products/`。普通 Xcode
+构建未显式指定时，交叉构建中间产物位于 `ISH_WATCH_ARTIFACT_ROOT`，默认展开为
+DerivedData 下的：
 
 ```text
 Build/Intermediates.noindex/iSH.build/iSHWatchArtifacts/<配置><平台后缀>/
@@ -320,7 +360,11 @@ Build/Intermediates.noindex/iSH.build/iSHWatchArtifacts/<配置><平台后缀>/
 Build/Products/<配置><平台后缀>/iSHWatchLibraries/
 ```
 
-LinkSmoke 的验证包位于 `Build/Products/<配置><平台后缀>/iSHWatchLinkSmoke.app/`；这个路径下出现 `.app` 只表示 Xcode 完成了 application 类型的最终链接，不表示该包拥有界面、可以启动 guest 或能够作为产品交付。
+LinkSmoke 的验证包位于
+`Build/Products/<配置><平台后缀>/iSHWatchLinkSmoke.app/`；这个路径下出现
+`.app` 只表示 Xcode 完成了链接。完整产品位于同级 `iSHWatch.app/`，但无签名
+SDK 构建仍不等于实体设备安装、启动或发行证据。`iSHWatchUITests` 会真实启动
+Simulator、安装 Alpine 包并运行长时软件矩阵，不属于上述纯编译命令。
 
 可以用以下命令查看本机的完整展开路径，而不依赖 DerivedData 的随机目录名：
 
@@ -353,11 +397,13 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 
 冒烟脚本不会下载或提交 rootfs。macOS 普通进程不能监听 UDP 53，因此测试专用动态库只在该次 `ish` 子进程中把 guest 可见的 `127.0.0.53:53` 映射到本地夹具随机选择的高位端口，并把响应来源恢复为 guest 看到的 53 端口；生产 socket 实现不含测试重定向。DNS 阶段会先把 fakefs 复制到宿主临时目录，resolver 只写入隔离副本，不会改动输入 rootfs 的 resolver；顶层存储或 `data` 树含真实宿主符号链接的非规范 fakefs 会被拒绝。脚本会拒绝与已有 `ish` 进程或同一 rootfs 的另一份验收重叠运行，并为每个 guest 命令设置硬超时；正常退出或收到可捕获信号时会清理隔离副本和自己启动的 DNS/HTTP 服务。若宿主直接以 `SIGKILL` 终止脚本，夹具会监测父进程并自行退出，带硬上限的 guest 子进程也会释放锁，但随机命名的临时 fakefs 副本可能留在磁盘上，需要人工删除。
 
-本次发布候选在开发使用的 macOS 与 Xcode 环境中完成了以下门禁：
+本次发布候选已经完成以下门禁：
 
-- 默认非交叉 `kernel=ish` 配置当前登记的 Meson 测试，在常规、ASan+UBSan 与 TSan 配置中均通过。
+- 默认非交叉 `kernel=ish` 配置当前登记的普通 Meson 测试已在 fresh 本机构建和公开 Linux Clang/GCC 矩阵通过；ASan+UBSan 证据只覆盖相应改动的定向回归，当前不声称完整测试集已重新通过 sanitizer 或 TSan。
 - iOS device `arm64`，watchOS device `arm64_32`/`arm64` 与 Simulator `arm64`/`x86_64` 的 core、完整静态库、普通消费者、全归档消费者、ABI 和二进制元数据门禁通过，并成功生成包含 device/Simulator 变体的三份 XCFramework。
-- Alpine AArch64 的动态 `/bin/sh`、文件操作、子进程等待、信号终止、数字地址 HTTP、musl `getent`、BusyBox `nslookup` 与主机名 HTTP 获取通过；查询日志证明三条工作负载都实际经过本地 UDP DNS responder，冒烟结束后没有残留 `ish` 进程。
+- 命令行 Alpine 冒烟的动态 `/bin/sh`、文件操作、子进程等待、信号终止、数字地址 HTTP、musl `getent`、BusyBox `nslookup` 与主机名 HTTP 获取通过；查询日志证明三条工作负载都实际经过本地 UDP DNS responder。
+- 专用 iPhone 与 Watch Simulator 的完整产品分别通过启动/交互、真实 resolver、HTTP/HTTPS、`apk update`、SQLite WAL 与复启持久化、Python、guest GCC/pthread、本地 Git 操作和离线 SSH 客户端/密钥/配置固定矩阵。此类长时 UI 门禁是发布候选实证，不在每次公开 CI 中重放，也不能替代实体设备验证。
+- 公开 CI 会构建 iPhone device `arm64` Release、Apple 五切片 core、Watch 四切片 LinkSmoke 和 Watch Simulator `arm64` 完整 App，逐字比较双端 Alpine 声明资源，并确认 ReleaseLinux 不携带该资源。
 
 ## 来源、许可与独立实现边界
 
@@ -366,6 +412,10 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 多架构改动依据公开的 Arm 指令集、Linux AArch64 ABI、ELF 与 Apple 平台 ABI 资料独立设计和实现。实现过程中以官方基线为集成边界，不引入其他衍生实现的源代码。最终发布前必须以官方基线到发布提交为范围，重新执行来源、相似性、受跟踪文件路径与提交信息审计；无法用公开规范解释的显著重合必须重写或明确标注来源。
 
 ## 当前限制
+
+以下条目记录超出固定软件矩阵的兼容边界，不是要求在产品已经运行后继续
+预写所有 Linux 长尾。只有真实 iPhone/Watch 工作负载出现可复现失败时，才把
+对应差异提升为产品修复。
 
 - AArch64 指令和 Linux 系统调用覆盖以运行现有工作负载为驱动，尚不等同于完整 ISA 或内核兼容层；当前已实现 32/64 位 `CASP`、`CASPA`、`CASPL` 与 `CASPAL`，但尚未覆盖完整 `FEAT_LSE`，guest 的 `AT_HWCAP` 暂不宣告 `HWCAP_ATOMICS`。
 - 未支持的 AArch64 指令会安全投递 `SIGILL`，未知 Linux 系统调用会返回 `ENOSYS`。
@@ -392,6 +442,6 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 - `DC ZVA` 当前通过 `DCZID_EL0.DZP` 声明不可用，guest libc 会回退到普通清零路径。
 - AArch64 已接入 204 `getsockname`、205 `getpeername`、209 `getsockopt` 与 210 `shutdown`。名称查询保持协议状态检查、完整长度回写与截断地址复制的 Linux 顺序；socket option 支持零长度和短缓冲，区分 SOL_SOCKET 的值优先 copyout 与 TCP/IP 的长度优先 copyout，并在 guest copyout 前消费 `SO_ERROR`。`SO_PROTOCOL` 返回 guest 的实际 TCP/UDP 协议号，`SO_ACCEPTCONN` 使用显式监听状态；AArch64 的 OLD/NEW timeout 都按固定 16 字节 wire 转换，watchOS `arm64_32` 的 host `timeval` 宽度不会泄漏。AF_UNIX 现在以 guest 状态累加读写关闭方向，STREAM/SEQPACKET 向对端传播反向方向，DGRAM 保留已排队 payload/SCM；Unix listener 的读关闭会封住新连接并按原顺序排空既有 pending。尚未完成的是 INET 未连接调用的方向副作用、连接中/已连接 TCP 的统一错误消费，以及 INET listener 读关闭后的退监听状态机。
 - AArch64 已接入 199 `socketpair`、201 `listen`、202 `accept` 与 242 `accept4`。返回 fd 会先以不可见事务预留，socketpair 的两个编号逐字写回后才创建协议对象，accept 则在地址写回成功后才发布 accepted fd；满表不会提前消费 pending 连接或 AF_UNIX 在途 SCM。AF_UNIX 的 STREAM、DGRAM、RAW 归一化可用；本地 SEQPACKET 当前只覆盖 socketpair，并保持记录截断、清洁对端关闭后的 EOF/HUP、写入 EPIPE，以及关闭端存在未读记录时对端一次性的 `ECONNRESET/POLLERR/SO_ERROR`，命名、connect 与 listen 仍未接入。DGRAM connect 使用单向弱路由，支持非对称重连、显式替代目的地后恢复、同名重绑身份校验、dead-peer 一次性错误和关闭时无分配分批拆边；hidden transport 在 guest bind 前已排队的记录保留发送时的匿名源快照。accepted fd 不继承 Darwin listener 的非阻塞状态。监听恢复会保存 backlog、非阻塞与重绑定所需 option，并在挂起快照中持有内部 fd 身份锚点；恢复时以同一 open-file-description 共享的状态变化拒绝同号外来 socket，而不是依赖 Darwin 对 socket 不唯一的 `fstat` 字段。仍有效的宿主 listener 保持原身份，失效时仅在原 raw fd 号未被复用且 Unix 后备路径身份匹配时安全重建，再重新挂接既有 poll 后端登记并恢复 listen。当前协议要求集成方在 guest/socket 生命周期静止期由主线程串行调用，并保持宿主 raw fd 与内部身份锚点仅由 socket 层持有、不被外部长期复制或绕过 socket 锁替换；身份与监听代次复核用于失败关闭保护，不使 poll 重登记成为可与 shutdown/listen 并发的通用事务。这里的恢复证据来自受控宿主 fd 失效测试，不等于已经完成真机生命周期验收。
-- 网络验证目前覆盖回环 TCP 客户端、基础 UDP DNS A 查询、并行 AAAA 的无数据响应、`getent`/`nslookup` 与主机名 HTTP；尚未覆盖 DNS 截断后的 TCP 回退、真实 Apple resolver、完整 IPv6 resolver、IP ancillary、UDP GSO 或全部 socket 选项。
-- Apple 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core、完整静态库的普通与全归档链接闭包、重定位、Mach-O 平台、minOS 和 XCFramework 二进制变体；它不运行 guest、不衡量后端性能，也不验证完整 iOS/watchOS 应用的生命周期、界面、签名、沙箱、entitlement 或真机能力，这些仍由集成方负责。
+- 产品网络矩阵已经覆盖 iPhone/Watch Simulator 的系统 resolver、IPv4、HTTP、HTTPS 与 `apk update`；命令行夹具还覆盖本地 UDP DNS A 查询、并行 AAAA 无数据响应及 `getent`/`nslookup`。尚未认证 DNS 截断后的 TCP 回退、完整 IPv6 resolver、IP ancillary、UDP GSO 或全部 socket 选项。
+- Apple core 门禁验证五切片的 AArch64 auto 后端选择、C/threaded 归档共存、函数指针 ABI、`arm64e` 指针认证，以及 core 与完整静态库消费者的链接闭包、重定位、Mach-O 平台和 minOS。独立 Xcode 门禁另行构建 iPhone App、Watch 四切片 LinkSmoke 和 Watch Simulator App；专用 Simulator 已运行双端产品矩阵。实体 iPhone/Watch 的签名、entitlement、安装、挂起恢复和 App Store 交付仍无最终证据。
 - Alpine 冒烟是目标工作负载验证，不等价于完整发行版兼容认证。
