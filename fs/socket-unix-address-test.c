@@ -3989,10 +3989,13 @@ static bool test_blocked_datagram_retarget_round(
     bool waiting_observed = false;
     bool stayed_blocked = false;
     bool retargeted = false;
+    unsigned consumed_old_messages = 0;
+    unsigned release_messages = 0;
+    bool old_capacity_released = false;
     bool woke_promptly = false;
     bool registration_cleared = false;
     bool new_delivery_exact = false;
-    bool old_queue_unchanged = false;
+    bool old_queue_accounted = false;
     bool old_inbound_purged = false;
     const byte_t filler = 0x74;
     const int buffer_size = BLOCKED_SEND_BUFFER_SIZE;
@@ -4089,7 +4092,24 @@ static bool test_blocked_datagram_retarget_round(
 
     retargeted = stayed_blocked && connect_unix_socket(
             fixture, sender, &new_address) == 0;
-    woke_promptly = retargeted && wait_for_flag(
+
+    // 拒收路由可直接重检；Linux 成功路由仍需释放旧队列占用的 sender 内存。
+#ifndef __APPLE__
+    release_messages = reject_new_route ? 0 : filler_messages;
+#endif
+    while (retargeted && consumed_old_messages < release_messages) {
+        byte_t consumed = 0;
+        if (receive_unix_datagram(fixture, old_receiver,
+                    MSG_DONTWAIT_, &consumed,
+                    sizeof(consumed), NULL) !=
+                    (ssize_t) sizeof(consumed) ||
+                consumed != filler)
+            break;
+        consumed_old_messages++;
+    }
+    old_capacity_released = retargeted &&
+            consumed_old_messages == release_messages;
+    woke_promptly = old_capacity_released && wait_for_flag(
             &call.finished, BLOCKED_SEND_WAIT_MS);
     if (atomic_load_explicit(&call.finished, memory_order_acquire)) {
         thread_joined = pthread_join(thread, NULL) == 0;
@@ -4123,7 +4143,8 @@ static bool test_blocked_datagram_retarget_round(
 
         bool old_ordered = true;
         byte_t old_payload = 0;
-        for (unsigned index = 0; index < filler_messages; index++) {
+        for (unsigned index = consumed_old_messages;
+                index < filler_messages; index++) {
             if (receive_unix_datagram(fixture, old_receiver,
                         MSG_DONTWAIT_, &old_payload,
                         sizeof(old_payload), NULL) !=
@@ -4133,7 +4154,7 @@ static bool test_blocked_datagram_retarget_round(
                 break;
             }
         }
-        old_queue_unchanged = old_ordered &&
+        old_queue_accounted = old_ordered &&
                 receive_unix_datagram(fixture, old_receiver,
                         MSG_DONTWAIT_, &old_payload,
                         sizeof(old_payload), NULL) == _EAGAIN;
@@ -4187,23 +4208,26 @@ cleanup:
             filler_messages != 0 && blocking_restored && new_route_ready &&
             thread_started &&
             started_observed && waiting_observed && stayed_blocked &&
-            retargeted && woke_promptly && thread_joined &&
+            retargeted && old_capacity_released &&
+            woke_promptly && thread_joined &&
             call.result == (reject_new_route ?
                     _EPIPE : (ssize_t) sizeof(call.payload)) &&
             registration_cleared && old_inbound_purged && new_delivery_exact &&
-            old_queue_unchanged && new_closed && old_closed &&
+            old_queue_accounted && new_closed && old_closed &&
             sender_closed && new_host_closed && old_host_closed &&
             sender_host_closed && host_fds_after == host_fd_baseline;
     if (!passed_round) {
         fprintf(stderr,
                 "改换 peer 回归失败轮次 %u：填充=%d(%u, errno=%d)，"
-                "同路由/清旧=%d/%d，等待=%d，重连=%d，唤醒=%d，"
+                "同路由/清旧=%d/%d，等待=%d，重连=%d，旧消费=%u/%u，唤醒=%d，"
                 "结果=%zd，新/旧队列=%d/%d，"
                 "host fd=%d/%d\n",
                 round, queue_full, filler_messages, fill_error,
                 same_route_preserved, old_inbound_purged,
-                waiting_observed, retargeted, woke_promptly, call.result,
-                new_delivery_exact, old_queue_unchanged,
+                waiting_observed, retargeted,
+                consumed_old_messages, release_messages,
+                woke_promptly, call.result,
+                new_delivery_exact, old_queue_accounted,
                 host_fd_baseline, host_fds_after);
     }
     return passed_round;
