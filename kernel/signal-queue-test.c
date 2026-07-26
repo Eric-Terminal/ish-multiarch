@@ -496,6 +496,7 @@ static bool init_published_group(struct published_group *published,
     published->leader->tgid = published->leader->pid;
     published->leader->uid = published->leader->suid = uid;
     published->leader->blocked = sig_mask(SIGRTMIN_);
+    task_thread_store(published->leader, pthread_self());
     task_publish(published->leader);
 
     published->sibling = task_create_(published->leader);
@@ -506,6 +507,7 @@ static bool init_published_group(struct published_group *published,
     published->sibling->tgid = published->leader->pid;
     published->sibling->uid = published->sibling->suid = uid;
     published->sibling->blocked = sig_mask(SIGRTMIN_);
+    task_thread_store(published->sibling, pthread_self());
     task_publish(published->sibling);
     return true;
 }
