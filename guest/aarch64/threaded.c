@@ -281,6 +281,38 @@ static void execute_conditional_select_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_rbit_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_RBIT);
+    byte_t width = instruction->width;
+    assert(width == 32 || width == 64);
+    qword_t value = read_general_register(cpu,
+            instruction->operands.data_processing_1source.rn,
+            width, false);
+    // 逐级交换相邻位组，AArch64 优化构建会折叠为宿主 RBIT。
+    value = ((value >> 1U) & UINT64_C(0x5555555555555555)) |
+            ((value & UINT64_C(0x5555555555555555)) << 1U);
+    value = ((value >> 2U) & UINT64_C(0x3333333333333333)) |
+            ((value & UINT64_C(0x3333333333333333)) << 2U);
+    value = ((value >> 4U) & UINT64_C(0x0f0f0f0f0f0f0f0f)) |
+            ((value & UINT64_C(0x0f0f0f0f0f0f0f0f)) << 4U);
+    value = ((value >> 8U) & UINT64_C(0x00ff00ff00ff00ff)) |
+            ((value & UINT64_C(0x00ff00ff00ff00ff)) << 8U);
+    value = ((value >> 16U) & UINT64_C(0x0000ffff0000ffff)) |
+            ((value & UINT64_C(0x0000ffff0000ffff)) << 16U);
+    value = (value >> 32U) | (value << 32U);
+    value >>= 64U - (unsigned) width;
+
+    write_general_register(cpu,
+            instruction->operands.data_processing_1source.rd,
+            width, false, value);
+    cpu->pc += 4;
+}
+
 static void execute_rev32_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -1143,6 +1175,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_CSEL:
         case AARCH64_OP_CSINC:
             return execute_conditional_select_fast;
+        case AARCH64_OP_RBIT:
+            return execute_rbit_fast;
         case AARCH64_OP_REV32:
             return execute_rev32_fast;
         case AARCH64_OP_CLZ:

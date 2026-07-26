@@ -54,6 +54,8 @@
 #define INSTRUCTION_ADD_X1_X1_X0 UINT32_C(0x8b000021)
 #define INSTRUCTION_MOV_X0_X10 UINT32_C(0xaa0a03e0)
 #define INSTRUCTION_MOV_X2_X7 UINT32_C(0xaa0703e2)
+#define INSTRUCTION_RBIT_W2_W2 UINT32_C(0x5ac00042)
+#define INSTRUCTION_RBIT_W0_W3 UINT32_C(0x5ac00060)
 #define INSTRUCTION_CLZ_W2_W2 UINT32_C(0x5ac01042)
 #define INSTRUCTION_CLZ_W0_W0 UINT32_C(0x5ac01000)
 #define INSTRUCTION_EOR_X2_X7_0000FFFF0000FFFF UINT32_C(0xd2003ce2)
@@ -73,6 +75,7 @@
 #define INSTRUCTION_EOR_X0_X0_X7 UINT32_C(0xca070000)
 #define INSTRUCTION_ORR_W1_WZR_7 UINT32_C(0x32000be1)
 #define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
+#define INSTRUCTION_MADD_X1_X2_X0_X1 UINT32_C(0x9b000441)
 #define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
 #define INSTRUCTION_MOV_W11_W2 UINT32_C(0x2a0203eb)
@@ -552,6 +555,17 @@ static void write_clz_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
     put_instruction(code + 28, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 32, INSTRUCTION_B_NE_NEG_32);
     put_instruction(code + 36, INSTRUCTION_SVC);
+}
+
+static void write_rbit_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_X0_X10);
+    put_instruction(code + 4, INSTRUCTION_MOV_X2_X7);
+    put_instruction(code + 8, INSTRUCTION_RBIT_W2_W2);
+    put_instruction(code + 12, INSTRUCTION_RBIT_W0_W3);
+    put_instruction(code + 16, INSTRUCTION_MADD_X1_X2_X0_X1);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 24, INSTRUCTION_B_NE_NEG_24);
+    put_instruction(code + 28, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1336,6 +1350,21 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 10,
         .write_program = write_clz_program,
+    },
+    {
+        .name = "RBIT 双真实画像宽度与乘加结果依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = UINT64_C(0x2380b3),
+        .iteration_register = 4,
+        .initial_x0 = UINT64_C(0x000bd591),
+        .initial_x7 = UINT64_C(0x01234567c0000000),
+        .initial_x10 = UINT64_C(0xaaaaaaaadeadbeef),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_rbit_program,
     },
 };
 
