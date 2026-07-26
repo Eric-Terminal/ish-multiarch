@@ -74,8 +74,12 @@
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
 #define INSTRUCTION_MOV_W11_W2 UINT32_C(0x2a0203eb)
 #define INSTRUCTION_MOV_X8_X1 UINT32_C(0xaa0103e8)
+#define INSTRUCTION_MOV_X1_X7 UINT32_C(0xaa0703e1)
 #define INSTRUCTION_UMADDL_X1_W0_W11_XZR UINT32_C(0x9bab7c01)
 #define INSTRUCTION_UMADDL_X1_W1_W2_X8 UINT32_C(0x9ba22021)
+#define INSTRUCTION_SMADDL_X0_W0_W1_XZR UINT32_C(0x9b217c00)
+#define INSTRUCTION_ADD_X1_X8_X0 UINT32_C(0x8b000101)
+#define INSTRUCTION_SMADDL_X2_W7_W10_X6 UINT32_C(0x9b2a18e2)
 #define INSTRUCTION_LSLV_X5_X7_X1 UINT32_C(0x9ac120e5)
 #define INSTRUCTION_ADD_X7_X5_1 UINT32_C(0x910004a7)
 #define INSTRUCTION_LSLV_W0_W0_W1 UINT32_C(0x1ac12000)
@@ -123,6 +127,7 @@
 #define INSTRUCTION_B_NE_NEG_20 UINT32_C(0x54ffff61)
 #define INSTRUCTION_B_NE_NEG_24 UINT32_C(0x54ffff41)
 #define INSTRUCTION_B_NE_NEG_28 UINT32_C(0x54ffff21)
+#define INSTRUCTION_B_NE_NEG_36 UINT32_C(0x54fffee1)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -499,6 +504,21 @@ static void write_eor_immediate_program(
     put_instruction(code + 24, INSTRUCTION_SUBS_X6_X6_1);
     put_instruction(code + 28, INSTRUCTION_B_NE_NEG_28);
     put_instruction(code + 32, INSTRUCTION_SVC);
+}
+
+static void write_smaddl_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_X8_X1);
+    put_instruction(code + 4, INSTRUCTION_MOV_X0_X10);
+    put_instruction(code + 8, INSTRUCTION_MOV_X1_X7);
+    put_instruction(code + 12, INSTRUCTION_SMADDL_X0_W0_W1_XZR);
+    put_instruction(code + 16, INSTRUCTION_ADD_X1_X8_X0);
+    put_instruction(code + 20, INSTRUCTION_SMADDL_X2_W7_W10_X6);
+    put_instruction(code + 24, INSTRUCTION_ADD_X1_SHIFTED);
+    put_instruction(code + 28, INSTRUCTION_ORR_W2_WZR_3);
+    put_instruction(code + 32, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 36, INSTRUCTION_B_NE_NEG_36);
+    put_instruction(code + 40, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1230,6 +1250,22 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 9,
         .write_program = write_eor_immediate_program,
+    },
+    {
+        .name = "SMADDL 双符号源与累加结果依赖热点环",
+        .instructions_per_iteration = 10,
+        .x1_increment_per_iteration = 7,
+        .iteration_register = 4,
+        .initial_x0 = UINT64_C(0xfffffffffffffffa),
+        .initial_x6 = 19,
+        .initial_x7 = UINT64_C(0xbbbbbbbb00000003),
+        .initial_x10 = UINT64_C(0xaaaaaaaafffffffe),
+        .expected_x4 = 0,
+        .expected_x6 = 19,
+        .fast_per_iteration = 10,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 11,
+        .write_program = write_smaddl_program,
     },
 };
 

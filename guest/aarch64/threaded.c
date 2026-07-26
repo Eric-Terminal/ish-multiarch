@@ -559,10 +559,12 @@ static void execute_multiply_add_fast(struct cpu_state *cpu,
     (void) result;
     assert(instruction->opcode == AARCH64_OP_MADD ||
             instruction->opcode == AARCH64_OP_MSUB ||
+            instruction->opcode == AARCH64_OP_SMADDL ||
             instruction->opcode == AARCH64_OP_UMADDL);
     byte_t width = instruction->width;
-    byte_t source_width =
-            instruction->opcode == AARCH64_OP_UMADDL ? 32 : width;
+    bool long_multiply = instruction->opcode == AARCH64_OP_SMADDL ||
+            instruction->opcode == AARCH64_OP_UMADDL;
+    byte_t source_width = long_multiply ? 32 : width;
     qword_t left = read_general_register(cpu,
             instruction->operands.data_processing_3source.rn,
             source_width, false);
@@ -572,6 +574,12 @@ static void execute_multiply_add_fast(struct cpu_state *cpu,
     qword_t accumulator = read_general_register(cpu,
             instruction->operands.data_processing_3source.ra,
             width, false);
+    if (instruction->opcode == AARCH64_OP_SMADDL) {
+        left = (left ^ UINT32_C(0x80000000)) -
+                UINT32_C(0x80000000);
+        right = (right ^ UINT32_C(0x80000000)) -
+                UINT32_C(0x80000000);
+    }
     qword_t product = left * right;
     qword_t value = instruction->opcode == AARCH64_OP_MSUB ?
             accumulator - product : accumulator + product;
@@ -1113,6 +1121,7 @@ static aarch64_threaded_handler select_handler(
             return execute_variable_right_shift_fast;
         case AARCH64_OP_MADD:
         case AARCH64_OP_MSUB:
+        case AARCH64_OP_SMADDL:
         case AARCH64_OP_UMADDL:
             return execute_multiply_add_fast;
         case AARCH64_OP_EXTR:
