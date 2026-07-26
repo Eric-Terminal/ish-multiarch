@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TOOL="$ROOT/tools/apple-aarch64-rootfs-sources.py"
+RELEASE_TOOL="$ROOT/tools/apple-aarch64-rootfs-release.py"
 PYTHON=${1:-}
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -32,6 +33,14 @@ size_file() {
     wc -c < "$1" | tr -d ' '
 }
 
+mode_file() {
+    if [[ $OSTYPE == darwin* ]]; then
+        stat -f '%Lp' "$1"
+    else
+        stat -c '%a' "$1"
+    fi
+}
+
 expect_failure() {
     local expected=$1
     local error_file=$2
@@ -50,6 +59,7 @@ expect_failure() {
 }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ish-aarch64-sources-test.XXXXXX")
+TMP=$(cd "$TMP" && pwd -P)
 cleanup() {
     local exit_code=$?
     trap - EXIT HUP INT TERM
@@ -270,6 +280,187 @@ printf '%s  %s\n' "$(sha256_file "$FIRST")" "$(basename "$FIRST")" \
     > "$CHECKSUM"
 "$PYTHON" "$TOOL" verify "$FIRST" --checksum "$CHECKSUM" \
     "${COMMON[@]}" >/dev/null
+
+BUNDLE_FILENAME="alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar"
+RELEASE_CHECKSUM="$TMP/release.sha256"
+printf '%s  %s\n' "$(sha256_file "$FIRST")" "$BUNDLE_FILENAME" \
+    > "$RELEASE_CHECKSUM"
+RELEASE_COMMAND=(
+    env ISH_AARCH64_RELEASE_TEST_MODE=fixture
+    "$PYTHON" "$RELEASE_TOOL"
+)
+
+expect_failure "自定义源码锁只能用于显式 fixture 模式" \
+    "$TMP/release-fixture-mode.stderr" \
+    env ISH_AARCH64_RELEASE_TEST_MODE= \
+    "$PYTHON" "$RELEASE_TOOL" "$CACHE" "$TMP/release-without-fixture-mode" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+
+RELEASE_OUTPUT="$TMP/release-output"
+"${RELEASE_COMMAND[@]}" "$CACHE" "$RELEASE_OUTPUT" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+release_entry_count=$(
+    find "$RELEASE_OUTPUT" -mindepth 1 -maxdepth 1 -print |
+        wc -l | tr -d ' '
+)
+if [[ ! -d "$RELEASE_OUTPUT" || -L "$RELEASE_OUTPUT" ||
+        "$release_entry_count" != 2 ||
+        ! -f "$RELEASE_OUTPUT/$BUNDLE_FILENAME" ||
+        -L "$RELEASE_OUTPUT/$BUNDLE_FILENAME" ||
+        ! -f "$RELEASE_OUTPUT/corresponding-source.sha256" ||
+        -L "$RELEASE_OUTPUT/corresponding-source.sha256" ]]; then
+    echo "错误：发布暂存目录没有精确包含两份普通文件。" >&2
+    exit 1
+fi
+if [[ $(mode_file "$RELEASE_OUTPUT") != 755 ||
+        $(mode_file "$RELEASE_OUTPUT/$BUNDLE_FILENAME") != 644 ||
+        $(mode_file "$RELEASE_OUTPUT/corresponding-source.sha256") != 644 ]]; then
+    echo "错误：发布暂存目录或文件权限不固定。" >&2
+    exit 1
+fi
+cmp "$FIRST" "$RELEASE_OUTPUT/$BUNDLE_FILENAME"
+cmp "$RELEASE_CHECKSUM" \
+    "$RELEASE_OUTPUT/corresponding-source.sha256"
+"$PYTHON" "$TOOL" verify "$RELEASE_OUTPUT/$BUNDLE_FILENAME" \
+    --checksum "$RELEASE_OUTPUT/corresponding-source.sha256" \
+    "${COMMON[@]}" >/dev/null
+
+# 即使锁中的 file:// 原始资产仍可读取，暂存器也不得补齐缺失缓存。
+NO_FETCH_CACHE="$TMP/cache-no-fetch"
+cp -R "$CACHE" "$NO_FETCH_CACHE"
+NO_FETCH_LEAF="$NO_FETCH_CACHE/distfiles/beta/beta-source.txt"
+rm "$NO_FETCH_LEAF"
+NO_FETCH_RELEASE="$TMP/release-no-fetch"
+expect_failure "生成对应源码包失败：源码资产不存在或是符号链接" \
+    "$TMP/release-no-fetch.stderr" \
+    "${RELEASE_COMMAND[@]}" "$NO_FETCH_CACHE" "$NO_FETCH_RELEASE" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+if [[ -e "$NO_FETCH_LEAF" || -L "$NO_FETCH_LEAF" ||
+        -e "$NO_FETCH_RELEASE" || -L "$NO_FETCH_RELEASE" ]]; then
+    echo "错误：发布暂存补齐了缺失缓存或发布了不完整源码。" >&2
+    exit 1
+fi
+
+PROTECTED_RELEASE="$TMP/release-protected"
+mkdir "$PROTECTED_RELEASE"
+printf '保留旧源码包\n' > "$PROTECTED_RELEASE/$BUNDLE_FILENAME"
+printf '保留旧摘要\n' \
+    > "$PROTECTED_RELEASE/corresponding-source.sha256"
+PROTECTED_RELEASE_BUNDLE_SHA=$(
+    sha256_file "$PROTECTED_RELEASE/$BUNDLE_FILENAME"
+)
+PROTECTED_RELEASE_CHECKSUM_SHA=$(
+    sha256_file "$PROTECTED_RELEASE/corresponding-source.sha256"
+)
+expect_failure "发布输出目录已经存在" \
+    "$TMP/release-protected.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$PROTECTED_RELEASE" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+PROTECTED_RELEASE_BUNDLE_AFTER=$(
+    sha256_file "$PROTECTED_RELEASE/$BUNDLE_FILENAME"
+)
+PROTECTED_RELEASE_CHECKSUM_AFTER=$(
+    sha256_file "$PROTECTED_RELEASE/corresponding-source.sha256"
+)
+if [[ "$PROTECTED_RELEASE_BUNDLE_AFTER" != "$PROTECTED_RELEASE_BUNDLE_SHA" ||
+        "$PROTECTED_RELEASE_CHECKSUM_AFTER" != "$PROTECTED_RELEASE_CHECKSUM_SHA" ]]; then
+    echo "错误：发布失败改写了既有输出。" >&2
+    exit 1
+fi
+
+BAD_RELEASE_CHECKSUM="$TMP/release-bad.sha256"
+printf '%064d  %s\n' 0 "$BUNDLE_FILENAME" > "$BAD_RELEASE_CHECKSUM"
+BAD_RELEASE="$TMP/release-bad"
+expect_failure "对应源码包 SHA-256 不匹配" \
+    "$TMP/release-bad.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$BAD_RELEASE" \
+    --checksum "$BAD_RELEASE_CHECKSUM" "${COMMON[@]}"
+if [[ -e "$BAD_RELEASE" || -L "$BAD_RELEASE" ]]; then
+    echo "错误：摘要漂移后仍发布了对应源码目录。" >&2
+    exit 1
+fi
+
+CHECKSUM_LINK_TARGET="$TMP/release-checksum-target"
+CHECKSUM_LINK="$TMP/release-checksum-link"
+cp "$RELEASE_CHECKSUM" "$CHECKSUM_LINK_TARGET"
+CHECKSUM_LINK_SHA=$(sha256_file "$CHECKSUM_LINK_TARGET")
+ln -s "$(basename "$CHECKSUM_LINK_TARGET")" "$CHECKSUM_LINK"
+expect_failure "对应源码包 SHA-256 清单不存在或是符号链接" \
+    "$TMP/release-checksum-link.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$TMP/release-checksum-output" \
+    --checksum "$CHECKSUM_LINK" "${COMMON[@]}"
+if [[ $(sha256_file "$CHECKSUM_LINK_TARGET") != "$CHECKSUM_LINK_SHA" ||
+        -e "$TMP/release-checksum-output" ||
+        -L "$TMP/release-checksum-output" ]]; then
+    echo "错误：校验清单链接目标被发布门禁改写。" >&2
+    exit 1
+fi
+
+RELEASE_LINK_TARGET="$TMP/release-link-target"
+RELEASE_LINK="$TMP/release-link"
+mkdir "$RELEASE_LINK_TARGET"
+printf '保留链接目标\n' > "$RELEASE_LINK_TARGET/sentinel"
+RELEASE_LINK_SHA=$(sha256_file "$RELEASE_LINK_TARGET/sentinel")
+ln -s "$(basename "$RELEASE_LINK_TARGET")" "$RELEASE_LINK"
+expect_failure "发布输出目录已经存在" \
+    "$TMP/release-link.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$RELEASE_LINK" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+RELEASE_LINK_AFTER=$(sha256_file "$RELEASE_LINK_TARGET/sentinel")
+if [[ "$RELEASE_LINK_AFTER" != "$RELEASE_LINK_SHA" ]]; then
+    echo "错误：发布输出链接目标被改写。" >&2
+    exit 1
+fi
+
+RELEASE_PARENT_TARGET="$TMP/release-parent-target"
+RELEASE_PARENT_LINK="$TMP/release-parent-link"
+mkdir "$RELEASE_PARENT_TARGET"
+printf '保留父目录目标\n' > "$RELEASE_PARENT_TARGET/sentinel"
+RELEASE_PARENT_SHA=$(sha256_file "$RELEASE_PARENT_TARGET/sentinel")
+ln -s "$(basename "$RELEASE_PARENT_TARGET")" "$RELEASE_PARENT_LINK"
+expect_failure "发布输出父目录路径不能包含符号链接" \
+    "$TMP/release-parent-link.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$RELEASE_PARENT_LINK/output" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+RELEASE_PARENT_AFTER=$(sha256_file "$RELEASE_PARENT_TARGET/sentinel")
+if [[ "$RELEASE_PARENT_AFTER" != "$RELEASE_PARENT_SHA" ||
+        -e "$RELEASE_PARENT_TARGET/output" ||
+        -L "$RELEASE_PARENT_TARGET/output" ]]; then
+    echo "错误：发布父目录链接目标被改写。" >&2
+    exit 1
+fi
+
+CACHE_LINK="$TMP/release-cache-link"
+ln -s "$(basename "$CACHE")" "$CACHE_LINK"
+expect_failure "源码缓存路径不能包含符号链接" \
+    "$TMP/release-cache-link.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE_LINK" "$TMP/release-cache-link-output" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+if [[ -e "$TMP/release-cache-link-output" ||
+        -L "$TMP/release-cache-link-output" ]]; then
+    echo "错误：符号链接源码缓存仍生成了发布输出。" >&2
+    exit 1
+fi
+
+LITERAL_GLOB_RELEASE="$TMP/release-*"
+expect_failure "发布输出路径不能包含 glob 元字符" \
+    "$TMP/release-glob.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$LITERAL_GLOB_RELEASE" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+if [[ -e "$LITERAL_GLOB_RELEASE" || -L "$LITERAL_GLOB_RELEASE" ]]; then
+    echo "错误：发布门禁创建了字面 glob 输出。" >&2
+    exit 1
+fi
+
+expect_failure "发布输出目录不能位于源码缓存内部" \
+    "$TMP/release-inside-cache.stderr" \
+    "${RELEASE_COMMAND[@]}" "$CACHE" "$CACHE/release-output" \
+    --checksum "$RELEASE_CHECKSUM" "${COMMON[@]}"
+if find "$TMP" -name '.release-stage.*' -print -quit | grep -q .; then
+    echo "错误：发布暂存门禁留下了私有候选目录。" >&2
+    exit 1
+fi
+
 VERIFY_FIFO="$TMP/verify-fifo.tar"
 VERIFY_FIFO_CHECKSUM="$TMP/verify-fifo.sha256"
 mkfifo "$VERIFY_FIFO"

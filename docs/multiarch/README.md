@@ -197,6 +197,23 @@ python3 tools/apple-aarch64-rootfs-sources.py verify \
     build/alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar
 ```
 
+准备发行资产时，应从已经填充并通过锁校验的 cache 生成一个新的本地
+暂存目录，不能复用 `build/` 里可能遗留的旧 tar：
+
+```sh
+mkdir -p build
+python3 tools/apple-aarch64-rootfs-release.py \
+    build/alpine-source-cache \
+    build/alpine-source-release
+```
+
+暂存器不会下载或补齐源码资产。它会独立生成并验证两份候选，确认两次
+结果逐字节一致后，以排他 rename 发布输出目录；既有输出、符号链接路径、
+缺失缓存、摘要漂移或任一步失败都会拒绝发布。成功目录固定只包含
+`alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar` 与
+`corresponding-source.sha256` 两个普通文件。本地暂存完成不等于这些资产
+已经进入公共 Release，也不替代最终发行审计。
+
 确定性 tar 包含 23 份真实源码载荷和内嵌锁表，不进入 Xcode rootfs phase、seed 或 App
 Resources。它的当前 SHA-256 由
 `third_party/alpine/3.24.1-aarch64/corresponding-source.sha256` 唯一锁定。
