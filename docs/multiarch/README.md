@@ -157,6 +157,12 @@ AArch64 minirootfs 转换为 fakefs 种子。输出目录只有 `meta.db`、`dat
 `rootfs-manifest.txt` 与 `rootfs-hardlinks.tsv` 四项；归档本身和生成的 rootfs 都不进入
 仓库。hardlink 清单用于弥补 App bundle 复制过程中可能丢失的宿主链接关系。
 
+正式打包还会离线读取归档内的 apk installed 数据库，并与
+`third_party/alpine/3.24.1-aarch64/packages.tsv` 逐项核对 16 个二进制包的版本、
+apk origin、apk 元数据声明的许可证表达式和 aports commit 字段。这个门禁只锁定二进制
+归档与受跟踪 apk 包元数据清单的一致性，不验证 aports 对象或上游源码字节，也不等于已经
+交付第三方许可证文本或完整对应源码；发行前仍须完成下文的来源与许可门禁。
+
 Apple 端的 `ish_apple_rootfs_seed_install` 只负责把上述只读 bundle 资源首次安装到调用者
 提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、BusyBox ELF、
 SQLite schema 与完整性、hardlink 清单和数据树类型，再在未发布的 staging 中重建链接、

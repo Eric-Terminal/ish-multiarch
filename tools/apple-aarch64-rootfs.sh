@@ -29,19 +29,23 @@ MANIFEST_VERSION=$VERSION
 MANIFEST_URL=$URL
 TEST_MODE=${ISH_AARCH64_ROOTFS_TEST_MODE:-}
 TEST_SHA256=${ISH_AARCH64_ROOTFS_TEST_SHA256:-}
+TEST_PACKAGES=${ISH_AARCH64_ROOTFS_TEST_PACKAGES:-}
+PACKAGE_LOCK="$ROOT/third_party/alpine/3.24.1-aarch64/packages.tsv"
 case "$TEST_MODE" in
     '')
-        if [[ -n "$TEST_SHA256" ]]; then
-            echo "错误：测试摘要只能用于显式 fixture 模式。" >&2
+        if [[ -n "$TEST_SHA256" || -n "$TEST_PACKAGES" ]]; then
+            echo "错误：测试摘要与包清单只能用于显式 fixture 模式。" >&2
             exit 2
         fi
         ;;
     fixture)
-        if [[ -z "$TEST_SHA256" || -z "$ARCHIVE" ]]; then
-            echo "错误：fixture 模式必须显式提供摘要和本地归档。" >&2
+        if [[ -z "$TEST_SHA256" || -z "$TEST_PACKAGES" ||
+                -z "$ARCHIVE" ]]; then
+            echo "错误：fixture 模式必须显式提供摘要、包清单和本地归档。" >&2
             exit 2
         fi
         EXPECTED_SHA256=$TEST_SHA256
+        PACKAGE_LOCK=$TEST_PACKAGES
         SOURCE_KIND=test-fixture
         MANIFEST_VERSION=test-fixture
         MANIFEST_URL=test-fixture://synthetic
@@ -327,6 +331,9 @@ if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
     echo "实际：$ACTUAL_SHA256" >&2
     exit 1
 fi
+
+"$ROOT/tools/apple-aarch64-rootfs-packages.sh" \
+    "$ARCHIVE" "$PACKAGE_LOCK"
 
 if [[ -z "$FAKEFSIFY" ]]; then
     FAKEFSIFY=$(build_fakefsify)

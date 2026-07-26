@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PACKAGER="$ROOT/tools/apple-aarch64-rootfs.sh"
+PACKAGE_VERIFIER="$ROOT/tools/apple-aarch64-rootfs-packages.sh"
 FAKEFSIFY=${1:-}
 SQLITE3_BIN=${2:-}
 
@@ -63,9 +64,11 @@ make_archive() {
     local destination=$2
     local elf_class=${3:-2}
     local elf_data=${4:-1}
+    local installed_fixture=${5:-}
     local tree="$TMP/tree"
     rm -rf "$tree"
-    mkdir -p "$tree/bin" "$tree/etc" "$tree/usr/lib"
+    mkdir -p "$tree/bin" "$tree/etc" "$tree/usr/lib" \
+        "$tree/lib/apk/db"
 
     # 只需构造足够识别 class/data/e_machine 的 ELF 头，转换器不会执行它。
     printf '\177ELF' > "$tree/bin/busybox"
@@ -83,6 +86,23 @@ make_archive() {
     printf 'test\n' > "$tree/etc/alpine-release"
     printf 'hardlink-proof\n' > "$tree/usr/lib/hardlink-source"
     ln "$tree/usr/lib/hardlink-source" "$tree/usr/lib/hardlink-alias"
+    if [[ -n "$installed_fixture" ]]; then
+        cp "$installed_fixture" "$tree/lib/apk/db/installed"
+    else
+        printf '%s\n' \
+            'P:fixture-extra' \
+            'V:2-r0' \
+            'L:BSD-2-Clause' \
+            'o:fixture-origin' \
+            'c:fedcba9876543210fedcba9876543210fedcba98' \
+            '' \
+            'P:fixture-base' \
+            'V:1-r0' \
+            'L:MIT' \
+            'o:fixture-origin' \
+            'c:0123456789abcdef0123456789abcdef01234567' \
+            > "$tree/lib/apk/db/installed"
+    fi
     (cd "$tree" && tar -czf "$destination" .)
 }
 
@@ -93,6 +113,7 @@ run_packager() {
     digest=$(sha256_file "$archive")
     env ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
         ISH_AARCH64_ROOTFS_TEST_SHA256="$digest" \
+        ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
         "$PACKAGER" "$output" "$archive" "$FAKEFSIFY"
 }
 
@@ -102,18 +123,77 @@ run_packager_with_digest() {
     local digest=$3
     env ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
         ISH_AARCH64_ROOTFS_TEST_SHA256="$digest" \
+        ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
         "$PACKAGER" "$output" "$archive" "$FAKEFSIFY"
 }
+
+run_packager_with_packages() {
+    local archive=$1
+    local output=$2
+    local packages=$3
+    env ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
+        ISH_AARCH64_ROOTFS_TEST_SHA256="$(sha256_file "$archive")" \
+        ISH_AARCH64_ROOTFS_TEST_PACKAGES="$packages" \
+        "$PACKAGER" "$output" "$archive" "$FAKEFSIFY"
+}
+
+FIXTURE_PACKAGES="$TMP/packages.tsv"
+EMPTY_PACKAGES="$TMP/packages-empty.tsv"
+BASE_PACKAGES="$TMP/packages-base.tsv"
+DUPLICATE_ACTUAL_PACKAGES="$TMP/packages-actual-duplicate.tsv"
+printf '%s\n' \
+    $'package\tversion\torigin\tlicense\taports_commit' \
+    $'fixture-base\t1-r0\tfixture-origin\tMIT\t0123456789abcdef0123456789abcdef01234567' \
+    $'fixture-extra\t2-r0\tfixture-origin\tBSD-2-Clause\tfedcba9876543210fedcba9876543210fedcba98' \
+    > "$FIXTURE_PACKAGES"
+sed -n '1p' "$FIXTURE_PACKAGES" > "$EMPTY_PACKAGES"
+sed -n '1p;2p' "$FIXTURE_PACKAGES" > "$BASE_PACKAGES"
+sed -n '1p;2p;2p' "$FIXTURE_PACKAGES" \
+    > "$DUPLICATE_ACTUAL_PACKAGES"
+
+EMPTY_INSTALLED="$TMP/installed-empty"
+REPEATED_FIELD_INSTALLED="$TMP/installed-repeated-field"
+DUPLICATE_PACKAGE_INSTALLED="$TMP/installed-duplicate-package"
+: > "$EMPTY_INSTALLED"
+printf '%s\n' \
+    'P:' \
+    'P:fixture-base' \
+    'V:1-r0' \
+    'L:MIT' \
+    'o:fixture-origin' \
+    'c:0123456789abcdef0123456789abcdef01234567' \
+    > "$REPEATED_FIELD_INSTALLED"
+printf '%s\n' \
+    'P:fixture-base' \
+    'V:1-r0' \
+    'L:MIT' \
+    'o:fixture-origin' \
+    'c:0123456789abcdef0123456789abcdef01234567' \
+    '' \
+    'P:fixture-base' \
+    'V:1-r0' \
+    'L:MIT' \
+    'o:fixture-origin' \
+    'c:0123456789abcdef0123456789abcdef01234567' \
+    > "$DUPLICATE_PACKAGE_INSTALLED"
 
 AARCH64_ARCHIVE="$TMP/aarch64.tar.gz"
 WRONG_ARCHIVE="$TMP/wrong-arch.tar.gz"
 WRONG_CLASS_ARCHIVE="$TMP/wrong-class.tar.gz"
 WRONG_ENDIAN_ARCHIVE="$TMP/wrong-endian.tar.gz"
+EMPTY_INSTALLED_ARCHIVE="$TMP/empty-installed.tar.gz"
+REPEATED_FIELD_ARCHIVE="$TMP/repeated-field.tar.gz"
+DUPLICATE_PACKAGE_ARCHIVE="$TMP/duplicate-package.tar.gz"
 OUTPUT="$TMP/result"
 make_archive 183 "$AARCH64_ARCHIVE"
 make_archive 3 "$WRONG_ARCHIVE"
 make_archive 183 "$WRONG_CLASS_ARCHIVE" 1 1
 make_archive 183 "$WRONG_ENDIAN_ARCHIVE" 2 2
+make_archive 183 "$EMPTY_INSTALLED_ARCHIVE" 2 1 "$EMPTY_INSTALLED"
+make_archive 183 "$REPEATED_FIELD_ARCHIVE" 2 1 \
+    "$REPEATED_FIELD_INSTALLED"
+make_archive 183 "$DUPLICATE_PACKAGE_ARCHIVE" 2 1 \
+    "$DUPLICATE_PACKAGE_INSTALLED"
 
 run_packager "$AARCH64_ARCHIVE" "$OUTPUT"
 [[ -f "$OUTPUT/meta.db" && -f "$OUTPUT/data/bin/busybox" ]]
@@ -129,6 +209,60 @@ grep -F $'usr/lib/hardlink-alias\tusr/lib/hardlink-source' \
     "$OUTPUT/rootfs-hardlinks.tsv" >/dev/null
 [[ $(stat_inode "$OUTPUT/data/usr/lib/hardlink-source") == \
     $(stat_inode "$OUTPUT/data/usr/lib/hardlink-alias") ]]
+
+VERSION_DRIFT_PACKAGES="$TMP/packages-version-drift.tsv"
+ORIGIN_DRIFT_PACKAGES="$TMP/packages-origin-drift.tsv"
+LICENSE_DRIFT_PACKAGES="$TMP/packages-license-drift.tsv"
+COMMIT_DRIFT_PACKAGES="$TMP/packages-commit-drift.tsv"
+DUPLICATE_PACKAGES="$TMP/packages-duplicate.tsv"
+UNSORTED_PACKAGES="$TMP/packages-unsorted.tsv"
+awk 'BEGIN { FS = OFS = "\t" } NR == 2 { $2 = "9-r9" } { print }' \
+    "$FIXTURE_PACKAGES" > "$VERSION_DRIFT_PACKAGES"
+awk 'BEGIN { FS = OFS = "\t" } NR == 2 { $3 = "other-origin" } { print }' \
+    "$FIXTURE_PACKAGES" > "$ORIGIN_DRIFT_PACKAGES"
+awk 'BEGIN { FS = OFS = "\t" } NR == 2 { $4 = "GPL-2.0-only" } { print }' \
+    "$FIXTURE_PACKAGES" > "$LICENSE_DRIFT_PACKAGES"
+awk 'BEGIN { FS = OFS = "\t" } NR == 2 {
+        $5 = "1123456789abcdef0123456789abcdef01234567"
+    } { print }' "$FIXTURE_PACKAGES" > "$COMMIT_DRIFT_PACKAGES"
+sed -n '1p;2p;2p;3p' "$FIXTURE_PACKAGES" > "$DUPLICATE_PACKAGES"
+{
+    sed -n '1p' "$FIXTURE_PACKAGES"
+    sed -n '3p' "$FIXTURE_PACKAGES"
+    sed -n '2p' "$FIXTURE_PACKAGES"
+} > "$UNSORTED_PACKAGES"
+
+if run_packager_with_packages "$AARCH64_ARCHIVE" \
+        "$TMP/package-drift-output" "$VERSION_DRIFT_PACKAGES" \
+        >/dev/null 2>&1; then
+    echo "错误：打包器不能接受版本漂移的 rootfs 包清单。" >&2
+    exit 1
+fi
+[[ ! -e "$TMP/package-drift-output" ]]
+for invalid_packages in "$ORIGIN_DRIFT_PACKAGES" \
+        "$LICENSE_DRIFT_PACKAGES" "$COMMIT_DRIFT_PACKAGES" \
+        "$DUPLICATE_PACKAGES" "$UNSORTED_PACKAGES"; do
+    if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$invalid_packages" \
+            >/dev/null 2>&1; then
+        echo "错误：包来源校验器接受了漂移、重复或乱序清单。" >&2
+        exit 1
+    fi
+done
+if "$PACKAGE_VERIFIER" "$EMPTY_INSTALLED_ARCHIVE" "$EMPTY_PACKAGES" \
+        >/dev/null 2>&1; then
+    echo "错误：包来源校验器接受了空的 apk installed 数据库。" >&2
+    exit 1
+fi
+if "$PACKAGE_VERIFIER" "$REPEATED_FIELD_ARCHIVE" "$BASE_PACKAGES" \
+        >/dev/null 2>&1; then
+    echo "错误：包来源校验器接受了重复的 apk installed 字段。" >&2
+    exit 1
+fi
+if "$PACKAGE_VERIFIER" "$DUPLICATE_PACKAGE_ARCHIVE" \
+        "$DUPLICATE_ACTUAL_PACKAGES" >/dev/null 2>&1; then
+    echo "错误：包来源校验器接受了重复的 apk installed 包名。" >&2
+    exit 1
+fi
 
 touch "$OUTPUT/previous-output"
 if run_packager_with_digest "$AARCH64_ARCHIVE" "$OUTPUT" \
@@ -149,6 +283,12 @@ if env ISH_AARCH64_ROOTFS_TEST_SHA256="$(sha256_file "$AARCH64_ARCHIVE")" \
         "$PACKAGER" "$TMP/implicit-fixture" "$AARCH64_ARCHIVE" \
         "$FAKEFSIFY" >/dev/null 2>&1; then
     echo "错误：未显式启用 fixture 模式时不能接受测试摘要。" >&2
+    exit 1
+fi
+if env ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
+        "$PACKAGER" "$TMP/implicit-package-fixture" "$AARCH64_ARCHIVE" \
+        "$FAKEFSIFY" >/dev/null 2>&1; then
+    echo "错误：未显式启用 fixture 模式时不能接受测试包清单。" >&2
     exit 1
 fi
 
@@ -197,9 +337,29 @@ fi
 INVALID_ARCHIVE="$TMP/not-a-tar.gz"
 printf 'not-an-archive\n' > "$INVALID_ARCHIVE"
 if run_packager "$INVALID_ARCHIVE" "$OUTPUT" >/dev/null 2>&1; then
-    echo "错误：转换失败不应替换既有 rootfs。" >&2
+    echo "错误：无法读取的归档不应替换既有 rootfs。" >&2
     exit 1
 fi
+[[ -f "$OUTPUT/meta.db" ]]
+
+FAILING_FAKEFSIFY="$TMP/failing-fakefsify"
+FAILING_FAKEFSIFY_LOG="$TMP/failing-fakefsify.log"
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'printf "called\n" > "$FAILING_FAKEFSIFY_LOG"' \
+    'exit 1' > "$FAILING_FAKEFSIFY"
+chmod +x "$FAILING_FAKEFSIFY"
+if env FAILING_FAKEFSIFY_LOG="$FAILING_FAKEFSIFY_LOG" \
+        ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
+        ISH_AARCH64_ROOTFS_TEST_SHA256="$(sha256_file "$AARCH64_ARCHIVE")" \
+        ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
+        "$PACKAGER" "$OUTPUT" "$AARCH64_ARCHIVE" "$FAILING_FAKEFSIFY" \
+        >/dev/null 2>&1; then
+    echo "错误：fakefsify 转换失败不应替换既有 rootfs。" >&2
+    exit 1
+fi
+[[ $(sed -n '1p' "$FAILING_FAKEFSIFY_LOG") == called ]]
 [[ -f "$OUTPUT/meta.db" ]]
 
 CACHE="$TMP/cache"
@@ -231,6 +391,7 @@ env REAL_FAKEFSIFY="$FAKEFSIFY" SLOW_FAKEFSIFY_LOG="$SLOW_LOG" \
     ISH_AARCH64_ROOTFS_LOCK_TIMEOUT=10 \
     ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
     ISH_AARCH64_ROOTFS_TEST_SHA256="$digest" \
+    ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
     "$PACKAGER" "$OUTPUT" "$AARCH64_ARCHIVE" "$SLOW_FAKEFSIFY" \
         >/dev/null &
 first_pid=$!
@@ -239,6 +400,7 @@ env REAL_FAKEFSIFY="$FAKEFSIFY" SLOW_FAKEFSIFY_LOG="$SLOW_LOG" \
     ISH_AARCH64_ROOTFS_LOCK_TIMEOUT=10 \
     ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
     ISH_AARCH64_ROOTFS_TEST_SHA256="$digest" \
+    ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
     "$PACKAGER" "$OUTPUT" "$AARCH64_ARCHIVE" "$SLOW_FAKEFSIFY" \
         >/dev/null &
 second_pid=$!
@@ -255,6 +417,7 @@ fi
 
 if env ISH_AARCH64_ROOTFS_TEST_MODE=fixture \
         ISH_AARCH64_ROOTFS_TEST_SHA256="$(sha256_file "$AARCH64_ARCHIVE")" \
+        ISH_AARCH64_ROOTFS_TEST_PACKAGES="$FIXTURE_PACKAGES" \
         "$PACKAGER" "$TMP/nested/.." "$AARCH64_ARCHIVE" "$FAKEFSIFY" \
         >/dev/null 2>&1; then
     echo "错误：输出目录不能接受 ..。" >&2
