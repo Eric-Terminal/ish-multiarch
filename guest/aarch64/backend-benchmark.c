@@ -50,6 +50,10 @@
 #define INSTRUCTION_ORR_W5_WZR_7FFFFFFE UINT32_C(0x321f77e5)
 #define INSTRUCTION_ADD_W4_W10_W5 UINT32_C(0x0b050144)
 #define INSTRUCTION_SUB_W10_W10_1 UINT32_C(0x5100054a)
+#define INSTRUCTION_EOR_W0_W4_1 UINT32_C(0x52000080)
+#define INSTRUCTION_ADD_X1_X1_X0 UINT32_C(0x8b000021)
+#define INSTRUCTION_MOV_X0_X10 UINT32_C(0xaa0a03e0)
+#define INSTRUCTION_EOR_X2_X7_0000FFFF0000FFFF UINT32_C(0xd2003ce2)
 #define INSTRUCTION_ADR_X1_PLUS_12 UINT32_C(0x10000061)
 #define INSTRUCTION_SUB_X1_X1_X7 UINT32_C(0xcb070021)
 #define INSTRUCTION_ADRP_X4_PLUS_86_PAGES UINT32_C(0xd00002a4)
@@ -479,6 +483,20 @@ static void write_bfm_program(
     put_instruction(code + 16, INSTRUCTION_EOR_X0_X0_X7);
     put_instruction(code + 20, INSTRUCTION_ORR_W1_WZR_7);
     put_instruction(code + 24, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 28, INSTRUCTION_B_NE_NEG_28);
+    put_instruction(code + 32, INSTRUCTION_SVC);
+}
+
+static void write_eor_immediate_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_EOR_W0_W4_1);
+    put_instruction(code + 4, INSTRUCTION_ADD_X1_X1_X0);
+    put_instruction(code + 8, INSTRUCTION_MOV_X0_X10);
+    put_instruction(code + 12,
+            INSTRUCTION_EOR_X2_X7_0000FFFF0000FFFF);
+    put_instruction(code + 16, INSTRUCTION_ADD_X1_SHIFTED);
+    put_instruction(code + 20, INSTRUCTION_ORR_W2_WZR_3);
+    put_instruction(code + 24, INSTRUCTION_SUBS_X6_X6_1);
     put_instruction(code + 28, INSTRUCTION_B_NE_NEG_28);
     put_instruction(code + 32, INSTRUCTION_SVC);
 }
@@ -1195,6 +1213,23 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 9,
         .write_program = write_bfm_program,
+    },
+    {
+        .name = "EOR immediate 双宽度真实画像结果依赖热点环",
+        .instructions_per_iteration = 8,
+        .x1_increment_per_iteration =
+                UINT64_C(0x0000000100000015),
+        .iteration_register = 6,
+        .initial_x0 = UINT64_C(0x1122334455667788),
+        .initial_x4 = UINT64_C(0xaaaaaaaa00000011),
+        .initial_x7 = UINT64_C(0x0000fffe0000fffa),
+        .initial_x10 = UINT64_C(0x1122334455667788),
+        .expected_x4 = UINT64_C(0xaaaaaaaa00000011),
+        .expected_x6 = 0,
+        .fast_per_iteration = 8,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 9,
+        .write_program = write_eor_immediate_program,
     },
 };
 

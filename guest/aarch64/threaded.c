@@ -406,6 +406,7 @@ static void execute_logical_immediate_fast(struct cpu_state *cpu,
     (void) result;
     assert(instruction->opcode == AARCH64_OP_AND_IMMEDIATE ||
             instruction->opcode == AARCH64_OP_ORR_IMMEDIATE ||
+            instruction->opcode == AARCH64_OP_EOR_IMMEDIATE ||
             instruction->opcode == AARCH64_OP_ANDS_IMMEDIATE);
     byte_t rd = instruction->operands.logical_immediate.rd;
     byte_t rn = instruction->operands.logical_immediate.rn;
@@ -413,8 +414,13 @@ static void execute_logical_immediate_fast(struct cpu_state *cpu,
     bool set_flags = instruction->opcode == AARCH64_OP_ANDS_IMMEDIATE;
     qword_t left = read_general_register(cpu, rn, width, false);
     qword_t right = instruction->operands.logical_immediate.immediate;
-    qword_t value = instruction->opcode == AARCH64_OP_ORR_IMMEDIATE ?
-            left | right : left & right;
+    qword_t value;
+    if (instruction->opcode == AARCH64_OP_ORR_IMMEDIATE)
+        value = left | right;
+    else if (instruction->opcode == AARCH64_OP_EOR_IMMEDIATE)
+        value = left ^ right;
+    else
+        value = left & right;
 
     if (set_flags) {
         qword_t sign = UINT64_C(1) << (width - 1);
@@ -1091,6 +1097,7 @@ static aarch64_threaded_handler select_handler(
             return execute_logical_shifted_register_fast;
         case AARCH64_OP_AND_IMMEDIATE:
         case AARCH64_OP_ORR_IMMEDIATE:
+        case AARCH64_OP_EOR_IMMEDIATE:
         case AARCH64_OP_ANDS_IMMEDIATE:
             return execute_logical_immediate_fast;
         case AARCH64_OP_SBFM:
