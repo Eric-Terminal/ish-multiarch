@@ -3763,7 +3763,8 @@ static bool test_blocked_datagram_send_receive_round(
     bool started_observed = false;
     bool waiting_observed = false;
     bool stayed_blocked = false;
-    bool consumed_one = false;
+    unsigned consumed_messages = 0;
+    bool capacity_released = false;
     bool woke_promptly = false;
     bool registration_cleared = false;
     bool queue_drained_in_order = false;
@@ -3827,13 +3828,22 @@ static bool test_blocked_datagram_send_receive_round(
             poll_registration_matches(&fixture->task, true) &&
             !atomic_load_explicit(&call.finished, memory_order_acquire);
 
-    byte_t consumed = 0;
-    consumed_one = stayed_blocked &&
-            receive_unix_datagram(fixture, pair[1], MSG_DONTWAIT_,
-                    &consumed, sizeof(consumed), NULL) ==
-                    (ssize_t) sizeof(consumed) &&
-            consumed == filler;
-    woke_promptly = consumed_one && wait_for_flag(
+    // Apple 每消费一条便推进内部容量代次；Linux POLLOUT 则等待发送内存低水位。
+    unsigned release_messages = 1;
+#ifndef __APPLE__
+    release_messages = filler_messages;
+#endif
+    while (stayed_blocked && consumed_messages < release_messages) {
+        byte_t consumed = 0;
+        if (receive_unix_datagram(fixture, pair[1], MSG_DONTWAIT_,
+                    &consumed, sizeof(consumed), NULL) !=
+                    (ssize_t) sizeof(consumed) ||
+                consumed != filler)
+            break;
+        consumed_messages++;
+    }
+    capacity_released = consumed_messages == release_messages;
+    woke_promptly = capacity_released && wait_for_flag(
             &call.finished, BLOCKED_SEND_WAIT_MS);
     if (atomic_load_explicit(&call.finished, memory_order_acquire)) {
         thread_joined = pthread_join(thread, NULL) == 0;
@@ -3844,7 +3854,8 @@ static bool test_blocked_datagram_send_receive_round(
     if (thread_joined && call.result == (ssize_t) sizeof(call.payload)) {
         bool ordered = true;
         byte_t received = 0;
-        for (unsigned index = 1; index < filler_messages; index++) {
+        for (unsigned index = consumed_messages;
+                index < filler_messages; index++) {
             if (receive_unix_datagram(fixture, pair[1], MSG_DONTWAIT_,
                         &received, sizeof(received), NULL) !=
                         (ssize_t) sizeof(received) ||
@@ -3903,7 +3914,8 @@ cleanup:
             receiver_retained && buffer_configured && queue_full &&
             filler_messages != 0 && blocking_restored && thread_started &&
             started_observed && waiting_observed && stayed_blocked &&
-            consumed_one && woke_promptly && thread_joined &&
+            capacity_released && consumed_messages != 0 &&
+            woke_promptly && thread_joined &&
             call.result == (ssize_t) sizeof(call.payload) &&
             registration_cleared && queue_drained_in_order &&
             receiver_closed && sender_closed && receiver_host_closed &&
@@ -3911,9 +3923,10 @@ cleanup:
     if (!passed_round) {
         fprintf(stderr,
                 "容量恢复回归失败轮次 %u：填充=%d(%u, errno=%d)，"
-                "等待=%d，消费=%d，唤醒=%d，结果=%zd，队列=%d，host fd=%d/%d\n",
+                "等待=%d，消费=%u，唤醒=%d，结果=%zd，队列=%d，host fd=%d/%d\n",
                 round, queue_full, filler_messages, fill_error,
-                waiting_observed, consumed_one, woke_promptly, call.result,
+                waiting_observed, consumed_messages,
+                woke_promptly, call.result,
                 queue_drained_in_order, host_fd_baseline, host_fds_after);
     }
     return passed_round;
