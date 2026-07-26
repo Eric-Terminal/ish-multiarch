@@ -1,0 +1,2 @@
+alpine_version	archive_name	archive_size	archive_sha256	source_url	installed_size	installed_sha256	packages_size	packages_sha256	package_count	origin_count
+3.24.1	alpine-minirootfs-3.24.1-aarch64.tar.gz	4023732	f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259	https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz	15097	05a374ef814e2909cafd466adb305eee75dabde6b452746713438efa2bc051f3	1404	ac755fe674724258b116b4eb62633a0ed899e55223154ef183b7b34dbe26783b	16	10

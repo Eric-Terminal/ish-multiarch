@@ -163,11 +163,36 @@ apk origin、apk 元数据声明的许可证表达式和 aports commit 字段。
 归档与受跟踪 apk 包元数据清单的一致性，不验证 aports 对象或上游源码字节，也不等于已经
 交付第三方许可证文本或完整对应源码；发行前仍须完成下文的来源与许可门禁。
 
-Apple 端的 `ish_apple_rootfs_seed_install` 只负责把上述只读 bundle 资源首次安装到调用者
-提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、BusyBox ELF、
-SQLite schema 与完整性、hardlink 清单和数据树类型，再在未发布的 staging 中重建链接、
-更新 `meta.db` 的真实 inode，并以排他 rename 发布 final root。安装过程使用长期 lock、
-随机 staging 和与该目录 dev/inode 绑定的原子 owner 记录；在文件系统支持目录 fsync 时，
+对应源码门禁与日常 App 构建分离。`binary-reference.tsv` 把包清单关联到固定二进制归档和
+apk installed 数据库，`origins.tsv` 锁定 10 个 aports commit/path/tree，
+`source-assets.tsv` 则锁定 10 份 aports 目录归档及 9 份上游 distfile 的 URL、大小和
+SHA-512。生成与验证还会严格解析每份 `APKBUILD` 的 `sha512sums`：目录内文件就地重算，
+目录外要求则必须与上游资产清单双向闭合。以下命令会先检查受跟踪锁，再显式顺序取得资产、
+生成只有普通文件且元数据固定的 59,217,920 字节 tar，并按受跟踪 SHA-256 做纯离线复核：
+
+```sh
+python3 tools/apple-aarch64-rootfs-sources.py check-locks
+python3 tools/apple-aarch64-rootfs-sources.py fetch \
+    build/alpine-source-cache
+python3 tools/apple-aarch64-rootfs-sources.py bundle \
+    build/alpine-source-cache \
+    build/alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar
+python3 tools/apple-aarch64-rootfs-sources.py verify \
+    build/alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar
+```
+
+确定性 tar 的 SHA-256 为
+`54dd3ad02d2363c48d9910533b8f2559b14ad223ebb1f135ebe732586c869bca`。它包含 19 份真实
+源码载荷和内嵌锁表，不进入 Xcode rootfs phase、seed 或 App Resources。当前仓库只是锁定
+并可复现生成该外部源码制品；在它真正随 release 发布，并补齐许可证正文、版权 notices 与
+双端 App 内查看入口前，不能声称来源与许可交付已经完成。
+
+Apple 端的 `ish_apple_rootfs_seed_install` 只负责把前述只读 fakefs rootfs seed 首次安装到
+调用者提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、
+BusyBox ELF、SQLite schema 与完整性、hardlink 清单和数据树类型，再在未发布的 staging
+中重建链接、更新 `meta.db` 的真实 inode，并以排他 rename 发布 final root。安装过程使用
+长期 lock、随机 staging 和与该目录 dev/inode 绑定的原子 owner 记录；在文件系统支持目录
+fsync 时，
 目录项删除与发布分别通过两阶段 fsync 保留掉电恢复顺序。未知 owner、错配目录和符号链接
 不会被自动删除。
 

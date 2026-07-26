@@ -21,6 +21,19 @@ if get_option('kernel') == 'ish'
     endif
 endif
 
+if not meson.is_cross_build()
+    python3_cli = find_program('python3', required: false)
+    if python3_cli.found()
+        apple_aarch64_rootfs_sources_test = find_program(
+            'apple-aarch64-rootfs-sources-test.sh')
+        test('apple_aarch64_source_bundle',
+            apple_aarch64_rootfs_sources_test,
+            args: [python3_cli.full_path()], timeout: 60)
+    else
+        warning('未找到 Python 3，跳过 AArch64 对应源码包测试')
+    endif
+endif
+
 libarchive = dependency('libarchive', required: false)
 if not libarchive.found()
     # homebrew

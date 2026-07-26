@@ -3,10 +3,36 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
-VERSION=3.24.1
-ARCHIVE_NAME="alpine-minirootfs-${VERSION}-aarch64.tar.gz"
-URL="https://dl-cdn.alpinelinux.org/alpine/v${VERSION%.*}/releases/aarch64/${ARCHIVE_NAME}"
-EXPECTED_SHA256=f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259
+REFERENCE_LOCK="$ROOT/third_party/alpine/3.24.1-aarch64/binary-reference.tsv"
+REFERENCE_HEADER=$'alpine_version\tarchive_name\tarchive_size\tarchive_sha256\tsource_url\tinstalled_size\tinstalled_sha256\tpackages_size\tpackages_sha256\tpackage_count\torigin_count'
+if [[ ! -f "$REFERENCE_LOCK" ]] ||
+        ! awk -F '\t' -v header="$REFERENCE_HEADER" '
+            NR == 1 && $0 != header { exit 1 }
+            NR == 2 && NF != 11 { exit 1 }
+            NR > 2 { exit 1 }
+            END { if (NR != 2) exit 1 }
+        ' "$REFERENCE_LOCK"; then
+    echo "错误：AArch64 rootfs 二进制参照清单格式非法。" >&2
+    exit 1
+fi
+IFS=$'\t' read -r VERSION ARCHIVE_NAME EXPECTED_SIZE EXPECTED_SHA256 URL \
+    INSTALLED_SIZE INSTALLED_SHA256 PACKAGES_SIZE PACKAGES_SHA256 \
+    PACKAGE_COUNT ORIGIN_COUNT < <(sed -n '2p' "$REFERENCE_LOCK")
+EXPECTED_URL="https://dl-cdn.alpinelinux.org/alpine/v${VERSION%.*}/releases/aarch64/$ARCHIVE_NAME"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ||
+        "$ARCHIVE_NAME" != "alpine-minirootfs-${VERSION}-aarch64.tar.gz" ||
+        ! "$EXPECTED_SIZE" =~ ^[1-9][0-9]*$ ||
+        ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ||
+        "$URL" != "$EXPECTED_URL" ||
+        ! "$INSTALLED_SIZE" =~ ^[1-9][0-9]*$ ||
+        ! "$INSTALLED_SHA256" =~ ^[0-9a-f]{64}$ ||
+        ! "$PACKAGES_SIZE" =~ ^[1-9][0-9]*$ ||
+        ! "$PACKAGES_SHA256" =~ ^[0-9a-f]{64}$ ||
+        ! "$PACKAGE_COUNT" =~ ^[1-9][0-9]*$ ||
+        ! "$ORIGIN_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误：AArch64 rootfs 二进制参照字段非法。" >&2
+    exit 1
+fi
 
 usage() {
     echo "用法：$0 <输出 fakefs 目录> [本地 rootfs 归档] [fakefsify]" >&2
@@ -31,6 +57,7 @@ TEST_MODE=${ISH_AARCH64_ROOTFS_TEST_MODE:-}
 TEST_SHA256=${ISH_AARCH64_ROOTFS_TEST_SHA256:-}
 TEST_PACKAGES=${ISH_AARCH64_ROOTFS_TEST_PACKAGES:-}
 PACKAGE_LOCK="$ROOT/third_party/alpine/3.24.1-aarch64/packages.tsv"
+PACKAGE_REFERENCE=$REFERENCE_LOCK
 case "$TEST_MODE" in
     '')
         if [[ -n "$TEST_SHA256" || -n "$TEST_PACKAGES" ]]; then
@@ -45,7 +72,9 @@ case "$TEST_MODE" in
             exit 2
         fi
         EXPECTED_SHA256=$TEST_SHA256
+        EXPECTED_SIZE=
         PACKAGE_LOCK=$TEST_PACKAGES
+        PACKAGE_REFERENCE=--fixture
         SOURCE_KIND=test-fixture
         MANIFEST_VERSION=test-fixture
         MANIFEST_URL=test-fixture://synthetic
@@ -69,6 +98,10 @@ sha256_file() {
         echo "错误：找不到 shasum 或 sha256sum。" >&2
         return 1
     fi
+}
+
+file_size() {
+    wc -c < "$1" | tr -d ' '
 }
 
 sha256_text() {
@@ -290,7 +323,9 @@ if [[ -z "$ARCHIVE" ]]; then
     mkdir -p "$CACHE"
     ARCHIVE="$CACHE/$ARCHIVE_NAME"
     CACHE_VALID=false
-    if [[ -f "$ARCHIVE" && $(sha256_file "$ARCHIVE") == \
+    if [[ -f "$ARCHIVE" &&
+            $(file_size "$ARCHIVE") == "$EXPECTED_SIZE" &&
+            $(sha256_file "$ARCHIVE") == \
             "$EXPECTED_SHA256" ]]; then
         CACHE_VALID=true
     fi
@@ -307,10 +342,14 @@ if [[ -z "$ARCHIVE" ]]; then
         trap 'rm -f "${download:-}"' EXIT
         curl --fail --location --retry 3 --output "$download" "$URL"
         DOWNLOAD_SHA256=$(sha256_file "$download")
-        if [[ "$DOWNLOAD_SHA256" != "$EXPECTED_SHA256" ]]; then
-            echo "错误：下载的 AArch64 rootfs SHA-256 不匹配。" >&2
-            echo "期望：$EXPECTED_SHA256" >&2
-            echo "实际：$DOWNLOAD_SHA256" >&2
+        DOWNLOAD_SIZE=$(file_size "$download")
+        if [[ "$DOWNLOAD_SIZE" != "$EXPECTED_SIZE" ||
+                "$DOWNLOAD_SHA256" != "$EXPECTED_SHA256" ]]; then
+            echo "错误：下载的 AArch64 rootfs 大小或 SHA-256 不匹配。" >&2
+            echo "期望大小：$EXPECTED_SIZE" >&2
+            echo "实际大小：$DOWNLOAD_SIZE" >&2
+            echo "期望 SHA-256：$EXPECTED_SHA256" >&2
+            echo "实际 SHA-256：$DOWNLOAD_SHA256" >&2
             exit 1
         fi
         mv "$download" "$ARCHIVE"
@@ -325,15 +364,21 @@ if [[ ! -f "$ARCHIVE" ]]; then
 fi
 
 ACTUAL_SHA256=$(sha256_file "$ARCHIVE")
-if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
-    echo "错误：AArch64 rootfs SHA-256 不匹配。" >&2
-    echo "期望：$EXPECTED_SHA256" >&2
-    echo "实际：$ACTUAL_SHA256" >&2
+ACTUAL_SIZE=$(file_size "$ARCHIVE")
+if [[ -n "$EXPECTED_SIZE" && "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]] ||
+        [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+    echo "错误：AArch64 rootfs 大小或 SHA-256 不匹配。" >&2
+    if [[ -n "$EXPECTED_SIZE" ]]; then
+        echo "期望大小：$EXPECTED_SIZE" >&2
+        echo "实际大小：$ACTUAL_SIZE" >&2
+    fi
+    echo "期望 SHA-256：$EXPECTED_SHA256" >&2
+    echo "实际 SHA-256：$ACTUAL_SHA256" >&2
     exit 1
 fi
 
 "$ROOT/tools/apple-aarch64-rootfs-packages.sh" \
-    "$ARCHIVE" "$PACKAGE_LOCK"
+    "$ARCHIVE" "$PACKAGE_LOCK" "$PACKAGE_REFERENCE"
 
 if [[ -z "$FAKEFSIFY" ]]; then
     FAKEFSIFY=$(build_fakefsify)

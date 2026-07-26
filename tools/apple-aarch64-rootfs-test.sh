@@ -29,6 +29,10 @@ sha256_text() {
     fi
 }
 
+file_size() {
+    wc -c < "$1" | tr -d ' '
+}
+
 stat_inode() {
     local inode
     inode=$(stat -f '%i' "$1" 2>/dev/null || true)
@@ -40,6 +44,7 @@ stat_inode() {
 }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ish-aarch64-rootfs-test.XXXXXX")
+export ISH_AARCH64_ROOTFS_LOCK_ROOT="$TMP/locks"
 child_pids=
 cleanup() {
     local status=$?
@@ -195,6 +200,15 @@ make_archive 183 "$REPEATED_FIELD_ARCHIVE" 2 1 \
 make_archive 183 "$DUPLICATE_PACKAGE_ARCHIVE" 2 1 \
     "$DUPLICATE_PACKAGE_INSTALLED"
 
+FIXTURE_INSTALLED="$TMP/installed-reference"
+tar -xOzf "$AARCH64_ARCHIVE" ./lib/apk/db/installed \
+    > "$FIXTURE_INSTALLED"
+FIXTURE_REFERENCE="$TMP/binary-reference.tsv"
+printf '%s\n' \
+    $'alpine_version\tarchive_name\tarchive_size\tarchive_sha256\tsource_url\tinstalled_size\tinstalled_sha256\tpackages_size\tpackages_sha256\tpackage_count\torigin_count' \
+    "3.24.1"$'\t'"alpine-minirootfs-3.24.1-aarch64.tar.gz"$'\t'"$(file_size "$AARCH64_ARCHIVE")"$'\t'"$(sha256_file "$AARCH64_ARCHIVE")"$'\t'"https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"$'\t'"$(file_size "$FIXTURE_INSTALLED")"$'\t'"$(sha256_file "$FIXTURE_INSTALLED")"$'\t'"$(file_size "$FIXTURE_PACKAGES")"$'\t'"$(sha256_file "$FIXTURE_PACKAGES")"$'\t2\t1' \
+    > "$FIXTURE_REFERENCE"
+
 run_packager "$AARCH64_ARCHIVE" "$OUTPUT"
 [[ -f "$OUTPUT/meta.db" && -f "$OUTPUT/data/bin/busybox" ]]
 [[ ! -e "$OUTPUT/meta.db-wal" && ! -e "$OUTPUT/meta.db-shm" ]]
@@ -209,6 +223,45 @@ grep -F $'usr/lib/hardlink-alias\tusr/lib/hardlink-source' \
     "$OUTPUT/rootfs-hardlinks.tsv" >/dev/null
 [[ $(stat_inode "$OUTPUT/data/usr/lib/hardlink-source") == \
     $(stat_inode "$OUTPUT/data/usr/lib/hardlink-alias") ]]
+"$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
+    "$FIXTURE_REFERENCE" >/dev/null
+if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
+        >/dev/null 2>&1; then
+    echo "错误：包来源校验器不能隐式跳过二进制参照。" >&2
+    exit 1
+fi
+
+for drift_column in 1 2 3 4 5 6 7 8 9 10 11; do
+    DRIFT_REFERENCE="$TMP/binary-reference-drift-$drift_column.tsv"
+    case "$drift_column" in
+        1)
+            drift_value=3.24.2
+            ;;
+        2)
+            drift_value=alpine-minirootfs-3.24.2-aarch64.tar.gz
+            ;;
+        3|6|8|10)
+            drift_value=1
+            ;;
+        4|7|9)
+            drift_value=0000000000000000000000000000000000000000000000000000000000000000
+            ;;
+        5)
+            drift_value=https://example.invalid/alpine-minirootfs-3.24.1-aarch64.tar.gz
+            ;;
+        11)
+            drift_value=2
+            ;;
+    esac
+    awk -F '\t' -v OFS='\t' -v column="$drift_column" \
+        -v value="$drift_value" 'NR == 2 { $column = value } { print }' \
+        "$FIXTURE_REFERENCE" > "$DRIFT_REFERENCE"
+    if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
+            "$DRIFT_REFERENCE" >/dev/null 2>&1; then
+        echo "错误：包来源校验器接受了漂移的二进制参照字段 $drift_column。" >&2
+        exit 1
+    fi
+done
 
 VERSION_DRIFT_PACKAGES="$TMP/packages-version-drift.tsv"
 ORIGIN_DRIFT_PACKAGES="$TMP/packages-origin-drift.tsv"
@@ -243,23 +296,23 @@ for invalid_packages in "$ORIGIN_DRIFT_PACKAGES" \
         "$LICENSE_DRIFT_PACKAGES" "$COMMIT_DRIFT_PACKAGES" \
         "$DUPLICATE_PACKAGES" "$UNSORTED_PACKAGES"; do
     if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$invalid_packages" \
-            >/dev/null 2>&1; then
+            --fixture >/dev/null 2>&1; then
         echo "错误：包来源校验器接受了漂移、重复或乱序清单。" >&2
         exit 1
     fi
 done
-if "$PACKAGE_VERIFIER" "$EMPTY_INSTALLED_ARCHIVE" "$EMPTY_PACKAGES" \
+if "$PACKAGE_VERIFIER" "$EMPTY_INSTALLED_ARCHIVE" "$EMPTY_PACKAGES" --fixture \
         >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了空的 apk installed 数据库。" >&2
     exit 1
 fi
-if "$PACKAGE_VERIFIER" "$REPEATED_FIELD_ARCHIVE" "$BASE_PACKAGES" \
+if "$PACKAGE_VERIFIER" "$REPEATED_FIELD_ARCHIVE" "$BASE_PACKAGES" --fixture \
         >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了重复的 apk installed 字段。" >&2
     exit 1
 fi
 if "$PACKAGE_VERIFIER" "$DUPLICATE_PACKAGE_ARCHIVE" \
-        "$DUPLICATE_ACTUAL_PACKAGES" >/dev/null 2>&1; then
+        "$DUPLICATE_ACTUAL_PACKAGES" --fixture >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了重复的 apk installed 包名。" >&2
     exit 1
 fi

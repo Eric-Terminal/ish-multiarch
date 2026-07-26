@@ -22,6 +22,7 @@ $(SRCROOT)/meson_options.txt
 $(SRCROOT)/misc.h
 $(SRCROOT)/platform/apple-rootfs-seed.c
 $(SRCROOT)/platform/apple-rootfs-seed.h
+$(SRCROOT)/third_party/alpine/3.24.1-aarch64/binary-reference.tsv
 $(SRCROOT)/third_party/alpine/3.24.1-aarch64/packages.tsv
 $(SRCROOT)/tools/apple-aarch64-hardlinks.awk
 $(SRCROOT)/tools/apple-aarch64-rootfs-packages.sh
