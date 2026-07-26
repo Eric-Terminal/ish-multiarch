@@ -62,6 +62,7 @@ jobs:
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_license_notices_app \
             apple_meson_project_options \
+            apple_watch_package_prebuilt \
             apple_rootfs_seed apple_resolver \
             pty_lifecycle \
             pty_read_lifecycle tty_real_lifecycle \
@@ -82,6 +83,7 @@ jobs:
             -arch arm64 \
             -sdk iphoneos \
             -derivedDataPath "$derived" \
+            ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
             CODE_SIGNING_ALLOWED=NO
           app="$derived/Build/Products/Release-iphoneos/iSH.app"
           test -x "$app/iSH"
@@ -105,6 +107,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
             ONLY_ACTIVE_ARCH=NO
             ISH_WATCH_ARTIFACT_ROOT="$artifacts"
+            ISH_WATCH_PACKAGE_MODE=prebuilt
             SYMROOT="$products"
           )
 
@@ -139,6 +142,7 @@ jobs:
           verify_slice "$simulator" arm64 WATCHOSSIMULATOR 10.0
           verify_slice "$simulator" x86_64 WATCHOSSIMULATOR 10.0
 
+          # iPhone Release 已填充并校验同一缓存，Watch 不应再次联网。
           app_products="$RUNNER_TEMP/ish-watch-app-products"
           xcodebuild \
             -project iSH.xcodeproj \
@@ -150,6 +154,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
             ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+            ISH_WATCH_PACKAGE_MODE=prebuilt \
+            ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
+            ISH_AARCH64_ROOTFS_OFFLINE=1 \
             SYMROOT="$app_products" \
             build
 

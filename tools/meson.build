@@ -33,6 +33,11 @@ if not meson.is_cross_build()
         warning('未找到 Meson CLI，跳过旧项目选项刷新测试')
     endif
 
+    apple_watch_package_test = find_program(
+        'apple-watch-package-test.sh')
+    test('apple_watch_package_prebuilt',
+        apple_watch_package_test, timeout: 30)
+
     python3_cli = find_program('python3', required: false)
     if python3_cli.found()
         apple_aarch64_rootfs_sources_test = find_program(
