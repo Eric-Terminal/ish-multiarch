@@ -21,7 +21,7 @@ export CC="$CC_FOR_BUILD" # compatibility with meson < 0.54.0
 
 buildtype=debug
 b_ndebug=false
-if [[ ${CONFIGURATION:-} == Release ]]; then
+if [[ ${CONFIGURATION:-} == Release* ]]; then
     buildtype=debugoptimized
 fi
 b_sanitize=none
