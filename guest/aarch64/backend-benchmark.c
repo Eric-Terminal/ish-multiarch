@@ -59,6 +59,12 @@
 #define INSTRUCTION_AND_X4_X1_X2_LSL_2 UINT32_C(0x8a020824)
 #define INSTRUCTION_UBFM_W4_W0_28_27 UINT32_C(0x531c6c04)
 #define INSTRUCTION_SXTW_X2_W2 UINT32_C(0x93407c42)
+#define INSTRUCTION_MOV_X1_X10 UINT32_C(0xaa0a03e1)
+#define INSTRUCTION_MOV_X2_X10 UINT32_C(0xaa0a03e2)
+#define INSTRUCTION_BFM_X0_X1_52_51 UINT32_C(0xb374cc20)
+#define INSTRUCTION_BFM_W2_W0_0_4 UINT32_C(0x33001002)
+#define INSTRUCTION_EOR_X0_X0_X7 UINT32_C(0xca070000)
+#define INSTRUCTION_ORR_W1_WZR_7 UINT32_C(0x32000be1)
 #define INSTRUCTION_LSRV_W4_W10_W4 UINT32_C(0x1ac42544)
 #define INSTRUCTION_MUL_X6_X6_X0 UINT32_C(0x9b007cc6)
 #define INSTRUCTION_MUL_W2_W0_W2 UINT32_C(0x1b027c02)
@@ -462,6 +468,19 @@ static void write_store_simd_imm9_program(
     put_instruction(code + 8, INSTRUCTION_SUBS_X6_X6_1);
     put_instruction(code + 12, INSTRUCTION_B_NE_NEG_12);
     put_instruction(code + 16, INSTRUCTION_SVC);
+}
+
+static void write_bfm_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_MOV_X1_X10);
+    put_instruction(code + 4, INSTRUCTION_MOV_X2_X10);
+    put_instruction(code + 8, INSTRUCTION_BFM_X0_X1_52_51);
+    put_instruction(code + 12, INSTRUCTION_BFM_W2_W0_0_4);
+    put_instruction(code + 16, INSTRUCTION_EOR_X0_X0_X7);
+    put_instruction(code + 20, INSTRUCTION_ORR_W1_WZR_7);
+    put_instruction(code + 24, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 28, INSTRUCTION_B_NE_NEG_28);
+    put_instruction(code + 32, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1161,6 +1180,21 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 5,
         .write_program = write_store_simd_imm9_program,
+    },
+    {
+        .name = "BFM 双路径双宽度真实画像结果依赖热点环",
+        .instructions_per_iteration = 8,
+        .x1_increment_per_iteration = 0,
+        .iteration_register = 4,
+        .initial_x0 = UINT64_C(0xfedcba9876543203),
+        .initial_x7 = UINT64_C(0x54761a9876552000),
+        .initial_x10 = UINT64_C(0xaaaaaaaa00000011),
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .fast_per_iteration = 8,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 9,
+        .write_program = write_bfm_program,
     },
 };
 
