@@ -31,11 +31,15 @@
 #define SYS_SENDTO 206
 #define SYS_SETSOCKOPT 208
 
+#define TEST_PASSED 0
+#define TEST_FAILED 1
+#define TEST_SKIPPED 2
+
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
         fprintf(stderr, "AArch64 socket IPv6/RAW 测试失败：%s（第 %d 行）\n", \
                 message, __LINE__); \
-        return 1; \
+        return TEST_FAILED; \
     } \
 } while (0)
 
@@ -244,6 +248,10 @@ static int create_guest_socket(struct fixture *fixture,
         dword_t family, dword_t type, dword_t protocol) {
     return (int) (sqword_t) invoke(fixture, memory, fault, SYS_SOCKET,
             family, type, protocol, 0, 0, 0);
+}
+
+static bool raw_socket_permission_denied(int result) {
+    return result == _EPERM || result == _EACCES;
 }
 
 static struct linux_sockaddr_in linux_loopback4(uint16_t port) {
@@ -987,8 +995,12 @@ static int test_raw_length_and_oob(struct fixture *fixture,
             IPPROTO_ICMP);
     int ipv6 = create_guest_socket(fixture, memory, fault,
             AF_INET6_, SOCK_RAW_, IPPROTO_ICMPV6);
-    CHECK(ipv4 >= 0 && ipv6 >= 0,
-            "IPv4/IPv6 RAW guest socket 创建成功");
+    CHECK(ipv4 >= 0 || raw_socket_permission_denied(ipv4),
+            "IPv4 RAW guest socket 只允许权限不足时跳过");
+    CHECK(ipv6 >= 0 || raw_socket_permission_denied(ipv6),
+            "IPv6 RAW guest socket 只允许权限不足时跳过");
+    if (ipv4 < 0 || ipv6 < 0)
+        return TEST_SKIPPED;
     struct fd *flagged_raw = f_get_task(&fixture->task, ipv4);
     CHECK(flagged_raw != NULL &&
                     bit_test(ipv4, fixture->task.files->cloexec) &&
@@ -1044,8 +1056,12 @@ static int test_raw_address_differences(struct fixture *fixture,
             AF_INET_, SOCK_RAW_, IPPROTO_ICMP);
     int ipv6 = create_guest_socket(fixture, memory, fault,
             AF_INET6_, SOCK_RAW_, IPPROTO_ICMPV6);
-    CHECK(ipv4 >= 0 && ipv6 >= 0,
-            "RAW 地址差异 guest socket 创建成功");
+    CHECK(ipv4 >= 0 || raw_socket_permission_denied(ipv4),
+            "IPv4 RAW 地址测试只允许权限不足时跳过");
+    CHECK(ipv6 >= 0 || raw_socket_permission_denied(ipv6),
+            "IPv6 RAW 地址测试只允许权限不足时跳过");
+    if (ipv4 < 0 || ipv6 < 0)
+        return TEST_SKIPPED;
     static const byte_t payload[] = {0x8, 0x0, 0x0, 0x0};
     qword_t payload_pointer = put_user(
             memory, 0x1000, payload, sizeof(payload));
@@ -1134,8 +1150,13 @@ static int run_test(const char *name, test_function function) {
     int result = function(&fixture, &memory, &fault);
     fixture_destroy(&fixture);
     free(memory.bytes);
-    if (result == 0)
+    if (result == TEST_SKIPPED) {
+        printf("跳过：%s（宿主拒绝 RAW socket 权限）\n", name);
+    } else if (result == TEST_PASSED) {
         printf("通过：%s\n", name);
+    } else {
+        result = TEST_FAILED;
+    }
     return result;
 }
 
@@ -1162,8 +1183,8 @@ int main(void) {
     };
     unsigned failures = 0;
     for (size_t index = 0; index < sizeof(tests) / sizeof(tests[0]); index++)
-        failures += (unsigned) run_test(
-                tests[index].name, tests[index].function);
+        failures += run_test(tests[index].name,
+                tests[index].function) == TEST_FAILED;
     if (failures != 0)
         fprintf(stderr, "共有 %u 组 socket IPv6/RAW 测试失败\n", failures);
     return failures == 0 ? 0 : 1;
