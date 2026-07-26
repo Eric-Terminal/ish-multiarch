@@ -22,6 +22,17 @@ if get_option('kernel') == 'ish'
 endif
 
 if not meson.is_cross_build()
+    meson_cli = find_program('meson', required: false)
+    if meson_cli.found()
+        apple_meson_project_options_test = find_program(
+            'apple-meson-project-options-test.sh')
+        test('apple_meson_project_options',
+            apple_meson_project_options_test,
+            args: [meson_cli.full_path()], timeout: 30)
+    else
+        warning('未找到 Meson CLI，跳过旧项目选项刷新测试')
+    endif
+
     python3_cli = find_program('python3', required: false)
     if python3_cli.found()
         apple_aarch64_rootfs_sources_test = find_program(

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 BUILD_ROOT=${1:-"$ROOT/build-apple-core"}
 source "$ROOT/tools/apple-meson-arch.sh"
+source "$ROOT/tools/apple-meson-project-options.sh"
 source "$ROOT/tools/reproducible-build-env.sh"
 ish_reproducible_build_environment "$ROOT"
 
@@ -211,6 +212,9 @@ build_slice() {
     echo "==> 严格构建 ${name} 的 AArch64 core（${target}）"
     write_cross_file "$core_cross_file" "$sdk" "$arch" "$target" strict
     if [[ -d "$core_build_dir/meson-private" ]]; then
+        apple_meson_refresh_project_options \
+            "$MESON" "$core_build_dir" "$ROOT" \
+            core_only aarch64_backend aarch64_threaded_profile
         "$MESON" setup --reconfigure "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true \
             -Daarch64_backend=auto -Daarch64_threaded_profile=false \
@@ -244,6 +248,9 @@ build_slice() {
     echo "==> 完整构建 ${name} 的 kernel/fs/platform"
     write_cross_file "$full_cross_file" "$sdk" "$arch" "$target" full
     if [[ -d "$full_build_dir/meson-private" ]]; then
+        apple_meson_refresh_project_options \
+            "$MESON" "$full_build_dir" "$ROOT" \
+            core_only aarch64_backend aarch64_threaded_profile
         "$MESON" setup --reconfigure "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
