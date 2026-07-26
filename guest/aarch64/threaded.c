@@ -470,13 +470,14 @@ static void execute_sbfm_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static void execute_lsrv_fast(struct cpu_state *cpu,
+static void execute_variable_right_shift_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct aarch64_execute_result *result) {
     (void) tlb;
     (void) result;
-    assert(instruction->opcode == AARCH64_OP_LSRV);
+    assert(instruction->opcode == AARCH64_OP_LSRV ||
+            instruction->opcode == AARCH64_OP_ASRV);
     byte_t width = instruction->width;
     qword_t left = read_general_register(cpu,
             instruction->operands.data_processing_2source.rn,
@@ -485,8 +486,10 @@ static void execute_lsrv_fast(struct cpu_state *cpu,
             instruction->operands.data_processing_2source.rm,
             width, false);
     byte_t amount = (byte_t) (right & (width - 1));
-    qword_t value = shift_register(
-            left, width, AARCH64_SHIFT_LSR, amount);
+    enum aarch64_shift_type type =
+            instruction->opcode == AARCH64_OP_ASRV ?
+            AARCH64_SHIFT_ASR : AARCH64_SHIFT_LSR;
+    qword_t value = shift_register(left, width, type, amount);
 
     write_general_register(cpu,
             instruction->operands.data_processing_2source.rd,
@@ -1066,7 +1069,8 @@ static aarch64_threaded_handler select_handler(
         case AARCH64_OP_LSLV:
             return execute_lslv_fast;
         case AARCH64_OP_LSRV:
-            return execute_lsrv_fast;
+        case AARCH64_OP_ASRV:
+            return execute_variable_right_shift_fast;
         case AARCH64_OP_MADD:
         case AARCH64_OP_MSUB:
         case AARCH64_OP_UMADDL:
