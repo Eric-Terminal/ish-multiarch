@@ -571,6 +571,24 @@ static void execute_extract_fast(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_movi_fast(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct aarch64_execute_result *result) {
+    (void) tlb;
+    (void) result;
+    assert(instruction->opcode == AARCH64_OP_ADVSIMD_MOVI);
+    assert(instruction->width == 64 || instruction->width == 128);
+    byte_t rd = instruction->operands.advsimd_immediate.rd;
+    qword_t immediate =
+            instruction->operands.advsimd_immediate.immediate;
+
+    cpu->v[rd].d[0] = immediate;
+    cpu->v[rd].d[1] =
+            instruction->width == 128 ? immediate : 0;
+    cpu->pc += 4;
+}
+
 static void execute_scalar_load_fast(struct cpu_state *cpu,
         struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
@@ -1055,6 +1073,8 @@ static aarch64_threaded_handler select_handler(
             return execute_multiply_add_fast;
         case AARCH64_OP_EXTR:
             return execute_extract_fast;
+        case AARCH64_OP_ADVSIMD_MOVI:
+            return execute_advsimd_movi_fast;
         case AARCH64_OP_LOAD_IMM12:
         case AARCH64_OP_LOAD_IMM9:
         case AARCH64_OP_LOAD_REGISTER_OFFSET:

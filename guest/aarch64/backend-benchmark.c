@@ -88,6 +88,9 @@
 #define INSTRUCTION_ADD_SP_X3_300 UINT32_C(0x910c007f)
 #define INSTRUCTION_LDP_Q30_Q29_SP_80 UINT32_C(0xad42f7fe)
 #define INSTRUCTION_STP_Q30_Q29_X3_200 UINT32_C(0xad10747e)
+#define INSTRUCTION_LDP_Q30_Q31_SP_80 UINT32_C(0xad42fffe)
+#define INSTRUCTION_MOVI_V31_4S_0 UINT32_C(0x4f00041f)
+#define INSTRUCTION_STP_Q30_Q31_X3_200 UINT32_C(0xad107c7e)
 #define INSTRUCTION_STR_Q0_X0 UINT32_C(0x3d800000)
 #define INSTRUCTION_STR_Q31_X0_32 UINT32_C(0x3d80081f)
 #define INSTRUCTION_SUB_X0_X0_16 UINT32_C(0xd1004000)
@@ -103,6 +106,7 @@
 #define INSTRUCTION_MOV_W6_W2 UINT32_C(0x2a0203e6)
 #define INSTRUCTION_MSUB_W6_W6_W5_W10 UINT32_C(0x1b05a8c6)
 #define INSTRUCTION_B_NE_NEG_20 UINT32_C(0x54ffff61)
+#define INSTRUCTION_B_NE_NEG_24 UINT32_C(0x54ffff41)
 #define INSTRUCTION_SUBS_X0 UINT32_C(0xf1000400)
 #define INSTRUCTION_SVC UINT32_C(0xd4000001)
 #define STORE_VALUE UINT64_C(0x8877665544332211)
@@ -416,6 +420,19 @@ static void write_load_simd_pair_program(
     put_instruction(code + 16, INSTRUCTION_SUBS_X4_X4_1);
     put_instruction(code + 20, INSTRUCTION_B_NE_NEG_20);
     put_instruction(code + 24, INSTRUCTION_SVC);
+}
+
+static void write_advsimd_movi_program(
+        byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
+    put_instruction(code, INSTRUCTION_ADD_SP_X3_300);
+    put_instruction(code + 4, INSTRUCTION_LDP_Q30_Q31_SP_80);
+    // 每轮重新毒化 V31，确保存储结果真正依赖 MOVI 清零。
+    put_instruction(code + 8, INSTRUCTION_MOVI_V31_4S_0);
+    put_instruction(code + 12, INSTRUCTION_STP_Q30_Q31_X3_200);
+    put_instruction(code + 16, INSTRUCTION_CSINC_X1_X1_X1_EQ);
+    put_instruction(code + 20, INSTRUCTION_SUBS_X4_X4_1);
+    put_instruction(code + 24, INSTRUCTION_B_NE_NEG_24);
+    put_instruction(code + 28, INSTRUCTION_SVC);
 }
 
 static void write_adrp_program(byte_t code[GUEST_MEMORY_PAGE_SIZE]) {
@@ -1062,6 +1079,27 @@ static const struct benchmark_workload workloads[] = {
         .fallback_per_iteration = 0,
         .program_instruction_count = 7,
         .write_program = write_load_simd_pair_program,
+    },
+    {
+        .name = "AdvSIMD MOVI 真实画像结果依赖热点环",
+        .instructions_per_iteration = 7,
+        .x1_increment_per_iteration = 1,
+        .iteration_register = 4,
+        .expected_x4 = 0,
+        .expected_x6 = 0,
+        .expected_sp = DATA_PAGE + 0x300,
+        .expected_store_offset = 0x200,
+        .expected_store_size = 32,
+        .expected_store_values = {
+            PAIR_FIRST_VALUE,
+            PAIR_SECOND_VALUE,
+            0,
+            0,
+        },
+        .fast_per_iteration = 7,
+        .fallback_per_iteration = 0,
+        .program_instruction_count = 8,
+        .write_program = write_advsimd_movi_program,
     },
 };
 
