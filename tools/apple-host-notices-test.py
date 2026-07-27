@@ -54,7 +54,7 @@ def test_production_output():
     if NOTICES.EXPECTED_NOTICE_TEXT_COUNT != 125:
         fail("宿主声明唯一正文组数量合同漂移")
     begin_count = first.count(b"===== BEGIN APPLE HOST NOTICE:")
-    if begin_count != 129 or begin_count != first.count(
+    if begin_count != 130 or begin_count != first.count(
         b"===== END APPLE HOST NOTICE:"
     ):
         fail("宿主声明 section marker 不平衡")
@@ -64,6 +64,7 @@ def test_production_output():
         "overview",
         "material-provenance",
         "wcwidth-unicode-provenance",
+        "libarchive-unicode-provenance",
         "unresolved-provenance",
     ):
         begin = (
@@ -79,7 +80,12 @@ def test_production_output():
         "组件：hterm 1.91.0、libdot 8.0.0\n",
         "组件：intl-segmenter snapshot\n",
         "组件：wcwidth 0.0.3\n",
-        f"组件：Unicode Character Database {NOTICES.WCWIDTH_UCD_VERSION}\n",
+        (
+            "组件：Unicode Character Database "
+            f"{NOTICES.WCWIDTH_UCD_VERSION}、"
+            "Unicode Character Database "
+            f"{NOTICES.LIBARCHIVE_UCD_VERSION}\n"
+        ),
         "组件：libarchive 3.4.3\n",
         f"组件：Material Design Icons {NOTICES.MATERIAL_ICON_REVISION}\n",
     ):
@@ -210,6 +216,22 @@ def test_production_output():
         NOTICES.WCWIDTH_UCD_ARCHIVE_SHA256,
         NOTICES.WCWIDTH_RANGES_GIT_BLOB,
         NOTICES.WCWIDTH_RANGES_SHA256,
+        "已闭合的 libarchive Unicode 6.0.0 规范化表来源与许可",
+        NOTICES.LIBARCHIVE_UNICODETOOLS_REVISION,
+        NOTICES.LIBARCHIVE_UNICODETOOLS_SOURCE_URL,
+        NOTICES.LIBARCHIVE_UCD_ARCHIVE_URL,
+        NOTICES.LIBARCHIVE_UCD_ARCHIVE_SHA256,
+        NOTICES.LIBARCHIVE_UNICODE_GENERATOR_GIT_BLOB,
+        NOTICES.LIBARCHIVE_GENERATED_BASELINE_GIT_BLOB,
+        NOTICES.LIBARCHIVE_COMPOSITION_HEADER_GIT_BLOB,
+        NOTICES.LIBARCHIVE_UAX15_URL,
+        NOTICES.LIBARCHIVE_UAX15_SHA256,
+        "这不表示 libarchive 作者明确记录或使用了该 Git 提交",
+        "这里只记录本工程采用的许可证据路径",
+        "不冒充 2010 归档内许可原件",
+        "不声称 Unicode 在该提交中专门重新许可旧数据",
+        "技术报告全文不作为数据输入复制进仓库或产品",
+        "NormalizationTest 来源未进入 Apple App 的 128 个编译源",
         "这不表示 libapps 作者明确记录或使用了该 Git 提交",
         "先把当前三张表替换为哨兵",
         "UCD.zip 本身不含 LICENSE",
@@ -227,8 +249,10 @@ def test_production_output():
             fail(f"宿主声明缺少外部来源或生成证据：{marker}")
     expected_unicode_path_counts = {
         NOTICES.WCWIDTH_UCD_README_PATH: 1,
-        NOTICES.WCWIDTH_UCD_LICENSE_PATH: 2,
+        NOTICES.WCWIDTH_UCD_LICENSE_PATH: 3,
         **{path: 1 for path in NOTICES.WCWIDTH_UCD_DATA_PATHS},
+        NOTICES.LIBARCHIVE_UCD_README_PATH: 1,
+        **{path: 1 for path in NOTICES.LIBARCHIVE_UCD_DATA_PATHS},
     }
     for relative, count in expected_unicode_path_counts.items():
         if first.count(relative.encode("utf-8")) != count:
@@ -237,6 +261,8 @@ def test_production_output():
         "wcwidth Unicode 数据：完整 lib_wc.js 摘要与原始来源注释已锁定",
         "生成脚本读取 PropList.txt、UnicodeData.txt 与 EastAsianWidth.txt",
         "仓内没有这三份 13.0.0 原始字节或相应 Unicode 许可原文",
+        "libarchive Unicode 来源：archive_string_composition.h",
+        "来源数据、标准文本版本与适用许可仍须在公共发行前单独闭合",
     ):
         if stale.encode("utf-8") in first:
             fail(f"宿主声明仍保留已闭合的 wcwidth 未决文案：{stale}")
@@ -374,6 +400,88 @@ def test_wcwidth_unicode_replay():
             ROOT, NOTICES.load_validator(), mutated
         ),
         "不能逐字重建当前三张表",
+    )
+
+
+def test_libarchive_unicode_replay():
+    data_by_name = {
+        name: (
+            ROOT / NOTICES.LIBARCHIVE_UCD_SNAPSHOT_BASE / name
+        ).read_bytes()
+        for name, _blob in NOTICES.LIBARCHIVE_UCD_DATA_FILES
+    }
+    header = (
+        ROOT / NOTICES.LIBARCHIVE_COMPOSITION_HEADER_PATH
+    ).read_bytes()
+    NOTICES.verify_libarchive_composition_semantics(
+        data_by_name["UnicodeData.txt"],
+        data_by_name["CompositionExclusions.txt"],
+        header,
+    )
+
+    unicode_data = data_by_name["UnicodeData.txt"]
+    combining_marker = b"0308;COMBINING DIAERESIS;Mn;230;"
+    if unicode_data.count(combining_marker) != 1:
+        fail("libarchive UnicodeData 负例缺少唯一 CCC 变更点")
+    mutated_unicode_data = unicode_data.replace(
+        combining_marker,
+        b"0308;COMBINING DIAERESIS;Mn;0;",
+        1,
+    )
+    expect_failure(
+        lambda: NOTICES.verify_libarchive_composition_semantics(
+            mutated_unicode_data,
+            data_by_name["CompositionExclusions.txt"],
+            header,
+        ),
+        "组合记录数量漂移",
+    )
+
+    exclusions = data_by_name["CompositionExclusions.txt"]
+    exclusion_marker = b"0958    #  DEVANAGARI LETTER QA\n"
+    if exclusions.count(exclusion_marker) != 1:
+        fail("libarchive CompositionExclusions 负例缺少唯一变更点")
+    mutated_exclusions = exclusions.replace(
+        exclusion_marker,
+        b"0957    #  DEVANAGARI LETTER QA\n",
+        1,
+    )
+    expect_failure(
+        lambda: NOTICES.verify_libarchive_composition_semantics(
+            unicode_data,
+            mutated_exclusions,
+            header,
+        ),
+        "组合记录数量漂移",
+    )
+
+    generator = (
+        ROOT / NOTICES.LIBARCHIVE_UNICODE_GENERATOR_PATH
+    ).read_bytes()
+    expect_failure(
+        lambda: NOTICES.replay_libarchive_composition_header(
+            generator.replace(b"Expect UnicodeData.txt", b"Expect UCD input", 1),
+            unicode_data,
+            header,
+        ),
+        "生成脚本字节漂移",
+    )
+    expect_failure(
+        lambda: NOTICES.replay_libarchive_composition_header(
+            generator,
+            unicode_data,
+            header.replace(b"Canonical Combining", b"Canonical Changed", 1),
+        ),
+        "当前生成头文件字节漂移",
+    )
+
+    source = (ROOT / NOTICES.LIBARCHIVE_STRING_SOURCE_PATH).read_bytes()
+    NOTICES.verify_libarchive_hangul_constants(source)
+    expect_failure(
+        lambda: NOTICES.verify_libarchive_hangul_constants(
+            source.replace(b"#define HC_TCOUNT\t28", b"#define HC_TCOUNT\t27", 1)
+        ),
+        "HC_TCOUNT",
     )
 
 
@@ -542,6 +650,7 @@ def main():
         temporary_root = Path(temporary)
         test_material_icon_formatting(temporary_root)
         test_wcwidth_unicode_replay()
+        test_libarchive_unicode_replay()
         test_leading_comments_and_include_closure(temporary_root)
         test_fragment_uniqueness(temporary_root)
         test_output_drift_and_atomicity(temporary_root)

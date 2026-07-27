@@ -103,12 +103,52 @@ WCWIDTH_UNICODETOOLS_SOURCE_URL = (
 WCWIDTH_UNICODETOOLS_DATA_BASE = (
     "unicodetools/data/ucd/13.0.0-Update"
 )
-WCWIDTH_UCD_LICENSE_PATH = (
+UNICODE_DATA_LICENSE_PATH = (
     "third_party/apple-host/unicodetools/"
     f"{WCWIDTH_UNICODETOOLS_REVISION}/LICENSE"
 )
-WCWIDTH_UCD_LICENSE_GIT_BLOB = (
+UNICODE_DATA_LICENSE_GIT_BLOB = (
     "500dbd5463e43403fa163a8095828e7f6c1539c6"
+)
+WCWIDTH_UCD_LICENSE_PATH = UNICODE_DATA_LICENSE_PATH
+WCWIDTH_UCD_LICENSE_GIT_BLOB = UNICODE_DATA_LICENSE_GIT_BLOB
+LIBARCHIVE_UCD_VERSION = "6.0.0"
+LIBARCHIVE_UCD_ARCHIVE_URL = (
+    "https://www.unicode.org/Public/zipped/6.0.0/UCD.zip"
+)
+LIBARCHIVE_UCD_ARCHIVE_SIZE = 2_581_878
+LIBARCHIVE_UCD_ARCHIVE_SHA256 = (
+    "f4c32d5d3f2ba8e73c156b13e8fb7742a1e0cab88b6a0bf765dc3b42109e915c"
+)
+LIBARCHIVE_UCD_SNAPSHOT_BASE = (
+    "third_party/apple-host/unicode-ucd/6.0.0"
+)
+LIBARCHIVE_UCD_README_PATH = (
+    f"{LIBARCHIVE_UCD_SNAPSHOT_BASE}/ReadMe.txt"
+)
+LIBARCHIVE_UCD_DATA_FILES = (
+    (
+        "CompositionExclusions.txt",
+        "e39c651811014a593ed14dea9a868e8bb02cd3c3",
+    ),
+    (
+        "UnicodeData.txt",
+        "8d7222b13789c43e5ed36ddf0d3eb7ebe8d72c7b",
+    ),
+)
+LIBARCHIVE_UCD_DATA_PATHS = tuple(
+    f"{LIBARCHIVE_UCD_SNAPSHOT_BASE}/{name}"
+    for name, _blob in LIBARCHIVE_UCD_DATA_FILES
+)
+LIBARCHIVE_UCD_LICENSE_PATH = UNICODE_DATA_LICENSE_PATH
+LIBARCHIVE_UCD_LICENSE_GIT_BLOB = UNICODE_DATA_LICENSE_GIT_BLOB
+LIBARCHIVE_UNICODETOOLS_REVISION = WCWIDTH_UNICODETOOLS_REVISION
+LIBARCHIVE_UNICODETOOLS_SOURCE_URL = WCWIDTH_UNICODETOOLS_SOURCE_URL
+LIBARCHIVE_UNICODETOOLS_DATA_BASE = (
+    "unicodetools/data/ucd/6.0.0-Update"
+)
+LIBARCHIVE_UNICODE_GENERATOR_PATH = (
+    "deps/libarchive/build/utils/gen_archive_string_composition_h.sh"
 )
 LIBARCHIVE_INLINE_NOTICE_PATHS = {
     "deps/libarchive/libarchive/archive_blake2.h",
@@ -276,6 +316,24 @@ REQUIRED_LICENSE_KEYS = {
         "provenance",
         WCWIDTH_UCD_README_PATH,
     ),
+    (
+        "libarchive",
+        "libarchive",
+        "license",
+        LIBARCHIVE_UCD_LICENSE_PATH,
+    ),
+    (
+        "libarchive",
+        "libarchive",
+        "provenance",
+        LIBARCHIVE_UCD_README_PATH,
+    ),
+    (
+        "libarchive",
+        "libarchive",
+        "provenance",
+        LIBARCHIVE_UNICODE_GENERATOR_PATH,
+    ),
 } | {
     ("libarchive", "libarchive", "inline-notice", path)
     for path in LIBARCHIVE_INLINE_NOTICE_PATHS
@@ -285,12 +343,17 @@ REQUIRED_LICENSE_KEYS = {
 } | {
     ("hterm-bundle", "wcwidth", "provenance", path)
     for path in WCWIDTH_UCD_DATA_PATHS
+} | {
+    ("libarchive", "libarchive", "provenance", path)
+    for path in LIBARCHIVE_UCD_DATA_PATHS
 }
 APPLE_HOST_RAW_INPUT_PATHS = tuple(
     sorted(
-        path
-        for _unit, _component, _role, path in REQUIRED_LICENSE_KEYS
-        if PurePosixPath(path).is_relative_to(LOCK_RELATIVE)
+        {
+            path
+            for _unit, _component, _role, path in REQUIRED_LICENSE_KEYS
+            if PurePosixPath(path).is_relative_to(LOCK_RELATIVE)
+        }
     )
 )
 

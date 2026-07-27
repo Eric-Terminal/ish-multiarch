@@ -16,6 +16,20 @@ import tempfile
 
 from apple_host_manifest import (
     HostInputError,
+    LIBARCHIVE_UCD_ARCHIVE_SHA256,
+    LIBARCHIVE_UCD_ARCHIVE_SIZE,
+    LIBARCHIVE_UCD_ARCHIVE_URL,
+    LIBARCHIVE_UCD_DATA_FILES,
+    LIBARCHIVE_UCD_DATA_PATHS,
+    LIBARCHIVE_UCD_LICENSE_GIT_BLOB,
+    LIBARCHIVE_UCD_LICENSE_PATH,
+    LIBARCHIVE_UCD_README_PATH,
+    LIBARCHIVE_UCD_SNAPSHOT_BASE,
+    LIBARCHIVE_UCD_VERSION,
+    LIBARCHIVE_UNICODE_GENERATOR_PATH,
+    LIBARCHIVE_UNICODETOOLS_DATA_BASE,
+    LIBARCHIVE_UNICODETOOLS_REVISION,
+    LIBARCHIVE_UNICODETOOLS_SOURCE_URL,
     MATERIAL_ICON_LICENSE_PATH,
     MATERIAL_ICON_README_PATH,
     MATERIAL_ICON_REVISION,
@@ -101,6 +115,57 @@ WCWIDTH_TABLE_ASSIGNMENT = re.compile(
     rb"^(lib\.wc\.(?:ambiguous|combining|unambiguous)) = .*?^\];\n",
     re.MULTILINE | re.DOTALL,
 )
+LIBARCHIVE_UCD_README_GIT_BLOB = (
+    "89d5cb39ef3a1ee6ec04edda391d90102dbbe890"
+)
+LIBARCHIVE_UNICODE_GENERATOR_GIT_BLOB = (
+    "925de5c85e784c35d2291b86d4d9550042a15a02"
+)
+LIBARCHIVE_UNICODE_GENERATOR_SHA256 = (
+    "a523081eb14b692457b8c9f6c6896030d0d3b8f313fdf37154b70ab00bf107fa"
+)
+LIBARCHIVE_COMPOSITION_HEADER_PATH = (
+    "deps/libarchive/libarchive/archive_string_composition.h"
+)
+LIBARCHIVE_COMPOSITION_HEADER_GIT_BLOB = (
+    "d0ac340961a0a892fb9271ab0f48100515aeb6a9"
+)
+LIBARCHIVE_COMPOSITION_HEADER_SHA256 = (
+    "da5a7bf624dc2316ca9d73537f16d749de65df52bfb211f61ed7052c61cbf46a"
+)
+LIBARCHIVE_GENERATED_BASELINE_GIT_BLOB = (
+    "be41e3365124f630e361bd29726d1df26688e64f"
+)
+LIBARCHIVE_GENERATED_BASELINE_SHA256 = (
+    "1cb44be8d597f87efca8bf6fb33696635ebdf231a2b63a4b420b1c0b5bcec015"
+)
+LIBARCHIVE_STRING_SOURCE_PATH = (
+    "deps/libarchive/libarchive/archive_string.c"
+)
+LIBARCHIVE_COMPOSITION_RECORD = re.compile(
+    rb"\{ 0x([0-9A-F]+) , 0x([0-9A-F]+) , 0x([0-9A-F]+) \},"
+)
+LIBARCHIVE_EXPLICIT_EXCLUSION_COUNT = 81
+LIBARCHIVE_COMPOSITION_RECORD_COUNT = 931
+LIBARCHIVE_UAX15_REVISION = 33
+LIBARCHIVE_UAX15_VERSION = "Unicode 6.0.0"
+LIBARCHIVE_UAX15_DATE = "2010-09-17"
+LIBARCHIVE_UAX15_URL = (
+    "https://www.unicode.org/reports/tr15/tr15-33.html"
+)
+LIBARCHIVE_UAX15_SIZE = 143_604
+LIBARCHIVE_UAX15_SHA256 = (
+    "d7deff6d0a4651bb7249d22cbfc1e5e752eb722bdde3982c8e5c54c9a7d664f4"
+)
+LIBARCHIVE_HANGUL_CONSTANTS = {
+    b"SBASE": b"0xAC00",
+    b"LBASE": b"0x1100",
+    b"VBASE": b"0x1161",
+    b"TBASE": b"0x11A7",
+    b"LCOUNT": b"19",
+    b"VCOUNT": b"21",
+    b"TCOUNT": b"28",
+}
 UNICODE_LICENSE_BOM = b"\xef\xbb\xbf"
 UNICODE_LICENSE_MARKERS = (
     b"UNICODE, INC. LICENSE AGREEMENT - DATA FILES AND SOFTWARE\n",
@@ -540,6 +605,306 @@ def verify_wcwidth_unicode_evidence(root, inputs_by_path, validator):
     replay_wcwidth_tables(root, validator, data_by_name)
 
 
+def normalize_libarchive_generated_header(data):
+    old_guard = (
+        b"\n#ifndef __LIBARCHIVE_BUILD\n"
+        b"#error This header is only to be used internally to libarchive.\n"
+        b"#endif\n"
+        b"\n"
+        b"#ifndef ARCHIVE_STRING_COMPOSITION_H_INCLUDED\n"
+        b"#define ARCHIVE_STRING_COMPOSITION_H_INCLUDED\n"
+    )
+    new_guard = (
+        b"\n#ifndef ARCHIVE_STRING_COMPOSITION_H_INCLUDED\n"
+        b"#define ARCHIVE_STRING_COMPOSITION_H_INCLUDED\n"
+        b"\n"
+        b"#ifndef __LIBARCHIVE_BUILD\n"
+        b"#error This header is only to be used internally to libarchive.\n"
+        b"#endif\n"
+    )
+    old_spelling = b"Canonical Cimbining Class"
+    new_spelling = b"Canonical Combining Class"
+    if data.count(old_guard) != 1:
+        fail("libarchive Unicode 生成基线的 header guard 边界漂移")
+    if data.count(old_spelling) != 1 or data.count(new_spelling) != 1:
+        fail("libarchive Unicode 生成基线的拼写桥接边界漂移")
+    return data.replace(old_guard, new_guard, 1).replace(
+        old_spelling, new_spelling, 1
+    )
+
+
+def replay_libarchive_composition_header(
+    generator, unicode_data, current_header
+):
+    if (
+        git_blob_oid(generator) != LIBARCHIVE_UNICODE_GENERATOR_GIT_BLOB
+        or hashlib.sha256(generator).hexdigest()
+        != LIBARCHIVE_UNICODE_GENERATOR_SHA256
+    ):
+        fail("libarchive Unicode 生成脚本字节漂移")
+    if (
+        git_blob_oid(current_header)
+        != LIBARCHIVE_COMPOSITION_HEADER_GIT_BLOB
+        or hashlib.sha256(current_header).hexdigest()
+        != LIBARCHIVE_COMPOSITION_HEADER_SHA256
+    ):
+        fail("libarchive Unicode 当前生成头文件字节漂移")
+
+    with tempfile.TemporaryDirectory(
+        prefix="ish-libarchive-ucd6."
+    ) as temporary:
+        directory = Path(temporary)
+        script_path = directory / "gen_archive_string_composition_h.sh"
+        input_path = directory / "UnicodeData.txt"
+        output_path = directory / "archive_string_composition.h"
+        script_path.write_bytes(generator)
+        input_path.write_bytes(unicode_data)
+        environment = os.environ.copy()
+        environment.update({"LANG": "C", "LC_ALL": "C"})
+        try:
+            result = subprocess.run(
+                ["sh", str(script_path), str(input_path)],
+                cwd=directory,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired:
+            fail("libarchive Unicode 6.0.0 离线重放超时")
+        if result.returncode != 0:
+            detail = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            ).strip()
+            fail(f"libarchive Unicode 6.0.0 离线重放失败：{detail}")
+        try:
+            generated = output_path.read_bytes()
+        except OSError as error:
+            fail(f"libarchive Unicode 生成器没有产生头文件：{error}")
+
+    if (
+        git_blob_oid(generated) != LIBARCHIVE_GENERATED_BASELINE_GIT_BLOB
+        or hashlib.sha256(generated).hexdigest()
+        != LIBARCHIVE_GENERATED_BASELINE_SHA256
+    ):
+        fail("libarchive Unicode 6.0.0 生成基线字节漂移")
+    if normalize_libarchive_generated_header(generated) != current_header:
+        fail("libarchive Unicode 生成基线经两处固定文本变换后不能恢复当前头文件")
+
+
+def parse_libarchive_unicode_data(data):
+    if not data.endswith(b"\n") or b"\r" in data:
+        fail("libarchive UnicodeData 必须只使用 LF 且以换行结束")
+    combining_classes = {}
+    decompositions = []
+    for line_number, line in enumerate(data.splitlines(), 1):
+        fields = line.split(b";")
+        if len(fields) != 15:
+            fail(f"libarchive UnicodeData 第 {line_number} 行字段数量漂移")
+        try:
+            codepoint = int(fields[0], 16)
+            combining_class = int(fields[3], 10)
+        except ValueError:
+            fail(f"libarchive UnicodeData 第 {line_number} 行数字字段非法")
+        if codepoint in combining_classes:
+            fail(f"libarchive UnicodeData 重复码点：U+{codepoint:04X}")
+        combining_classes[codepoint] = combining_class
+        decompositions.append((codepoint, fields[5]))
+    return combining_classes, decompositions
+
+
+def parse_libarchive_composition_exclusions(data):
+    if not data.endswith(b"\n") or b"\r" in data:
+        fail("libarchive CompositionExclusions 必须只使用 LF 且以换行结束")
+    exclusions = set()
+    for line_number, line in enumerate(data.splitlines(), 1):
+        value = line.split(b"#", 1)[0].strip()
+        if not value:
+            continue
+        if re.fullmatch(rb"[0-9A-F]{4,6}", value) is None:
+            fail(
+                "libarchive CompositionExclusions "
+                f"第 {line_number} 行码点非法"
+            )
+        codepoint = int(value, 16)
+        if codepoint in exclusions:
+            fail(
+                "libarchive CompositionExclusions "
+                f"重复码点：U+{codepoint:04X}"
+            )
+        exclusions.add(codepoint)
+    if len(exclusions) != LIBARCHIVE_EXPLICIT_EXCLUSION_COUNT:
+        fail("libarchive CompositionExclusions 显式排除项数量漂移")
+    return exclusions
+
+
+def extract_libarchive_table(header, declaration, description):
+    marker = declaration + b" {\n"
+    if header.count(marker) != 1:
+        fail(f"libarchive {description}声明边界漂移")
+    block = header.split(marker, 1)[1].split(b"};\n", 1)[0]
+    records = [
+        tuple(int(value, 16) for value in match)
+        for match in LIBARCHIVE_COMPOSITION_RECORD.findall(block)
+    ]
+    if len(records) != LIBARCHIVE_COMPOSITION_RECORD_COUNT:
+        fail(f"libarchive {description}记录数量漂移")
+    return records
+
+
+def verify_libarchive_composition_semantics(
+    unicode_data, composition_exclusions, header
+):
+    combining_classes, decompositions = parse_libarchive_unicode_data(
+        unicode_data
+    )
+    exclusions = parse_libarchive_composition_exclusions(
+        composition_exclusions
+    )
+    expected = []
+    for codepoint, mapping in decompositions:
+        parts = mapping.split()
+        if len(parts) != 2 or parts[0].startswith(b"<"):
+            continue
+        first, second = (int(part, 16) for part in parts)
+        if first not in combining_classes:
+            fail(
+                "libarchive UnicodeData 分解首码点缺少组合类别："
+                f"U+{first:04X}"
+            )
+        # 单码点分解不会进入二元表；非 starter 分解由首码点 CCC 排除。
+        if codepoint in exclusions or combining_classes[first] != 0:
+            continue
+        expected.append((first, second, codepoint))
+    expected.sort()
+    if len(expected) != LIBARCHIVE_COMPOSITION_RECORD_COUNT:
+        fail("Unicode 6.0.0 输入推导出的 libarchive 组合记录数量漂移")
+
+    composition = extract_libarchive_table(
+        header,
+        (
+            b"static const struct unicode_composition_table "
+            b"u_composition_table[] ="
+        ),
+        "正向组合表",
+    )
+    if composition != expected:
+        fail("Unicode 6.0.0 输入不能逐项恢复 libarchive 正向组合表")
+
+    decomposition = extract_libarchive_table(
+        header,
+        (
+            b"static const struct unicode_decomposition_table "
+            b"u_decomposition_table[] ="
+        ),
+        "反向分解表",
+    )
+    reverse = sorted((first, second, nfc) for nfc, first, second in decomposition)
+    if reverse != expected:
+        fail("Unicode 6.0.0 输入不能逐项恢复 libarchive 反向分解表")
+
+
+def verify_libarchive_hangul_constants(source):
+    for name, value in LIBARCHIVE_HANGUL_CONSTANTS.items():
+        pattern = (
+            rb"^#define HC_" + name + rb"[ \t]+" + re.escape(value) + rb"$"
+        )
+        if len(re.findall(pattern, source, re.MULTILINE)) != 1:
+            fail(f"libarchive UAX #15 Hangul 常量漂移：HC_{name.decode()}")
+    for line in (
+        b"#define HC_NCOUNT\t(HC_VCOUNT * HC_TCOUNT)\n",
+        b"#define HC_SCOUNT\t(HC_LCOUNT * HC_NCOUNT)\n",
+    ):
+        if source.count(line) != 1:
+            fail("libarchive UAX #15 Hangul 派生常量漂移")
+
+
+def verify_libarchive_unicode_evidence(
+    root, inputs_by_path, input_keys
+):
+    expected_roles = {
+        LIBARCHIVE_UCD_README_PATH: "provenance",
+        LIBARCHIVE_UNICODE_GENERATOR_PATH: "provenance",
+        **{path: "provenance" for path in LIBARCHIVE_UCD_DATA_PATHS},
+    }
+    for relative, role in expected_roles.items():
+        item = inputs_by_path.get(relative)
+        if (
+            item is None
+            or item.delivery_unit != "libarchive"
+            or item.component != "libarchive"
+            or item.role != role
+        ):
+            fail(f"libarchive Unicode 来源输入缺失：{relative}")
+    license_key = (
+        "libarchive",
+        "libarchive",
+        "license",
+        LIBARCHIVE_UCD_LICENSE_PATH,
+    )
+    if license_key not in input_keys:
+        fail("libarchive Unicode Data Files 许可输入缺失")
+
+    readme = read_regular(
+        root, LIBARCHIVE_UCD_README_PATH, "Unicode 6.0.0 final ReadMe"
+    )
+    for marker in (
+        b"# Date: 2010-10-05, 16:26:38 PDT [KW]\n",
+        b"# Unicode Character Database\n",
+        b"# Copyright (c) 1991-2010 Unicode, Inc.\n",
+        b"# For terms of use, see http://www.unicode.org/terms_of_use.html\n",
+        b"for the Unicode Character Database (UCD) for Unicode 6.0.0.\n",
+    ):
+        if readme.count(marker) != 1:
+            fail("Unicode 6.0.0 final ReadMe 标记漂移")
+    if git_blob_oid(readme) != LIBARCHIVE_UCD_README_GIT_BLOB:
+        fail("Unicode 6.0.0 final ReadMe Git blob 漂移")
+
+    data_by_name = {}
+    for name, expected_blob in LIBARCHIVE_UCD_DATA_FILES:
+        relative = f"{LIBARCHIVE_UCD_SNAPSHOT_BASE}/{name}"
+        data = read_regular(root, relative, "Unicode 6.0.0 生成来源")
+        if git_blob_oid(data) != expected_blob:
+            fail(f"UnicodeTools 固定 Git blob 漂移：{relative}")
+        data_by_name[name] = data
+    if not data_by_name["CompositionExclusions.txt"].startswith(
+        b"# CompositionExclusions-6.0.0.txt\n"
+    ):
+        fail("Unicode 6.0.0 CompositionExclusions 版本标记漂移")
+    if not data_by_name["UnicodeData.txt"].startswith(
+        b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n"
+    ):
+        fail("Unicode 6.0.0 UnicodeData 起始记录漂移")
+
+    license_data = read_regular(
+        root, LIBARCHIVE_UCD_LICENSE_PATH, "Unicode Data Files 许可"
+    )
+    if git_blob_oid(license_data) != LIBARCHIVE_UCD_LICENSE_GIT_BLOB:
+        fail("Unicode Data Files 许可 Git blob 漂移")
+    unicode_license_text(license_data)
+
+    generator = read_regular(
+        root, LIBARCHIVE_UNICODE_GENERATOR_PATH, "libarchive Unicode 生成器"
+    )
+    header = read_regular(
+        root, LIBARCHIVE_COMPOSITION_HEADER_PATH, "libarchive Unicode 当前头文件"
+    )
+    replay_libarchive_composition_header(
+        generator, data_by_name["UnicodeData.txt"], header
+    )
+    verify_libarchive_composition_semantics(
+        data_by_name["UnicodeData.txt"],
+        data_by_name["CompositionExclusions.txt"],
+        header,
+    )
+    verify_libarchive_hangul_constants(
+        read_regular(
+            root, LIBARCHIVE_STRING_SOURCE_PATH, "libarchive Unicode 运行时源码"
+        )
+    )
+
+
 def overview():
     return (
         "===== BEGIN APPLE HOST NOTICE: overview =====\n"
@@ -558,7 +923,8 @@ def overview():
         "与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。\n"
         "- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见"
         "后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已"
-        "闭合。W3C/X11 和 libarchive Unicode 等缺口继续列在未闭合一节。\n"
+        "闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与"
+        "许可路径也已闭合。W3C/X11 缺口继续列在未闭合一节。\n"
         "- 来源与许可边界是工程审计记录，不是法律结论。\n"
         "- public-domain 字样仅转述锁定上游源码，不是本工具作出的法律"
         "判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。\n"
@@ -660,6 +1026,79 @@ def wcwidth_unicode_provenance(inputs_by_path):
     ).encode("utf-8")
 
 
+def libarchive_unicode_provenance(inputs_by_path):
+    data_lines = []
+    for name, blob in LIBARCHIVE_UCD_DATA_FILES:
+        relative = f"{LIBARCHIVE_UCD_SNAPSHOT_BASE}/{name}"
+        item = inputs_by_path[relative]
+        upstream = f"{LIBARCHIVE_UNICODETOOLS_DATA_BASE}/{name}"
+        data_lines.append(
+            f"- {relative}；{item.size} 字节；SHA-256 {item.sha256}\n"
+            f"  官方 Git 路径 {upstream}；blob {blob}"
+        )
+    readme = inputs_by_path[LIBARCHIVE_UCD_README_PATH]
+    generator = inputs_by_path[LIBARCHIVE_UNICODE_GENERATOR_PATH]
+    license_item = inputs_by_path[LIBARCHIVE_UCD_LICENSE_PATH]
+
+    return (
+        "===== BEGIN APPLE HOST NOTICE: libarchive-unicode-provenance =====\n"
+        "已闭合的 libarchive Unicode 6.0.0 规范化表来源与许可\n"
+        "\n"
+        "锁定的 archive_string_composition.h 明确标记由 Unicode 6.0.0 "
+        "UnicodeData.txt 生成；当前生成脚本与头文件均来自 libarchive "
+        "3.4.3 gitlink。本工程选择 Unicode 官方 unicodetools 固定提交 "
+        f"{LIBARCHIVE_UNICODETOOLS_REVISION} 中逐字匹配的数据作为不可变"
+        "输入证据；这不表示 libarchive 作者明确记录或使用了该 Git 提交。\n"
+        "\n"
+        f"权威仓库：{LIBARCHIVE_UNICODETOOLS_SOURCE_URL}\n"
+        + "\n".join(data_lines)
+        + "\n\n"
+        "上述两个官方 Git blob 与 Unicode 6.0.0 发布归档中的同名成员"
+        "逐字节一致。发布归档锁为：\n"
+        f"- {LIBARCHIVE_UCD_ARCHIVE_URL}\n"
+        f"- {LIBARCHIVE_UCD_ARCHIVE_SIZE} 字节；SHA-256 "
+        f"{LIBARCHIVE_UCD_ARCHIVE_SHA256}\n"
+        f"- final ReadMe：{LIBARCHIVE_UCD_README_PATH}；{readme.size} 字节；"
+        f"SHA-256 {readme.sha256}；官方 Git blob "
+        f"{LIBARCHIVE_UCD_README_GIT_BLOB}\n"
+        "\n"
+        f"生成脚本：{LIBARCHIVE_UNICODE_GENERATOR_PATH}；{generator.size} "
+        f"字节；SHA-256 {generator.sha256}；Git blob "
+        f"{LIBARCHIVE_UNICODE_GENERATOR_GIT_BLOB}。校验器在隔离临时目录、"
+        "C locale 下以锁定 UnicodeData 离线运行脚本，先得到 Git blob "
+        f"{LIBARCHIVE_GENERATED_BASELINE_GIT_BLOB}，再且仅再执行拼写修正"
+        "与 header guard 前移两处固定文本变换；结果必须逐字恢复当前头文件 "
+        f"Git blob {LIBARCHIVE_COMPOSITION_HEADER_GIT_BLOB}。"
+        "CompositionExclusions 的 81 个显式项与 UnicodeData 中单码点、"
+        "非 starter 分解规则还会独立推导并逐项核对正反两张 931 项表。\n"
+        "\n"
+        "本工程记录的许可依据来自同一 Unicode 官方固定 Git 树的根 "
+        f"LICENSE："
+        f"{LIBARCHIVE_UCD_LICENSE_PATH}；{license_item.size} 字节；SHA-256 "
+        f"{license_item.sha256}。该许可与 wcwidth UCD 证据共享同一原始"
+        "文件，聚合正文按精确字节只收入一次。Unicode 6.0.0 UCD.zip 本身"
+        "不含 LICENSE，final ReadMe 与 CompositionExclusions 只链接当时"
+        "的可变 Terms of Use；固定 Git 树同时包含逐字相同的数据和根 "
+        "LICENSE，因此这里只记录本工程采用的许可证据路径，不冒充 2010 "
+        "归档内许可原件，也不声称 Unicode 在该提交中专门重新许可旧数据。\n"
+        "\n"
+        f"archive_string.c 的 Hangul 常量对应 {LIBARCHIVE_UAX15_VERSION}、"
+        f"UAX #15 Revision {LIBARCHIVE_UAX15_REVISION}（"
+        f"{LIBARCHIVE_UAX15_DATE}）：{LIBARCHIVE_UAX15_URL}；"
+        f"{LIBARCHIVE_UAX15_SIZE} 字节；SHA-256 "
+        f"{LIBARCHIVE_UAX15_SHA256}。上游只记录未版本化链接，因此该版本"
+        "是本工程按 Unicode 6.0.0 选择的规范证据，不表示作者明确选择了 "
+        "UAX #15 Revision 33；技术报告全文不作为数据输入复制进仓库或产品。\n"
+        "\n"
+        "本节只闭合 Apple 产品使用的 libarchive 规范化运行时与生成表。"
+        "子模块中的 libarchive 测试源码、压缩夹具及其 NormalizationTest "
+        "来源未进入 Apple App 的 128 个编译源、由其形成的 165 文件"
+        "编译/include 闭包或产品资源闭包，也不在本节范围。\n"
+        "===== END APPLE HOST NOTICE: libarchive-unicode-provenance =====\n"
+        "\n"
+    ).encode("utf-8")
+
+
 def unresolved_provenance():
     return (
         "===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====\n"
@@ -669,11 +1108,6 @@ def unresolved_provenance():
         "W3C CSS Color 4，颜色表派生自 stock X11 rgb.txt；仓内没有所用"
         "上游版本、X11 原始数据或对应权威条款。收录这些注释不表示外部"
         "许可已经确定。\n"
-        "\n"
-        "libarchive Unicode 来源：archive_string_composition.h、"
-        "archive_string.c 的锁定文本分别指向 UnicodeData 与 Unicode "
-        "Standard Annex #15；来源数据、标准文本版本与适用许可仍须在"
-        "公共发行前单独闭合。\n"
         "===== END APPLE HOST NOTICE: unresolved-provenance =====\n"
         "\n"
     ).encode("utf-8")
@@ -683,6 +1117,7 @@ def audit_boundaries(inputs_by_path):
     return (
         material_provenance(inputs_by_path)
         + wcwidth_unicode_provenance(inputs_by_path)
+        + libarchive_unicode_provenance(inputs_by_path)
         + unresolved_provenance()
     )
 
@@ -750,13 +1185,47 @@ def build_notice(root):
     )
 
     inputs_by_path = {}
+    input_keys = {}
     for item in state.license_inputs:
-        if item.path in inputs_by_path:
-            fail(f"宿主许可与来源输入路径重复：{item.path}")
-        inputs_by_path[item.path] = item
+        key = (
+            item.delivery_unit,
+            item.component,
+            item.role,
+            item.path,
+        )
+        if key in input_keys:
+            fail(f"宿主许可与来源输入记录重复：{item.path}")
+        input_keys[key] = item
+        inputs_by_path.setdefault(item.path, item)
+    shared_unicode_license = {
+        (
+            item.delivery_unit,
+            item.component,
+            item.role,
+        )
+        for item in state.license_inputs
+        if item.path == LIBARCHIVE_UCD_LICENSE_PATH
+    }
+    if shared_unicode_license != {
+        ("hterm-bundle", "wcwidth", "license"),
+        ("libarchive", "libarchive", "license"),
+    }:
+        fail("Unicode Data Files 共享许可归属漂移")
+    duplicate_paths = {
+        item.path
+        for item in state.license_inputs
+        if sum(
+            other.path == item.path
+            for other in state.license_inputs
+        )
+        > 1
+    }
+    if duplicate_paths != {LIBARCHIVE_UCD_LICENSE_PATH}:
+        fail("除共享 Unicode Data Files 许可外，宿主输入路径不得重复")
     verify_history_evidence(root, validator)
     verify_material_icon_evidence(root, inputs_by_path)
     verify_wcwidth_unicode_evidence(root, inputs_by_path, validator)
+    verify_libarchive_unicode_evidence(root, inputs_by_path, input_keys)
 
     raw_sources = []
     full_license_components = set()
@@ -767,9 +1236,22 @@ def build_notice(root):
         if item.path == MATERIAL_ICON_LICENSE_PATH:
             component = f"Material Design Icons {MATERIAL_ICON_REVISION}"
             content = read_regular(root, item.path, "宿主完整许可文本")
-        elif item.path == WCWIDTH_UCD_LICENSE_PATH:
+        elif (
+            item.path == WCWIDTH_UCD_LICENSE_PATH
+            and item.component == "wcwidth"
+        ):
             component = (
                 f"Unicode Character Database {WCWIDTH_UCD_VERSION}"
+            )
+            content = unicode_license_text(
+                read_regular(root, item.path, "Unicode Data Files 许可")
+            )
+        elif (
+            item.path == LIBARCHIVE_UCD_LICENSE_PATH
+            and item.component == "libarchive"
+        ):
+            component = (
+                f"Unicode Character Database {LIBARCHIVE_UCD_VERSION}"
             )
             content = unicode_license_text(
                 read_regular(root, item.path, "Unicode Data Files 许可")

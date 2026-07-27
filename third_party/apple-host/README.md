@@ -55,12 +55,14 @@ reference `.c` 引用的 `blake2-kat.h`，以及 `archive_platform.h` 引用的
 的 `deps/config.h` 提供，不属于 gitlink notices 闭包。除此之外的任何
 缺失 include 都会失败，不能被静默忽略。
 
-当前收入宿主正文的七个完整许可输入中，hterm 与 libdot 的原始字节相同，
-因此去重后是 6 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
+当前收入宿主正文的八条完整许可归属记录中，Unicode Data Files 许可由
+wcwidth 与 libarchive 共享同一路径，hterm 与 libdot 的原始字节也相同，
+因此去重后仍是 6 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
 得到 97 份唯一前导文本；22 个锁定片段当前也各自唯一。生成器由此固定
 `6 + 97 + 22 = 125` 个唯一正文 section，再加 `overview`、
-`material-provenance`、`wcwidth-unicode-provenance` 与
-`unresolved-provenance` 四个边界 section，共有 129 对 BEGIN/END 标记。
+`material-provenance`、`wcwidth-unicode-provenance`、
+`libarchive-unicode-provenance` 与 `unresolved-provenance` 五个边界
+section，共有 130 对 BEGIN/END 标记。
 数量漂移会使永久回归失败，避免提取范围在无人察觉时扩张或收缩。
 
 hterm、libdot、intl-segmenter、wcwidth、`libarchive/COPYING` 和
@@ -106,15 +108,29 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
   条款，收入来源注释不表示外部许可已经确定。
 - `archive_string_composition.h` 明确由 Unicode 6.0.0 的
   `UnicodeData.txt` 生成，`archive_string.c` 的 Hangul 组合常量和流程
-  明确来源于 Unicode Standard Annex #15。来源数据、标准文本版本与适用
-  许可仍须单独闭合。
+  明确来源于 Unicode Standard Annex #15。本锁保存官方固定提交中与
+  Unicode 6.0.0 发布归档逐字一致的 `UnicodeData.txt`、
+  `CompositionExclusions.txt` 和 final ReadMe；当前生成脚本在隔离临时
+  目录、C locale 下先恢复历史生成基线，再经过唯一的拼写修正与 header
+  guard 前移，逐字得到当前头文件。另一路语义校验以 81 个显式排除项和
+  UnicodeData 的单码点、非 starter 规则逐项恢复正反两张 931 项表。
+  Hangul 常量固定到 Unicode 6.0.0 对应的 UAX #15 Revision 33 URL、大小和
+  摘要；技术报告全文不是生成输入，也不复制进仓库或产品。
+- Unicode 6.0.0 归档本身没有 LICENSE，数据只链接当时的可变 Terms of
+  Use 的精确主体是 final ReadMe 与 `CompositionExclusions.txt`。本工程
+  记录的许可依据来自 Unicode 官方 2020 固定 Git 树的根 LICENSE；该树
+  同时包含逐字相同的数据与许可文件。这不冒充 2010 归档内许可原件，也不
+  声称 Unicode 在该提交中专门重新许可旧数据。子模块中的 libarchive 测试
+  源码、压缩夹具及其 `NormalizationTest.txt` 来源未进入 Apple App 编译、
+  include 或资源闭包，留给未来完整子模块源码包审计。
 
 ## 生成与校验
 
 生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob，离线
-重放 Material 上游快照到当前三个 SVG 的固定格式化关系，并用锁定的历史
-`ranges.py` 与三份 UCD 输入重建 wcwidth 三张表。完整子模块已经具备历史
-对象；浅克隆需要先单独补齐 `deps/libapps` 历史：
+重放 Material 上游快照到当前三个 SVG 的固定格式化关系，用锁定的历史
+`ranges.py` 与三份 UCD 输入重建 wcwidth 三张表，并用当前 libarchive
+生成器和 Unicode 6.0.0 输入重建其固定头文件链。libarchive 重放只使用
+当前 gitlink 文件，不要求历史对象；浅克隆只需补齐 `deps/libapps` 历史：
 
 ```sh
 if [ "$(git -C deps/libapps rev-parse --is-shallow-repository)" = true ]; then
@@ -155,8 +171,8 @@ LinkSmoke 不应获得本文件。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
 - BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
   选择分支。
-- W3C/X11 与 libarchive Unicode 来源缺口仍会阻断公共发行；Material 图标
-  和 wcwidth UCD 的证据闭合不表示其他未知边界或法律审查已经完成。
+- W3C/X11 来源缺口仍会阻断公共发行；Material 图标、wcwidth UCD 与
+  libarchive Unicode 的证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及
   对应源码资产不由本地输入锁代替。
 - 本锁不是通用 SBOM；以后引入三个既有 gitlink 之外的宿主代码时，必须

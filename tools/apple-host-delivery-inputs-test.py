@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from apple_host_manifest import (
+    LIBARCHIVE_UCD_SNAPSHOT_BASE,
     MATERIAL_ICON_SNAPSHOT_BASE,
     WCWIDTH_UCD_SNAPSHOT_BASE,
 )
@@ -463,6 +464,15 @@ def case_wcwidth_ucd_input_drift(root):
     )
 
 
+def case_libarchive_ucd_input_drift(root):
+    path = root / LIBARCHIVE_UCD_SNAPSHOT_BASE / "CompositionExclusions.txt"
+    replace_once(
+        path,
+        "# CompositionExclusions-6.0.0.txt\n",
+        "# CompositionExclusions-6.0.1.txt\n",
+    )
+
+
 def case_notice_fragment_digest_drift(root):
     path = root / "third_party/apple-host/notice-fragments.tsv"
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -658,6 +668,10 @@ def main():
             ),
             "wcwidth-ucd-input-drift": (
                 case_wcwidth_ucd_input_drift,
+                "宿主许可复核输入摘要漂移",
+            ),
+            "libarchive-ucd-input-drift": (
+                case_libarchive_ucd_input_drift,
                 "宿主许可复核输入摘要漂移",
             ),
             "notice-fragment-digest-drift": (

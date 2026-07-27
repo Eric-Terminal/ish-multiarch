@@ -7,7 +7,7 @@ Apple 宿主第三方声明
 - Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；本文件不能代表 iSH+Linux 的完整发行义务已经闭合。
 - Alpine guest seed、项目自身许可、LGPL 与对应源码交付继续由各自的发行门禁处理。
 - libarchive 的 BLAKE2 声明列出 CC0 1.0 Universal、OpenSSL 与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。
-- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已闭合。W3C/X11 和 libarchive Unicode 等缺口继续列在未闭合一节。
+- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与许可路径也已闭合。W3C/X11 缺口继续列在未闭合一节。
 - 来源与许可边界是工程审计记录，不是法律结论。
 - public-domain 字样仅转述锁定上游源码，不是本工具作出的法律判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。
 ===== END APPLE HOST NOTICE: overview =====
@@ -53,12 +53,35 @@ libapps 历史提交 6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8 明确说明当前
 适用许可来自同一 unicodetools 固定提交的根 LICENSE：third_party/apple-host/unicodetools/a87ae283358bf1858e7cbf6520c6bba0d3b58710/LICENSE；2275 字节；SHA-256 80b381b2f157c31e7f3222bdb932bda9fbd7b335e888beec56820fb2993363de。原文件的 UTF-8 BOM 只在聚合显示时移除，其余许可正文逐字收入后续完整许可 section。UCD.zip 本身不含 LICENSE；final ReadMe 只用于确认最终 Unicode 13.0.0 发布身份。
 ===== END APPLE HOST NOTICE: wcwidth-unicode-provenance =====
 
+===== BEGIN APPLE HOST NOTICE: libarchive-unicode-provenance =====
+已闭合的 libarchive Unicode 6.0.0 规范化表来源与许可
+
+锁定的 archive_string_composition.h 明确标记由 Unicode 6.0.0 UnicodeData.txt 生成；当前生成脚本与头文件均来自 libarchive 3.4.3 gitlink。本工程选择 Unicode 官方 unicodetools 固定提交 a87ae283358bf1858e7cbf6520c6bba0d3b58710 中逐字匹配的数据作为不可变输入证据；这不表示 libarchive 作者明确记录或使用了该 Git 提交。
+
+权威仓库：https://github.com/unicode-org/unicodetools
+- third_party/apple-host/unicode-ucd/6.0.0/CompositionExclusions.txt；8354 字节；SHA-256 02aeca0fdf5df2b753e3a8f597858ba6e70786cfedb9f9ef2f1f380a5e30302f
+  官方 Git 路径 unicodetools/data/ucd/6.0.0-Update/CompositionExclusions.txt；blob e39c651811014a593ed14dea9a868e8bb02cd3c3
+- third_party/apple-host/unicode-ucd/6.0.0/UnicodeData.txt；1329401 字节；SHA-256 90b45b777346bef027556f9c6cb3ea5d7d745bd60d6762855c08d8a22d34f771
+  官方 Git 路径 unicodetools/data/ucd/6.0.0-Update/UnicodeData.txt；blob 8d7222b13789c43e5ed36ddf0d3eb7ebe8d72c7b
+
+上述两个官方 Git blob 与 Unicode 6.0.0 发布归档中的同名成员逐字节一致。发布归档锁为：
+- https://www.unicode.org/Public/zipped/6.0.0/UCD.zip
+- 2581878 字节；SHA-256 f4c32d5d3f2ba8e73c156b13e8fb7742a1e0cab88b6a0bf765dc3b42109e915c
+- final ReadMe：third_party/apple-host/unicode-ucd/6.0.0/ReadMe.txt；410 字节；SHA-256 f60b999a42a615bfff12bbe91749a7c01e94eba26d0fb17d37a159a836b85f54；官方 Git blob 89d5cb39ef3a1ee6ec04edda391d90102dbbe890
+
+生成脚本：deps/libarchive/build/utils/gen_archive_string_composition_h.sh；10214 字节；SHA-256 a523081eb14b692457b8c9f6c6896030d0d3b8f313fdf37154b70ab00bf107fa；Git blob 925de5c85e784c35d2291b86d4d9550042a15a02。校验器在隔离临时目录、C locale 下以锁定 UnicodeData 离线运行脚本，先得到 Git blob be41e3365124f630e361bd29726d1df26688e64f，再且仅再执行拼写修正与 header guard 前移两处固定文本变换；结果必须逐字恢复当前头文件 Git blob d0ac340961a0a892fb9271ab0f48100515aeb6a9。CompositionExclusions 的 81 个显式项与 UnicodeData 中单码点、非 starter 分解规则还会独立推导并逐项核对正反两张 931 项表。
+
+本工程记录的许可依据来自同一 Unicode 官方固定 Git 树的根 LICENSE：third_party/apple-host/unicodetools/a87ae283358bf1858e7cbf6520c6bba0d3b58710/LICENSE；2275 字节；SHA-256 80b381b2f157c31e7f3222bdb932bda9fbd7b335e888beec56820fb2993363de。该许可与 wcwidth UCD 证据共享同一原始文件，聚合正文按精确字节只收入一次。Unicode 6.0.0 UCD.zip 本身不含 LICENSE，final ReadMe 与 CompositionExclusions 只链接当时的可变 Terms of Use；固定 Git 树同时包含逐字相同的数据和根 LICENSE，因此这里只记录本工程采用的许可证据路径，不冒充 2010 归档内许可原件，也不声称 Unicode 在该提交中专门重新许可旧数据。
+
+archive_string.c 的 Hangul 常量对应 Unicode 6.0.0、UAX #15 Revision 33（2010-09-17）：https://www.unicode.org/reports/tr15/tr15-33.html；143604 字节；SHA-256 d7deff6d0a4651bb7249d22cbfc1e5e752eb722bdde3982c8e5c54c9a7d664f4。上游只记录未版本化链接，因此该版本是本工程按 Unicode 6.0.0 选择的规范证据，不表示作者明确选择了 UAX #15 Revision 33；技术报告全文不作为数据输入复制进仓库或产品。
+
+本节只闭合 Apple 产品使用的 libarchive 规范化运行时与生成表。子模块中的 libarchive 测试源码、压缩夹具及其 NormalizationTest 来源未进入 Apple App 的 128 个编译源、由其形成的 165 文件编译/include 闭包或产品资源闭包，也不在本节范围。
+===== END APPLE HOST NOTICE: libarchive-unicode-provenance =====
+
 ===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====
 未闭合的外部来源与许可
 
 libdot 外部来源：lib_colors.js 的锁定注释说明 HSL 算法改编自 W3C CSS Color 4，颜色表派生自 stock X11 rgb.txt；仓内没有所用上游版本、X11 原始数据或对应权威条款。收录这些注释不表示外部许可已经确定。
-
-libarchive Unicode 来源：archive_string_composition.h、archive_string.c 的锁定文本分别指向 UnicodeData 与 Unicode Standard Annex #15；来源数据、标准文本版本与适用许可仍须在公共发行前单独闭合。
 ===== END APPLE HOST NOTICE: unresolved-provenance =====
 
 ===== BEGIN APPLE HOST NOTICE: text-001 =====
@@ -492,7 +515,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ===== BEGIN APPLE HOST NOTICE: text-006 =====
 类别：完整许可
-组件：Unicode Character Database 13.0.0
+组件：Unicode Character Database 13.0.0、Unicode Character Database 6.0.0
 来源：
 - third_party/apple-host/unicodetools/a87ae283358bf1858e7cbf6520c6bba0d3b58710/LICENSE
 原始文本 SHA-256：794116bfe8e3c4c2fc8799346fcf0653f457ed104f9fe67fcfdcf0efe5c33253

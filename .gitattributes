@@ -1,3 +1,4 @@
-# 锁定的上游文本及其聚合声明逐字保留尾随空格。
+# 锁定的上游文本及其聚合声明逐字保留有意义的原始空白。
 third_party/apple-host/APPLE-HOST-NOTICES.txt whitespace=-trailing-space
 third_party/apple-host/unicode-ucd/13.0.0/ReadMe.txt whitespace=-trailing-space
+third_party/apple-host/unicode-ucd/6.0.0/CompositionExclusions.txt whitespace=-blank-at-eof
