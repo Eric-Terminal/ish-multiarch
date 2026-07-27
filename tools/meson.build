@@ -62,6 +62,10 @@ if not meson.is_cross_build()
             'apple-host-notices-test.py')
         test('apple_host_notices', python3_cli,
             args: apple_host_notices_test, timeout: 30)
+        apple_project_license_notices_test = files(
+            'apple-project-license-notices-test.py')
+        test('apple_project_license_notices', python3_cli,
+            args: apple_project_license_notices_test, timeout: 30)
     else
         warning('未找到 Python 3，跳过 AArch64 来源、许可与 Apple 宿主输入测试')
     endif

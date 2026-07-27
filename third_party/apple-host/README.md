@@ -123,19 +123,23 @@ Frameworks、Resources、Sources 与 Copy Files phase 中的直接输入。
 不启动 Simulator。
 
 `APPLE-HOST-NOTICES.txt` 只应进入普通 `iSH` 与可选 `iSH+Linux` 的资源。
-`iSHWatch` 没有 libarchive/hterm 宿主输入，继续只显示 Alpine seed 声明；
-`iSHFileProvider`、测试 target 与 LinkSmoke 不应获得本文件。
+`iSHWatch` 没有 libarchive/hterm 宿主输入，因此不显示本文件；其共享许可页
+显示独立的项目许可与 Alpine seed 声明。`iSHFileProvider`、测试 target 与
+LinkSmoke 不应获得本文件。
 
 ## 不在本锁内闭合的事项
 
 - Alpine AArch64 guest seed 使用相邻的独立来源、许可和对应源码锁。
-- 项目自身 GPL 正文与当前 fork 源码入口仍须形成产品内可证明的交付链。
+- 项目许可正文与当前公开仓库入口使用独立的确定性资源，已经进入普通
+  `iSH`、`iSH+Linux` 与 `iSHWatch`；它仍不等于二进制已经绑定并公开了精确
+  release revision、gitlink 和对应源码资产。
 - BusyBox 静态输入的 LGPL 版本依据和最终发行方案仍须单独决定。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
 - BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
   选择分支。
 - 上述 Material、wcwidth UCD、W3C/X11 与 libarchive Unicode 来源缺口仍会
   阻断公共发行；本切片只是把已有证据和未知边界做成可复现声明，不是法律闭合。
-- 公共 Release、真机安装运行与从公开位置回读资产不由本地输入锁代替。
+- 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及
+  对应源码资产不由本地输入锁代替。
 - 本锁不是通用 SBOM；以后引入三个既有 gitlink 之外的宿主代码时，必须
   重新审计并显式扩展清单与门禁。

@@ -26,7 +26,7 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Alpine AArch64 许可声明")
+                .accessibilityLabel("许可证与源码")
                 .accessibilityIdentifier("third-party-notices-button")
             }
 

@@ -25,6 +25,20 @@ ALPINE_NOTICES_RELATIVE = PurePosixPath(
 HOST_NOTICES_RELATIVE = PurePosixPath(
     "third_party/apple-host/APPLE-HOST-NOTICES.txt"
 )
+PROJECT_NOTICES_RELATIVE = PurePosixPath(
+    "distribution/apple/project-license/PROJECT-LICENSES.txt"
+)
+PROJECT_RAW_INPUTS = (
+    PurePosixPath("LICENSE.md"),
+    PurePosixPath("LICENSE.IOS"),
+    PurePosixPath("distribution/apple/project-license/inputs.tsv"),
+    PurePosixPath(
+        "distribution/apple/project-license/license-inputs/GPL-2.0.txt"
+    ),
+    PurePosixPath(
+        "distribution/apple/project-license/license-inputs/GPL-3.0.txt"
+    ),
+)
 RESOURCE_CONTRACTS = {
     ALPINE_NOTICES_RELATIVE: {
         "owners": {"iSH", "iSHWatch"},
@@ -40,6 +54,15 @@ RESOURCE_CONTRACTS = {
         "owners": {"iSH", "iSH+Linux"},
         "excluded": {
             "iSHWatch",
+            "iSHFileProvider",
+            "iSHUITests",
+            "iSHWatchUITests",
+            "iSHWatchLinkSmoke",
+        },
+    },
+    PROJECT_NOTICES_RELATIVE: {
+        "owners": {"iSH", "iSH+Linux", "iSHWatch"},
+        "excluded": {
             "iSHFileProvider",
             "iSHUITests",
             "iSHWatchUITests",
@@ -120,8 +143,14 @@ def verify_project_resources(project, build_files, resolved):
         build_ids, used_ids, owners = owners_for_reference(
             project, reference, build_files, "PBXResourcesBuildPhase"
         )
-        if len(build_ids) != 2 or build_ids != used_ids:
-            fail(f"{relative.name} 必须通过恰好两个 Resources build file 打包")
+        if (
+            len(build_ids) != len(contract["owners"])
+            or build_ids != used_ids
+        ):
+            fail(
+                f"{relative.name} 的 Resources build file 数量"
+                "必须与 owner 数量一致"
+            )
         if owners != contract["owners"]:
             fail(
                 f"{relative.name} 的 Resources owners 漂移，实际为："
@@ -136,6 +165,17 @@ def verify_project_resources(project, build_files, resolved):
         for build_id in build_ids:
             if len(re.findall(rf"\b{build_id}\b", project)) != 2:
                 fail(f"资源成员 {build_id} 只能出现在定义和目标阶段各一次")
+
+    for relative in PROJECT_RAW_INPUTS:
+        for reference in resolved.get(str(relative), []):
+            build_ids, used_ids, owners = owners_for_reference(
+                project,
+                reference,
+                build_files,
+                "PBXResourcesBuildPhase",
+            )
+            if build_ids or used_ids or owners:
+                fail(f"项目许可原始输入不得进入 Resources：{relative}")
 
     rootfs_inputs = read_text(
         "tools/apple-aarch64-rootfs-inputs.xcfilelist"
@@ -185,6 +225,10 @@ def verify_iphone_contract(project, build_files, resolved):
     except (OSError, ET.ParseError) as error:
         fail(f"无法解析 About.storyboard：{error}")
 
+    project_lookup = (
+        r'URLForResource:\s*@"PROJECT-LICENSES"\s*'
+        r'withExtension:\s*@"txt"\s*\]\s*!=\s*nil'
+    )
     alpine_lookup = (
         r'URLForResource:\s*@"THIRD-PARTY-NOTICES"\s*'
         r'withExtension:\s*@"txt"\s*\]\s*!=\s*nil'
@@ -194,13 +238,18 @@ def verify_iphone_contract(project, build_files, resolved):
         r'withExtension:\s*@"txt"\s*\]\s*!=\s*nil'
     )
     notices_capability = re.search(
-        r"self\.hasThirdPartyNotices\s*=\s*(.*?);",
+        r"self\.hasLicenseNotices\s*=\s*(.*?);",
         about,
         re.DOTALL,
     )
     if notices_capability is None:
         fail("About 页面缺少声明资源能力检查")
     capability = notices_capability.group(1)
+    require_pattern(
+        capability,
+        project_lookup,
+        "About 页面缺少项目许可资源能力检查",
+    )
     require_pattern(
         capability,
         alpine_lookup,
@@ -216,9 +265,10 @@ def verify_iphone_contract(project, build_files, resolved):
     require_pattern(
         normalized(loader),
         r'NSArray<NSString \*> \*resourceNames = @\[\s*'
+        r'@"PROJECT-LICENSES",\s*'
         r'@"THIRD-PARTY-NOTICES",\s*'
         r'@"APPLE-HOST-NOTICES",\s*\]',
-        "iPhone 查看器必须按固定顺序声明两份可选资源",
+        "iPhone 查看器必须按固定顺序声明三份可选资源",
     )
     require_pattern(
         loader,
@@ -237,12 +287,17 @@ def verify_iphone_contract(project, build_files, resolved):
         fail("iPhone 声明正文必须有唯一的辅助功能 identifier")
     if "ISH_LINUX" in loader:
         fail("共享 iPhone 声明查看器不能按 ISH_LINUX 分叉")
-    if loader.count('self.title = @"Third-Party Notices"') != 1:
-        fail("iPhone 声明查看器标题必须保持产品范围中立")
+    if loader.count('self.title = @"Licenses and Source"') != 1:
+        fail("iPhone 许可与源码查看器标题漂移")
+    source_url = "https://github.com/Eric-Terminal/ish-multiarch"
+    if about.count(f'@"{source_url}"') != 1:
+        fail("iPhone About 必须唯一链接当前公开源码仓库")
+    if "https://github.com/ish-app/ish" in about:
+        fail("iPhone About 不能继续链接官方基线仓库")
     require_pattern(
         normalized(about),
         r"numberOfRowsInSection:.*?section == 2"
-        r".*?!self\.hasThirdPartyNotices.*?rows--;",
+        r".*?!self\.hasLicenseNotices.*?rows--;",
         "共享 About 页面必须在缺少资源时移除第三段最后一行",
     )
     require_pattern(
@@ -258,6 +313,7 @@ def verify_iphone_contract(project, build_files, resolved):
         "iPhone 声明 UI 测试必须绕过 guest 启动",
     )
     for marker in (
+        "===== BEGIN PROJECT LICENSE NOTICE: overview =====",
         "===== BEGIN NOTICE: overview =====",
         "===== BEGIN APPLE HOST NOTICE: overview =====",
     ):
@@ -265,11 +321,15 @@ def verify_iphone_contract(project, build_files, resolved):
             fail(f"iPhone 声明 UI 测试缺少固定正文标记：{marker}")
     require_pattern(
         normalized(ui_test),
-        r"alpineRange\.location,\s*0.*?"
+        r"projectRange\.location,\s*0.*?"
+        r"alpineRange\.location,\s*NSNotFound.*?"
         r"appleHostRange\.location,\s*NSNotFound.*?"
+        r"projectRange\.location,\s*alpineRange\.location.*?"
         r"alpineRange\.location,\s*appleHostRange\.location",
-        "iPhone 声明 UI 测试必须验证普通 iSH 的两份正文及固定顺序",
+        "iPhone UI 测试必须验证普通 iSH 的三份正文及固定顺序",
     )
+    if ui_test.count(f'@"{source_url}"') != 1:
+        fail("iPhone UI 测试必须验证项目许可中的公开源码入口")
 
     scheme_skips = {}
     for relative in (
@@ -344,8 +404,10 @@ def verify_iphone_contract(project, build_files, resolved):
     )
     if len(notice_labels) != 1 or notice_labels[0].get(
         "text"
-    ) != "Third-Party Notices":
-        fail("共享 iPhone 声明入口标题必须保持产品范围中立")
+    ) != "Licenses and Source":
+        fail("共享 iPhone 许可证与源码入口标题漂移")
+    if len(root.findall('.//label[@text="Source Code on GitHub"]')) != 1:
+        fail("iPhone About 必须有唯一的公开源码行标题")
     if notice_cell.findall("./connections/segue"):
         fail("iPhone 声明入口不能依赖静态行自动触发 segue")
     controller_connections = about_controllers[0].find("./connections")
@@ -381,11 +443,11 @@ def verify_iphone_contract(project, build_files, resolved):
         fail("About.storyboard 缺少固定的 iPhone 声明查看器")
     viewer_navigation = viewers[0].find("./navigationItem")
     if (
-        viewers[0].get("title") != "Third-Party Notices"
+        viewers[0].get("title") != "Licenses and Source"
         or viewer_navigation is None
-        or viewer_navigation.get("title") != "Third-Party Notices"
+        or viewer_navigation.get("title") != "Licenses and Source"
     ):
-        fail("iPhone 声明查看器 storyboard 标题必须保持产品范围中立")
+        fail("iPhone 许可证与源码查看器 storyboard 标题漂移")
 
     source_reference = require_unique_reference(
         resolved, "app/ThirdPartyNoticesViewController.m"
@@ -418,15 +480,18 @@ def verify_watch_contract(project, build_files, resolved):
         if HOST_NOTICES_RELATIVE.name in content:
             fail(f"Watch 源码不得引用 Apple 宿主声明：{relative}")
     require_pattern(
-        notices_view,
-        r'Bundle\.main\.url\(\s*forResource:\s*"THIRD-PARTY-NOTICES"'
-        r',\s*withExtension:\s*"txt"\s*\)',
-        "Watch 查看器缺少声明资源 loader",
+        normalized(notices_view),
+        r'resourceNames\s*=\s*\[\s*"PROJECT-LICENSES",\s*'
+        r'"THIRD-PARTY-NOTICES",\s*\].*?'
+        r"for\s+resourceName\s+in\s+resourceNames.*?"
+        r"Bundle\.main\.url\(\s*forResource:\s*resourceName,\s*"
+        r'withExtension:\s*"txt"\s*\)',
+        "Watch 查看器必须按项目许可、Alpine 的固定顺序加载资源",
     )
     require_pattern(
         notices_view,
         r"private\s+static\s+let\s+loadState.*?"
-        r"String\(contentsOf:\s*url,\s*encoding:\s*\.utf8\)",
+        r"String\(\s*contentsOf:\s*url,\s*encoding:\s*\.utf8\)",
         "Watch 查看器必须按进程缓存并以 UTF-8 读取正文",
     )
     require_pattern(
@@ -440,6 +505,7 @@ def verify_watch_contract(project, build_files, resolved):
         "third-party-notices-content",
         "third-party-notices-error",
         "close-third-party-notices",
+        "project-source-link",
     }
     for identifier in required_view_identifiers:
         if notices_view.count(f'"{identifier}"') != 1:
@@ -448,11 +514,17 @@ def verify_watch_contract(project, build_files, resolved):
         fail("Watch 声明入口 identifier 漂移")
     if "ThirdPartyNoticesView()" not in content_view:
         fail("Watch 声明入口没有展示固定查看器")
-    if 'accessibilityLabel("Alpine AArch64 许可声明")' not in content_view:
-        fail("Watch 声明入口没有明确限定 Alpine AArch64 范围")
+    if 'accessibilityLabel("许可证与源码")' not in content_view:
+        fail("Watch 入口没有使用许可证与源码标题")
+    source_url = "https://github.com/Eric-Terminal/ish-multiarch"
+    if notices_view.count(source_url) != 1:
+        fail("Watch 查看器必须唯一链接当前公开源码仓库")
+    if '.navigationTitle("许可证与源码")' not in notices_view:
+        fail("Watch 许可证与源码查看器标题漂移")
     for identifier in (
         "third-party-notices-button",
         "third-party-notices-content",
+        "project-source-link",
         "close-third-party-notices",
     ):
         if ui_test.count(f'"{identifier}"') != 1:
@@ -493,7 +565,7 @@ def main():
     verify_project_resources(project, build_files, resolved)
     verify_iphone_contract(project, build_files, resolved)
     verify_watch_contract(project, build_files, resolved)
-    print("Apple 产品第三方声明资源与查看入口接线测试通过")
+    print("Apple 产品许可、源码与第三方声明接线测试通过")
 
 
 if __name__ == "__main__":

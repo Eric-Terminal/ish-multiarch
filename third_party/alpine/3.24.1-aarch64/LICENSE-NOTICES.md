@@ -62,11 +62,14 @@ tools/apple-aarch64-rootfs-licenses-test.sh "$(command -v python3)"
 musl 的 `crypt_sha256.c`、`crypt_sha512.c` 与 `fmtmsg.c` 只声明 public domain、没有要求
 保留的 notice，其源码字节仍在对应源码包中。
 
-这些检查不构成法律意见。声明资源与只读查看入口已经接入 iPhone 和 Watch App，并由静态
-归属门禁、双端 UI 用例及公开 CI 的 bundle 字节比较覆盖；iSH+Linux 明确排除该资源。
+这些检查不构成法律意见。Alpine 声明资源与只读查看入口已经接入普通 iPhone 和 Watch
+App，并由静态归属门禁、双端 UI 用例及公开 CI 的 bundle 字节比较覆盖；iSH+Linux
+明确排除该资源。独立的项目许可正文与当前公开仓库入口已经进入普通 iSH、iSH+Linux 与
+iSHWatch 三种 App，因此 iPhone/Watch 的共享页面会按产品实际资源组合显示项目许可和
+Alpine 声明。
 Apple 宿主侧 libarchive 与 hterm 闭包已经使用独立的确定性正文和产品资源门禁，但
 BLAKE2 许可分支、Material 图标权威许可、wcwidth Unicode 13.0.0 三份 UCD 输入及许可、
-lib_colors 的 W3C/X11 来源、libarchive 的 UnicodeData/UAX #15 来源、项目自身 GPL 入口
-及可选 Linux 产品范围仍须单独闭合。这些缺口继续阻断公共发行；宿主声明切片只是记录
-证据与未决边界，不是法律闭合。公开发行前还必须解决上述 LGPL 发行决策，并在 release
-位置同时提供固定的对应源码制品。
+lib_colors 的 W3C/X11 来源、libarchive 的 UnicodeData/UAX #15 来源及可选 Linux 产品
+范围仍须单独闭合。项目许可与规范仓库入口的产品接线不等于精确二进制 revision 或
+Release 已经绑定：这些外部来源、上述 LGPL 发行决策和固定对应源码制品仍须在公开
+release 位置形成可回读、可校验的完整交付链。

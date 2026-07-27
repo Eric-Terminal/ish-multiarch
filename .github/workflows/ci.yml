@@ -74,7 +74,7 @@ jobs:
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_license_notices_app \
             apple_host_delivery_inputs \
-            apple_host_notices \
+            apple_host_notices apple_project_license_notices \
             apple_meson_project_options \
             apple_watch_package_prebuilt \
             apple_rootfs_seed apple_resolver \
@@ -107,6 +107,9 @@ jobs:
           cmp -s \
             third_party/apple-host/APPLE-HOST-NOTICES.txt \
             "$app/APPLE-HOST-NOTICES.txt"
+          cmp -s \
+            distribution/apple/project-license/PROJECT-LICENSES.txt \
+            "$app/PROJECT-LICENSES.txt"
           test -z "$(
             find "$app" -path '*/PlugIns/*.appex/*' \
               -name APPLE-HOST-NOTICES.txt -print -quit
@@ -114,6 +117,17 @@ jobs:
           test -z "$(
             find "$app" -path '*/PlugIns/*.appex/*' \
               -name THIRD-PARTY-NOTICES.txt -print -quit
+          )"
+          test -z "$(
+            find "$app" -path '*/PlugIns/*.appex/*' \
+              -name PROJECT-LICENSES.txt -print -quit
+          )"
+          test -z "$(
+            find "$app" \
+              \( -name LICENSE.md -o -name LICENSE.IOS \
+                 -o -name inputs.tsv -o -name GPL-2.0.txt \
+                 -o -name GPL-3.0.txt \) \
+              -print -quit
           )"
       - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
@@ -173,7 +187,8 @@ jobs:
             test -z "$(
               find "$link_app" \
                 \( -name THIRD-PARTY-NOTICES.txt \
-                   -o -name APPLE-HOST-NOTICES.txt \) \
+                   -o -name APPLE-HOST-NOTICES.txt \
+                   -o -name PROJECT-LICENSES.txt \) \
                 -print -quit
             )"
           done
@@ -201,8 +216,18 @@ jobs:
           cmp -s \
             third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
             "$watch_app/THIRD-PARTY-NOTICES.txt"
+          cmp -s \
+            distribution/apple/project-license/PROJECT-LICENSES.txt \
+            "$watch_app/PROJECT-LICENSES.txt"
           test -z "$(
             find "$watch_app" -name APPLE-HOST-NOTICES.txt -print -quit
+          )"
+          test -z "$(
+            find "$watch_app" \
+              \( -name LICENSE.md -o -name LICENSE.IOS \
+                 -o -name inputs.tsv -o -name GPL-2.0.txt \
+                 -o -name GPL-3.0.txt \) \
+              -print -quit
           )"
       - name: Build
         if: matrix.kernel == 'linux'
@@ -223,10 +248,24 @@ jobs:
           cmp -s \
             third_party/apple-host/APPLE-HOST-NOTICES.txt \
             "$app/APPLE-HOST-NOTICES.txt"
+          cmp -s \
+            distribution/apple/project-license/PROJECT-LICENSES.txt \
+            "$app/PROJECT-LICENSES.txt"
           test -z "$(find "$app" -name THIRD-PARTY-NOTICES.txt -print -quit)"
           test -z "$(
             find "$app" -path '*/PlugIns/*.appex/*' \
               -name APPLE-HOST-NOTICES.txt -print -quit
+          )"
+          test -z "$(
+            find "$app" -path '*/PlugIns/*.appex/*' \
+              -name PROJECT-LICENSES.txt -print -quit
+          )"
+          test -z "$(
+            find "$app" \
+              \( -name LICENSE.md -o -name LICENSE.IOS \
+                 -o -name inputs.tsv -o -name GPL-2.0.txt \
+                 -o -name GPL-3.0.txt \) \
+              -print -quit
           )"
           meson_build="$(dirname "$app")/meson/arch-x86_64"
           test -f "$meson_build/meson-private/coredata.dat"

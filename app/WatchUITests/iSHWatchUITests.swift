@@ -8,17 +8,17 @@ final class iSHWatchUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testAlpineAArch64许可无需等待Linux即可查看() throws {
+    func test许可证与源码无需等待Linux即可查看() throws {
         let app = XCUIApplication()
         app.launch()
 
         let entry = app.buttons["third-party-notices-button"]
         XCTAssertTrue(
             entry.waitForExistence(timeout: 10),
-            "Alpine AArch64 许可入口没有出现")
+            "许可证与源码入口没有出现")
         XCTAssertTrue(
             entry.isEnabled,
-            "Alpine AArch64 许可入口不应受 Linux 状态禁用")
+            "许可证与源码入口不应受 Linux 状态禁用")
 
         let entryReady = expectation(
             for: NSPredicate(format: "hittable == true"),
@@ -29,14 +29,20 @@ final class iSHWatchUITests: XCTestCase {
         let content = app.scrollViews["third-party-notices-content"]
         XCTAssertTrue(
             content.waitForExistence(timeout: 10),
-            "Alpine AArch64 许可正文没有加载")
+            "许可证与源码正文没有加载")
+
+        let sourceLink = app.descendants(
+            matching: .any)["project-source-link"]
+        XCTAssertTrue(
+            sourceLink.waitForExistence(timeout: 10),
+            "公开源码入口没有出现")
 
         // watchOS 26 会把 toolbar button 暴露成同标识的嵌套按钮节点。
         let close = app.buttons.matching(
             identifier: "close-third-party-notices").firstMatch
         XCTAssertTrue(
             close.waitForExistence(timeout: 10),
-            "Alpine AArch64 许可查看页没有完成按钮")
+            "许可证与源码查看页没有完成按钮")
         let closeReady = expectation(
             for: NSPredicate(format: "hittable == true"),
             evaluatedWith: close)
@@ -47,7 +53,7 @@ final class iSHWatchUITests: XCTestCase {
             for: NSPredicate(format: "exists == false"),
             evaluatedWith: content)
         wait(for: [dismissed], timeout: 10)
-        XCTAssertTrue(entry.exists, "关闭 Alpine AArch64 许可后没有返回终端")
+        XCTAssertTrue(entry.exists, "关闭许可证与源码后没有返回终端")
     }
 
     func testAArch64终端命令与快捷键() throws {

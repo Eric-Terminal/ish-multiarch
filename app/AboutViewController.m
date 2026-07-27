@@ -37,7 +37,7 @@
 
 @property (weak, nonatomic) IBOutlet NSLayoutConstraint *saddamHussein;
 
-@property (nonatomic) BOOL hasThirdPartyNotices;
+@property (nonatomic) BOOL hasLicenseNotices;
 
 @end
 
@@ -45,7 +45,9 @@
 
 - (void)viewDidLoad {
     // UITableViewController 可能在父类加载流程中查询静态行数，因此先缓存资源状态。
-    self.hasThirdPartyNotices =
+    self.hasLicenseNotices =
+            [NSBundle.mainBundle URLForResource:@"PROJECT-LICENSES"
+                                  withExtension:@"txt"] != nil ||
             [NSBundle.mainBundle URLForResource:@"THIRD-PARTY-NOTICES"
                                   withExtension:@"txt"] != nil ||
             [NSBundle.mainBundle URLForResource:@"APPLE-HOST-NOTICES"
@@ -114,7 +116,7 @@
     if (cell == self.sendFeedback) {
         [UIApplication openURL:@"mailto:tblodt@icloud.com?subject=Feedback%20for%20iSH"];
     } else if (cell == self.openGithub) {
-        [UIApplication openURL:@"https://github.com/ish-app/ish"];
+        [UIApplication openURL:@"https://github.com/Eric-Terminal/ish-multiarch"];
     } else if (cell == self.openFediverse) {
         [UIApplication openURL:@"https://publ.ish.app/ish"];
     } else if (cell == self.openDiscord) {
@@ -159,8 +161,8 @@
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger rows = [super tableView:tableView numberOfRowsInSection:section];
-    // 第三段最后一行由共享 storyboard 提供，只在 App 实际打包任一声明时显示。
-    if (section == 2 && !self.hasThirdPartyNotices)
+    // 第三段最后一行由共享 storyboard 提供，只在 App 实际打包任一许可资源时显示。
+    if (section == 2 && !self.hasLicenseNotices)
         rows--;
     return rows;
 }

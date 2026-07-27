@@ -5,7 +5,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.title = @"Third-Party Notices";
+    self.title = @"Licenses and Source";
 
     UITextView *textView = [[UITextView alloc] initWithFrame:CGRectZero];
     textView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -29,6 +29,7 @@
 
     // 固定资源顺序与产品组成无关；每个产品只展示自身实际打包的正文。
     NSArray<NSString *> *resourceNames = @[
+        @"PROJECT-LICENSES",
         @"THIRD-PARTY-NOTICES",
         @"APPLE-HOST-NOTICES",
     ];
@@ -53,7 +54,7 @@
         }
     }
     textView.text = sections.count == 0
-            ? @"无法加载第三方声明：应用包中没有可用的声明资源。"
+            ? @"无法加载许可与源码信息：应用包中没有可用的许可资源。"
             : [sections componentsJoinedByString:@"\n\n"];
 
     [self.view addSubview:textView];

@@ -1,0 +1,6 @@
+section	role	path	source_url	size	sha256
+source	source	-	https://github.com/Eric-Terminal/ish-multiarch	-	-
+license-md	terms	LICENSE.md	-	1731	300e62ce6fafbee38b072ab7daf8d64bd57042d81e09d3b4c58af26bcabddab1
+license-ios	additional-terms	LICENSE.IOS	-	782	37708e19d5ea72c1491926ce6d33ae33ab746609b772a4f1b1657a809f835958
+gpl-2.0	license-text	distribution/apple/project-license/license-inputs/GPL-2.0.txt	https://www.gnu.org/licenses/gpl-2.0.txt	17984	edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6
+gpl-3.0	license-text	distribution/apple/project-license/license-inputs/GPL-3.0.txt	https://www.gnu.org/licenses/gpl-3.0.txt	35149	3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986

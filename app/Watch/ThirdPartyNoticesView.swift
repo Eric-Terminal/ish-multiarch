@@ -10,6 +10,12 @@ struct ThirdPartyNoticesView: View {
     }
 
     private static let linesPerChunk = 64
+    private static let resourceNames = [
+        "PROJECT-LICENSES",
+        "THIRD-PARTY-NOTICES",
+    ]
+    private static let sourceURL = URL(
+        string: "https://github.com/Eric-Terminal/ish-multiarch")!
 
     // watchOS 对单个超长 Text 的布局和辅助功能快照代价很高；
     // 分块后由 LazyVStack 只创建当前视口附近的正文。
@@ -34,23 +40,29 @@ struct ThirdPartyNoticesView: View {
     // 声明正文只在首次打开查看页时读取，
     // 避免终端状态刷新触发重复 I/O。
     private static let loadState: LoadState = {
-        guard let url = Bundle.main.url(
-                forResource: "THIRD-PARTY-NOTICES",
-                withExtension: "txt") else {
-            return .failed("App 中缺少 Alpine AArch64 许可声明文件。")
+        var sections = [String]()
+        for resourceName in resourceNames {
+            guard let url = Bundle.main.url(
+                    forResource: resourceName,
+                    withExtension: "txt") else {
+                return .failed("App 中缺少 \(resourceName).txt。")
+            }
+            guard let text = try? String(
+                    contentsOf: url,
+                    encoding: .utf8) else {
+                return .failed(
+                    "\(resourceName).txt 不是有效的 UTF-8 文本，" +
+                    "或当前无法读取。")
+            }
+            sections.append(text)
         }
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            return .failed(
-                "Alpine AArch64 许可声明文件不是有效的 UTF-8 文本，" +
-                "或当前无法读取。")
-        }
-        return .loaded(chunks(for: text))
+        return .loaded(chunks(for: sections.joined(separator: "\n\n")))
     }()
 
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Alpine AArch64 许可声明")
+                .navigationTitle("许可证与源码")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("完成") {
@@ -69,6 +81,9 @@ struct ThirdPartyNoticesView: View {
         case let .loaded(chunks):
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Link("查看源代码", destination: Self.sourceURL)
+                        .padding(.bottom, 8)
+                        .accessibilityIdentifier("project-source-link")
                     ForEach(chunks.indices, id: \.self) { index in
                         Text(verbatim: chunks[index])
                             .font(.system(

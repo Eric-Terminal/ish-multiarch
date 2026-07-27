@@ -22,7 +22,7 @@
     self.app = nil;
 }
 
-- (void)test共享第三方声明入口 {
+- (void)test共享许可证与源码入口 {
     XCUIElement *recoveryBar = self.app.navigationBars[@"Recovery Mode"];
     XCTAssertTrue([recoveryBar waitForExistenceWithTimeout:30],
                   @"Recovery 设置页没有在期限内出现");
@@ -34,37 +34,48 @@
     XCUIElement *entry = table.cells[@"third-party-notices-entry"];
     for (NSUInteger attempt = 0; attempt < 4 && !entry.hittable; attempt++)
         [table swipeUp];
-    XCTAssertTrue(entry.hittable, @"第三方声明入口不可点击");
+    XCTAssertTrue(entry.hittable, @"许可证与源码入口不可点击");
     [entry tap];
 
     XCUIElement *navigationBar =
-            self.app.navigationBars[@"Third-Party Notices"];
+            self.app.navigationBars[@"Licenses and Source"];
     XCTAssertTrue([navigationBar waitForExistenceWithTimeout:10],
-                  @"第三方声明页面没有出现");
+                  @"许可证与源码页面没有出现");
 
     XCUIElement *textView = self.app.textViews[@"third-party-notices-text"];
     XCTAssertTrue([textView waitForExistenceWithTimeout:10],
-                  @"第三方声明正文没有出现");
+                  @"许可证与源码正文没有出现");
     XCTAssertTrue([textView.value isKindOfClass:NSString.class],
-                  @"第三方声明正文不是文本");
+                  @"许可证与源码正文不是文本");
     NSString *text = textView.value;
+    NSString *projectMarker =
+            @"===== BEGIN PROJECT LICENSE NOTICE: overview =====";
     NSString *alpineMarker = @"===== BEGIN NOTICE: overview =====";
     NSString *appleHostMarker =
             @"===== BEGIN APPLE HOST NOTICE: overview =====";
+    NSString *sourceURL =
+            @"https://github.com/Eric-Terminal/ish-multiarch";
+    NSRange projectRange = [text rangeOfString:projectMarker];
     NSRange alpineRange = [text rangeOfString:alpineMarker];
     NSRange appleHostRange = [text rangeOfString:appleHostMarker];
-    XCTAssertEqual(alpineRange.location, 0,
-                   @"普通 iSH 的 Alpine 声明缺少固定起始标记");
+    XCTAssertEqual(projectRange.location, 0,
+                   @"普通 iSH 的项目许可缺少固定起始标记");
+    XCTAssertNotEqual(alpineRange.location, NSNotFound,
+                      @"普通 iSH 的 Alpine 声明缺少固定起始标记");
     XCTAssertNotEqual(appleHostRange.location, NSNotFound,
                       @"普通 iSH 的 Apple 宿主声明缺少固定起始标记");
+    XCTAssertNotEqual([text rangeOfString:sourceURL].location, NSNotFound,
+                      @"普通 iSH 的项目许可缺少公开源码入口");
+    XCTAssertLessThan(projectRange.location, alpineRange.location,
+                      @"普通 iSH 的项目许可与 Alpine 声明顺序漂移");
     XCTAssertLessThan(alpineRange.location, appleHostRange.location,
-                      @"普通 iSH 的两份声明顺序漂移");
+                      @"普通 iSH 的 Alpine 与 Apple 宿主声明顺序漂移");
 
     XCUIElement *back = navigationBar.buttons[@"Recovery Mode"];
-    XCTAssertTrue(back.hittable, @"声明页面的返回按钮不可点击");
+    XCTAssertTrue(back.hittable, @"许可证与源码页面的返回按钮不可点击");
     [back tap];
     XCTAssertTrue([recoveryBar waitForExistenceWithTimeout:10],
-                  @"从声明页面返回后 Recovery 设置页没有出现");
+                  @"从许可证与源码页面返回后 Recovery 设置页没有出现");
 
     // Exit 会先把持久化 recovery 开关复位，再结束 App。
     XCUIElement *exit = recoveryBar.buttons[@"Exit"];
