@@ -47,6 +47,8 @@
     // UITableViewController 可能在父类加载流程中查询静态行数，因此先缓存资源状态。
     self.hasThirdPartyNotices =
             [NSBundle.mainBundle URLForResource:@"THIRD-PARTY-NOTICES"
+                                  withExtension:@"txt"] != nil ||
+            [NSBundle.mainBundle URLForResource:@"APPLE-HOST-NOTICES"
                                   withExtension:@"txt"] != nil;
     [super viewDidLoad];
     [self _updateUI];
@@ -157,7 +159,7 @@
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger rows = [super tableView:tableView numberOfRowsInSection:section];
-    // 第三段最后一行由共享 storyboard 提供，只在 App 实际打包声明时显示。
+    // 第三段最后一行由共享 storyboard 提供，只在 App 实际打包任一声明时显示。
     if (section == 2 && !self.hasThirdPartyNotices)
         rows--;
     return rows;

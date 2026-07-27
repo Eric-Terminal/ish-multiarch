@@ -1,0 +1,2 @@
+# 宿主声明逐字保留锁定上游文本中的尾随空格。
+third_party/apple-host/APPLE-HOST-NOTICES.txt whitespace=-trailing-space

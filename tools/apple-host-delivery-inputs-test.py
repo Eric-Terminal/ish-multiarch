@@ -103,6 +103,7 @@ def production_input_paths():
         "third_party/apple-host/README.md",
         "third_party/apple-host/dependencies.tsv",
         "third_party/apple-host/license-inputs.tsv",
+        "third_party/apple-host/notice-fragments.tsv",
         "third_party/apple-host/target-inputs.tsv",
     }
     paths.update(libarchive_sources)
@@ -435,6 +436,24 @@ def case_license_digest_drift(root):
     write_utf8(path, text.replace(row, "\t".join(fields)))
 
 
+def case_notice_fragment_digest_drift(root):
+    path = root / "third_party/apple-host/notice-fragments.tsv"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    fields = lines[1].split("\t")
+    fields[-1] = "0" * 64
+    lines[1] = "\t".join(fields)
+    write_utf8(path, "\n".join(lines) + "\n")
+
+
+def case_notice_fragment_range_drift(root):
+    path = root / "third_party/apple-host/notice-fragments.tsv"
+    replace_once(
+        path,
+        "archive_entry.c\t1618\t1650\t",
+        "archive_entry.c\t1619\t1650\t",
+    )
+
+
 def case_iphone_loses_libarchive(root):
     project = root / "iSH.xcodeproj/project.pbxproj"
     line = (
@@ -588,6 +607,14 @@ def main():
             "license-digest-drift": (
                 case_license_digest_drift,
                 "宿主许可复核输入摘要漂移",
+            ),
+            "notice-fragment-digest-drift": (
+                case_notice_fragment_digest_drift,
+                "宿主声明片段摘要漂移",
+            ),
+            "notice-fragment-range-drift": (
+                case_notice_fragment_range_drift,
+                "宿主声明中段片段路径或范围集合漂移",
             ),
             "iphone-missing-libarchive": (
                 case_iphone_loses_libarchive,

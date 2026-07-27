@@ -16,6 +16,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
             submodules: true
+      - name: 获取宿主来源历史证据
+        if: matrix.kernel == 'ish'
+        shell: bash
+        run: |
+          if [[ "$(git -C deps/libapps rev-parse --is-shallow-repository)" == true ]]; then
+            git -C deps/libapps fetch --no-tags --unshallow origin
+          fi
       - uses: actions/setup-python@v6
         with:
             python-version: '3.x'
@@ -45,6 +52,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
             submodules: true
+      - name: 获取宿主来源历史证据
+        if: matrix.kernel == 'ish'
+        shell: bash
+        run: |
+          if [[ "$(git -C deps/libapps rev-parse --is-shallow-repository)" == true ]]; then
+            git -C deps/libapps fetch --no-tags --unshallow origin
+          fi
       - name: Install dependencies
         run: |
           brew install llvm lld ninja libarchive meson
@@ -60,6 +74,7 @@ jobs:
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_license_notices_app \
             apple_host_delivery_inputs \
+            apple_host_notices \
             apple_meson_project_options \
             apple_watch_package_prebuilt \
             apple_rootfs_seed apple_resolver \
@@ -89,6 +104,17 @@ jobs:
           cmp -s \
             third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
             "$app/THIRD-PARTY-NOTICES.txt"
+          cmp -s \
+            third_party/apple-host/APPLE-HOST-NOTICES.txt \
+            "$app/APPLE-HOST-NOTICES.txt"
+          test -z "$(
+            find "$app" -path '*/PlugIns/*.appex/*' \
+              -name APPLE-HOST-NOTICES.txt -print -quit
+          )"
+          test -z "$(
+            find "$app" -path '*/PlugIns/*.appex/*' \
+              -name THIRD-PARTY-NOTICES.txt -print -quit
+          )"
       - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
@@ -140,6 +166,17 @@ jobs:
           verify_slice "$device" arm64 WATCHOS 26.0
           verify_slice "$simulator" arm64 WATCHOSSIMULATOR 10.0
           verify_slice "$simulator" x86_64 WATCHOSSIMULATOR 10.0
+          for link_app in \
+            "$products/Release-watchos/iSHWatchLinkSmoke.app" \
+            "$products/Release-watchsimulator/iSHWatchLinkSmoke.app"
+          do
+            test -z "$(
+              find "$link_app" \
+                \( -name THIRD-PARTY-NOTICES.txt \
+                   -o -name APPLE-HOST-NOTICES.txt \) \
+                -print -quit
+            )"
+          done
 
           # iPhone Release 已填充并校验同一缓存，Watch 不应再次联网。
           app_products="$RUNNER_TEMP/ish-watch-app-products"
@@ -164,6 +201,9 @@ jobs:
           cmp -s \
             third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
             "$watch_app/THIRD-PARTY-NOTICES.txt"
+          test -z "$(
+            find "$watch_app" -name APPLE-HOST-NOTICES.txt -print -quit
+          )"
       - name: Build
         if: matrix.kernel == 'linux'
         shell: bash
@@ -180,7 +220,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
           app="$derived/Build/Products/ReleaseLinux-iphonesimulator/iSH.app"
           test -x "$app/iSH"
+          cmp -s \
+            third_party/apple-host/APPLE-HOST-NOTICES.txt \
+            "$app/APPLE-HOST-NOTICES.txt"
           test -z "$(find "$app" -name THIRD-PARTY-NOTICES.txt -print -quit)"
+          test -z "$(
+            find "$app" -path '*/PlugIns/*.appex/*' \
+              -name APPLE-HOST-NOTICES.txt -print -quit
+          )"
           meson_build="$(dirname "$app")/meson/arch-x86_64"
           test -f "$meson_build/meson-private/coredata.dat"
           IFS=$'\t' read -r buildtype kernel < <(

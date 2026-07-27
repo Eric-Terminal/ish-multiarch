@@ -14,6 +14,7 @@ DEPENDENCIES_HEADER = (
 )
 TARGETS_HEADER = "target\trelease_scope\tinput_scope\tcomponent\tdelivery_kind\tdelivery_name"
 LICENSES_HEADER = "delivery_unit\tcomponent\trole\tpath\tsize\tsha256"
+NOTICE_FRAGMENTS_HEADER = "path\tstart_line\tend_line\tsize\tsha256"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9][a-z0-9+._-]*$")
@@ -53,25 +54,148 @@ LIBARCHIVE_INLINE_NOTICE_PATHS = {
     "deps/libarchive/libarchive/archive_blake2sp_ref.c",
     "deps/libarchive/libarchive/archive_entry.c",
     "deps/libarchive/libarchive/archive_getdate.c",
+    "deps/libarchive/libarchive/archive_pack_dev.c",
+    "deps/libarchive/libarchive/archive_pack_dev.h",
     "deps/libarchive/libarchive/archive_ppmd7.c",
     "deps/libarchive/libarchive/archive_ppmd7_private.h",
     "deps/libarchive/libarchive/archive_ppmd8.c",
     "deps/libarchive/libarchive/archive_ppmd8_private.h",
+    "deps/libarchive/libarchive/archive_ppmd_private.h",
+    "deps/libarchive/libarchive/archive_random.c",
     "deps/libarchive/libarchive/archive_rb.c",
     "deps/libarchive/libarchive/archive_rb.h",
     "deps/libarchive/libarchive/archive_read_support_filter_compress.c",
     "deps/libarchive/libarchive/archive_read_support_format_7zip.c",
+    "deps/libarchive/libarchive/archive_read_support_format_mtree.c",
+    "deps/libarchive/libarchive/archive_string.c",
+    "deps/libarchive/libarchive/archive_string_composition.h",
+    "deps/libarchive/libarchive/archive_windows.c",
     "deps/libarchive/libarchive/archive_write_add_filter_compress.c",
     "deps/libarchive/libarchive/archive_xxhash.h",
     "deps/libarchive/libarchive/xxhash.c",
 }
+REQUIRED_NOTICE_FRAGMENT_RANGES = {
+    ("deps/libapps/libdot/doc/ChangeLog.md", 134, 136),
+    ("deps/libapps/libdot/js/lib_colors.js", 322, 323),
+    ("deps/libapps/libdot/js/lib_colors.js", 629, 640),
+    ("deps/libapps/libdot/js/lib_colors.js", 755, 757),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
+        7,
+        77,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
+        117,
+        118,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
+        235,
+        236,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
+        326,
+        327,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/ranges.py",
+        15,
+        17,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/ranges.py",
+        28,
+        32,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/ranges.py",
+        54,
+        60,
+    ),
+    (
+        "deps/libapps/libdot/third_party/wcwidth/ranges.py",
+        114,
+        130,
+    ),
+    ("deps/libarchive/libarchive/archive_entry.c", 1618, 1650),
+    ("deps/libarchive/libarchive/archive_ppmd8.c", 1118, 1122),
+    ("deps/libarchive/libarchive/archive_random.c", 103, 131),
+    (
+        "deps/libarchive/libarchive/archive_read_support_format_7zip.c",
+        3605,
+        3611,
+    ),
+    (
+        "deps/libarchive/libarchive/archive_read_support_format_7zip.c",
+        3703,
+        3709,
+    ),
+    (
+        "deps/libarchive/libarchive/archive_read_support_format_mtree.c",
+        1413,
+        1413,
+    ),
+    ("deps/libarchive/libarchive/archive_string.c", 2797, 2800),
+    ("deps/libarchive/libarchive/archive_string.c", 3043, 3046),
+    ("deps/libarchive/libarchive/archive_windows.c", 789, 829),
+}
 REQUIRED_LICENSE_KEYS = {
+    (
+        "hterm-bundle",
+        "hterm",
+        "provenance",
+        "deps/libapps/hterm/concat/hterm_resources.concat",
+    ),
+    (
+        "hterm-bundle",
+        "hterm",
+        "provenance",
+        "deps/libapps/hterm/images/close.svg",
+    ),
+    (
+        "hterm-bundle",
+        "hterm",
+        "provenance",
+        "deps/libapps/hterm/images/keyboard_arrow_down.svg",
+    ),
+    (
+        "hterm-bundle",
+        "hterm",
+        "provenance",
+        "deps/libapps/hterm/images/keyboard_arrow_up.svg",
+    ),
     ("hterm-bundle", "hterm", "license", "deps/libapps/hterm/LICENSE"),
+    (
+        "hterm-bundle",
+        "libdot",
+        "inline-notice",
+        "deps/libapps/libdot/js/lib_colors.js",
+    ),
     ("hterm-bundle", "libdot", "license", "deps/libapps/libdot/LICENSE"),
     ("hterm-bundle", "intl-segmenter", "license",
      "deps/libapps/libdot/third_party/intl-segmenter/LICENSE.md"),
     ("hterm-bundle", "wcwidth", "license",
      "deps/libapps/libdot/third_party/wcwidth/LICENSE.md"),
+    (
+        "hterm-bundle",
+        "wcwidth",
+        "inline-notice",
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
+    ),
+    (
+        "hterm-bundle",
+        "wcwidth",
+        "provenance",
+        "deps/libapps/libdot/doc/ChangeLog.md",
+    ),
+    (
+        "hterm-bundle",
+        "wcwidth",
+        "provenance",
+        "deps/libapps/libdot/third_party/wcwidth/ranges.py",
+    ),
     ("libarchive", "libarchive", "license", "deps/libarchive/COPYING"),
     ("linux-kernel", "linux", "license", "deps/linux/COPYING"),
 } | {
@@ -115,6 +239,15 @@ class LicenseInput:
     component: str
     role: str
     path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class NoticeFragment:
+    path: str
+    start_line: int
+    end_line: int
     size: int
     sha256: str
 
@@ -384,7 +517,7 @@ def parse_license_inputs(root, dependencies):
         if (
             component not in dependencies
             or dependencies[component].delivery_unit != delivery_unit
-            or role not in {"inline-notice", "license"}
+            or role not in {"inline-notice", "license", "provenance"}
             or not HEX64.fullmatch(sha256)
         ):
             fail(f"宿主许可复核输入字段非法：{path}")
@@ -403,3 +536,39 @@ def parse_license_inputs(root, dependencies):
     if keys != REQUIRED_LICENSE_KEYS:
         fail("宿主许可复核输入路径集合漂移")
     return inputs
+
+
+def parse_notice_fragments(root, license_inputs):
+    rows = read_lock(
+        root,
+        "notice-fragments.tsv",
+        NOTICE_FRAGMENTS_HEADER,
+        "宿主声明中段片段锁",
+    )
+    licensed_paths = {item.path for item in license_inputs}
+    fragments = []
+    for row in rows:
+        if len(row) != 5 or any(not field for field in row):
+            fail("宿主声明中段片段锁含空字段或列数错误")
+        path, start_text, end_text, size_text, sha256 = row
+        validate_relative(path, "宿主声明片段路径")
+        if path not in licensed_paths or not HEX64.fullmatch(sha256):
+            fail(f"宿主声明中段片段字段非法：{path}")
+        try:
+            start_line = int(start_text)
+            end_line = int(end_text)
+            size = int(size_text)
+        except ValueError:
+            fail(f"宿主声明中段片段数字字段非法：{path}")
+        if start_line <= 0 or end_line < start_line or size <= 0:
+            fail(f"宿主声明中段片段范围非法：{path}")
+        fragments.append(
+            NoticeFragment(path, start_line, end_line, size, sha256)
+        )
+    ranges = {
+        (fragment.path, fragment.start_line, fragment.end_line)
+        for fragment in fragments
+    }
+    if ranges != REQUIRED_NOTICE_FRAGMENT_RANGES:
+        fail("宿主声明中段片段路径或范围集合漂移")
+    return fragments

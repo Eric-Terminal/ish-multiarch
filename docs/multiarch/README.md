@@ -244,27 +244,57 @@ Alpine 闭包混为一谈：
 
 ```sh
 python3 tools/apple-host-delivery-inputs.py check-locks
+python3 tools/apple-host-notices.py check-locks
 ```
 
 该只读门禁固定 `deps/libarchive`、`deps/libapps` 与可选 Linux 产品所用
-`deps/linux` 的 gitlink、版本来源、实际构建输入路径集合、许可复核输入
-及 target 路由，并拒绝三个既有 gitlink 未声明进入主工程构建 phase。
+`deps/linux` 的 gitlink、版本来源、实际构建输入路径集合、许可、源码内
+声明与 provenance 来源证据，以及 target 路由，并拒绝三个既有 gitlink
+未声明进入主工程构建 phase。
 普通 `iSH` 携带 `libarchive.a` 与 `hterm_all.js`；
 后者的静态 concat 闭包同时包含 hterm、libdot、intl-segmenter 和
 wcwidth。Watch 与 FileProvider 没有这两项 vendored 输入，Watch 的显式
 外部链接项只按 Apple SDK 边界登记。完整格式与非目标见
 `third_party/apple-host/README.md`。
 
-这仍只是技术输入身份锁：libarchive 源内的控制性声明只作为后续复核点，
-尚未生成宿主 notices，也没有替 LGPL 方案、项目自身 GPL 入口或法律审查
-作出结论。`iSH+Linux` 的 Linux GPLv2 范围、在线 root 下载与产品声明仍
-按未决发行产品单独处理。
+第二条命令会从 libarchive 的 128 个实际 Xcode 编译源出发，递归闭合锁定
+gitlink 内的 37 个本地双引号 include，并逐字提取每个文件开头连续的 C
+块注释。另有 21 段来源、生成或许可证据由固定行区间与摘要锁定，其中
+12 段来自 hterm 交付输入及其锁定生成 provenance（`ranges.py` 不进入
+53 项实际交付闭包），9 段来自 libarchive；hterm、libdot、
+intl-segmenter、wcwidth 和 `libarchive/COPYING` 的完整许可则按原始文件
+收入。只有原始提取单元字节完全相同才去重，来源路径不会丢失。
+
+收入宿主正文的五个完整许可输入去重为 4 份唯一文本，libarchive 闭包得到
+97 份唯一前导文本，21 个锁定片段也各自唯一，因此生成 122 个唯一正文
+section；再加 `overview` 与 `unresolved-provenance`，文件共有 124 对
+BEGIN/END 标记。
+重建结果必须与受跟踪的 `APPLE-HOST-NOTICES.txt` 逐字一致。
+
+来源片段只在锁定文本或本地历史明确写出 imported、taken、adapted、
+derived、generated 等来源/生成关系时纳入；普通标准引用不会被递归扩成无穷
+依赖。当前未决节如实记录：三个 Material SVG 只有 libapps 导入提交，缺少
+权威上游 revision、路径与许可，不能推定 Apache 2.0；wcwidth 的 Unicode
+13.0.0 表缺少 `PropList.txt`、`UnicodeData.txt`、`EastAsianWidth.txt`
+原始字节及 Unicode 许可；`lib_colors.js` 的 W3C CSS Color 4 改编与 X11
+`rgb.txt` 派生缺少固定上游材料；libarchive 的 Unicode 6.0.0
+`UnicodeData.txt` 生成表和 Unicode Standard Annex #15 明确来源表述也仍须
+闭合。
+
+这份宿主正文进入普通 `iSH` 与 `iSH+Linux`，共享 iPhone 查看器按 bundle
+中实际存在的资源显示：普通 iSH 依次显示 Alpine seed 与宿主正文，
+iSH+Linux 只显示公共宿主正文。Watch 继续只显示 Alpine seed；FileProvider
+和测试产品不携带宿主正文。该接线仍不是最终法律结论：BLAKE2 许可分支、
+上述 Material、Unicode、W3C/X11 来源许可，LGPL 方案、项目自身 GPL 入口，
+以及 `iSH+Linux` 的 Linux GPLv2、在线 rootfs 和对应源码交付均保持未决。
+这些缺口继续阻断公共发行；本切片只是确定性记录证据与未知边界，不是法律闭合。
 
 当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入
 iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 target 归属门禁
 及公开 CI 的 bundle 字节比较覆盖；不携带固定 AArch64 seed 的 iSH+Linux 明确
-排除该资源。对应源码 tar 尚未在本 fork 的 release 位置公开，宿主 notices
-也尚未生成，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
+排除该资源。公共宿主正文也已形成确定性生成门禁和产品接线，但上述未决
+许可选择、Linux 产品范围与对应源码 tar 尚未在本 fork 的 release 位置公开，
+因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
 中 21 个输入与 pax-utils `elf.h` 的原始 notice 明确采用
 LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、没有指定版本。发行门禁还
 必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节转换，或同时提供
@@ -441,7 +471,7 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 - iOS device `arm64`，watchOS device `arm64_32`/`arm64` 与 Simulator `arm64`/`x86_64` 的 core、完整静态库、普通消费者、全归档消费者、ABI 和二进制元数据门禁通过，并成功生成包含 device/Simulator 变体的三份 XCFramework。
 - 命令行 Alpine 冒烟的动态 `/bin/sh`、文件操作、子进程等待、信号终止、数字地址 HTTP、musl `getent`、BusyBox `nslookup` 与主机名 HTTP 获取通过；查询日志证明三条工作负载都实际经过本地 UDP DNS responder。
 - 专用 iPhone 与 Watch Simulator 的完整产品分别通过启动/交互、真实 resolver、HTTP/HTTPS、`apk update`、SQLite WAL 与复启持久化、Python、guest GCC/pthread、本地 Git 操作和离线 SSH 客户端/密钥/配置固定矩阵。此类长时 UI 门禁是发布候选实证，不在每次公开 CI 中重放，也不能替代实体设备验证。
-- 公开 CI 会构建 iPhone device `arm64` Release、Apple 五切片 core、Watch 四切片 LinkSmoke 和 Watch Simulator `arm64` 完整 App，逐字比较双端 Alpine 声明资源，并确认 ReleaseLinux 不携带该资源。
+- 公开 CI 会构建 iPhone device `arm64` Release、Apple 五切片 core、Watch 四切片 LinkSmoke 和 Watch Simulator `arm64` 完整 App；它逐字比较 iPhone 的 Alpine/宿主正文、Watch 的 Alpine 正文和 ReleaseLinux 的公共宿主正文，并验证每个产品都排除不属于自身范围的声明资源。
 
 ## 来源、许可与独立实现边界
 

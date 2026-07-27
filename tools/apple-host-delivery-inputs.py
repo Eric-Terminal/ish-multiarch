@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
 import json
@@ -26,6 +27,7 @@ from apple_host_manifest import (
     fail,
     parse_dependencies,
     parse_license_inputs,
+    parse_notice_fragments,
     parse_targets,
     path_from_root,
     read_regular,
@@ -54,9 +56,23 @@ REQUIRED_HTERM_PATHS = {
     "deps/libapps/hterm/concat/hterm_all.concat",
     "deps/libapps/hterm/concat/hterm_deps.concat",
     "deps/libapps/hterm/concat/hterm_resources.concat",
+    "deps/libapps/hterm/images/close.svg",
+    "deps/libapps/hterm/images/keyboard_arrow_down.svg",
+    "deps/libapps/hterm/images/keyboard_arrow_up.svg",
+    "deps/libapps/libdot/js/lib_colors.js",
     "deps/libapps/libdot/third_party/intl-segmenter/intl-segmenter.js",
     "deps/libapps/libdot/third_party/wcwidth/lib_wc.js",
 }
+
+
+@dataclass(frozen=True)
+class ValidatedHostInputs:
+    dependencies: dict
+    license_inputs: tuple
+    notice_fragments: tuple
+    gitlinks: frozenset
+    libarchive_sources: frozenset
+    hterm_inputs: frozenset
 
 
 def run_git(root, *arguments):
@@ -749,7 +765,7 @@ def verify_main_project(
 
 
 def verify_license_inputs(
-    root, inputs, gitlinks, libarchive_sources
+    root, inputs, gitlinks, libarchive_sources, hterm_inputs
 ):
     for item in inputs:
         data = read_regular(root, item.path, "宿主许可复核输入")
@@ -765,6 +781,30 @@ def verify_license_inputs(
             and item.path not in libarchive_sources
         ):
             fail(f"libarchive 声明输入没有进入编译源：{item.path}")
+        if (
+            item.delivery_unit == "hterm-bundle"
+            and item.role == "inline-notice"
+            and item.path not in hterm_inputs
+        ):
+            fail(f"hterm 声明输入没有进入生成闭包：{item.path}")
+
+
+def verify_notice_fragments(root, fragments, gitlinks):
+    for fragment in fragments:
+        data = read_regular(root, fragment.path, "宿主声明片段来源")
+        ensure_tracked_file(root, fragment.path, gitlinks)
+        if b"\r" in data:
+            fail(f"宿主声明片段来源必须只使用 LF：{fragment.path}")
+        lines = data.splitlines(keepends=True)
+        if fragment.end_line > len(lines):
+            fail(f"宿主声明片段行号超出来源文件：{fragment.path}")
+        selected = b"".join(
+            lines[fragment.start_line - 1 : fragment.end_line]
+        )
+        if len(selected) != fragment.size:
+            fail(f"宿主声明片段大小漂移：{fragment.path}")
+        if hashlib.sha256(selected).hexdigest() != fragment.sha256:
+            fail(f"宿主声明片段摘要漂移：{fragment.path}")
 
 
 def verify_linux_contract(dependencies):
@@ -783,18 +823,28 @@ def check_locks(root):
     dependencies = parse_dependencies(root)
     targets = parse_targets(root, dependencies)
     inputs = parse_license_inputs(root, dependencies)
+    fragments = parse_notice_fragments(root, inputs)
     gitlinks = verify_gitlinks(root, dependencies)
     verify_versions(root, dependencies, gitlinks)
     libarchive_sources, libarchive_product_id = verify_libarchive(
         root, dependencies, gitlinks
     )
-    verify_hterm(root, dependencies, gitlinks)
+    hterm_inputs = verify_hterm(root, dependencies, gitlinks)
     verify_linux_contract(dependencies)
     verify_main_project(
         root, targets, dependencies, gitlinks, libarchive_product_id
     )
     verify_license_inputs(
-        root, inputs, gitlinks, libarchive_sources
+        root, inputs, gitlinks, libarchive_sources, hterm_inputs
+    )
+    verify_notice_fragments(root, fragments, gitlinks)
+    return ValidatedHostInputs(
+        dependencies,
+        tuple(inputs),
+        tuple(fragments),
+        frozenset(gitlinks),
+        frozenset(libarchive_sources),
+        frozenset(hterm_inputs),
     )
 
 

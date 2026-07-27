@@ -44,6 +44,8 @@
 		A1F000000000000000000006 /* ThirdPartyNoticesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */; };
 		A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000007 /* ThirdPartyNoticesView.swift */; };
 		A1F00000000000000000000A /* ThirdPartyNoticesUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */; };
+		A1F00000000000000000000C /* APPLE-HOST-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */; };
+		A1F00000000000000000000D /* APPLE-HOST-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */; };
 		0FC2383C2991FBA6004C09EC /* mmx.c in Sources */ = {isa = PBXBuildFile; fileRef = 0FC2383B2991FB82004C09EC /* mmx.c */; };
 		491B31E62883BF22008EEFB0 /* ThemeViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 491B31E52883BF22008EEFB0 /* ThemeViewController.m */; };
 		49302D8E277669D300C9885A /* ish.c in Sources */ = {isa = PBXBuildFile; fileRef = 49302D8D277669D300C9885A /* ish.c */; };
@@ -508,6 +510,7 @@
 		A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesViewController.m; sourceTree = "<group>"; };
 		A1F000000000000000000007 /* ThirdPartyNoticesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThirdPartyNoticesView.swift; sourceTree = "<group>"; };
 		A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesUITests.m; sourceTree = "<group>"; };
+		A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "APPLE-HOST-NOTICES.txt"; path = "third_party/apple-host/APPLE-HOST-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
 		0FC2383B2991FB82004C09EC /* mmx.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mmx.c; sourceTree = "<group>"; };
 		408A2639236440F8008A4E81 /* iOSFS.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = iOSFS.m; sourceTree = "<group>"; };
 		408A263B23644102008A4E81 /* iOSFS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = iOSFS.h; sourceTree = "<group>"; };
@@ -1151,6 +1154,7 @@
 			children = (
 				BB792B521F96D90D00FFB7A4 /* app */,
 				A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */,
+				A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */,
 				BB9C7B88240A343400F5D4F0 /* iSH.xcconfig */,
 				BB4A53931FAA393B00A72ACE /* most of the code */,
 				BB18B27F1F97F2590059FCD8 /* Scripts */,
@@ -1993,6 +1997,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */,
+				A1F00000000000000000000C /* APPLE-HOST-NOTICES.txt in Resources */,
 				BB38599627BCEE6B000A1082 /* idollarhash.png in Resources */,
 				BB3859A227BCEE6B000A1082 /* dollarblock2.png in Resources */,
 				BB3859A727BCEE6B000A1082 /* uninspired.png in Resources */,
@@ -2039,6 +2044,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1F00000000000000000000D /* APPLE-HOST-NOTICES.txt in Resources */,
 				BBEF197D268066D1001225BD /* 3d.png in Resources */,
 				BBEF197E268066D1001225BD /* colontildehash.png in Resources */,
 				BBEF197F268066D1001225BD /* metal.png in Resources */,

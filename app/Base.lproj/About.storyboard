@@ -268,14 +268,14 @@
                                             </subviews>
                                         </tableViewCellContentView>
                                     </tableViewCell>
-                                    <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" preservesSuperviewLayoutMargins="YES" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="Ntc-3P-Lbl" style="IBUITableViewCellStyleDefault" id="Ntc-3P-Row" userLabel="Alpine AArch64 Notices">
+                                    <tableViewCell clipsSubviews="YES" contentMode="scaleToFill" preservesSuperviewLayoutMargins="YES" selectionStyle="default" accessoryType="disclosureIndicator" indentationWidth="10" textLabel="Ntc-3P-Lbl" style="IBUITableViewCellStyleDefault" id="Ntc-3P-Row" userLabel="Third-Party Notices">
                                         <rect key="frame" x="0.0" y="553" width="320" height="43.5"/>
                                         <autoresizingMask key="autoresizingMask"/>
                                         <tableViewCellContentView key="contentView" opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" preservesSuperviewLayoutMargins="YES" insetsLayoutMarginsFromSafeArea="NO" tableViewCell="Ntc-3P-Row" id="Ntc-3P-Cnt">
                                             <rect key="frame" x="0.0" y="0.0" width="293.5" height="43.5"/>
                                             <autoresizingMask key="autoresizingMask"/>
                                             <subviews>
-                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" insetsLayoutMarginsFromSafeArea="NO" text="Alpine AArch64 Notices" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Ntc-3P-Lbl">
+                                                <label opaque="NO" multipleTouchEnabled="YES" contentMode="left" insetsLayoutMarginsFromSafeArea="NO" text="Third-Party Notices" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" id="Ntc-3P-Lbl">
                                                     <rect key="frame" x="16" y="0.0" width="269.5" height="43.5"/>
                                                     <autoresizingMask key="autoresizingMask"/>
                                                     <fontDescription key="fontDescription" type="system" pointSize="17"/>
@@ -428,17 +428,17 @@
             </objects>
             <point key="canvasLocation" x="243.75" y="157.3943661971831"/>
         </scene>
-        <!--Alpine AArch64 Notices-->
+        <!--Third-Party Notices-->
         <scene sceneID="Ntc-3P-Scn">
             <objects>
-                <viewController title="Alpine AArch64 Notices" id="Ntc-3P-VCl" customClass="ThirdPartyNoticesViewController" sceneMemberID="viewController">
+                <viewController title="Third-Party Notices" id="Ntc-3P-VCl" customClass="ThirdPartyNoticesViewController" sceneMemberID="viewController">
                     <view key="view" contentMode="scaleToFill" id="Ntc-3P-Viw">
                         <rect key="frame" x="0.0" y="0.0" width="320" height="568"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <viewLayoutGuide key="safeArea" id="Ntc-3P-Saf"/>
                         <color key="backgroundColor" systemColor="systemBackgroundColor"/>
                     </view>
-                    <navigationItem key="navigationItem" title="Alpine AArch64 Notices" id="Ntc-3P-Nav"/>
+                    <navigationItem key="navigationItem" title="Third-Party Notices" id="Ntc-3P-Nav"/>
                 </viewController>
                 <placeholder placeholderIdentifier="IBFirstResponder" id="Ntc-3P-Rsp" userLabel="First Responder" customClass="UIResponder" sceneMemberID="firstResponder"/>
             </objects>
