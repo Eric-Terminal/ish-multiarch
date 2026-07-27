@@ -1,23 +1,37 @@
 ===== BEGIN APPLE HOST NOTICE: overview =====
 Apple 宿主第三方声明
 
-覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 hterm 生成资源及 libarchive 静态库的锁定原始文本，并在下一节列出尚未闭合的外部来源。
+覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 hterm 生成资源及 libarchive 静态库的锁定原始文本，并在后续两节分别记录已闭合的 Material 图标证据和仍未闭合的外部来源。
 
 未决边界：
 - Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；本文件不能代表 iSH+Linux 的完整发行义务已经闭合。
 - Alpine guest seed、项目自身许可、LGPL 与对应源码交付继续由各自的发行门禁处理。
 - libarchive 的 BLAKE2 声明列出 CC0 1.0 Universal、OpenSSL 与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。
-- Material 图标、Unicode 数据、W3C 与 X11 来源的具体缺口见“未闭合的外部来源与许可”一节；该节是工程审计记录，不是法律结论。
+- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见下一节；Unicode 数据、W3C 与 X11 等缺口继续列在未闭合一节。
+- 来源与许可边界是工程审计记录，不是法律结论。
 - public-domain 字样仅转述锁定上游源码，不是本工具作出的法律判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。
 ===== END APPLE HOST NOTICE: overview =====
 
+===== BEGIN APPLE HOST NOTICE: material-provenance =====
+已闭合的 Material 图标来源与许可
+
+libapps 历史提交 de5387e902ef285c2d2c6909a53d37d826843551 只记录三个 hterm find bar SVG 取自 google/material-design-icons，没有记录精确上游 revision。本锁选取作者时间点的官方 master tip 3d4a32b327272c458e12586437c3ca0696b28a69 作为同时期不可变快照；这不表示导入者明确记录或选择了该 revision。
+
+权威仓库：https://github.com/google/material-design-icons
+- 当前 deps/libapps/hterm/images/close.svg；207 字节；SHA-256 37e8a51562f5d4b51a17b75860719509ffa7bae2f153115d013552824d65ca86
+  上游 navigation/svg/production/ic_close_24px.svg；202 字节；SHA-256 6d4ccf520d400755057a1739a66c0feda3c98bbc34e8e7f79afa630b2e43f87e
+- 当前 deps/libapps/hterm/images/keyboard_arrow_down.svg；153 字节；SHA-256 5f52b70fd6248f3841a183f99fa4c66cbfe47a40120e289a8150034cc90e29cb
+  上游 hardware/svg/production/ic_keyboard_arrow_down_24px.svg；148 字节；SHA-256 5bb56392396df54f2fef737af5c4a1db53c8c2f2094cab6609fbe40871db3fb7
+- 当前 deps/libapps/hterm/images/keyboard_arrow_up.svg；152 字节；SHA-256 b60f51ec7413de81cd25b0452cbb9e2a98ed82687b5cfcd6abd81b27be06d29c
+  上游 hardware/svg/production/ic_keyboard_arrow_up_24px.svg；147 字节；SHA-256 00d8f7123bb5ef3f7fad786905f5407cc5fb8b4c55e1b0511803f6c8c01e3903
+
+三份当前 SVG 都由对应上游单行原字节执行同一确定性格式化得到：在 svg 与 path 元素之间插入 LF 和两个空格，在 path 与结束 svg 之间插入 LF，并补文件尾 LF；图形数据没有改写。校验器会离线逐字重放该关系。
+
+同一快照的 third_party/apple-host/material-design-icons/3d4a32b327272c458e12586437c3ca0696b28a69/README.md 第 37–40 行明确说明这些 icons 在 Apache License Version 2.0 下提供；根 LICENSE 原字节也已固定并作为完整许可收入本文件。该证据只闭合上述三个已交付 SVG，不表示其他宿主来源或整个发行已经闭合。
+===== END APPLE HOST NOTICE: material-provenance =====
+
 ===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====
 未闭合的外部来源与许可
-
-Material Design 图标：锁定 libapps 历史提交 de5387e902ef285c2d2c6909a53d37d826843551 记录下列三个 hterm find bar SVG 取自 google/material-design-icons；当前锁定仓内没有对应上游 revision、上游路径、适用许可版本或权威许可原文，不能据此推定 Apache 2.0。公共发行前必须补齐这些证据：
-- deps/libapps/hterm/images/close.svg；207 字节；SHA-256 37e8a51562f5d4b51a17b75860719509ffa7bae2f153115d013552824d65ca86
-- deps/libapps/hterm/images/keyboard_arrow_down.svg；153 字节；SHA-256 5f52b70fd6248f3841a183f99fa4c66cbfe47a40120e289a8150034cc90e29cb
-- deps/libapps/hterm/images/keyboard_arrow_up.svg；152 字节；SHA-256 b60f51ec7413de81cd25b0452cbb9e2a98ed82687b5cfcd6abd81b27be06d29c
 
 wcwidth Unicode 数据：完整 lib_wc.js 摘要与原始来源注释已锁定；本地历史提交 6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8 将当前三张表标识为 Unicode 13.0.0。生成脚本读取 PropList.txt、UnicodeData.txt 与 EastAsianWidth.txt，但仓内没有这三份 13.0.0 原始字节或相应 Unicode 许可原文，因此生成数据闭包尚未完成。
 
@@ -245,6 +259,217 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ===== END APPLE HOST NOTICE: text-004 =====
 
 ===== BEGIN APPLE HOST NOTICE: text-005 =====
+类别：完整许可
+组件：Material Design Icons 3d4a32b327272c458e12586437c3ca0696b28a69
+来源：
+- third_party/apple-host/material-design-icons/3d4a32b327272c458e12586437c3ca0696b28a69/LICENSE
+原始文本 SHA-256：58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd
+
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+===== END APPLE HOST NOTICE: text-005 =====
+
+===== BEGIN APPLE HOST NOTICE: text-006 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -254,9 +479,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # 5.0.0, 2020-04-05, Unicode 13.0.0 update, and minor tooling improvements.
 
 * wcwidth: Update to Unicode 13.0.0 release.
-===== END APPLE HOST NOTICE: text-005 =====
+===== END APPLE HOST NOTICE: text-006 =====
 
-===== BEGIN APPLE HOST NOTICE: text-006 =====
+===== BEGIN APPLE HOST NOTICE: text-007 =====
 类别：hterm 来源与生成证据
 组件：libdot 8.0.0
 来源：
@@ -265,9 +490,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   // The following algorithm has been adapted from:
   //     https://www.w3.org/TR/css-color-4/#hsl-to-rgb
-===== END APPLE HOST NOTICE: text-006 =====
+===== END APPLE HOST NOTICE: text-007 =====
 
-===== BEGIN APPLE HOST NOTICE: text-007 =====
+===== BEGIN APPLE HOST NOTICE: text-008 =====
 类别：hterm 来源与生成证据
 组件：libdot 8.0.0
 来源：
@@ -286,9 +511,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * @param {string} name The color name to convert.
  * @return {?string} The corresponding CSS rgb(...) value.
  */
-===== END APPLE HOST NOTICE: text-007 =====
+===== END APPLE HOST NOTICE: text-008 =====
 
-===== BEGIN APPLE HOST NOTICE: text-008 =====
+===== BEGIN APPLE HOST NOTICE: text-009 =====
 类别：hterm 来源与生成证据
 组件：libdot 8.0.0
 来源：
@@ -298,9 +523,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /**
  * Named colors according to the stock X11 rgb.txt file.
  */
-===== END APPLE HOST NOTICE: text-008 =====
+===== END APPLE HOST NOTICE: text-009 =====
 
-===== BEGIN APPLE HOST NOTICE: text-009 =====
+===== BEGIN APPLE HOST NOTICE: text-010 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -309,9 +534,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Sorted list of non-overlapping intervals of non-spacing characters
 // generated by the `./ranges.py` helper.
-===== END APPLE HOST NOTICE: text-009 =====
+===== END APPLE HOST NOTICE: text-010 =====
 
-===== BEGIN APPLE HOST NOTICE: text-010 =====
+===== BEGIN APPLE HOST NOTICE: text-011 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -320,9 +545,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Sorted list of non-overlapping intervals of East Asian Ambiguous characters
 // generated by the `./ranges.py` helper.
-===== END APPLE HOST NOTICE: text-010 =====
+===== END APPLE HOST NOTICE: text-011 =====
 
-===== BEGIN APPLE HOST NOTICE: text-011 =====
+===== BEGIN APPLE HOST NOTICE: text-012 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -331,9 +556,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Sorted list of non-overlapping intervals of East Asian Unambiguous characters
 // generated by the `./ranges.py` helper.
-===== END APPLE HOST NOTICE: text-011 =====
+===== END APPLE HOST NOTICE: text-012 =====
 
-===== BEGIN APPLE HOST NOTICE: text-012 =====
+===== BEGIN APPLE HOST NOTICE: text-013 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3
 来源：
@@ -411,9 +636,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  * Latest version: https://www.cl.cam.ac.uk/~mgk25/ucs/wcwidth.c
  */
-===== END APPLE HOST NOTICE: text-012 =====
+===== END APPLE HOST NOTICE: text-013 =====
 
-===== BEGIN APPLE HOST NOTICE: text-013 =====
+===== BEGIN APPLE HOST NOTICE: text-014 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -437,9 +662,9 @@ def load_east_asian():
     }
 
     data = Path('EastAsianWidth.txt').read_text(encoding='utf-8')
-===== END APPLE HOST NOTICE: text-013 =====
+===== END APPLE HOST NOTICE: text-014 =====
 
-===== BEGIN APPLE HOST NOTICE: text-014 =====
+===== BEGIN APPLE HOST NOTICE: text-015 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -449,9 +674,9 @@ def load_east_asian():
 You'll need to provide the relevant Unicode database files.
 The latest version can be found here:
 https://www.unicode.org/Public/UNIDATA/UCD.zip
-===== END APPLE HOST NOTICE: text-014 =====
+===== END APPLE HOST NOTICE: text-015 =====
 
-===== BEGIN APPLE HOST NOTICE: text-015 =====
+===== BEGIN APPLE HOST NOTICE: text-016 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -463,9 +688,9 @@ def load_proplist():
     db = {}
 
     data = Path('PropList.txt').read_text(encoding='utf-8')
-===== END APPLE HOST NOTICE: text-015 =====
+===== END APPLE HOST NOTICE: text-016 =====
 
-===== BEGIN APPLE HOST NOTICE: text-016 =====
+===== BEGIN APPLE HOST NOTICE: text-017 =====
 类别：hterm 来源与生成证据
 组件：wcwidth 0.0.3（UCD 13.0.0 生成证据）
 来源：
@@ -479,9 +704,22 @@ def load_unicode_data():
     https://unicode.org/reports/tr44/#UnicodeData.txt
     https://unicode.org/reports/tr44/#General_Category_Values
     """
-===== END APPLE HOST NOTICE: text-016 =====
+===== END APPLE HOST NOTICE: text-017 =====
 
-===== BEGIN APPLE HOST NOTICE: text-017 =====
+===== BEGIN APPLE HOST NOTICE: text-018 =====
+类别：hterm 来源与生成证据
+组件：Material Design Icons 3d4a32b327272c458e12586437c3ca0696b28a69
+来源：
+- third_party/apple-host/material-design-icons/3d4a32b327272c458e12586437c3ca0696b28a69/README.md:37-40
+原始文本 SHA-256：6170f9ff1747fa2a4049af142cbeb9a738aab4a6d5c3b5b0897a601698ee6af7
+
+## License
+
+We have made these icons available for you to incorporate into your products under the [Apache License Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt). Feel free to remix and re-share these icons and documentation in your products.
+We'd love attribution in your app's *about* screen, but it's not required. The only thing we ask is that you not re-sell these icons.
+===== END APPLE HOST NOTICE: text-018 =====
+
+===== BEGIN APPLE HOST NOTICE: text-019 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -514,9 +752,9 @@ def load_unicode_data():
  *
  * $FreeBSD: src/lib/libarchive/archive.h.in,v 1.50 2008/05/26 17:00:22 kientzle Exp $
  */
-===== END APPLE HOST NOTICE: text-017 =====
+===== END APPLE HOST NOTICE: text-019 =====
 
-===== BEGIN APPLE HOST NOTICE: text-018 =====
+===== BEGIN APPLE HOST NOTICE: text-020 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -548,9 +786,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-018 =====
+===== END APPLE HOST NOTICE: text-020 =====
 
-===== BEGIN APPLE HOST NOTICE: text-019 =====
+===== BEGIN APPLE HOST NOTICE: text-021 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -583,9 +821,9 @@ def load_unicode_data():
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-019 =====
+===== END APPLE HOST NOTICE: text-021 =====
 
-===== BEGIN APPLE HOST NOTICE: text-020 =====
+===== BEGIN APPLE HOST NOTICE: text-022 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -609,9 +847,9 @@ def load_unicode_data():
    More information about the BLAKE2 hash function can be found at
    https://blake2.net.
 */
-===== END APPLE HOST NOTICE: text-020 =====
+===== END APPLE HOST NOTICE: text-022 =====
 
-===== BEGIN APPLE HOST NOTICE: text-021 =====
+===== BEGIN APPLE HOST NOTICE: text-023 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -646,9 +884,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-021 =====
+===== END APPLE HOST NOTICE: text-023 =====
 
-===== BEGIN APPLE HOST NOTICE: text-022 =====
+===== BEGIN APPLE HOST NOTICE: text-024 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -679,9 +917,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-022 =====
+===== END APPLE HOST NOTICE: text-024 =====
 
-===== BEGIN APPLE HOST NOTICE: text-023 =====
+===== BEGIN APPLE HOST NOTICE: text-025 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -714,9 +952,9 @@ def load_unicode_data():
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-023 =====
+===== END APPLE HOST NOTICE: text-025 =====
 
-===== BEGIN APPLE HOST NOTICE: text-024 =====
+===== BEGIN APPLE HOST NOTICE: text-026 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -749,9 +987,9 @@ def load_unicode_data():
  *
  * $FreeBSD: head/lib/libarchive/archive_crc32.h 201102 2009-12-28 03:11:36Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-024 =====
+===== END APPLE HOST NOTICE: text-026 =====
 
-===== BEGIN APPLE HOST NOTICE: text-025 =====
+===== BEGIN APPLE HOST NOTICE: text-027 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -785,9 +1023,9 @@ def load_unicode_data():
 * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-===== END APPLE HOST NOTICE: text-025 =====
+===== END APPLE HOST NOTICE: text-027 =====
 
-===== BEGIN APPLE HOST NOTICE: text-026 =====
+===== BEGIN APPLE HOST NOTICE: text-028 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -820,9 +1058,9 @@ def load_unicode_data():
 * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-===== END APPLE HOST NOTICE: text-026 =====
+===== END APPLE HOST NOTICE: text-028 =====
 
-===== BEGIN APPLE HOST NOTICE: text-027 =====
+===== BEGIN APPLE HOST NOTICE: text-029 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -855,9 +1093,9 @@ def load_unicode_data():
 * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-===== END APPLE HOST NOTICE: text-027 =====
+===== END APPLE HOST NOTICE: text-029 =====
 
-===== BEGIN APPLE HOST NOTICE: text-028 =====
+===== BEGIN APPLE HOST NOTICE: text-030 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -889,9 +1127,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-028 =====
+===== END APPLE HOST NOTICE: text-030 =====
 
-===== BEGIN APPLE HOST NOTICE: text-029 =====
+===== BEGIN APPLE HOST NOTICE: text-031 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -925,9 +1163,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-029 =====
+===== END APPLE HOST NOTICE: text-031 =====
 
-===== BEGIN APPLE HOST NOTICE: text-030 =====
+===== BEGIN APPLE HOST NOTICE: text-032 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -963,9 +1201,9 @@ def load_unicode_data():
  *
  * Borrowed from FreeBSD's <sys/endian.h>
  */
-===== END APPLE HOST NOTICE: text-030 =====
+===== END APPLE HOST NOTICE: text-032 =====
 
-===== BEGIN APPLE HOST NOTICE: text-031 =====
+===== BEGIN APPLE HOST NOTICE: text-033 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -997,9 +1235,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-031 =====
+===== END APPLE HOST NOTICE: text-033 =====
 
-===== BEGIN APPLE HOST NOTICE: text-032 =====
+===== BEGIN APPLE HOST NOTICE: text-034 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1033,9 +1271,9 @@ def load_unicode_data():
  *
  * $FreeBSD: head/lib/libarchive/archive_entry.h 201096 2009-12-28 02:41:27Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-032 =====
+===== END APPLE HOST NOTICE: text-034 =====
 
-===== BEGIN APPLE HOST NOTICE: text-033 =====
+===== BEGIN APPLE HOST NOTICE: text-035 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1097,9 +1335,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-033 =====
+===== END APPLE HOST NOTICE: text-035 =====
 
-===== BEGIN APPLE HOST NOTICE: text-034 =====
+===== BEGIN APPLE HOST NOTICE: text-036 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1132,9 +1370,9 @@ def load_unicode_data():
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-034 =====
+===== END APPLE HOST NOTICE: text-036 =====
 
-===== BEGIN APPLE HOST NOTICE: text-035 =====
+===== BEGIN APPLE HOST NOTICE: text-037 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1167,9 +1405,9 @@ def load_unicode_data():
  *
  * $FreeBSD: head/lib/libarchive/archive_entry_private.h 201096 2009-12-28 02:41:27Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-035 =====
+===== END APPLE HOST NOTICE: text-037 =====
 
-===== BEGIN APPLE HOST NOTICE: text-036 =====
+===== BEGIN APPLE HOST NOTICE: text-038 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1201,9 +1439,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-036 =====
+===== END APPLE HOST NOTICE: text-038 =====
 
-===== BEGIN APPLE HOST NOTICE: text-037 =====
+===== BEGIN APPLE HOST NOTICE: text-039 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1238,9 +1476,9 @@ def load_unicode_data():
 **
 **  This code is in the public domain and has no copyright.
 */
-===== END APPLE HOST NOTICE: text-037 =====
+===== END APPLE HOST NOTICE: text-039 =====
 
-===== BEGIN APPLE HOST NOTICE: text-038 =====
+===== BEGIN APPLE HOST NOTICE: text-040 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1273,9 +1511,9 @@ def load_unicode_data():
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-038 =====
+===== END APPLE HOST NOTICE: text-040 =====
 
-===== BEGIN APPLE HOST NOTICE: text-039 =====
+===== BEGIN APPLE HOST NOTICE: text-041 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1310,9 +1548,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-039 =====
+===== END APPLE HOST NOTICE: text-041 =====
 
-===== BEGIN APPLE HOST NOTICE: text-040 =====
+===== BEGIN APPLE HOST NOTICE: text-042 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1345,9 +1583,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-040 =====
+===== END APPLE HOST NOTICE: text-042 =====
 
-===== BEGIN APPLE HOST NOTICE: text-041 =====
+===== BEGIN APPLE HOST NOTICE: text-043 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1386,9 +1624,9 @@ def load_unicode_data():
  */
 
 /* Originally from NetBSD's mknod(8) source. */
-===== END APPLE HOST NOTICE: text-041 =====
+===== END APPLE HOST NOTICE: text-043 =====
 
-===== BEGIN APPLE HOST NOTICE: text-042 =====
+===== BEGIN APPLE HOST NOTICE: text-044 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1427,9 +1665,9 @@ def load_unicode_data():
  */
 
 /* Originally from NetBSD's mknod(8) source. */
-===== END APPLE HOST NOTICE: text-042 =====
+===== END APPLE HOST NOTICE: text-044 =====
 
-===== BEGIN APPLE HOST NOTICE: text-043 =====
+===== BEGIN APPLE HOST NOTICE: text-045 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1461,9 +1699,9 @@ def load_unicode_data():
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-043 =====
+===== END APPLE HOST NOTICE: text-045 =====
 
-===== BEGIN APPLE HOST NOTICE: text-044 =====
+===== BEGIN APPLE HOST NOTICE: text-046 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1497,9 +1735,9 @@ def load_unicode_data():
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-044 =====
+===== END APPLE HOST NOTICE: text-046 =====
 
-===== BEGIN APPLE HOST NOTICE: text-045 =====
+===== BEGIN APPLE HOST NOTICE: text-047 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1542,9 +1780,9 @@ def load_unicode_data():
  * actively trying to minimize #if blocks within the main source,
  * since they obfuscate the code.
  */
-===== END APPLE HOST NOTICE: text-045 =====
+===== END APPLE HOST NOTICE: text-047 =====
 
-===== BEGIN APPLE HOST NOTICE: text-046 =====
+===== BEGIN APPLE HOST NOTICE: text-048 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1579,9 +1817,9 @@ def load_unicode_data():
  */
 
 /* !!ONLY FOR USE INTERNALLY TO LIBARCHIVE!! */
-===== END APPLE HOST NOTICE: text-046 =====
+===== END APPLE HOST NOTICE: text-048 =====
 
-===== BEGIN APPLE HOST NOTICE: text-047 =====
+===== BEGIN APPLE HOST NOTICE: text-049 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1591,9 +1829,9 @@ def load_unicode_data():
 /* Ppmd7.c -- PPMdH codec
 2010-03-12 : Igor Pavlov : Public domain
 This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
-===== END APPLE HOST NOTICE: text-047 =====
+===== END APPLE HOST NOTICE: text-049 =====
 
-===== BEGIN APPLE HOST NOTICE: text-048 =====
+===== BEGIN APPLE HOST NOTICE: text-050 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1607,9 +1845,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
 /* This code supports virtual RangeDecoder and includes the implementation
 of RangeCoder from 7z, instead of RangeCoder from original PPMd var.H.
 If you need the compatibility with original PPMd var.H, you can use external RangeDecoder */
-===== END APPLE HOST NOTICE: text-048 =====
+===== END APPLE HOST NOTICE: text-050 =====
 
-===== BEGIN APPLE HOST NOTICE: text-049 =====
+===== BEGIN APPLE HOST NOTICE: text-051 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1619,9 +1857,9 @@ If you need the compatibility with original PPMd var.H, you can use external Ran
 /* Ppmd8.c -- PPMdI codec
 2016-05-21 : Igor Pavlov : Public domain
 This code is based on PPMd var.I (2002): Dmitry Shkarin : Public domain */
-===== END APPLE HOST NOTICE: text-049 =====
+===== END APPLE HOST NOTICE: text-051 =====
 
-===== BEGIN APPLE HOST NOTICE: text-050 =====
+===== BEGIN APPLE HOST NOTICE: text-052 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1633,9 +1871,9 @@ This code is based on PPMd var.I (2002): Dmitry Shkarin : Public domain */
 This code is based on:
   PPMd var.I (2002): Dmitry Shkarin : Public domain
   Carryless rangecoder (1999): Dmitry Subbotin : Public domain */
-===== END APPLE HOST NOTICE: text-050 =====
+===== END APPLE HOST NOTICE: text-052 =====
 
-===== BEGIN APPLE HOST NOTICE: text-051 =====
+===== BEGIN APPLE HOST NOTICE: text-053 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1645,9 +1883,9 @@ This code is based on:
 /* Ppmd.h -- PPMD codec common code
 2010-03-12 : Igor Pavlov : Public domain
 This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
-===== END APPLE HOST NOTICE: text-051 =====
+===== END APPLE HOST NOTICE: text-053 =====
 
-===== BEGIN APPLE HOST NOTICE: text-052 =====
+===== BEGIN APPLE HOST NOTICE: text-054 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1680,9 +1918,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/archive_private.h 201098 2009-12-28 02:58:14Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-052 =====
+===== END APPLE HOST NOTICE: text-054 =====
 
-===== BEGIN APPLE HOST NOTICE: text-053 =====
+===== BEGIN APPLE HOST NOTICE: text-055 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1718,9 +1956,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-053 =====
+===== END APPLE HOST NOTICE: text-055 =====
 
-===== BEGIN APPLE HOST NOTICE: text-054 =====
+===== BEGIN APPLE HOST NOTICE: text-056 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1757,9 +1995,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * Based on: NetBSD: rb.c,v 1.6 2010/04/30 13:58:09 joerg Exp
  */
-===== END APPLE HOST NOTICE: text-054 =====
+===== END APPLE HOST NOTICE: text-056 =====
 
-===== BEGIN APPLE HOST NOTICE: text-055 =====
+===== BEGIN APPLE HOST NOTICE: text-057 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1796,9 +2034,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * Based on NetBSD: rb.h,v 1.13 2009/08/16 10:57:01 yamt Exp
  */
-===== END APPLE HOST NOTICE: text-055 =====
+===== END APPLE HOST NOTICE: text-057 =====
 
-===== BEGIN APPLE HOST NOTICE: text-056 =====
+===== BEGIN APPLE HOST NOTICE: text-058 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1837,9 +2075,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * far as possible, separated out into separate files to avoid
  * needlessly bloating statically-linked clients.
  */
-===== END APPLE HOST NOTICE: text-056 =====
+===== END APPLE HOST NOTICE: text-058 =====
 
-===== BEGIN APPLE HOST NOTICE: text-057 =====
+===== BEGIN APPLE HOST NOTICE: text-059 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1871,9 +2109,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-057 =====
+===== END APPLE HOST NOTICE: text-059 =====
 
-===== BEGIN APPLE HOST NOTICE: text-058 =====
+===== BEGIN APPLE HOST NOTICE: text-060 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1906,9 +2144,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-058 =====
+===== END APPLE HOST NOTICE: text-060 =====
 
-===== BEGIN APPLE HOST NOTICE: text-059 =====
+===== BEGIN APPLE HOST NOTICE: text-061 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1943,9 +2181,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  */
 
 /* This is the tree-walking code for POSIX systems. */
-===== END APPLE HOST NOTICE: text-059 =====
+===== END APPLE HOST NOTICE: text-061 =====
 
-===== BEGIN APPLE HOST NOTICE: text-060 =====
+===== BEGIN APPLE HOST NOTICE: text-062 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -1979,9 +2217,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/archive_read_disk_private.h 201105 2009-12-28 03:20:54Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-060 =====
+===== END APPLE HOST NOTICE: text-062 =====
 
-===== BEGIN APPLE HOST NOTICE: text-061 =====
+===== BEGIN APPLE HOST NOTICE: text-063 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2014,9 +2252,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-061 =====
+===== END APPLE HOST NOTICE: text-063 =====
 
-===== BEGIN APPLE HOST NOTICE: text-062 =====
+===== BEGIN APPLE HOST NOTICE: text-064 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2049,9 +2287,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/archive_read_private.h 201088 2009-12-28 02:18:55Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-062 =====
+===== END APPLE HOST NOTICE: text-064 =====
 
-===== BEGIN APPLE HOST NOTICE: text-063 =====
+===== BEGIN APPLE HOST NOTICE: text-065 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2084,9 +2322,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-063 =====
+===== END APPLE HOST NOTICE: text-065 =====
 
-===== BEGIN APPLE HOST NOTICE: text-064 =====
+===== BEGIN APPLE HOST NOTICE: text-066 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2156,9 +2394,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-064 =====
+===== END APPLE HOST NOTICE: text-066 =====
 
-===== BEGIN APPLE HOST NOTICE: text-065 =====
+===== BEGIN APPLE HOST NOTICE: text-067 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2192,9 +2430,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-065 =====
+===== END APPLE HOST NOTICE: text-067 =====
 
-===== BEGIN APPLE HOST NOTICE: text-066 =====
+===== BEGIN APPLE HOST NOTICE: text-068 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2227,9 +2465,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-066 =====
+===== END APPLE HOST NOTICE: text-068 =====
 
-===== BEGIN APPLE HOST NOTICE: text-067 =====
+===== BEGIN APPLE HOST NOTICE: text-069 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2261,9 +2499,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-067 =====
+===== END APPLE HOST NOTICE: text-069 =====
 
-===== BEGIN APPLE HOST NOTICE: text-068 =====
+===== BEGIN APPLE HOST NOTICE: text-070 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2294,9 +2532,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-068 =====
+===== END APPLE HOST NOTICE: text-070 =====
 
-===== BEGIN APPLE HOST NOTICE: text-069 =====
+===== BEGIN APPLE HOST NOTICE: text-071 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2328,9 +2566,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-069 =====
+===== END APPLE HOST NOTICE: text-071 =====
 
-===== BEGIN APPLE HOST NOTICE: text-070 =====
+===== BEGIN APPLE HOST NOTICE: text-072 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2361,9 +2599,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-070 =====
+===== END APPLE HOST NOTICE: text-072 =====
 
-===== BEGIN APPLE HOST NOTICE: text-071 =====
+===== BEGIN APPLE HOST NOTICE: text-073 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2394,9 +2632,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-071 =====
+===== END APPLE HOST NOTICE: text-073 =====
 
-===== BEGIN APPLE HOST NOTICE: text-072 =====
+===== BEGIN APPLE HOST NOTICE: text-074 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2430,9 +2668,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-072 =====
+===== END APPLE HOST NOTICE: text-074 =====
 
-===== BEGIN APPLE HOST NOTICE: text-073 =====
+===== BEGIN APPLE HOST NOTICE: text-075 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2464,9 +2702,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-073 =====
+===== END APPLE HOST NOTICE: text-075 =====
 
-===== BEGIN APPLE HOST NOTICE: text-074 =====
+===== BEGIN APPLE HOST NOTICE: text-076 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2498,9 +2736,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-074 =====
+===== END APPLE HOST NOTICE: text-076 =====
 
-===== BEGIN APPLE HOST NOTICE: text-075 =====
+===== BEGIN APPLE HOST NOTICE: text-077 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2533,9 +2771,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-075 =====
+===== END APPLE HOST NOTICE: text-077 =====
 
-===== BEGIN APPLE HOST NOTICE: text-076 =====
+===== BEGIN APPLE HOST NOTICE: text-078 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2566,9 +2804,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-076 =====
+===== END APPLE HOST NOTICE: text-078 =====
 
-===== BEGIN APPLE HOST NOTICE: text-077 =====
+===== BEGIN APPLE HOST NOTICE: text-079 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2601,9 +2839,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-077 =====
+===== END APPLE HOST NOTICE: text-079 =====
 
-===== BEGIN APPLE HOST NOTICE: text-078 =====
+===== BEGIN APPLE HOST NOTICE: text-080 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2634,9 +2872,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
 * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-===== END APPLE HOST NOTICE: text-078 =====
+===== END APPLE HOST NOTICE: text-080 =====
 
-===== BEGIN APPLE HOST NOTICE: text-079 =====
+===== BEGIN APPLE HOST NOTICE: text-081 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2667,9 +2905,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-079 =====
+===== END APPLE HOST NOTICE: text-081 =====
 
-===== BEGIN APPLE HOST NOTICE: text-080 =====
+===== BEGIN APPLE HOST NOTICE: text-082 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2702,9 +2940,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-080 =====
+===== END APPLE HOST NOTICE: text-082 =====
 
-===== BEGIN APPLE HOST NOTICE: text-081 =====
+===== BEGIN APPLE HOST NOTICE: text-083 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2735,9 +2973,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-081 =====
+===== END APPLE HOST NOTICE: text-083 =====
 
-===== BEGIN APPLE HOST NOTICE: text-082 =====
+===== BEGIN APPLE HOST NOTICE: text-084 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2770,9 +3008,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-082 =====
+===== END APPLE HOST NOTICE: text-084 =====
 
-===== BEGIN APPLE HOST NOTICE: text-083 =====
+===== BEGIN APPLE HOST NOTICE: text-085 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2804,9 +3042,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-083 =====
+===== END APPLE HOST NOTICE: text-085 =====
 
-===== BEGIN APPLE HOST NOTICE: text-084 =====
+===== BEGIN APPLE HOST NOTICE: text-086 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2840,9 +3078,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * $FreeBSD: head/lib/libarchive/archive_string.h 201092 2009-12-28 02:26:06Z kientzle $
  *
  */
-===== END APPLE HOST NOTICE: text-084 =====
+===== END APPLE HOST NOTICE: text-086 =====
 
-===== BEGIN APPLE HOST NOTICE: text-085 =====
+===== BEGIN APPLE HOST NOTICE: text-087 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2884,9 +3122,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  *  See also http://unicode.org/report/tr15/
  */
-===== END APPLE HOST NOTICE: text-085 =====
+===== END APPLE HOST NOTICE: text-087 =====
 
-===== BEGIN APPLE HOST NOTICE: text-086 =====
+===== BEGIN APPLE HOST NOTICE: text-088 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2919,9 +3157,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-086 =====
+===== END APPLE HOST NOTICE: text-088 =====
 
-===== BEGIN APPLE HOST NOTICE: text-087 =====
+===== BEGIN APPLE HOST NOTICE: text-089 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -2973,9 +3211,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * identifying a file.  This doesn't match well with Windows.  I'm
  * considering alternative APIs.
  */
-===== END APPLE HOST NOTICE: text-087 =====
+===== END APPLE HOST NOTICE: text-089 =====
 
-===== BEGIN APPLE HOST NOTICE: text-088 =====
+===== BEGIN APPLE HOST NOTICE: text-090 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3024,9 +3262,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * Visual Studio and the Windows SDK define off_t as 32 bits; Win32's
  * more modern file handling APIs all use __int64 instead of off_t.
  */
-===== END APPLE HOST NOTICE: text-088 =====
+===== END APPLE HOST NOTICE: text-090 =====
 
-===== BEGIN APPLE HOST NOTICE: text-089 =====
+===== BEGIN APPLE HOST NOTICE: text-091 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3057,9 +3295,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-089 =====
+===== END APPLE HOST NOTICE: text-091 =====
 
-===== BEGIN APPLE HOST NOTICE: text-090 =====
+===== BEGIN APPLE HOST NOTICE: text-092 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3123,9 +3361,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-090 =====
+===== END APPLE HOST NOTICE: text-092 =====
 
-===== BEGIN APPLE HOST NOTICE: text-091 =====
+===== BEGIN APPLE HOST NOTICE: text-093 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3157,9 +3395,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-091 =====
+===== END APPLE HOST NOTICE: text-093 =====
 
-===== BEGIN APPLE HOST NOTICE: text-092 =====
+===== BEGIN APPLE HOST NOTICE: text-094 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3190,9 +3428,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-092 =====
+===== END APPLE HOST NOTICE: text-094 =====
 
-===== BEGIN APPLE HOST NOTICE: text-093 =====
+===== BEGIN APPLE HOST NOTICE: text-095 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3225,9 +3463,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-093 =====
+===== END APPLE HOST NOTICE: text-095 =====
 
-===== BEGIN APPLE HOST NOTICE: text-094 =====
+===== BEGIN APPLE HOST NOTICE: text-096 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3261,9 +3499,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/archive_write_disk_private.h 201086 2009-12-28 02:17:53Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-094 =====
+===== END APPLE HOST NOTICE: text-096 =====
 
-===== BEGIN APPLE HOST NOTICE: text-095 =====
+===== BEGIN APPLE HOST NOTICE: text-097 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3296,9 +3534,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-095 =====
+===== END APPLE HOST NOTICE: text-097 =====
 
-===== BEGIN APPLE HOST NOTICE: text-096 =====
+===== BEGIN APPLE HOST NOTICE: text-098 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3331,9 +3569,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/archive_write_private.h 201155 2009-12-29 05:20:12Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-096 =====
+===== END APPLE HOST NOTICE: text-098 =====
 
-===== BEGIN APPLE HOST NOTICE: text-097 =====
+===== BEGIN APPLE HOST NOTICE: text-099 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3364,9 +3602,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-097 =====
+===== END APPLE HOST NOTICE: text-099 =====
 
-===== BEGIN APPLE HOST NOTICE: text-098 =====
+===== BEGIN APPLE HOST NOTICE: text-100 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3400,9 +3638,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-098 =====
+===== END APPLE HOST NOTICE: text-100 =====
 
-===== BEGIN APPLE HOST NOTICE: text-099 =====
+===== BEGIN APPLE HOST NOTICE: text-101 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3435,9 +3673,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-099 =====
+===== END APPLE HOST NOTICE: text-101 =====
 
-===== BEGIN APPLE HOST NOTICE: text-100 =====
+===== BEGIN APPLE HOST NOTICE: text-102 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3469,9 +3707,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-100 =====
+===== END APPLE HOST NOTICE: text-102 =====
 
-===== BEGIN APPLE HOST NOTICE: text-101 =====
+===== BEGIN APPLE HOST NOTICE: text-103 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3505,9 +3743,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-101 =====
+===== END APPLE HOST NOTICE: text-103 =====
 
-===== BEGIN APPLE HOST NOTICE: text-102 =====
+===== BEGIN APPLE HOST NOTICE: text-104 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3539,9 +3777,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-102 =====
+===== END APPLE HOST NOTICE: text-104 =====
 
-===== BEGIN APPLE HOST NOTICE: text-103 =====
+===== BEGIN APPLE HOST NOTICE: text-105 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3573,9 +3811,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-103 =====
+===== END APPLE HOST NOTICE: text-105 =====
 
-===== BEGIN APPLE HOST NOTICE: text-104 =====
+===== BEGIN APPLE HOST NOTICE: text-106 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3608,9 +3846,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-104 =====
+===== END APPLE HOST NOTICE: text-106 =====
 
-===== BEGIN APPLE HOST NOTICE: text-105 =====
+===== BEGIN APPLE HOST NOTICE: text-107 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3643,9 +3881,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD$
  */
-===== END APPLE HOST NOTICE: text-105 =====
+===== END APPLE HOST NOTICE: text-107 =====
 
-===== BEGIN APPLE HOST NOTICE: text-106 =====
+===== BEGIN APPLE HOST NOTICE: text-108 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3676,9 +3914,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-106 =====
+===== END APPLE HOST NOTICE: text-108 =====
 
-===== BEGIN APPLE HOST NOTICE: text-107 =====
+===== BEGIN APPLE HOST NOTICE: text-109 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3710,9 +3948,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-107 =====
+===== END APPLE HOST NOTICE: text-109 =====
 
-===== BEGIN APPLE HOST NOTICE: text-108 =====
+===== BEGIN APPLE HOST NOTICE: text-110 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3745,9 +3983,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-108 =====
+===== END APPLE HOST NOTICE: text-110 =====
 
-===== BEGIN APPLE HOST NOTICE: text-109 =====
+===== BEGIN APPLE HOST NOTICE: text-111 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3784,9 +4022,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
 /*
  * Development supported by Google Summer of Code 2008.
  */
-===== END APPLE HOST NOTICE: text-109 =====
+===== END APPLE HOST NOTICE: text-111 =====
 
-===== BEGIN APPLE HOST NOTICE: text-110 =====
+===== BEGIN APPLE HOST NOTICE: text-112 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3818,9 +4056,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-===== END APPLE HOST NOTICE: text-110 =====
+===== END APPLE HOST NOTICE: text-112 =====
 
-===== BEGIN APPLE HOST NOTICE: text-111 =====
+===== BEGIN APPLE HOST NOTICE: text-113 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3853,9 +4091,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  *
  * $FreeBSD: head/lib/libarchive/filter_fork.h 201087 2009-12-28 02:18:26Z kientzle $
  */
-===== END APPLE HOST NOTICE: text-111 =====
+===== END APPLE HOST NOTICE: text-113 =====
 
-===== BEGIN APPLE HOST NOTICE: text-112 =====
+===== BEGIN APPLE HOST NOTICE: text-114 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3887,9 +4125,9 @@ This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-112 =====
+===== END APPLE HOST NOTICE: text-114 =====
 
-===== BEGIN APPLE HOST NOTICE: text-113 =====
+===== BEGIN APPLE HOST NOTICE: text-115 =====
 类别：libarchive 前导注释
 组件：libarchive 3.4.3
 来源：
@@ -3927,9 +4165,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 You can contact the author at :
 - xxHash source repository : http://code.google.com/p/xxhash/
 */
-===== END APPLE HOST NOTICE: text-113 =====
+===== END APPLE HOST NOTICE: text-115 =====
 
-===== BEGIN APPLE HOST NOTICE: text-114 =====
+===== BEGIN APPLE HOST NOTICE: text-116 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -3969,9 +4207,9 @@ You can contact the author at :
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-===== END APPLE HOST NOTICE: text-114 =====
+===== END APPLE HOST NOTICE: text-116 =====
 
-===== BEGIN APPLE HOST NOTICE: text-115 =====
+===== BEGIN APPLE HOST NOTICE: text-117 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -3983,9 +4221,9 @@ You can contact the author at :
 This code is based on:
   PPMd var.I (2002): Dmitry Shkarin : Public domain
   Carryless rangecoder (1999): Dmitry Subbotin : Public domain */
-===== END APPLE HOST NOTICE: text-115 =====
+===== END APPLE HOST NOTICE: text-117 =====
 
-===== BEGIN APPLE HOST NOTICE: text-116 =====
+===== BEGIN APPLE HOST NOTICE: text-118 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4021,9 +4259,9 @@ This code is based on:
  *
  * RC4 is a registered trademark of RSA Laboratories.
  */
-===== END APPLE HOST NOTICE: text-116 =====
+===== END APPLE HOST NOTICE: text-118 =====
 
-===== BEGIN APPLE HOST NOTICE: text-117 =====
+===== BEGIN APPLE HOST NOTICE: text-119 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4037,9 +4275,9 @@ This code is based on:
  * 2008-10-04 : Igor Pavlov : Public domain
  *
  */
-===== END APPLE HOST NOTICE: text-117 =====
+===== END APPLE HOST NOTICE: text-119 =====
 
-===== BEGIN APPLE HOST NOTICE: text-118 =====
+===== BEGIN APPLE HOST NOTICE: text-120 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4053,9 +4291,9 @@ This code is based on:
  * 2008-10-04 : Igor Pavlov : Public domain
  *
  */
-===== END APPLE HOST NOTICE: text-118 =====
+===== END APPLE HOST NOTICE: text-120 =====
 
-===== BEGIN APPLE HOST NOTICE: text-119 =====
+===== BEGIN APPLE HOST NOTICE: text-121 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4063,9 +4301,9 @@ This code is based on:
 原始文本 SHA-256：4651bafa8c9c1a43280dc495a806937ed8c14233bb6f7c6c5e023dc6c76e99a6
 
 /* Taken from http://unixpapa.com/incnote/string.html */
-===== END APPLE HOST NOTICE: text-119 =====
+===== END APPLE HOST NOTICE: text-121 =====
 
-===== BEGIN APPLE HOST NOTICE: text-120 =====
+===== BEGIN APPLE HOST NOTICE: text-122 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4076,9 +4314,9 @@ This code is based on:
  * Following Constants for Hangul compositions this information comes from
  * Unicode Standard Annex #15  http://unicode.org/reports/tr15/
  */
-===== END APPLE HOST NOTICE: text-120 =====
+===== END APPLE HOST NOTICE: text-122 =====
 
-===== BEGIN APPLE HOST NOTICE: text-121 =====
+===== BEGIN APPLE HOST NOTICE: text-123 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4089,9 +4327,9 @@ This code is based on:
 			 * We have to combine Hangul characters according to
 			 * http://uniicode.org/reports/tr15/#Hangul
 			 */
-===== END APPLE HOST NOTICE: text-121 =====
+===== END APPLE HOST NOTICE: text-123 =====
 
-===== BEGIN APPLE HOST NOTICE: text-122 =====
+===== BEGIN APPLE HOST NOTICE: text-124 =====
 类别：libarchive 中段片段
 组件：libarchive 3.4.3
 来源：
@@ -4139,4 +4377,4 @@ AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
 ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
 PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 */
-===== END APPLE HOST NOTICE: text-122 =====
+===== END APPLE HOST NOTICE: text-124 =====

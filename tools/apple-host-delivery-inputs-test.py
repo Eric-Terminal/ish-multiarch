@@ -11,11 +11,13 @@ import subprocess
 import sys
 import tempfile
 
+from apple_host_manifest import MATERIAL_ICON_SNAPSHOT_BASE
+
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
-VALIDATOR = TOOLS / "apple-host-delivery-inputs.py"
 sys.path.insert(0, str(TOOLS))
+VALIDATOR = TOOLS / "apple-host-delivery-inputs.py"
 SPEC = importlib.util.spec_from_file_location(
     "apple_host_delivery_inputs", VALIDATOR
 )
@@ -436,6 +438,18 @@ def case_license_digest_drift(root):
     write_utf8(path, text.replace(row, "\t".join(fields)))
 
 
+def case_material_upstream_svg_drift(root):
+    path = (
+        root
+        / MATERIAL_ICON_SNAPSHOT_BASE
+        / "navigation/svg/production/ic_close_24px.svg"
+    )
+    data = path.read_bytes()
+    if data.count(b"M19 6.41") != 1:
+        fail("合成 Material 上游 SVG 缺少唯一变更点")
+    path.write_bytes(data.replace(b"M19 6.41", b"M18 6.41", 1))
+
+
 def case_notice_fragment_digest_drift(root):
     path = root / "third_party/apple-host/notice-fragments.tsv"
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -538,6 +552,19 @@ def case_required_license_missing(root):
     write_utf8(path, "\n".join(filtered) + "\n")
 
 
+def case_material_readme_lock_missing(root):
+    path = root / "third_party/apple-host/license-inputs.tsv"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    expected = (
+        "hterm-bundle\thterm\tprovenance\t"
+        f"{MATERIAL_ICON_SNAPSHOT_BASE}/README.md\t"
+    )
+    filtered = [line for line in lines if not line.startswith(expected)]
+    if len(filtered) != len(lines) - 1:
+        fail("无法从合成许可锁中移除 Material README")
+    write_utf8(path, "\n".join(filtered) + "\n")
+
+
 def case_hterm_output_path_drift(root):
     project = root / "iSH.xcodeproj/project.pbxproj"
     text = project.read_text(encoding="utf-8")
@@ -608,6 +635,10 @@ def main():
                 case_license_digest_drift,
                 "宿主许可复核输入摘要漂移",
             ),
+            "material-upstream-svg-drift": (
+                case_material_upstream_svg_drift,
+                "宿主许可复核输入摘要漂移",
+            ),
             "notice-fragment-digest-drift": (
                 case_notice_fragment_digest_drift,
                 "宿主声明片段摘要漂移",
@@ -670,6 +701,10 @@ def main():
             ),
             "license-row-missing": (
                 case_required_license_missing,
+                "宿主许可复核输入路径集合漂移",
+            ),
+            "material-readme-lock-missing": (
+                case_material_readme_lock_missing,
                 "宿主许可复核输入路径集合漂移",
             ),
             "hterm-output-drift": (

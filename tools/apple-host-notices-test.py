@@ -51,16 +51,20 @@ def test_production_output():
         b"===== BEGIN APPLE HOST NOTICE: overview ====="
     ):
         fail("宿主声明首行 marker 漂移")
-    if NOTICES.EXPECTED_NOTICE_TEXT_COUNT != 122:
+    if NOTICES.EXPECTED_NOTICE_TEXT_COUNT != 124:
         fail("宿主声明唯一正文组数量合同漂移")
     begin_count = first.count(b"===== BEGIN APPLE HOST NOTICE:")
-    if begin_count != 124 or begin_count != first.count(
+    if begin_count != 127 or begin_count != first.count(
         b"===== END APPLE HOST NOTICE:"
     ):
         fail("宿主声明 section marker 不平衡")
-    if first.count(b"===== BEGIN APPLE HOST NOTICE: text-") != 122:
+    if first.count(b"===== BEGIN APPLE HOST NOTICE: text-") != 124:
         fail("宿主声明正文 section 数量漂移")
-    for identifier in ("overview", "unresolved-provenance"):
+    for identifier in (
+        "overview",
+        "material-provenance",
+        "unresolved-provenance",
+    ):
         begin = (
             f"===== BEGIN APPLE HOST NOTICE: {identifier} =====\n"
         ).encode("utf-8")
@@ -75,6 +79,7 @@ def test_production_output():
         "组件：intl-segmenter snapshot\n",
         "组件：wcwidth 0.0.3\n",
         "组件：libarchive 3.4.3\n",
+        f"组件：Material Design Icons {NOTICES.MATERIAL_ICON_REVISION}\n",
     ):
         if metadata.encode("utf-8") not in first:
             fail(f"宿主声明缺少锁定版本元数据：{metadata.strip()}")
@@ -84,8 +89,10 @@ def test_production_output():
         "deps/libapps/libdot/third_party/intl-segmenter/LICENSE.md",
         "deps/libapps/libdot/third_party/wcwidth/LICENSE.md",
         "deps/libarchive/COPYING",
+        NOTICES.MATERIAL_ICON_LICENSE_PATH,
     ):
-        if (ROOT / relative).read_bytes() not in first:
+        content = (ROOT / relative).read_bytes()
+        if first.count(content) != 1:
             fail(f"宿主声明缺少完整许可文本：{relative}")
     if (ROOT / "deps/linux/COPYING").read_bytes() in first:
         fail("宿主声明错误收入 Linux COPYING 正文")
@@ -101,30 +108,65 @@ def test_production_output():
     expected_hterm_provenance = {
         "deps/libapps/hterm/concat/hterm_resources.concat",
         *NOTICES.MATERIAL_ICON_PATHS,
+        NOTICES.MATERIAL_ICON_README_PATH,
+        *(
+            f"{NOTICES.MATERIAL_ICON_SNAPSHOT_BASE}/{upstream}"
+            for _current, upstream in NOTICES.MATERIAL_ICON_SOURCES
+        ),
     }
     if hterm_provenance != expected_hterm_provenance:
         fail("hterm Material 图标 provenance 输入集合漂移")
 
+    for current, upstream in NOTICES.MATERIAL_ICON_SOURCES:
+        current_item = next(
+            fields
+            for fields in (row.split("\t") for row in license_rows)
+            if fields[3] == current
+        )
+        snapshot = f"{NOTICES.MATERIAL_ICON_SNAPSHOT_BASE}/{upstream}"
+        upstream_item = next(
+            fields
+            for fields in (row.split("\t") for row in license_rows)
+            if fields[3] == snapshot
+        )
+        for marker in (
+            f"- 当前 {current}；{current_item[4]} 字节；SHA-256 "
+            f"{current_item[5]}",
+            f"  上游 {upstream}；{upstream_item[4]} 字节；SHA-256 "
+            f"{upstream_item[5]}",
+        ):
+            if first.count(marker.encode("utf-8")) != 1:
+                fail(f"宿主声明缺少唯一 Material 映射证据：{marker}")
     for marker in (
-        *NOTICES.MATERIAL_ICON_PATHS,
         NOTICES.MATERIAL_ICON_IMPORT_COMMIT,
-        "google/material-design-icons",
-    ):
-        encoded = marker.encode("utf-8")
-        if first.count(encoded) != 1:
-            fail(f"宿主声明缺少唯一 Material 来源证据：{marker}")
-    for marker in (
-        "适用许可版本或权威许可原文",
-        "不能据此推定 Apache 2.0",
-        "公共发行前必须补齐这些证据",
+        NOTICES.MATERIAL_ICON_REVISION,
+        NOTICES.MATERIAL_ICON_SOURCE_URL,
+        "作为同时期不可变快照",
+        "这不表示导入者明确记录或选择了该 revision",
+        "校验器会离线逐字重放该关系",
+        f"{NOTICES.MATERIAL_ICON_README_PATH}:37-40",
+        "在 Apache License Version 2.0 下提供",
     ):
         if marker.encode("utf-8") not in first:
-            fail(f"宿主声明没有明确 Material 许可边界：{marker}")
+            fail(f"宿主声明缺少 Material 来源或许可证据：{marker}")
+    readme_lines = (
+        ROOT / NOTICES.MATERIAL_ICON_README_PATH
+    ).read_bytes().splitlines(keepends=True)
+    applicability = b"".join(readme_lines[36:40])
+    if first.count(applicability) != 1:
+        fail("宿主声明缺少唯一 Material Apache-2.0 适用范围原文")
+    for stale in (
+        "当前锁定仓内没有对应上游 revision",
+        "不能据此推定 Apache 2.0",
+        "Material Design 图标：锁定 libapps 历史提交",
+    ):
+        if stale.encode("utf-8") in first:
+            fail(f"宿主声明仍保留已闭合的 Material 未决文案：{stale}")
 
     fragments = (
         ROOT / "third_party/apple-host/notice-fragments.tsv"
     ).read_text(encoding="utf-8").splitlines()[1:]
-    if len(fragments) != 21:
+    if len(fragments) != 22:
         fail("宿主声明片段数量合同漂移")
     for row in fragments:
         path, start, end, _size, _sha256 = row.split("\t")
@@ -168,6 +210,102 @@ def test_production_output():
 
     output = ROOT / NOTICES.OUTPUT_RELATIVE
     NOTICES.check_output(output, first)
+
+
+def test_material_icon_formatting(temporary_root):
+    upstream = b'<svg width="24"><path d="M0 0z"/></svg>'
+    current = NOTICES.format_material_icon(upstream, "合成上游 SVG")
+    if current != (
+        b'<svg width="24">\n  <path d="M0 0z"/>\n</svg>\n'
+    ):
+        fail("Material SVG 固定格式化没有生成预期字节")
+    expect_failure(
+        lambda: NOTICES.format_material_icon(
+            upstream + b"\n", "带文件尾换行的合成上游 SVG"
+        ),
+        "结构漂移",
+    )
+
+    inputs = {}
+    evidence = {
+        NOTICES.MATERIAL_ICON_LICENSE_PATH: (
+            b"Apache License\n"
+            b"Version 2.0, January 2004\n"
+            b"http://www.apache.org/licenses/\n"
+            b"TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n"
+        ),
+        NOTICES.MATERIAL_ICON_README_PATH: (
+            NOTICES.MATERIAL_ICON_README_LICENSE_HEADING
+            + NOTICES.MATERIAL_ICON_README_APPLICABILITY
+        ),
+    }
+    for relative, role in (
+        (NOTICES.MATERIAL_ICON_LICENSE_PATH, "license"),
+        (NOTICES.MATERIAL_ICON_README_PATH, "provenance"),
+    ):
+        path = temporary_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(evidence[relative])
+        inputs[relative] = SimpleNamespace(
+            delivery_unit="hterm-bundle",
+            component="hterm",
+            role=role,
+        )
+    for local, upstream_relative in NOTICES.MATERIAL_ICON_SOURCES:
+        snapshot = (
+            f"{NOTICES.MATERIAL_ICON_SNAPSHOT_BASE}/{upstream_relative}"
+        )
+        for relative, content in (
+            (snapshot, upstream),
+            (local, current),
+        ):
+            path = temporary_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            inputs[relative] = SimpleNamespace(
+                delivery_unit="hterm-bundle",
+                component="hterm",
+                role="provenance",
+            )
+    NOTICES.verify_material_icon_evidence(temporary_root, inputs)
+
+    readme_path = temporary_root / NOTICES.MATERIAL_ICON_README_PATH
+    readme_path.write_bytes(
+        evidence[NOTICES.MATERIAL_ICON_README_PATH].replace(
+            b"Apache License Version 2.0",
+            b"Apache License Version 1.0",
+        )
+    )
+    expect_failure(
+        lambda: NOTICES.verify_material_icon_evidence(
+            temporary_root, inputs
+        ),
+        "README 的 Apache-2.0 适用声明漂移",
+    )
+    readme_path.write_bytes(evidence[NOTICES.MATERIAL_ICON_README_PATH])
+
+    license_path = temporary_root / NOTICES.MATERIAL_ICON_LICENSE_PATH
+    license_path.write_bytes(
+        evidence[NOTICES.MATERIAL_ICON_LICENSE_PATH].replace(
+            b"Version 2.0", b"Version 1.0"
+        )
+    )
+    expect_failure(
+        lambda: NOTICES.verify_material_icon_evidence(
+            temporary_root, inputs
+        ),
+        "LICENSE 的 Apache-2.0 正文标记漂移",
+    )
+    license_path.write_bytes(evidence[NOTICES.MATERIAL_ICON_LICENSE_PATH])
+
+    first_local = NOTICES.MATERIAL_ICON_SOURCES[0][0]
+    (temporary_root / first_local).write_bytes(current.replace(b"M0", b"M1"))
+    expect_failure(
+        lambda: NOTICES.verify_material_icon_evidence(
+            temporary_root, inputs
+        ),
+        "固定格式化关系漂移",
+    )
 
 
 def test_leading_comments_and_include_closure(temporary_root):
@@ -333,6 +471,7 @@ def main():
         prefix="ish-apple-host-notices."
     ) as temporary:
         temporary_root = Path(temporary)
+        test_material_icon_formatting(temporary_root)
         test_leading_comments_and_include_closure(temporary_root)
         test_fragment_uniqueness(temporary_root)
         test_output_drift_and_atomicity(temporary_root)

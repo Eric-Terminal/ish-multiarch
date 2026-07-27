@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import re
 import stat
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
@@ -14,6 +16,11 @@ from apple_pbx import (
     phase_owners,
     property_value,
     resolve_file_references,
+)
+from apple_host_manifest import (
+    MATERIAL_ICON_LICENSE_PATH,
+    MATERIAL_ICON_README_PATH,
+    MATERIAL_ICON_SNAPSHOT_PATHS,
 )
 
 
@@ -39,6 +46,15 @@ PROJECT_RAW_INPUTS = (
         "distribution/apple/project-license/license-inputs/GPL-3.0.txt"
     ),
 )
+HOST_RAW_INPUTS = tuple(
+    PurePosixPath(relative)
+    for relative in (
+        MATERIAL_ICON_LICENSE_PATH,
+        MATERIAL_ICON_README_PATH,
+        *MATERIAL_ICON_SNAPSHOT_PATHS,
+    )
+)
+RAW_RESOURCE_INPUTS = PROJECT_RAW_INPUTS + HOST_RAW_INPUTS
 RESOURCE_CONTRACTS = {
     ALPINE_NOTICES_RELATIVE: {
         "owners": {"iSH", "iSHWatch"},
@@ -166,7 +182,7 @@ def verify_project_resources(project, build_files, resolved):
             if len(re.findall(rf"\b{build_id}\b", project)) != 2:
                 fail(f"资源成员 {build_id} 只能出现在定义和目标阶段各一次")
 
-    for relative in PROJECT_RAW_INPUTS:
+    for relative in RAW_RESOURCE_INPUTS:
         for reference in resolved.get(str(relative), []):
             build_ids, used_ids, owners = owners_for_reference(
                 project,
@@ -175,7 +191,7 @@ def verify_project_resources(project, build_files, resolved):
                 "PBXResourcesBuildPhase",
             )
             if build_ids or used_ids or owners:
-                fail(f"项目许可原始输入不得进入 Resources：{relative}")
+                fail(f"许可与来源原始输入不得进入 Resources：{relative}")
 
     rootfs_inputs = read_text(
         "tools/apple-aarch64-rootfs-inputs.xcfilelist"
@@ -204,6 +220,73 @@ def verify_project_resources(project, build_files, resolved):
                 fail(
                     f"RootFS Xcode 阶段不能读取或写入 {notices_relative.name}"
                 )
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_product_bundles(values):
+    forbidden = {}
+    for relative in HOST_RAW_INPUTS:
+        path = ROOT / relative
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            fail(f"Material 原始输入必须是常规文件：{relative}")
+        digest = sha256_file(path)
+        if digest in forbidden:
+            fail("Material 原始输入摘要必须互不相同")
+        forbidden[digest] = relative
+
+    for value in values:
+        bundle = Path(value)
+        try:
+            metadata = bundle.lstat()
+        except OSError as error:
+            fail(f"无法检查产品 bundle {bundle}：{error}")
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
+            metadata.st_mode
+        ):
+            fail(f"产品 bundle 必须是非符号链接目录：{bundle}")
+        for candidate in bundle.rglob("*"):
+            if not stat.S_ISREG(candidate.lstat().st_mode):
+                continue
+            source = forbidden.get(sha256_file(candidate))
+            if source is not None:
+                fail(
+                    "产品不得携带 Material 原始快照字节："
+                    f"{candidate}（来源 {source}）"
+                )
+
+
+def test_product_bundle_gate():
+    with tempfile.TemporaryDirectory(
+        prefix="ish-apple-license-bundle."
+    ) as temporary:
+        bundle = Path(temporary) / "Synthetic.app"
+        nested = bundle / "PlugIns/Synthetic.appex"
+        nested.mkdir(parents=True)
+        (bundle / "allowed.txt").write_bytes(b"allowed")
+        verify_product_bundles([bundle])
+
+        forbidden = nested / "renamed.bin"
+        for relative in HOST_RAW_INPUTS:
+            forbidden.write_bytes((ROOT / relative).read_bytes())
+            try:
+                verify_product_bundles([bundle])
+            except ValueError as error:
+                if (
+                    "产品不得携带 Material 原始快照字节" not in str(error)
+                    or str(relative) not in str(error)
+                ):
+                    fail(f"产品原始输入负例命中错误诊断：{error}")
+            else:
+                fail(f"产品原始输入改名复制负例意外通过：{relative}")
+            forbidden.unlink()
 
 
 def normalized(content):
@@ -565,7 +648,9 @@ def main():
     verify_project_resources(project, build_files, resolved)
     verify_iphone_contract(project, build_files, resolved)
     verify_watch_contract(project, build_files, resolved)
-    print("Apple 产品许可、源码与第三方声明接线测试通过")
+    test_product_bundle_gate()
+    verify_product_bundles(sys.argv[1:])
+    print("Apple 产品许可、源码与第三方声明接线及产物排除测试通过")
 
 
 if __name__ == "__main__":

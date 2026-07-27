@@ -20,3 +20,4 @@ deps/libarchive/libarchive/archive_read_support_format_mtree.c	1413	1413	57	4651
 deps/libarchive/libarchive/archive_string.c	2797	2800	146	5cfb425aa9001a9f6440bde55b2de8db601f643e5697ddbb3de5864b80e5652d
 deps/libarchive/libarchive/archive_string.c	3043	3046	116	5543083c75e6646d8506a82deda6c909b949ca48bcfa6c38c5b0671db9b03349
 deps/libarchive/libarchive/archive_windows.c	789	829	1714	1bf02fb89ca433cf7c4eae323af30d55dbb871aa80e91c3880de05680fbd37dd
+third_party/apple-host/material-design-icons/3d4a32b327272c458e12586437c3ca0696b28a69/README.md	37	40	392	6170f9ff1747fa2a4049af142cbeb9a738aab4a6d5c3b5b0897a601698ee6af7

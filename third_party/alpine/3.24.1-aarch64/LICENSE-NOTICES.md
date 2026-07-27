@@ -67,9 +67,10 @@ App，并由静态归属门禁、双端 UI 用例及公开 CI 的 bundle 字节�
 明确排除该资源。独立的项目许可正文与当前公开仓库入口已经进入普通 iSH、iSH+Linux 与
 iSHWatch 三种 App，因此 iPhone/Watch 的共享页面会按产品实际资源组合显示项目许可和
 Alpine 声明。
-Apple 宿主侧 libarchive 与 hterm 闭包已经使用独立的确定性正文和产品资源门禁，但
-BLAKE2 许可分支、Material 图标权威许可、wcwidth Unicode 13.0.0 三份 UCD 输入及许可、
+Apple 宿主侧 libarchive 与 hterm 闭包已经使用独立的确定性正文和产品资源门禁；三个
+已交付 Material 图标的同时期上游快照、固定格式化关系和 Apache-2.0 适用证据也已由该
+宿主锁闭合。但 BLAKE2 许可分支、wcwidth Unicode 13.0.0 三份 UCD 输入及许可、
 lib_colors 的 W3C/X11 来源、libarchive 的 UnicodeData/UAX #15 来源及可选 Linux 产品
 范围仍须单独闭合。项目许可与规范仓库入口的产品接线不等于精确二进制 revision 或
-Release 已经绑定：这些外部来源、上述 LGPL 发行决策和固定对应源码制品仍须在公开
+Release 已经绑定：这些剩余外部来源、上述 LGPL 发行决策和固定对应源码制品仍须在公开
 release 位置形成可回读、可校验的完整交付链。

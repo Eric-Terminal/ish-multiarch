@@ -129,6 +129,7 @@ jobs:
                  -o -name GPL-3.0.txt \) \
               -print -quit
           )"
+          python3 -B tools/apple-license-notices-app-test.py "$app"
       - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
@@ -229,6 +230,10 @@ jobs:
                  -o -name GPL-3.0.txt \) \
               -print -quit
           )"
+          python3 -B tools/apple-license-notices-app-test.py \
+            "$products/Release-watchos/iSHWatchLinkSmoke.app" \
+            "$products/Release-watchsimulator/iSHWatchLinkSmoke.app" \
+            "$watch_app"
       - name: Build
         if: matrix.kernel == 'linux'
         shell: bash
@@ -267,6 +272,7 @@ jobs:
                  -o -name GPL-3.0.txt \) \
               -print -quit
           )"
+          python3 -B tools/apple-license-notices-app-test.py "$app"
           meson_build="$(dirname "$app")/meson/arch-x86_64"
           test -f "$meson_build/meson-private/coredata.dat"
           IFS=$'\t' read -r buildtype kernel < <(

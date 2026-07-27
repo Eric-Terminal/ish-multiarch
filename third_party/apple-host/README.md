@@ -14,7 +14,7 @@
   `license` 表示收入正文的完整许可，`inline-notice` 表示可提取片段的源码
   复核输入，`provenance` 只表示来源或生成证据；后二者都不替版权方选择许可
   分支，也不证明外部许可已经闭合。
-- `notice-fragments.tsv` 固定 21 段来源、生成或许可证据，以仓库相对路径、
+- `notice-fragments.tsv` 固定 22 段来源、生成或许可证据，以仓库相对路径、
   1 起始闭区间、字节数和 SHA-256 约束原始字节。
 - `APPLE-HOST-NOTICES.txt` 是确定性生成物，正文带锁定组件版本、全部来源
   路径和原始文本摘要；相同字节只保留一份，来源不会随去重丢失。
@@ -40,8 +40,9 @@
 target 的 128 个实际 `.c` 输入出发，递归跟随 `deps/libarchive` gitlink
 内存在的本地双引号 include，当前得到 37 个头文件。它逐文件提取开头连续
 的 C 块注释；同一文件连续的多个块连同其原始间隔组成一个提取单元，再按
-整个单元的精确字节去重。`notice-fragments.tsv` 另行固定 21 段证据：
-12 段来自 hterm 交付输入及其锁定生成来源：libdot ChangeLog、
+整个单元的精确字节去重。`notice-fragments.tsv` 另行固定 22 段证据：
+13 段来自 hterm 交付输入及其锁定生成来源：Material 图标上游 README、
+libdot ChangeLog、
 `lib_colors.js`、wcwidth `lib_wc.js` 与 `ranges.py`；其中 `ranges.py`
 只作为 provenance，不进入 53 项实际交付闭包。另有 9 段来自 libarchive
 的中段来源或许可文本。
@@ -54,18 +55,21 @@ reference `.c` 引用的 `blake2-kat.h`，以及 `archive_platform.h` 引用的
 的 `deps/config.h` 提供，不属于 gitlink notices 闭包。除此之外的任何
 缺失 include 都会失败，不能被静默忽略。
 
-当前收入宿主正文的五个完整许可输入中，hterm 与 libdot 的原始字节相同，
-因此去重后是 4 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
-得到 97 份唯一前导文本；21 个锁定片段当前也各自唯一。生成器由此固定
-`4 + 97 + 21 = 122` 个唯一正文 section，再加 `overview` 与
-`unresolved-provenance` 两个边界 section，共有 124 对 BEGIN/END 标记。
+当前收入宿主正文的六个完整许可输入中，hterm 与 libdot 的原始字节相同，
+因此去重后是 5 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
+得到 97 份唯一前导文本；22 个锁定片段当前也各自唯一。生成器由此固定
+`5 + 97 + 22 = 124` 个唯一正文 section，再加 `overview`、
+`material-provenance` 与 `unresolved-provenance` 三个边界 section，
+共有 127 对 BEGIN/END 标记。
 数量漂移会使永久回归失败，避免提取范围在无人察觉时扩张或收缩。
 
-hterm、libdot、intl-segmenter、wcwidth 和 `libarchive/COPYING` 按完整
-文件字节收入。去重只比较原始字节是否完全相同，不合并“看起来等价”的许可
-文本，也不改写版权方、条款或 public-domain 字样。Linux `COPYING` 仍由
-输入锁复核，但正文明确排除，因为公共宿主声明不能冒充 `iSH+Linux` 的
-Linux kernel 许可与对应源码交付方案。
+hterm、libdot、intl-segmenter、wcwidth、`libarchive/COPYING` 和
+Material Design Icons 同期快照的根 `LICENSE` 按完整文件字节收入；
+Material README 只收入完整 License section，三个上游 SVG 只保留锁定
+输入及格式化映射证据。去重只比较原始字节是否完全相同，不合并“看起来
+等价”的许可文本，也不改写版权方、条款或 public-domain 字样。Linux
+`COPYING` 仍由输入锁复核，但正文明确排除，因为公共宿主声明不能冒充
+`iSH+Linux` 的 Linux kernel 许可与对应源码交付方案。
 
 ## 来源纳入政策与已知缺口
 
@@ -77,8 +81,13 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
 
 - 三个 hterm find bar Material SVG 的仓内字节和 libapps 导入提交
   `de5387e902ef285c2d2c6909a53d37d826843551` 已经固定；该提交只说明图标
-  取自 `google/material-design-icons`。当前没有对应上游 revision、上游
-  路径、适用许可版本或权威许可原文，因此不能推定为 Apache 2.0。
+  取自 `google/material-design-icons`，没有记录精确 revision。本锁选择
+  作者时间点的官方 master tip
+  `3d4a32b327272c458e12586437c3ca0696b28a69` 作为同时期不可变快照，
+  固定三个 `production` 上游 SVG、根 README 的 Apache-2.0 适用范围和
+  根 LICENSE 原字节。当前 SVG 只比上游多固定的元素间缩进和文件尾 LF；
+  校验器离线逐字重放该变换。该证据只闭合这三个已交付图标，不声称导入者
+  明确选择了该 revision，也不外推到其他来源。
 - wcwidth 的 `lib_wc.js` 原始移植块逐字记录 node.js `wcwidth.js` 与 npm
   来源；完整 LICENSE 和 METADATA 固定其许可与版本。生成脚本和 ChangeLog
   证据把当前三张表标识为 Unicode 13.0.0；对应本地历史提交为
@@ -95,8 +104,9 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
 
 ## 生成与校验
 
-生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob。完整
-子模块已经具备这些对象；浅克隆需要先单独补齐 `deps/libapps` 历史：
+生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob，并离线
+重放 Material 上游快照到当前三个 SVG 的固定格式化关系。完整子模块已经
+具备历史对象；浅克隆需要先单独补齐 `deps/libapps` 历史：
 
 ```sh
 if [ "$(git -C deps/libapps rev-parse --is-shallow-repository)" = true ]; then
@@ -137,8 +147,8 @@ LinkSmoke 不应获得本文件。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
 - BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
   选择分支。
-- 上述 Material、wcwidth UCD、W3C/X11 与 libarchive Unicode 来源缺口仍会
-  阻断公共发行；本切片只是把已有证据和未知边界做成可复现声明，不是法律闭合。
+- wcwidth UCD、W3C/X11 与 libarchive Unicode 来源缺口仍会阻断公共发行；
+  三个 Material 图标的证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及
   对应源码资产不由本地输入锁代替。
 - 本锁不是通用 SBOM；以后引入三个既有 gitlink 之外的宿主代码时，必须

@@ -47,6 +47,22 @@ EXPECTED_DELIVERY_CONTRACTS = {
     "linux": ("linux-kernel", "static-library", "liblinux.a"),
     "wcwidth": ("hterm-bundle", "generated-resource", "hterm_all.js"),
 }
+MATERIAL_ICON_REVISION = "3d4a32b327272c458e12586437c3ca0696b28a69"
+MATERIAL_ICON_SNAPSHOT_BASE = (
+    "third_party/apple-host/material-design-icons/"
+    f"{MATERIAL_ICON_REVISION}"
+)
+MATERIAL_ICON_LICENSE_PATH = f"{MATERIAL_ICON_SNAPSHOT_BASE}/LICENSE"
+MATERIAL_ICON_README_PATH = f"{MATERIAL_ICON_SNAPSHOT_BASE}/README.md"
+MATERIAL_ICON_UPSTREAM_PATHS = (
+    "hardware/svg/production/ic_keyboard_arrow_down_24px.svg",
+    "hardware/svg/production/ic_keyboard_arrow_up_24px.svg",
+    "navigation/svg/production/ic_close_24px.svg",
+)
+MATERIAL_ICON_SNAPSHOT_PATHS = tuple(
+    f"{MATERIAL_ICON_SNAPSHOT_BASE}/{path}"
+    for path in MATERIAL_ICON_UPSTREAM_PATHS
+)
 LIBARCHIVE_INLINE_NOTICE_PATHS = {
     "deps/libarchive/libarchive/archive_blake2.h",
     "deps/libarchive/libarchive/archive_blake2_impl.h",
@@ -140,6 +156,7 @@ REQUIRED_NOTICE_FRAGMENT_RANGES = {
     ("deps/libarchive/libarchive/archive_string.c", 2797, 2800),
     ("deps/libarchive/libarchive/archive_string.c", 3043, 3046),
     ("deps/libarchive/libarchive/archive_windows.c", 789, 829),
+    (MATERIAL_ICON_README_PATH, 37, 40),
 }
 REQUIRED_LICENSE_KEYS = {
     (
@@ -198,9 +215,14 @@ REQUIRED_LICENSE_KEYS = {
     ),
     ("libarchive", "libarchive", "license", "deps/libarchive/COPYING"),
     ("linux-kernel", "linux", "license", "deps/linux/COPYING"),
+    ("hterm-bundle", "hterm", "license", MATERIAL_ICON_LICENSE_PATH),
+    ("hterm-bundle", "hterm", "provenance", MATERIAL_ICON_README_PATH),
 } | {
     ("libarchive", "libarchive", "inline-notice", path)
     for path in LIBARCHIVE_INLINE_NOTICE_PATHS
+} | {
+    ("hterm-bundle", "hterm", "provenance", path)
+    for path in MATERIAL_ICON_SNAPSHOT_PATHS
 }
 
 

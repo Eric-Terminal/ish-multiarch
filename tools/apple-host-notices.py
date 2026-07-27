@@ -13,7 +13,15 @@ import stat
 import sys
 import tempfile
 
-from apple_host_manifest import HostInputError, fail, read_regular
+from apple_host_manifest import (
+    HostInputError,
+    MATERIAL_ICON_LICENSE_PATH,
+    MATERIAL_ICON_README_PATH,
+    MATERIAL_ICON_REVISION,
+    MATERIAL_ICON_SNAPSHOT_BASE,
+    fail,
+    read_regular,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,12 +39,38 @@ FULL_LICENSE_COMPONENTS = {
 EXPECTED_LIBARCHIVE_SOURCE_COUNT = 128
 EXPECTED_LIBARCHIVE_CLOSURE_COUNT = 165
 EXPECTED_LEADING_TEXT_COUNT = 97
-EXPECTED_NOTICE_TEXT_COUNT = 122
+EXPECTED_NOTICE_TEXT_COUNT = 124
 MATERIAL_ICON_IMPORT_COMMIT = "de5387e902ef285c2d2c6909a53d37d826843551"
-MATERIAL_ICON_PATHS = (
-    "deps/libapps/hterm/images/close.svg",
-    "deps/libapps/hterm/images/keyboard_arrow_down.svg",
-    "deps/libapps/hterm/images/keyboard_arrow_up.svg",
+MATERIAL_ICON_SOURCE_URL = (
+    "https://github.com/google/material-design-icons"
+)
+MATERIAL_ICON_SOURCES = (
+    (
+        "deps/libapps/hterm/images/close.svg",
+        "navigation/svg/production/ic_close_24px.svg",
+    ),
+    (
+        "deps/libapps/hterm/images/keyboard_arrow_down.svg",
+        "hardware/svg/production/ic_keyboard_arrow_down_24px.svg",
+    ),
+    (
+        "deps/libapps/hterm/images/keyboard_arrow_up.svg",
+        "hardware/svg/production/ic_keyboard_arrow_up_24px.svg",
+    ),
+)
+MATERIAL_ICON_PATHS = tuple(item[0] for item in MATERIAL_ICON_SOURCES)
+MATERIAL_ICON_README_LICENSE_HEADING = b"## License\n\n"
+MATERIAL_ICON_README_APPLICABILITY = (
+    b"We have made these icons available for you to incorporate into your "
+    b"products under the [Apache License Version 2.0]"
+    b"(https://www.apache.org/licenses/LICENSE-2.0.txt). Feel free to remix "
+    b"and re-share these icons and documentation in your products.\n"
+)
+MATERIAL_ICON_LICENSE_MARKERS = (
+    b"Apache License\n",
+    b"Version 2.0, January 2004\n",
+    b"http://www.apache.org/licenses/\n",
+    b"TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n",
 )
 WCWIDTH_UCD_EVIDENCE_COMMIT = "6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8"
 EXPECTED_UNRESOLVED_INCLUDES = {
@@ -260,14 +294,74 @@ def verify_history_evidence(root, validator):
                 fail(f"{description}证据提交与当前输入字节不一致：{relative}")
 
 
+def format_material_icon(data, source):
+    if (
+        b"\n" in data
+        or data.count(b"><path") != 1
+        or data.count(b"/></svg>") != 1
+        or not data.endswith(b"/></svg>")
+    ):
+        fail(f"Material 上游 SVG 结构漂移：{source}")
+    return data.replace(b"><path", b">\n  <path", 1).replace(
+        b"/></svg>", b"/>\n</svg>\n", 1
+    )
+
+
+def verify_material_icon_evidence(root, inputs_by_path):
+    expected_roles = {
+        MATERIAL_ICON_LICENSE_PATH: "license",
+        MATERIAL_ICON_README_PATH: "provenance",
+    }
+    for current, upstream in MATERIAL_ICON_SOURCES:
+        expected_roles[current] = "provenance"
+        expected_roles[f"{MATERIAL_ICON_SNAPSHOT_BASE}/{upstream}"] = (
+            "provenance"
+        )
+    for relative, role in expected_roles.items():
+        item = inputs_by_path.get(relative)
+        if (
+            item is None
+            or item.delivery_unit != "hterm-bundle"
+            or item.component != "hterm"
+            or item.role != role
+        ):
+            fail(f"Material 来源或许可输入缺失：{relative}")
+
+    readme = read_regular(
+        root, MATERIAL_ICON_README_PATH, "Material 上游 README"
+    )
+    for marker in (
+        MATERIAL_ICON_README_LICENSE_HEADING,
+        MATERIAL_ICON_README_APPLICABILITY,
+    ):
+        if readme.count(marker) != 1:
+            fail("Material README 的 Apache-2.0 适用声明漂移")
+
+    license_text = read_regular(
+        root, MATERIAL_ICON_LICENSE_PATH, "Material 上游 LICENSE"
+    )
+    for marker in MATERIAL_ICON_LICENSE_MARKERS:
+        if license_text.count(marker) != 1:
+            fail("Material LICENSE 的 Apache-2.0 正文标记漂移")
+
+    for current, upstream in MATERIAL_ICON_SOURCES:
+        snapshot = f"{MATERIAL_ICON_SNAPSHOT_BASE}/{upstream}"
+        formatted = format_material_icon(
+            read_regular(root, snapshot, "Material 上游 SVG"),
+            snapshot,
+        )
+        if formatted != read_regular(root, current, "Material 当前 SVG"):
+            fail(f"Material SVG 固定格式化关系漂移：{current}")
+
+
 def overview():
     return (
         "===== BEGIN APPLE HOST NOTICE: overview =====\n"
         "Apple 宿主第三方声明\n"
         "\n"
         "覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 "
-        "hterm 生成资源及 libarchive 静态库的锁定原始文本，并在下一节"
-        "列出尚未闭合的外部来源。\n"
+        "hterm 生成资源及 libarchive 静态库的锁定原始文本，并在后续"
+        "两节分别记录已闭合的 Material 图标证据和仍未闭合的外部来源。\n"
         "\n"
         "未决边界：\n"
         "- Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；"
@@ -276,8 +370,9 @@ def overview():
         "各自的发行门禁处理。\n"
         "- libarchive 的 BLAKE2 声明列出 CC0 1.0 Universal、OpenSSL "
         "与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。\n"
-        "- Material 图标、Unicode 数据、W3C 与 X11 来源的具体缺口见"
-        "“未闭合的外部来源与许可”一节；该节是工程审计记录，不是法律结论。\n"
+        "- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见"
+        "下一节；Unicode 数据、W3C 与 X11 等缺口继续列在未闭合一节。\n"
+        "- 来源与许可边界是工程审计记录，不是法律结论。\n"
         "- public-domain 字样仅转述锁定上游源码，不是本工具作出的法律"
         "判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。\n"
         "===== END APPLE HOST NOTICE: overview =====\n"
@@ -285,31 +380,52 @@ def overview():
     ).encode("utf-8")
 
 
-def audit_boundaries(inputs_by_path):
+def material_provenance(inputs_by_path):
     icon_lines = []
-    for relative in MATERIAL_ICON_PATHS:
-        item = inputs_by_path.get(relative)
-        if (
-            item is None
-            or item.component != "hterm"
-            or item.role != "provenance"
-        ):
-            fail(f"Material 图标来源输入缺失：{relative}")
+    for current, upstream in MATERIAL_ICON_SOURCES:
+        current_item = inputs_by_path[current]
+        snapshot = f"{MATERIAL_ICON_SNAPSHOT_BASE}/{upstream}"
+        upstream_item = inputs_by_path[snapshot]
         icon_lines.append(
-            f"- {relative}；{item.size} 字节；SHA-256 {item.sha256}"
+            f"- 当前 {current}；{current_item.size} 字节；SHA-256 "
+            f"{current_item.sha256}\n"
+            f"  上游 {upstream}；{upstream_item.size} 字节；SHA-256 "
+            f"{upstream_item.sha256}"
         )
 
+    return (
+        "===== BEGIN APPLE HOST NOTICE: material-provenance =====\n"
+        "已闭合的 Material 图标来源与许可\n"
+        "\n"
+        "libapps 历史提交 "
+        f"{MATERIAL_ICON_IMPORT_COMMIT} 只记录三个 hterm find bar SVG "
+        "取自 google/material-design-icons，没有记录精确上游 revision。"
+        "本锁选取作者时间点的官方 master tip "
+        f"{MATERIAL_ICON_REVISION} 作为同时期不可变快照；这不表示导入者"
+        "明确记录或选择了该 revision。\n"
+        "\n"
+        f"权威仓库：{MATERIAL_ICON_SOURCE_URL}\n"
+        + "\n".join(icon_lines)
+        + "\n\n"
+        "三份当前 SVG 都由对应上游单行原字节执行同一确定性格式化得到："
+        "在 svg 与 path 元素之间插入 LF 和两个空格，在 path 与结束 svg "
+        "之间插入 LF，并补文件尾 LF；图形数据没有改写。校验器会离线逐字"
+        "重放该关系。\n"
+        "\n"
+        f"同一快照的 {MATERIAL_ICON_README_PATH} 第 37–40 行明确说明这些 icons "
+        "在 Apache License Version 2.0 下提供；根 LICENSE 原字节也已固定"
+        "并作为完整许可收入本文件。该证据只闭合上述三个已交付 SVG，"
+        "不表示其他宿主来源或整个发行已经闭合。\n"
+        "===== END APPLE HOST NOTICE: material-provenance =====\n"
+        "\n"
+    ).encode("utf-8")
+
+
+def unresolved_provenance():
     return (
         "===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====\n"
         "未闭合的外部来源与许可\n"
         "\n"
-        "Material Design 图标：锁定 libapps 历史提交 "
-        f"{MATERIAL_ICON_IMPORT_COMMIT} 记录下列三个 hterm find bar SVG "
-        "取自 google/material-design-icons；当前锁定仓内没有对应上游 "
-        "revision、上游路径、适用许可版本或权威许可原文，不能据此推定 "
-        "Apache 2.0。公共发行前必须补齐这些证据：\n"
-        + "\n".join(icon_lines)
-        + "\n\n"
         "wcwidth Unicode 数据：完整 lib_wc.js 摘要与原始来源注释已锁定；"
         "本地历史提交 "
         f"{WCWIDTH_UCD_EVIDENCE_COMMIT} 将当前三张表标识为 Unicode "
@@ -329,6 +445,10 @@ def audit_boundaries(inputs_by_path):
         "===== END APPLE HOST NOTICE: unresolved-provenance =====\n"
         "\n"
     ).encode("utf-8")
+
+
+def audit_boundaries(inputs_by_path):
+    return material_provenance(inputs_by_path) + unresolved_provenance()
 
 
 def render_groups(groups, boundaries):
@@ -399,6 +519,7 @@ def build_notice(root):
             fail(f"宿主许可与来源输入路径重复：{item.path}")
         inputs_by_path[item.path] = item
     verify_history_evidence(root, validator)
+    verify_material_icon_evidence(root, inputs_by_path)
 
     raw_sources = []
     full_license_components = set()
@@ -406,13 +527,17 @@ def build_notice(root):
         if item.role != "license" or item.component not in FULL_LICENSE_COMPONENTS:
             continue
         full_license_components.add(item.component)
+        if item.path == MATERIAL_ICON_LICENSE_PATH:
+            component = f"Material Design Icons {MATERIAL_ICON_REVISION}"
+        else:
+            component = (
+                f"{item.component} "
+                f"{state.dependencies[item.component].version}"
+            )
         raw_sources.append(
             NoticeSource(
                 "完整许可",
-                (
-                    f"{item.component} "
-                    f"{state.dependencies[item.component].version}"
-                ),
+                component,
                 item.path,
                 read_regular(root, item.path, "宿主完整许可文本"),
             )
@@ -469,8 +594,11 @@ def build_notice(root):
     )
 
     for fragment, item in fragment_items.items():
-        dependency = state.dependencies[item.component]
-        label = f"{item.component} {dependency.version}"
+        if fragment.path == MATERIAL_ICON_README_PATH:
+            label = f"Material Design Icons {MATERIAL_ICON_REVISION}"
+        else:
+            dependency = state.dependencies[item.component]
+            label = f"{item.component} {dependency.version}"
         is_original_wcwidth_notice = (
             fragment.path.endswith("/wcwidth/lib_wc.js")
             and fragment.start_line == 7
