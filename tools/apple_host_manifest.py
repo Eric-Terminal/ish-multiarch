@@ -63,6 +63,53 @@ MATERIAL_ICON_SNAPSHOT_PATHS = tuple(
     f"{MATERIAL_ICON_SNAPSHOT_BASE}/{path}"
     for path in MATERIAL_ICON_UPSTREAM_PATHS
 )
+WCWIDTH_UCD_VERSION = "13.0.0"
+WCWIDTH_UCD_ARCHIVE_URL = (
+    "https://www.unicode.org/Public/zipped/13.0.0/UCD.zip"
+)
+WCWIDTH_UCD_ARCHIVE_SIZE = 7_537_310
+WCWIDTH_UCD_ARCHIVE_SHA256 = (
+    "2f76973b4d36ae45584f5a45ec65b47138932d777dd23a5669c89535ef3da951"
+)
+WCWIDTH_UCD_SNAPSHOT_BASE = (
+    "third_party/apple-host/unicode-ucd/13.0.0"
+)
+WCWIDTH_UCD_README_PATH = f"{WCWIDTH_UCD_SNAPSHOT_BASE}/ReadMe.txt"
+WCWIDTH_UCD_DATA_FILES = (
+    (
+        "PropList.txt",
+        "7d2f44c56fab8d8d787a0f70bc1518866d6f567c",
+    ),
+    (
+        "UnicodeData.txt",
+        "e22f967bbab8f2477a43533a334e21ebc0728eda",
+    ),
+    (
+        "EastAsianWidth.txt",
+        "b43aec92738c51a231709632a12998ef64fe7f34",
+    ),
+)
+WCWIDTH_UCD_DATA_PATHS = tuple(
+    f"{WCWIDTH_UCD_SNAPSHOT_BASE}/{name}"
+    for name, _blob in WCWIDTH_UCD_DATA_FILES
+)
+WCWIDTH_UNICODETOOLS_REVISION = (
+    "a87ae283358bf1858e7cbf6520c6bba0d3b58710"
+)
+WCWIDTH_UNICODETOOLS_TAG = "release-2020-09-15"
+WCWIDTH_UNICODETOOLS_SOURCE_URL = (
+    "https://github.com/unicode-org/unicodetools"
+)
+WCWIDTH_UNICODETOOLS_DATA_BASE = (
+    "unicodetools/data/ucd/13.0.0-Update"
+)
+WCWIDTH_UCD_LICENSE_PATH = (
+    "third_party/apple-host/unicodetools/"
+    f"{WCWIDTH_UNICODETOOLS_REVISION}/LICENSE"
+)
+WCWIDTH_UCD_LICENSE_GIT_BLOB = (
+    "500dbd5463e43403fa163a8095828e7f6c1539c6"
+)
 LIBARCHIVE_INLINE_NOTICE_PATHS = {
     "deps/libarchive/libarchive/archive_blake2.h",
     "deps/libarchive/libarchive/archive_blake2_impl.h",
@@ -217,13 +264,35 @@ REQUIRED_LICENSE_KEYS = {
     ("linux-kernel", "linux", "license", "deps/linux/COPYING"),
     ("hterm-bundle", "hterm", "license", MATERIAL_ICON_LICENSE_PATH),
     ("hterm-bundle", "hterm", "provenance", MATERIAL_ICON_README_PATH),
+    (
+        "hterm-bundle",
+        "wcwidth",
+        "license",
+        WCWIDTH_UCD_LICENSE_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "wcwidth",
+        "provenance",
+        WCWIDTH_UCD_README_PATH,
+    ),
 } | {
     ("libarchive", "libarchive", "inline-notice", path)
     for path in LIBARCHIVE_INLINE_NOTICE_PATHS
 } | {
     ("hterm-bundle", "hterm", "provenance", path)
     for path in MATERIAL_ICON_SNAPSHOT_PATHS
+} | {
+    ("hterm-bundle", "wcwidth", "provenance", path)
+    for path in WCWIDTH_UCD_DATA_PATHS
 }
+APPLE_HOST_RAW_INPUT_PATHS = tuple(
+    sorted(
+        path
+        for _unit, _component, _role, path in REQUIRED_LICENSE_KEYS
+        if PurePosixPath(path).is_relative_to(LOCK_RELATIVE)
+    )
+)
 
 
 class HostInputError(Exception):

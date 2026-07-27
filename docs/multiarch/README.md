@@ -284,13 +284,15 @@ README；`ranges.py` 不进入 53 项实际交付闭包），9 段来自 libarch
 hterm、libdot、intl-segmenter、wcwidth、`libarchive/COPYING` 和
 Material Design Icons 同期快照根 `LICENSE` 的完整许可按原始文件收入；
 Material README 只收入完整 License section，三个上游 SVG 只作为锁定
-输入与格式化映射证据。只有原始提取单元字节完全相同才去重，来源路径不会
-丢失。
+输入与格式化映射证据。Unicode Data Files 完整许可来自官方 unicodetools
+固定提交，聚合显示只移除文件开头的 UTF-8 BOM。只有最终收入正文的字节
+完全相同才去重，来源路径不会丢失。
 
-收入宿主正文的六个完整许可输入去重为 5 份唯一文本，libarchive 闭包得到
-97 份唯一前导文本，22 个锁定片段也各自唯一，因此生成 124 个唯一正文
-section；再加 `overview`、`material-provenance` 与
-`unresolved-provenance`，文件共有 127 对 BEGIN/END 标记。
+收入宿主正文的七个完整许可输入去重为 6 份唯一文本，libarchive 闭包得到
+97 份唯一前导文本，22 个锁定片段也各自唯一，因此生成 125 个唯一正文
+section；再加 `overview`、`material-provenance`、
+`wcwidth-unicode-provenance` 与 `unresolved-provenance`，文件共有
+129 对 BEGIN/END 标记。
 重建结果必须与受跟踪的 `APPLE-HOST-NOTICES.txt` 逐字一致。
 
 来源片段只在锁定文本或本地历史明确写出 imported、taken、adapted、
@@ -299,19 +301,22 @@ derived、generated 等来源/生成关系时纳入；普通标准引用不会�
 master tip `3d4a32b327272c458e12586437c3ca0696b28a69` 的三个精确
 `production` 路径、README Apache-2.0 适用声明与根 LICENSE；校验器会离线
 证明上游原字节只经固定空白格式化得到当前交付字节。导入提交没有记录精确
-revision，因此正文不会冒充导入者明确选择了该快照。当前未决节继续如实记录：
-wcwidth 的 Unicode 13.0.0 表缺少 `PropList.txt`、`UnicodeData.txt`、
-`EastAsianWidth.txt` 原始字节及 Unicode 许可；`lib_colors.js` 的 W3C
-CSS Color 4 改编与 X11 `rgb.txt` 派生缺少固定上游材料；libarchive 的
-Unicode 6.0.0 `UnicodeData.txt` 生成表和 Unicode Standard Annex #15
-明确来源表述也仍须闭合。
+revision，因此正文不会冒充导入者明确选择了该快照。wcwidth 已保存官方
+unicodetools 固定提交中的 Unicode 13.0.0 三份输入
+与完整 Data Files 许可，并交叉确认它们与固定 UCD 发布归档成员逐字一致；
+历史 `ranges.py` 会从哨兵状态离线重建当前三张表。该证据不冒充 libapps
+作者明确选择了上述 Git 提交，也不声称没有 LICENSE 成员的 UCD.zip 自带
+许可。当前未决节继续记录 `lib_colors.js` 的 W3C CSS Color 4 改编与 X11
+`rgb.txt` 派生缺少固定上游材料，以及 libarchive 的 Unicode 6.0.0
+`UnicodeData.txt` 生成表和 Unicode Standard Annex #15 来源仍须闭合。
 
 这份宿主正文进入普通 `iSH` 与 `iSH+Linux`，共享 iPhone 查看器按 bundle
 中实际存在的资源显示：普通 iSH 依次显示项目许可、Alpine seed 与宿主正文，
 iSH+Linux 显示项目许可与公共宿主正文。Watch 显示项目许可与 Alpine seed，
 但不携带宿主正文；FileProvider 和测试产品也不携带宿主正文。该接线仍不是
-最终法律结论：BLAKE2 许可分支、Unicode、W3C/X11 来源许可、LGPL 方案，
-以及 `iSH+Linux` 的 Linux GPLv2、在线 rootfs 和对应源码交付均保持未决。
+最终法律结论：BLAKE2 许可分支、W3C/X11 与 libarchive Unicode 来源许可、
+LGPL 方案，以及 `iSH+Linux` 的 Linux GPLv2、在线 rootfs 和对应源码交付
+均保持未决。
 这些缺口继续阻断公共发行；本切片只是确定性记录证据与未知边界，不是法律闭合。
 
 当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入

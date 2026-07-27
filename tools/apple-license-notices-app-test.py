@@ -18,9 +18,7 @@ from apple_pbx import (
     resolve_file_references,
 )
 from apple_host_manifest import (
-    MATERIAL_ICON_LICENSE_PATH,
-    MATERIAL_ICON_README_PATH,
-    MATERIAL_ICON_SNAPSHOT_PATHS,
+    APPLE_HOST_RAW_INPUT_PATHS,
 )
 
 
@@ -48,11 +46,7 @@ PROJECT_RAW_INPUTS = (
 )
 HOST_RAW_INPUTS = tuple(
     PurePosixPath(relative)
-    for relative in (
-        MATERIAL_ICON_LICENSE_PATH,
-        MATERIAL_ICON_README_PATH,
-        *MATERIAL_ICON_SNAPSHOT_PATHS,
-    )
+    for relative in APPLE_HOST_RAW_INPUT_PATHS
 )
 RAW_RESOURCE_INPUTS = PROJECT_RAW_INPUTS + HOST_RAW_INPUTS
 RESOURCE_CONTRACTS = {
@@ -236,10 +230,10 @@ def verify_product_bundles(values):
         path = ROOT / relative
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode):
-            fail(f"Material 原始输入必须是常规文件：{relative}")
+            fail(f"Apple 宿主原始输入必须是常规文件：{relative}")
         digest = sha256_file(path)
         if digest in forbidden:
-            fail("Material 原始输入摘要必须互不相同")
+            fail("Apple 宿主原始输入摘要必须互不相同")
         forbidden[digest] = relative
 
     for value in values:
@@ -258,7 +252,7 @@ def verify_product_bundles(values):
             source = forbidden.get(sha256_file(candidate))
             if source is not None:
                 fail(
-                    "产品不得携带 Material 原始快照字节："
+                    "产品不得携带 Apple 宿主原始输入字节："
                     f"{candidate}（来源 {source}）"
                 )
 
@@ -280,7 +274,8 @@ def test_product_bundle_gate():
                 verify_product_bundles([bundle])
             except ValueError as error:
                 if (
-                    "产品不得携带 Material 原始快照字节" not in str(error)
+                    "产品不得携带 Apple 宿主原始输入字节"
+                    not in str(error)
                     or str(relative) not in str(error)
                 ):
                     fail(f"产品原始输入负例命中错误诊断：{error}")

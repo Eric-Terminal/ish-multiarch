@@ -69,8 +69,9 @@ iSHWatch 三种 App，因此 iPhone/Watch 的共享页面会按产品实际资�
 Alpine 声明。
 Apple 宿主侧 libarchive 与 hterm 闭包已经使用独立的确定性正文和产品资源门禁；三个
 已交付 Material 图标的同时期上游快照、固定格式化关系和 Apache-2.0 适用证据也已由该
-宿主锁闭合。但 BLAKE2 许可分支、wcwidth Unicode 13.0.0 三份 UCD 输入及许可、
-lib_colors 的 W3C/X11 来源、libarchive 的 UnicodeData/UAX #15 来源及可选 Linux 产品
-范围仍须单独闭合。项目许可与规范仓库入口的产品接线不等于精确二进制 revision 或
-Release 已经绑定：这些剩余外部来源、上述 LGPL 发行决策和固定对应源码制品仍须在公开
-release 位置形成可回读、可校验的完整交付链。
+宿主锁闭合；wcwidth Unicode 13.0.0 三份 UCD 输入、历史生成重放与适用 Data Files
+许可也已形成固定证据链。但 BLAKE2 许可分支、lib_colors 的 W3C/X11 来源、libarchive
+的 UnicodeData/UAX #15 来源及可选 Linux 产品范围仍须单独闭合。项目许可与规范仓库
+入口的产品接线不等于精确二进制 revision 或 Release 已经绑定：这些剩余外部来源、
+上述 LGPL 发行决策和固定对应源码制品仍须在公开 release 位置形成可回读、可校验的
+完整交付链。

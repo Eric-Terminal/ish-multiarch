@@ -11,7 +11,10 @@ import subprocess
 import sys
 import tempfile
 
-from apple_host_manifest import MATERIAL_ICON_SNAPSHOT_BASE
+from apple_host_manifest import (
+    MATERIAL_ICON_SNAPSHOT_BASE,
+    WCWIDTH_UCD_SNAPSHOT_BASE,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,6 +67,7 @@ def run_validator(root, expect_success=True, expected_error=None):
     return run(
         [
             sys.executable,
+            "-B",
             str(VALIDATOR),
             "check-locks",
             "--root",
@@ -450,6 +454,15 @@ def case_material_upstream_svg_drift(root):
     path.write_bytes(data.replace(b"M19 6.41", b"M18 6.41", 1))
 
 
+def case_wcwidth_ucd_input_drift(root):
+    path = root / WCWIDTH_UCD_SNAPSHOT_BASE / "PropList.txt"
+    replace_once(
+        path,
+        "# PropList-13.0.0.txt\n",
+        "# PropList-13.0.1.txt\n",
+    )
+
+
 def case_notice_fragment_digest_drift(root):
     path = root / "third_party/apple-host/notice-fragments.tsv"
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -542,10 +555,14 @@ def case_linux_route_missing(root):
 def case_required_license_missing(root):
     path = root / "third_party/apple-host/license-inputs.tsv"
     lines = path.read_text(encoding="utf-8").splitlines()
+    expected = (
+        "hterm-bundle\twcwidth\tlicense\t"
+        "deps/libapps/libdot/third_party/wcwidth/LICENSE.md\t"
+    )
     filtered = [
         line
         for line in lines
-        if not line.startswith("hterm-bundle\twcwidth\tlicense\t")
+        if not line.startswith(expected)
     ]
     if len(filtered) != len(lines) - 1:
         fail("无法从合成许可锁中移除 wcwidth")
@@ -637,6 +654,10 @@ def main():
             ),
             "material-upstream-svg-drift": (
                 case_material_upstream_svg_drift,
+                "宿主许可复核输入摘要漂移",
+            ),
+            "wcwidth-ucd-input-drift": (
+                case_wcwidth_ucd_input_drift,
                 "宿主许可复核输入摘要漂移",
             ),
             "notice-fragment-digest-drift": (

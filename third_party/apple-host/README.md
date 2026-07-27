@@ -55,18 +55,20 @@ reference `.c` 引用的 `blake2-kat.h`，以及 `archive_platform.h` 引用的
 的 `deps/config.h` 提供，不属于 gitlink notices 闭包。除此之外的任何
 缺失 include 都会失败，不能被静默忽略。
 
-当前收入宿主正文的六个完整许可输入中，hterm 与 libdot 的原始字节相同，
-因此去重后是 5 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
+当前收入宿主正文的七个完整许可输入中，hterm 与 libdot 的原始字节相同，
+因此去重后是 6 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
 得到 97 份唯一前导文本；22 个锁定片段当前也各自唯一。生成器由此固定
-`5 + 97 + 22 = 124` 个唯一正文 section，再加 `overview`、
-`material-provenance` 与 `unresolved-provenance` 三个边界 section，
-共有 127 对 BEGIN/END 标记。
+`6 + 97 + 22 = 125` 个唯一正文 section，再加 `overview`、
+`material-provenance`、`wcwidth-unicode-provenance` 与
+`unresolved-provenance` 四个边界 section，共有 129 对 BEGIN/END 标记。
 数量漂移会使永久回归失败，避免提取范围在无人察觉时扩张或收缩。
 
 hterm、libdot、intl-segmenter、wcwidth、`libarchive/COPYING` 和
 Material Design Icons 同期快照的根 `LICENSE` 按完整文件字节收入；
 Material README 只收入完整 License section，三个上游 SVG 只保留锁定
-输入及格式化映射证据。去重只比较原始字节是否完全相同，不合并“看起来
+输入及格式化映射证据。Unicode Data Files 完整许可来自官方
+unicodetools 固定提交；聚合显示只移除原文件开头的 UTF-8 BOM，其余正文
+逐字保留。去重只比较最终收入正文的字节是否完全相同，不合并“看起来
 等价”的许可文本，也不改写版权方、条款或 public-domain 字样。Linux
 `COPYING` 仍由输入锁复核，但正文明确排除，因为公共宿主声明不能冒充
 `iSH+Linux` 的 Linux kernel 许可与对应源码交付方案。
@@ -91,9 +93,14 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
 - wcwidth 的 `lib_wc.js` 原始移植块逐字记录 node.js `wcwidth.js` 与 npm
   来源；完整 LICENSE 和 METADATA 固定其许可与版本。生成脚本和 ChangeLog
   证据把当前三张表标识为 Unicode 13.0.0；对应本地历史提交为
-  `6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8`。脚本明确读取
-  `PropList.txt`、`UnicodeData.txt` 与 `EastAsianWidth.txt`。仓内没有
-  这三份 13.0.0 原始字节或相应 Unicode 许可原文，生成数据闭包仍未完成。
+  `6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8`。本锁保存官方
+  unicodetools tag `release-2020-09-15` 对应提交
+  `a87ae283358bf1858e7cbf6520c6bba0d3b58710` 的 `PropList.txt`、
+  `UnicodeData.txt`、`EastAsianWidth.txt` 和根 LICENSE；三份数据与固定
+  UCD 13.0.0 发布归档成员逐字一致，final ReadMe 另行确认最终版本身份。
+  校验器用历史 `ranges.py` 在临时目录离线重放三张哨兵表，结果必须逐字
+  恢复当前 `lib_wc.js`。这证明所选官方材料能重建当前表，不声称 libapps
+  作者当年明确使用了该 Git 提交；UCD.zip 本身也不含 LICENSE。
 - `lib_colors.js` 明确说明 HSL 算法改编自 W3C CSS Color 4，颜色名称表派生
   自 stock X11 `rgb.txt`。仓内没有所用上游版本、X11 原始数据或对应权威
   条款，收入来源注释不表示外部许可已经确定。
@@ -104,9 +111,10 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
 
 ## 生成与校验
 
-生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob，并离线
-重放 Material 上游快照到当前三个 SVG 的固定格式化关系。完整子模块已经
-具备历史对象；浅克隆需要先单独补齐 `deps/libapps` 历史：
+生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob，离线
+重放 Material 上游快照到当前三个 SVG 的固定格式化关系，并用锁定的历史
+`ranges.py` 与三份 UCD 输入重建 wcwidth 三张表。完整子模块已经具备历史
+对象；浅克隆需要先单独补齐 `deps/libapps` 历史：
 
 ```sh
 if [ "$(git -C deps/libapps rev-parse --is-shallow-repository)" = true ]; then
@@ -147,8 +155,8 @@ LinkSmoke 不应获得本文件。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
 - BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
   选择分支。
-- wcwidth UCD、W3C/X11 与 libarchive Unicode 来源缺口仍会阻断公共发行；
-  三个 Material 图标的证据闭合不表示其他未知边界或法律审查已经完成。
+- W3C/X11 与 libarchive Unicode 来源缺口仍会阻断公共发行；Material 图标
+  和 wcwidth UCD 的证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及
   对应源码资产不由本地输入锁代替。
 - 本锁不是通用 SBOM；以后引入三个既有 gitlink 之外的宿主代码时，必须

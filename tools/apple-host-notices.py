@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -19,6 +20,20 @@ from apple_host_manifest import (
     MATERIAL_ICON_README_PATH,
     MATERIAL_ICON_REVISION,
     MATERIAL_ICON_SNAPSHOT_BASE,
+    WCWIDTH_UCD_ARCHIVE_SHA256,
+    WCWIDTH_UCD_ARCHIVE_SIZE,
+    WCWIDTH_UCD_ARCHIVE_URL,
+    WCWIDTH_UCD_DATA_FILES,
+    WCWIDTH_UCD_DATA_PATHS,
+    WCWIDTH_UCD_LICENSE_GIT_BLOB,
+    WCWIDTH_UCD_LICENSE_PATH,
+    WCWIDTH_UCD_README_PATH,
+    WCWIDTH_UCD_SNAPSHOT_BASE,
+    WCWIDTH_UCD_VERSION,
+    WCWIDTH_UNICODETOOLS_DATA_BASE,
+    WCWIDTH_UNICODETOOLS_REVISION,
+    WCWIDTH_UNICODETOOLS_SOURCE_URL,
+    WCWIDTH_UNICODETOOLS_TAG,
     fail,
     read_regular,
 )
@@ -39,7 +54,7 @@ FULL_LICENSE_COMPONENTS = {
 EXPECTED_LIBARCHIVE_SOURCE_COUNT = 128
 EXPECTED_LIBARCHIVE_CLOSURE_COUNT = 165
 EXPECTED_LEADING_TEXT_COUNT = 97
-EXPECTED_NOTICE_TEXT_COUNT = 124
+EXPECTED_NOTICE_TEXT_COUNT = 125
 MATERIAL_ICON_IMPORT_COMMIT = "de5387e902ef285c2d2c6909a53d37d826843551"
 MATERIAL_ICON_SOURCE_URL = (
     "https://github.com/google/material-design-icons"
@@ -73,6 +88,28 @@ MATERIAL_ICON_LICENSE_MARKERS = (
     b"TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n",
 )
 WCWIDTH_UCD_EVIDENCE_COMMIT = "6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8"
+WCWIDTH_RANGES_GIT_BLOB = "087b50e4bdd49bf053383fc58939786149c8246c"
+WCWIDTH_RANGES_SHA256 = (
+    "c172743c16062a0fd74b1b176e4a538f557d87be686bcadb53e18b077db86cdf"
+)
+WCWIDTH_TABLE_NAMES = {
+    b"lib.wc.ambiguous",
+    b"lib.wc.combining",
+    b"lib.wc.unambiguous",
+}
+WCWIDTH_TABLE_ASSIGNMENT = re.compile(
+    rb"^(lib\.wc\.(?:ambiguous|combining|unambiguous)) = .*?^\];\n",
+    re.MULTILINE | re.DOTALL,
+)
+UNICODE_LICENSE_BOM = b"\xef\xbb\xbf"
+UNICODE_LICENSE_MARKERS = (
+    b"UNICODE, INC. LICENSE AGREEMENT - DATA FILES AND SOFTWARE\n",
+    b"COPYRIGHT AND PERMISSION NOTICE\n",
+    b"Copyright \xc2\xa9 1991-2020 Unicode, Inc. All rights reserved.\n",
+    b"a copy of the Unicode data files and any associated documentation\n",
+    b"THE DATA FILES AND SOFTWARE ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF\n",
+    b"written authorization of the copyright holder.\n",
+)
 EXPECTED_UNRESOLVED_INCLUDES = {
     ("deps/libarchive/libarchive/archive.h", "android_lf.h"),
     ("deps/libarchive/libarchive/archive_blake2s_ref.c", "blake2-kat.h"),
@@ -354,6 +391,155 @@ def verify_material_icon_evidence(root, inputs_by_path):
             fail(f"Material SVG 固定格式化关系漂移：{current}")
 
 
+def git_blob_oid(data):
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def unicode_license_text(data):
+    if not data.startswith(UNICODE_LICENSE_BOM):
+        fail("Unicode Data Files 许可缺少锁定的 UTF-8 BOM")
+    content = data[len(UNICODE_LICENSE_BOM) :]
+    if UNICODE_LICENSE_BOM in content:
+        fail("Unicode Data Files 许可含额外 UTF-8 BOM")
+    for marker in UNICODE_LICENSE_MARKERS:
+        if content.count(marker) != 1:
+            fail("Unicode Data Files 许可正文标记漂移")
+    return content
+
+
+def replay_wcwidth_tables(root, validator, data_by_name):
+    repository = root / "deps/libapps"
+    script = validator.run_git(
+        repository,
+        "show",
+        (
+            f"{WCWIDTH_UCD_EVIDENCE_COMMIT}:"
+            "libdot/third_party/wcwidth/ranges.py"
+        ),
+    )
+    if (
+        hashlib.sha256(script).hexdigest() != WCWIDTH_RANGES_SHA256
+        or git_blob_oid(script) != WCWIDTH_RANGES_GIT_BLOB
+    ):
+        fail("wcwidth 历史生成脚本字节漂移")
+
+    current_path = (
+        "deps/libapps/libdot/third_party/wcwidth/lib_wc.js"
+    )
+    current = read_regular(root, current_path, "wcwidth 当前 JavaScript")
+    matches = list(WCWIDTH_TABLE_ASSIGNMENT.finditer(current))
+    if (
+        len(matches) != len(WCWIDTH_TABLE_NAMES)
+        or {match.group(1) for match in matches} != WCWIDTH_TABLE_NAMES
+    ):
+        fail("wcwidth 当前 JavaScript 三张表边界漂移")
+
+    sentinel = WCWIDTH_TABLE_ASSIGNMENT.sub(
+        lambda match: (
+            match.group(1)
+            + b" = [\n  [0x0000, 0x0000],\n];\n"
+        ),
+        current,
+    )
+    if sentinel == current:
+        fail("wcwidth 三张表哨兵替换没有生效")
+
+    with tempfile.TemporaryDirectory(
+        prefix="ish-wcwidth-ucd13."
+    ) as temporary:
+        directory = Path(temporary)
+        script_path = directory / "ranges.py"
+        javascript_path = directory / "lib_wc.js"
+        script_path.write_bytes(script)
+        javascript_path.write_bytes(sentinel)
+        for name, data in data_by_name.items():
+            (directory / name).write_bytes(data)
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(script_path),
+                    "--js",
+                    str(javascript_path),
+                    "update",
+                ],
+                cwd=directory,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            fail("wcwidth Unicode 13.0.0 离线重放超时")
+        if result.returncode != 0:
+            detail = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            ).strip()
+            fail(f"wcwidth Unicode 13.0.0 离线重放失败：{detail}")
+        if javascript_path.read_bytes() != current:
+            fail("wcwidth Unicode 13.0.0 输入不能逐字重建当前三张表")
+
+
+def verify_wcwidth_unicode_evidence(root, inputs_by_path, validator):
+    expected_roles = {
+        WCWIDTH_UCD_LICENSE_PATH: "license",
+        WCWIDTH_UCD_README_PATH: "provenance",
+        **{path: "provenance" for path in WCWIDTH_UCD_DATA_PATHS},
+    }
+    for relative, role in expected_roles.items():
+        item = inputs_by_path.get(relative)
+        if (
+            item is None
+            or item.delivery_unit != "hterm-bundle"
+            or item.component != "wcwidth"
+            or item.role != role
+        ):
+            fail(f"wcwidth Unicode 来源或许可输入缺失：{relative}")
+
+    readme = read_regular(
+        root, WCWIDTH_UCD_README_PATH, "Unicode 13.0.0 final ReadMe"
+    )
+    for marker in (
+        b"# Unicode Character Database\n",
+        b"This directory contains the final data files \n",
+        b"for the Unicode Character Database, for Version 13.0.0 "
+        b"of the Unicode Standard.\n",
+        b"# For terms of use, see https://www.unicode.org/terms_of_use.html\n",
+    ):
+        if readme.count(marker) != 1:
+            fail("Unicode 13.0.0 final ReadMe 标记漂移")
+
+    data_by_name = {}
+    for name, expected_blob in WCWIDTH_UCD_DATA_FILES:
+        relative = f"{WCWIDTH_UCD_SNAPSHOT_BASE}/{name}"
+        data = read_regular(root, relative, "Unicode 13.0.0 生成输入")
+        if git_blob_oid(data) != expected_blob:
+            fail(f"UnicodeTools 固定 Git blob 漂移：{relative}")
+        data_by_name[name] = data
+    if not data_by_name["PropList.txt"].startswith(
+        b"# PropList-13.0.0.txt\n"
+    ):
+        fail("Unicode 13.0.0 PropList 版本标记漂移")
+    if not data_by_name["EastAsianWidth.txt"].startswith(
+        b"# EastAsianWidth-13.0.0.txt\n"
+    ):
+        fail("Unicode 13.0.0 EastAsianWidth 版本标记漂移")
+    if not data_by_name["UnicodeData.txt"].startswith(
+        b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n"
+    ):
+        fail("Unicode 13.0.0 UnicodeData 起始记录漂移")
+
+    license_data = read_regular(
+        root, WCWIDTH_UCD_LICENSE_PATH, "Unicode Data Files 许可"
+    )
+    if git_blob_oid(license_data) != WCWIDTH_UCD_LICENSE_GIT_BLOB:
+        fail("Unicode Data Files 许可 Git blob 漂移")
+    unicode_license_text(license_data)
+    replay_wcwidth_tables(root, validator, data_by_name)
+
+
 def overview():
     return (
         "===== BEGIN APPLE HOST NOTICE: overview =====\n"
@@ -361,7 +547,7 @@ def overview():
         "\n"
         "覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 "
         "hterm 生成资源及 libarchive 静态库的锁定原始文本，并在后续"
-        "两节分别记录已闭合的 Material 图标证据和仍未闭合的外部来源。\n"
+        "专节记录已闭合的来源证据和仍未闭合的外部来源。\n"
         "\n"
         "未决边界：\n"
         "- Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；"
@@ -371,7 +557,8 @@ def overview():
         "- libarchive 的 BLAKE2 声明列出 CC0 1.0 Universal、OpenSSL "
         "与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。\n"
         "- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见"
-        "下一节；Unicode 数据、W3C 与 X11 等缺口继续列在未闭合一节。\n"
+        "后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已"
+        "闭合。W3C/X11 和 libarchive Unicode 等缺口继续列在未闭合一节。\n"
         "- 来源与许可边界是工程审计记录，不是法律结论。\n"
         "- public-domain 字样仅转述锁定上游源码，不是本工具作出的法律"
         "判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。\n"
@@ -421,17 +608,62 @@ def material_provenance(inputs_by_path):
     ).encode("utf-8")
 
 
+def wcwidth_unicode_provenance(inputs_by_path):
+    data_lines = []
+    for name, blob in WCWIDTH_UCD_DATA_FILES:
+        relative = f"{WCWIDTH_UCD_SNAPSHOT_BASE}/{name}"
+        item = inputs_by_path[relative]
+        upstream = f"{WCWIDTH_UNICODETOOLS_DATA_BASE}/{name}"
+        data_lines.append(
+            f"- {relative}；{item.size} 字节；SHA-256 {item.sha256}\n"
+            f"  官方 Git 路径 {upstream}；blob {blob}"
+        )
+    readme = inputs_by_path[WCWIDTH_UCD_README_PATH]
+    license_item = inputs_by_path[WCWIDTH_UCD_LICENSE_PATH]
+
+    return (
+        "===== BEGIN APPLE HOST NOTICE: wcwidth-unicode-provenance =====\n"
+        "已闭合的 wcwidth Unicode 13.0.0 生成来源与许可\n"
+        "\n"
+        "libapps 历史提交 "
+        f"{WCWIDTH_UCD_EVIDENCE_COMMIT} 明确说明当前三张 wcwidth 表由 "
+        "Unicode 13.0.0 重新生成，且该提交的 lib_wc.js 与当前交付字节"
+        "一致。本工程选择 Unicode 官方 unicodetools tag "
+        f"{WCWIDTH_UNICODETOOLS_TAG} 对应的固定提交 "
+        f"{WCWIDTH_UNICODETOOLS_REVISION} 作为不可变输入证据；这不表示 "
+        "libapps 作者明确记录或使用了该 Git 提交。\n"
+        "\n"
+        f"权威仓库：{WCWIDTH_UNICODETOOLS_SOURCE_URL}\n"
+        + "\n".join(data_lines)
+        + "\n\n"
+        "上述三个官方 Git blob 与 Unicode 13.0.0 发布归档中的同名成员"
+        "逐字节一致。发布归档锁为：\n"
+        f"- {WCWIDTH_UCD_ARCHIVE_URL}\n"
+        f"- {WCWIDTH_UCD_ARCHIVE_SIZE} 字节；SHA-256 "
+        f"{WCWIDTH_UCD_ARCHIVE_SHA256}\n"
+        f"- final ReadMe：{WCWIDTH_UCD_README_PATH}；{readme.size} 字节；"
+        f"SHA-256 {readme.sha256}\n"
+        "\n"
+        "校验器在临时目录中使用历史提交里的 ranges.py，先把当前三张表"
+        "替换为哨兵，再以三份锁定数据离线执行 update；结果必须逐字恢复"
+        "当前 lib_wc.js。历史生成脚本固定为 Git blob "
+        f"{WCWIDTH_RANGES_GIT_BLOB}、SHA-256 {WCWIDTH_RANGES_SHA256}。"
+        "运行时表和子模块字节没有改写。\n"
+        "\n"
+        f"适用许可来自同一 unicodetools 固定提交的根 LICENSE："
+        f"{WCWIDTH_UCD_LICENSE_PATH}；{license_item.size} 字节；SHA-256 "
+        f"{license_item.sha256}。原文件的 UTF-8 BOM 只在聚合显示时移除，"
+        "其余许可正文逐字收入后续完整许可 section。UCD.zip 本身不含 "
+        "LICENSE；final ReadMe 只用于确认最终 Unicode 13.0.0 发布身份。\n"
+        "===== END APPLE HOST NOTICE: wcwidth-unicode-provenance =====\n"
+        "\n"
+    ).encode("utf-8")
+
+
 def unresolved_provenance():
     return (
         "===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====\n"
         "未闭合的外部来源与许可\n"
-        "\n"
-        "wcwidth Unicode 数据：完整 lib_wc.js 摘要与原始来源注释已锁定；"
-        "本地历史提交 "
-        f"{WCWIDTH_UCD_EVIDENCE_COMMIT} 将当前三张表标识为 Unicode "
-        "13.0.0。生成脚本读取 PropList.txt、UnicodeData.txt 与 "
-        "EastAsianWidth.txt，但仓内没有这三份 13.0.0 原始字节或相应 "
-        "Unicode 许可原文，因此生成数据闭包尚未完成。\n"
         "\n"
         "libdot 外部来源：lib_colors.js 的锁定注释说明 HSL 算法改编自 "
         "W3C CSS Color 4，颜色表派生自 stock X11 rgb.txt；仓内没有所用"
@@ -448,7 +680,11 @@ def unresolved_provenance():
 
 
 def audit_boundaries(inputs_by_path):
-    return material_provenance(inputs_by_path) + unresolved_provenance()
+    return (
+        material_provenance(inputs_by_path)
+        + wcwidth_unicode_provenance(inputs_by_path)
+        + unresolved_provenance()
+    )
 
 
 def render_groups(groups, boundaries):
@@ -520,6 +756,7 @@ def build_notice(root):
         inputs_by_path[item.path] = item
     verify_history_evidence(root, validator)
     verify_material_icon_evidence(root, inputs_by_path)
+    verify_wcwidth_unicode_evidence(root, inputs_by_path, validator)
 
     raw_sources = []
     full_license_components = set()
@@ -529,17 +766,26 @@ def build_notice(root):
         full_license_components.add(item.component)
         if item.path == MATERIAL_ICON_LICENSE_PATH:
             component = f"Material Design Icons {MATERIAL_ICON_REVISION}"
+            content = read_regular(root, item.path, "宿主完整许可文本")
+        elif item.path == WCWIDTH_UCD_LICENSE_PATH:
+            component = (
+                f"Unicode Character Database {WCWIDTH_UCD_VERSION}"
+            )
+            content = unicode_license_text(
+                read_regular(root, item.path, "Unicode Data Files 许可")
+            )
         else:
             component = (
                 f"{item.component} "
                 f"{state.dependencies[item.component].version}"
             )
+            content = read_regular(root, item.path, "宿主完整许可文本")
         raw_sources.append(
             NoticeSource(
                 "完整许可",
                 component,
                 item.path,
-                read_regular(root, item.path, "宿主完整许可文本"),
+                content,
             )
         )
     if full_license_components != FULL_LICENSE_COMPONENTS:
