@@ -55,14 +55,14 @@ reference `.c` 引用的 `blake2-kat.h`，以及 `archive_platform.h` 引用的
 的 `deps/config.h` 提供，不属于 gitlink notices 闭包。除此之外的任何
 缺失 include 都会失败，不能被静默忽略。
 
-当前收入宿主正文的八条完整许可归属记录中，Unicode Data Files 许可由
+当前收入宿主正文的 11 条完整许可归属记录中，Unicode Data Files 许可由
 wcwidth 与 libarchive 共享同一路径，hterm 与 libdot 的原始字节也相同，
-因此去重后仍是 6 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
+因此去重后是 9 份唯一完整许可。165 个 libarchive 编译/include 闭包文件
 得到 97 份唯一前导文本；22 个锁定片段当前也各自唯一。生成器由此固定
-`6 + 97 + 22 = 125` 个唯一正文 section，再加 `overview`、
+`9 + 97 + 22 = 128` 个唯一正文 section，再加 `overview`、
 `material-provenance`、`wcwidth-unicode-provenance`、
-`libarchive-unicode-provenance` 与 `unresolved-provenance` 五个边界
-section，共有 130 对 BEGIN/END 标记。
+`libarchive-unicode-provenance` 与 `lib-colors-provenance` 五个边界
+section，共有 133 对 BEGIN/END 标记。
 数量漂移会使永久回归失败，避免提取范围在无人察觉时扩张或收缩。
 
 hterm、libdot、intl-segmenter、wcwidth、`libarchive/COPYING` 和
@@ -70,10 +70,13 @@ Material Design Icons 同期快照的根 `LICENSE` 按完整文件字节收入�
 Material README 只收入完整 License section，三个上游 SVG 只保留锁定
 输入及格式化映射证据。Unicode Data Files 完整许可来自官方
 unicodetools 固定提交；聚合显示只移除原文件开头的 UTF-8 BOM，其余正文
-逐字保留。去重只比较最终收入正文的字节是否完全相同，不合并“看起来
-等价”的许可文本，也不改写版权方、条款或 public-domain 字样。Linux
-`COPYING` 仍由输入锁复核，但正文明确排除，因为公共宿主声明不能冒充
-`iSH+Linux` 的 Linux kernel 许可与对应源码交付方案。
+逐字保留。W3C 2015 `NOTICE.txt`、X.Org `COPYING` 与 Debian
+`debian/copyright` 也各按完整字节收入；CSSWG `LICENSE.md`/`Overview.bs`、
+W3C 官方 HTML 与两份 `rgb.txt` 只作为来源证据，不冒充另一份完整许可。
+去重只比较最终收入正文的字节是否完全相同，不合并“看起来等价”的许可文本，
+也不改写版权方、条款或 public-domain 字样。Linux `COPYING` 仍由输入锁
+复核，但正文明确排除，因为公共宿主声明不能冒充 `iSH+Linux` 的 Linux
+kernel 许可与对应源码交付方案。
 
 ## 来源纳入政策与已知缺口
 
@@ -103,9 +106,25 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
   校验器用历史 `ranges.py` 在临时目录离线重放三张哨兵表，结果必须逐字
   恢复当前 `lib_wc.js`。这证明所选官方材料能重建当前表，不声称 libapps
   作者当年明确使用了该 Git 提交；UCD.zip 本身也不含 LICENSE。
-- `lib_colors.js` 明确说明 HSL 算法改编自 W3C CSS Color 4，颜色名称表派生
-  自 stock X11 `rgb.txt`。仓内没有所用上游版本、X11 原始数据或对应权威
-  条款，收入来源注释不表示外部许可已经确定。
+- `lib_colors.js` 的 2012 颜色表由 libapps 提交
+  `f522ce0a191e24a2fc7549962ec10338b1069b3a` 引入。本锁保存 X.Org
+  `d96f362956d9e58cbb46740f825d5bad50f0fbf1` 与 Debian 签名 tag
+  `xorg-1_7.6+12` 对应提交
+  `75d568a94a7ccfb37a51711c9f1ac42f584ec140` 的原表及完整许可。X.Org
+  752 条颜色记录归一化为 657 个键；Debian 753 条记录只多唯一 23 字节的
+  `DebianRed` 行，归一化为 658 个键。删除该行后两份原表逐字相同；按名称
+  小写、删除空白、同名后项覆盖、排序和固定格式重放，逐字得到当前 23,232
+  字节对象块。所选 revision 是本工程依据精确重放关系固定的证据，不冒充
+  libapps 作者明确选择。
+- HSL 改编由 libapps 提交
+  `ead51de5339938850e5fc249b0d92482869479e8` 引入。本工程以其作者时间为
+  截止点固定 CSSWG 提交
+  `7b4ea6de873df70dd4c79f3efe86bf2ea5964019`：解码后的算法片段为 534
+  字节，当前改编函数为 892 字节。门禁核对原始公式，以及百分比输入
+  归一化、RGB 255 缩放、alpha 返回和项目格式调整。CSSWG 根许可指向的
+  W3C 2015 完整 NOTICE 已进入聚合正文并附明确改编声明；2026-07-27 取得的
+  版本化官方 HTML 只锁定当前页面和条款标记，不能冒充 2019 年网页原件。
+  该 CSSWG revision 同样是本工程选择的同时期证据，不表示作者明确使用。
 - `archive_string_composition.h` 明确由 Unicode 6.0.0 的
   `UnicodeData.txt` 生成，`archive_string.c` 的 Hangul 组合常量和流程
   明确来源于 Unicode Standard Annex #15。本锁保存官方固定提交中与
@@ -126,11 +145,12 @@ adapted from、derived from、generated from 等来源/生成表述时纳入。�
 
 ## 生成与校验
 
-生成器还会验证两个锁定的 libapps 历史提交、提交说明和对应 blob，离线
+生成器还会验证四个锁定的 libapps 历史提交、提交说明和对应 blob，离线
 重放 Material 上游快照到当前三个 SVG 的固定格式化关系，用锁定的历史
 `ranges.py` 与三份 UCD 输入重建 wcwidth 三张表，并用当前 libarchive
-生成器和 Unicode 6.0.0 输入重建其固定头文件链。libarchive 重放只使用
-当前 gitlink 文件，不要求历史对象；浅克隆只需补齐 `deps/libapps` 历史：
+生成器和 Unicode 6.0.0 输入重建其固定头文件链；X11/Debian 原表会重建
+当前颜色对象，CSSWG 算法也会与当前 HSL 改编逐项核对。libarchive 重放只
+使用当前 gitlink 文件，不要求历史对象；浅克隆只需补齐 `deps/libapps` 历史：
 
 ```sh
 if [ "$(git -C deps/libapps rev-parse --is-shallow-repository)" = true ]; then
@@ -171,8 +191,8 @@ LinkSmoke 不应获得本文件。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
 - BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
   选择分支。
-- W3C/X11 来源缺口仍会阻断公共发行；Material 图标、wcwidth UCD 与
-  libarchive Unicode 的证据闭合不表示其他未知边界或法律审查已经完成。
+- Material 图标、wcwidth UCD、libarchive Unicode 与 lib_colors 的来源
+  证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及
   对应源码资产不由本地输入锁代替。
 - 本锁不是通用 SBOM；以后引入三个既有 gitlink 之外的宿主代码时，必须

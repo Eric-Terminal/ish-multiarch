@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import html
 import importlib.util
 import os
 from pathlib import Path, PurePosixPath
@@ -30,6 +31,24 @@ from apple_host_manifest import (
     LIBARCHIVE_UNICODETOOLS_DATA_BASE,
     LIBARCHIVE_UNICODETOOLS_REVISION,
     LIBARCHIVE_UNICODETOOLS_SOURCE_URL,
+    LIB_COLORS_CSSWG_LICENSE_PATH,
+    LIB_COLORS_CSSWG_OVERVIEW_PATH,
+    LIB_COLORS_CSSWG_REVISION,
+    LIB_COLORS_CSSWG_SOURCE_URL,
+    LIB_COLORS_DEBIAN_LICENSE_PATH,
+    LIB_COLORS_DEBIAN_REVISION,
+    LIB_COLORS_DEBIAN_RGB_PATH,
+    LIB_COLORS_DEBIAN_SOURCE_URL,
+    LIB_COLORS_DEBIAN_TAG,
+    LIB_COLORS_DEBIAN_TAG_OBJECT,
+    LIB_COLORS_W3C_LICENSE_HTML_PATH,
+    LIB_COLORS_W3C_LICENSE_URL,
+    LIB_COLORS_W3C_LICENSE_VERSION,
+    LIB_COLORS_W3C_NOTICE_PATH,
+    LIB_COLORS_XORG_LICENSE_PATH,
+    LIB_COLORS_XORG_REVISION,
+    LIB_COLORS_XORG_RGB_PATH,
+    LIB_COLORS_XORG_SOURCE_URL,
     MATERIAL_ICON_LICENSE_PATH,
     MATERIAL_ICON_README_PATH,
     MATERIAL_ICON_REVISION,
@@ -68,7 +87,7 @@ FULL_LICENSE_COMPONENTS = {
 EXPECTED_LIBARCHIVE_SOURCE_COUNT = 128
 EXPECTED_LIBARCHIVE_CLOSURE_COUNT = 165
 EXPECTED_LEADING_TEXT_COUNT = 97
-EXPECTED_NOTICE_TEXT_COUNT = 125
+EXPECTED_NOTICE_TEXT_COUNT = 128
 MATERIAL_ICON_IMPORT_COMMIT = "de5387e902ef285c2d2c6909a53d37d826843551"
 MATERIAL_ICON_SOURCE_URL = (
     "https://github.com/google/material-design-icons"
@@ -100,6 +119,107 @@ MATERIAL_ICON_LICENSE_MARKERS = (
     b"Version 2.0, January 2004\n",
     b"http://www.apache.org/licenses/\n",
     b"TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n",
+)
+LIB_COLORS_CURRENT_PATH = "deps/libapps/libdot/js/lib_colors.js"
+LIB_COLORS_CURRENT_GIT_BLOB = "3716a647e4e7baa95d904a10f56e5bd68c90d1d8"
+LIB_COLORS_X11_IMPORT_COMMIT = "f522ce0a191e24a2fc7549962ec10338b1069b3a"
+LIB_COLORS_X11_IMPORT_TREE = "6ad91bc53c5a81389664fe24f2d6d081dcfdf653"
+LIB_COLORS_X11_IMPORT_DATE = "2012-04-17T17:49:17-07:00"
+LIB_COLORS_X11_IMPORT_PATH = "hterm/js/colors.js"
+LIB_COLORS_X11_IMPORT_GIT_BLOB = (
+    "780c6ae13420fd3d525bcaa0179ef77bbd7d05e9"
+)
+LIB_COLORS_HSL_IMPORT_COMMIT = "ead51de5339938850e5fc249b0d92482869479e8"
+LIB_COLORS_HSL_IMPORT_TREE = "aa59a126df3e61f34b9ef2776a51dfdff380adf0"
+LIB_COLORS_HSL_IMPORT_DATE = "2019-10-30T10:21:29+11:00"
+LIB_COLORS_HSL_IMPORT_PATH = "libdot/js/lib_colors.js"
+LIB_COLORS_HSL_IMPORT_GIT_BLOB = (
+    "0a17b6add818c2c2caab5e719d6cc8112b17a155"
+)
+LIB_COLORS_CSSWG_TREE = "c25eb296a3c508f52b5b89a96486b346771c5ba4"
+LIB_COLORS_CSSWG_LICENSE_GIT_BLOB = (
+    "0f7c218c64691e29b618b5c1fed5cd9db7651727"
+)
+LIB_COLORS_CSSWG_OVERVIEW_GIT_BLOB = (
+    "e83ae5f51715d3961573758d5e5190efa22eea01"
+)
+LIB_COLORS_W3C_NOTICE_GIT_BLOB = (
+    "60d9c6df3b5e6fdda4b9e90a40fb598835b29f03"
+)
+LIB_COLORS_XORG_TREE = "2b0b6921c3185bc58b7203fe63f1f5600b3ca3d0"
+LIB_COLORS_XORG_LICENSE_GIT_BLOB = (
+    "ffaa287aaa08864f00e68f9254756f13b52a3bea"
+)
+LIB_COLORS_XORG_RGB_GIT_BLOB = "62eb8961ecd193922e17c8e318007f4bdf85383e"
+LIB_COLORS_DEBIAN_TREE = "4dd21fe20e7cb24b20cf36828ebe1e4715a49a72"
+LIB_COLORS_DEBIAN_LICENSE_GIT_BLOB = (
+    "54fc777195d6df457f49a7ae7bbe55540bd07c5d"
+)
+LIB_COLORS_DEBIAN_RGB_GIT_BLOB = (
+    "b9e56c60236bcb02a5e1aac9f7fa2c98f408e977"
+)
+LIB_COLORS_DEBIAN_EXTENSION_COMMIT = (
+    "84aa5f582d5d9cf36e57ea5434b20ec5fac76c59"
+)
+LIB_COLORS_DEBIAN_EXTENSION_LINE = b"215   7  81\t\tDebianRed\n"
+LIB_COLORS_XORG_RAW_RECORD_COUNT = 752
+LIB_COLORS_XORG_COLOR_COUNT = 657
+LIB_COLORS_DEBIAN_RAW_RECORD_COUNT = 753
+LIB_COLORS_COLOR_COUNT = 658
+LIB_COLORS_TABLE_SIZE = 23_232
+LIB_COLORS_TABLE_SHA256 = (
+    "ee247a9e2ce8e254d4bd2d4fa7041a3d8cf86a69a569ef18205014dc3f492ec8"
+)
+LIB_COLORS_HSL_SOURCE_SIZE = 534
+LIB_COLORS_HSL_SOURCE_SHA256 = (
+    "acd43b04b073c9b67814922f8d6622c8c274fce5bcb341bd3ef96a34bc93a738"
+)
+LIB_COLORS_HSL_CURRENT_SIZE = 892
+LIB_COLORS_HSL_CURRENT_SHA256 = (
+    "cfccdc3437d0c5f3fed3b3cb1f4770ef758e472c6ffe7d52f7e9f835f85ae649"
+)
+LIB_COLORS_W3C_TR_URL = (
+    "https://www.w3.org/TR/2016/WD-css-color-4-20160705/"
+)
+LIB_COLORS_W3C_TR_SIZE = 411_314
+LIB_COLORS_W3C_TR_SHA256 = (
+    "10c04c171032d7d8cb58f8e73b9fd7a20003ee9af8330a19b03036cfe2d6f722"
+)
+LIB_COLORS_W3C_CHANGE_NOTICE = (
+    "This software includes material copied from or derived from CSS Color "
+    "Module Level 4, "
+    f"{LIB_COLORS_W3C_TR_URL}. Copyright © 2016 W3C® "
+    "(MIT, ERCIM, Keio, Beihang)."
+)
+LIB_COLORS_RGB_RECORD = re.compile(
+    rb"^[ \t]*([0-9]{1,3})[ \t]+([0-9]{1,3})[ \t]+"
+    rb"([0-9]{1,3})[ \t]+([A-Za-z0-9 \t]+?)[ \t]*$"
+)
+LIB_COLORS_CURRENT_RECORD = re.compile(
+    rb"^  '([a-z][a-z0-9]*)': 'rgb\(([0-9]+), ([0-9]+), ([0-9]+)\)',$"
+)
+LIB_COLORS_HISTORIC_RECORD = re.compile(
+    rb'^  "([a-z][a-z0-9]*)": "rgb\(([0-9]+), ([0-9]+), ([0-9]+)\)"[,]?$'
+)
+LIB_COLORS_W3C_LICENSE_MARKERS = (
+    b"W3C Software and Document Notice and License\n",
+    b"Permission to copy, modify, and distribute this work, with or without\n",
+    b"The full text of this NOTICE in a location viewable to users of\n",
+    b"Notice of any changes or modifications, through a copyright\n",
+    b'THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO\n',
+    b"COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL\n",
+    b"The name and trademarks of copyright holders may NOT be used in\n",
+    b"[1] https://www.w3.org/Consortium/Legal/copyright-software-short-notice\n",
+)
+LIB_COLORS_XORG_LICENSE_MARKERS = (
+    b"Copyright 1985, 1989, 1998  The Open Group\n",
+    b"Permission to use, copy, modify, distribute, and sell this software and its\n",
+    b'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS\n',
+)
+LIB_COLORS_DEBIAN_LICENSE_MARKERS = (
+    b"Copyright 2004-2005 Canonical Ltd.\n",
+    b"Copyright 1996-2002 Software in the Public Interest, Inc.\n",
+    b"Except as contained in this notice, the name of Canoncial Ltd. shall not be\n",
 )
 WCWIDTH_UCD_EVIDENCE_COMMIT = "6b9f6ee9b9c94cfa4e3adf049c906610d1623ee8"
 WCWIDTH_RANGES_GIT_BLOB = "087b50e4bdd49bf053383fc58939786149c8246c"
@@ -459,6 +579,421 @@ def verify_material_icon_evidence(root, inputs_by_path):
 def git_blob_oid(data):
     header = f"blob {len(data)}\0".encode("ascii")
     return hashlib.sha1(header + data).hexdigest()
+
+
+def extract_lib_colors_table(data, assignment, description):
+    marker = assignment + b" = {\n"
+    if data.count(marker) != 1:
+        fail(f"{description}颜色表起始边界漂移")
+    start = data.index(marker)
+    end = data.find(b"};\n", start + len(marker))
+    if end < 0:
+        fail(f"{description}颜色表结束边界漂移")
+    return data[start : end + 3]
+
+
+def parse_lib_colors_js_table(block, assignment, record, description):
+    if not block.endswith(b"\n") or b"\r" in block:
+        fail(f"{description}颜色表必须只使用 LF 且以换行结束")
+    lines = block.splitlines()
+    if lines[0] != assignment + b" = {" or lines[-1] != b"};":
+        fail(f"{description}颜色表赋值边界漂移")
+    colors = {}
+    for line_number, line in enumerate(lines[1:-1], 1):
+        match = record.fullmatch(line)
+        if match is None:
+            fail(f"{description}颜色表第 {line_number} 项格式漂移")
+        name = match.group(1).decode("ascii")
+        rgb = tuple(int(value, 10) for value in match.groups()[1:])
+        if name in colors:
+            fail(f"{description}颜色表含重复键：{name}")
+        if any(value > 255 for value in rgb):
+            fail(f"{description}颜色表含越界 RGB：{name}")
+        colors[name] = rgb
+    return colors
+
+
+def parse_lib_colors_rgb(data, description):
+    if not data.endswith(b"\n") or b"\r" in data:
+        fail(f"{description}必须只使用 LF 且以换行结束")
+    colors = {}
+    record_count = 0
+    for line_number, line in enumerate(data.splitlines(), 1):
+        if not line or line.lstrip().startswith(b"!"):
+            continue
+        match = LIB_COLORS_RGB_RECORD.fullmatch(line)
+        if match is None:
+            fail(f"{description}第 {line_number} 行格式漂移")
+        rgb = tuple(int(value, 10) for value in match.groups()[:3])
+        if any(value > 255 for value in rgb):
+            fail(f"{description}第 {line_number} 行 RGB 越界")
+        normalized = re.sub(rb"[ \t]+", b"", match.group(4)).lower()
+        if re.fullmatch(rb"[a-z][a-z0-9]*", normalized) is None:
+            fail(f"{description}第 {line_number} 行颜色名称非法")
+        name = normalized.decode("ascii")
+        # 与原表生成规则一致：同名后项覆盖前项。
+        colors[name] = rgb
+        record_count += 1
+    return record_count, colors
+
+
+def render_lib_colors_table(colors):
+    output = bytearray(b"lib.colors.colorNames = {\n")
+    for name, rgb in sorted(colors.items()):
+        output.extend(
+            (
+                f"  '{name}': 'rgb({rgb[0]}, {rgb[1]}, {rgb[2]})',\n"
+            ).encode("ascii")
+        )
+    output.extend(b"};\n")
+    return bytes(output)
+
+
+def extract_lib_colors_hsl(data):
+    start_marker = (
+        b"lib.colors.hslxArrayToRgbaArray = function(hslx) {\n"
+    )
+    end_marker = b"\n\n/**\n * Converts a hsvx array to a hsla array."
+    if data.count(start_marker) != 1:
+        fail("lib_colors 当前 HSL 函数起始边界漂移")
+    start = data.index(start_marker)
+    end = data.find(end_marker, start + len(start_marker))
+    if end < 0:
+        fail("lib_colors 当前 HSL 函数结束边界漂移")
+    return data[start : end + 1]
+
+
+def extract_csswg_hsl_source(data):
+    start_marker = b"\tfunction hslToRgb(hue, sat, light) {"
+    end_marker = b"\n\t</pre>"
+    if data.count(start_marker) != 1:
+        fail("CSS Color 4 HSL 算法起始边界漂移")
+    start = data.index(start_marker)
+    end = data.find(end_marker, start + len(start_marker))
+    if end < 0:
+        fail("CSS Color 4 HSL 算法结束边界漂移")
+    source = html.unescape(
+        data[start:end].decode("utf-8", errors="strict")
+    ).encode("utf-8")
+    if (
+        len(source) != LIB_COLORS_HSL_SOURCE_SIZE
+        or hashlib.sha256(source).hexdigest()
+        != LIB_COLORS_HSL_SOURCE_SHA256
+    ):
+        fail("CSS Color 4 HSL 算法原始字节漂移")
+    return source
+
+
+def verify_lib_colors_hsl_adaptation(overview, current):
+    source = extract_csswg_hsl_source(overview)
+    adapted = extract_lib_colors_hsl(current)
+    if (
+        len(adapted) != LIB_COLORS_HSL_CURRENT_SIZE
+        or hashlib.sha256(adapted).hexdigest()
+        != LIB_COLORS_HSL_CURRENT_SHA256
+    ):
+        fail("lib_colors 当前 HSL 改编函数字节漂移")
+
+    source_markers = (
+        b"var t2 = light * (sat + 1);",
+        b"var t2 = light + sat - (light * sat);",
+        b"var t1 = light * 2 - t2;",
+        b"var r = hueToRgb(t1, t2, hue + 2);",
+        b"var g = hueToRgb(t1, t2, hue);",
+        b"var b = hueToRgb(t1, t2, hue - 2);",
+        b"if(hue < 0) hue += 6;",
+        b"if(hue >= 6) hue -= 6;",
+        b"if(hue < 1) return (t2 - t1) * hue + t1;",
+        b"else if(hue < 3) return t2;",
+        b"else if(hue < 4) return (t2 - t1) * (4 - hue) + t1;",
+        b"else return t1;",
+    )
+    for marker in source_markers:
+        if source.count(marker) != 1:
+            fail("CSS Color 4 HSL 公式边界漂移")
+
+    adapted_markers = (
+        b"const hue = parseInt(hslx[0], 10) / 60;",
+        b"const sat = parseInt(hslx[1], 10) / 100;",
+        b"const light = parseInt(hslx[2], 10) / 100;",
+        b"https://www.w3.org/TR/css-color-4/#hsl-to-rgb",
+        (
+            b"const t2 = light <= 0.5 ? light * (sat + 1) : "
+            b"light + sat - (light * sat);"
+        ),
+        b"const t1 = light * 2 - t2;",
+        b"255 * hueToRgb(t1, t2, hue + 2),",
+        b"255 * hueToRgb(t1, t2, hue),",
+        b"255 * hueToRgb(t1, t2, hue - 2),",
+        b"hslx[3] !== undefined ? +hslx[3] : 1,",
+        b"if (hue < 0) {",
+        b"if (hue >= 6) {",
+        b"return (t2 - t1) * hue + t1;",
+        b"} else if (hue < 3) {",
+        b"} else if (hue < 4) {",
+        b"return (t2 - t1) * (4 - hue) + t1;",
+    )
+    for marker in adapted_markers:
+        if adapted.count(marker) != 1:
+            fail("lib_colors HSL 固定改编关系漂移")
+
+
+def verify_lib_colors_history(
+    root, validator, current, current_colors
+):
+    repository = root / "deps/libapps"
+    checks = (
+        (
+            LIB_COLORS_X11_IMPORT_COMMIT,
+            LIB_COLORS_X11_IMPORT_TREE,
+            LIB_COLORS_X11_IMPORT_DATE,
+            LIB_COLORS_X11_IMPORT_PATH,
+            LIB_COLORS_X11_IMPORT_GIT_BLOB,
+            b"Added colors.js file to contain color utilities and palettes.",
+            "X11 颜色表",
+        ),
+        (
+            LIB_COLORS_HSL_IMPORT_COMMIT,
+            LIB_COLORS_HSL_IMPORT_TREE,
+            LIB_COLORS_HSL_IMPORT_DATE,
+            LIB_COLORS_HSL_IMPORT_PATH,
+            LIB_COLORS_HSL_IMPORT_GIT_BLOB,
+            b"libdot: support hsla? css strings",
+            "W3C HSL 改编",
+        ),
+    )
+    historic_inputs = {}
+    for (
+        commit,
+        tree,
+        author_date,
+        path,
+        blob,
+        message_marker,
+        description,
+    ) in checks:
+        base = validator.run_git(
+            repository, "merge-base", commit, "HEAD"
+        ).decode("ascii", errors="strict").strip()
+        if base != commit:
+            fail(f"{description}历史提交不是锁定 libapps HEAD 的祖先")
+        actual_tree = validator.run_git(
+            repository, "show", "-s", "--format=%T", commit
+        ).decode("ascii", errors="strict").strip()
+        actual_date = validator.run_git(
+            repository, "show", "-s", "--format=%aI", commit
+        ).decode("ascii", errors="strict").strip()
+        message = validator.run_git(
+            repository, "show", "-s", "--format=%B", commit
+        )
+        if (
+            actual_tree != tree
+            or actual_date != author_date
+            or message.count(message_marker) != 1
+        ):
+            fail(f"{description}历史提交身份漂移")
+        historic = validator.run_git(
+            repository, "show", f"{commit}:{path}"
+        )
+        if git_blob_oid(historic) != blob:
+            fail(f"{description}历史文件 Git blob 漂移")
+        historic_inputs[commit] = historic
+
+    if git_blob_oid(current) != LIB_COLORS_CURRENT_GIT_BLOB:
+        fail("lib_colors 当前文件 Git blob 漂移")
+    historic_table = extract_lib_colors_table(
+        historic_inputs[LIB_COLORS_X11_IMPORT_COMMIT],
+        b"hterm.colors.colorNames",
+        "libapps 历史",
+    )
+    historic_colors = parse_lib_colors_js_table(
+        historic_table,
+        b"hterm.colors.colorNames",
+        LIB_COLORS_HISTORIC_RECORD,
+        "libapps 历史",
+    )
+    if historic_colors != current_colors:
+        fail("libapps 历史 X11 颜色表与当前交付表语义不一致")
+
+    historic_hsl = historic_inputs[LIB_COLORS_HSL_IMPORT_COMMIT]
+    for marker in (
+        b"https://www.w3.org/TR/css-color-4/#hsl-to-rgb",
+        b"return (t2 - t1) * hue + t1;",
+        b"return (t2 - t1) * (4 - hue) + t1;",
+        b"255 * hueToRgb(t1, t2, hue + 2),",
+        b"255 * hueToRgb(t1, t2, hue - 2),",
+    ):
+        if historic_hsl.count(marker) != 1:
+            fail("libapps 历史 HSL 改编公式漂移")
+
+
+def verify_lib_colors_licenses(
+    csswg_license,
+    notice,
+    license_html,
+    xorg_license,
+    debian_license,
+):
+    if csswg_license.count(
+        b"[W3C Software and Document License]"
+    ) != 1 or csswg_license.count(
+        b"https://www.w3.org/Consortium/Legal/copyright-software"
+    ) != 1:
+        fail("CSSWG 根 LICENSE 的 W3C 许可指针漂移")
+
+    for marker in LIB_COLORS_W3C_LICENSE_MARKERS:
+        if notice.count(marker) != 1:
+            fail("W3C Software and Document NOTICE 正文漂移")
+    for marker in (
+        b"Software and Document license - 2015 version",
+        b"This license was in effect between 13 May 2015 and 31 December 2022.",
+        b"Permission to copy, modify, and distribute this work, with or without",
+        b"The full text of this NOTICE in a location viewable to users",
+        b"Notice of any changes or modifications",
+        b"COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL",
+        b"The name and trademarks of copyright holders may NOT be used",
+        b"https://www.w3.org/copyright/software-license-2015/",
+    ):
+        if marker not in license_html:
+            fail("W3C 2015 官方许可页面标记漂移")
+
+    for marker in LIB_COLORS_XORG_LICENSE_MARKERS:
+        if xorg_license.count(marker) != 1:
+            fail("X.Org rgb COPYING 正文漂移")
+    for marker in LIB_COLORS_DEBIAN_LICENSE_MARKERS:
+        if debian_license.count(marker) != 1:
+            fail("Debian X.Org copyright 正文漂移")
+    for marker in (
+        b"Permission is hereby granted, free of charge, to any person obtaining a\n",
+        b'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n',
+    ):
+        if debian_license.count(marker) != 2:
+            fail("Debian X.Org copyright 授权条款漂移")
+
+
+def verify_lib_colors_rgb_replay(xorg_rgb, debian_rgb, current):
+    if (
+        debian_rgb.count(LIB_COLORS_DEBIAN_EXTENSION_LINE) != 1
+        or debian_rgb.replace(
+            LIB_COLORS_DEBIAN_EXTENSION_LINE, b"", 1
+        ) != xorg_rgb
+    ):
+        fail("DebianRed 唯一扩展行与 X.Org rgb.txt 的字节关系漂移")
+
+    xorg_records, xorg_colors = parse_lib_colors_rgb(
+        xorg_rgb, "X.Org rgb.txt"
+    )
+    debian_records, debian_colors = parse_lib_colors_rgb(
+        debian_rgb, "Debian rgb.txt"
+    )
+    if (
+        xorg_records != LIB_COLORS_XORG_RAW_RECORD_COUNT
+        or len(xorg_colors) != LIB_COLORS_XORG_COLOR_COUNT
+        or debian_records != LIB_COLORS_DEBIAN_RAW_RECORD_COUNT
+        or len(debian_colors) != LIB_COLORS_COLOR_COUNT
+    ):
+        fail("lib_colors X11 原始记录或归一化键数量漂移")
+    if (
+        set(debian_colors) - set(xorg_colors) != {"debianred"}
+        or debian_colors["debianred"] != (215, 7, 81)
+        or any(debian_colors[name] != rgb for name, rgb in xorg_colors.items())
+    ):
+        fail("Debian rgb.txt 相对 X.Org 的唯一语义扩展漂移")
+
+    table = extract_lib_colors_table(
+        current, b"lib.colors.colorNames", "lib_colors 当前"
+    )
+    current_colors = parse_lib_colors_js_table(
+        table,
+        b"lib.colors.colorNames",
+        LIB_COLORS_CURRENT_RECORD,
+        "lib_colors 当前",
+    )
+    rendered = render_lib_colors_table(debian_colors)
+    if (
+        len(table) != LIB_COLORS_TABLE_SIZE
+        or hashlib.sha256(table).hexdigest()
+        != LIB_COLORS_TABLE_SHA256
+        or rendered != table
+        or current_colors != debian_colors
+    ):
+        fail("Debian rgb.txt 不能逐字重建当前 lib_colors 颜色表")
+    return current_colors
+
+
+def verify_lib_colors_evidence(root, inputs_by_path, validator):
+    expected_roles = {
+        LIB_COLORS_CSSWG_LICENSE_PATH: "provenance",
+        LIB_COLORS_CSSWG_OVERVIEW_PATH: "provenance",
+        LIB_COLORS_DEBIAN_LICENSE_PATH: "license",
+        LIB_COLORS_DEBIAN_RGB_PATH: "provenance",
+        LIB_COLORS_W3C_LICENSE_HTML_PATH: "provenance",
+        LIB_COLORS_W3C_NOTICE_PATH: "license",
+        LIB_COLORS_XORG_LICENSE_PATH: "license",
+        LIB_COLORS_XORG_RGB_PATH: "provenance",
+    }
+    for relative, role in expected_roles.items():
+        item = inputs_by_path.get(relative)
+        if (
+            item is None
+            or item.delivery_unit != "hterm-bundle"
+            or item.component != "libdot"
+            or item.role != role
+        ):
+            fail(f"lib_colors 来源或许可输入缺失：{relative}")
+    current_item = inputs_by_path.get(LIB_COLORS_CURRENT_PATH)
+    if (
+        current_item is None
+        or current_item.delivery_unit != "hterm-bundle"
+        or current_item.component != "libdot"
+        or current_item.role != "inline-notice"
+    ):
+        fail("lib_colors 当前交付输入归属漂移")
+
+    blob_expectations = {
+        LIB_COLORS_CSSWG_LICENSE_PATH:
+            LIB_COLORS_CSSWG_LICENSE_GIT_BLOB,
+        LIB_COLORS_CSSWG_OVERVIEW_PATH:
+            LIB_COLORS_CSSWG_OVERVIEW_GIT_BLOB,
+        LIB_COLORS_DEBIAN_LICENSE_PATH:
+            LIB_COLORS_DEBIAN_LICENSE_GIT_BLOB,
+        LIB_COLORS_DEBIAN_RGB_PATH:
+            LIB_COLORS_DEBIAN_RGB_GIT_BLOB,
+        LIB_COLORS_W3C_NOTICE_PATH:
+            LIB_COLORS_W3C_NOTICE_GIT_BLOB,
+        LIB_COLORS_XORG_LICENSE_PATH:
+            LIB_COLORS_XORG_LICENSE_GIT_BLOB,
+        LIB_COLORS_XORG_RGB_PATH:
+            LIB_COLORS_XORG_RGB_GIT_BLOB,
+    }
+    evidence = {}
+    for relative in expected_roles:
+        evidence[relative] = read_regular(
+            root, relative, "lib_colors 来源或许可"
+        )
+    for relative, expected_blob in blob_expectations.items():
+        if git_blob_oid(evidence[relative]) != expected_blob:
+            fail(f"lib_colors 固定 Git blob 漂移：{relative}")
+
+    verify_lib_colors_licenses(
+        evidence[LIB_COLORS_CSSWG_LICENSE_PATH],
+        evidence[LIB_COLORS_W3C_NOTICE_PATH],
+        evidence[LIB_COLORS_W3C_LICENSE_HTML_PATH],
+        evidence[LIB_COLORS_XORG_LICENSE_PATH],
+        evidence[LIB_COLORS_DEBIAN_LICENSE_PATH],
+    )
+
+    xorg_rgb = evidence[LIB_COLORS_XORG_RGB_PATH]
+    debian_rgb = evidence[LIB_COLORS_DEBIAN_RGB_PATH]
+
+    current = read_regular(root, LIB_COLORS_CURRENT_PATH, "lib_colors 当前输入")
+    current_colors = verify_lib_colors_rgb_replay(
+        xorg_rgb, debian_rgb, current
+    )
+
+    overview = evidence[LIB_COLORS_CSSWG_OVERVIEW_PATH]
+    verify_lib_colors_hsl_adaptation(overview, current)
+    verify_lib_colors_history(root, validator, current, current_colors)
 
 
 def unicode_license_text(data):
@@ -912,7 +1447,7 @@ def overview():
         "\n"
         "覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 "
         "hterm 生成资源及 libarchive 静态库的锁定原始文本，并在后续"
-        "专节记录已闭合的来源证据和仍未闭合的外部来源。\n"
+        "专节记录已闭合的来源证据与仍由发行门禁处理的边界。\n"
         "\n"
         "未决边界：\n"
         "- Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；"
@@ -924,7 +1459,8 @@ def overview():
         "- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见"
         "后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已"
         "闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与"
-        "许可路径也已闭合。W3C/X11 缺口继续列在未闭合一节。\n"
+        "许可路径也已闭合；lib_colors 的 W3C HSL 算法、X11 颜色表、"
+        "改编关系与适用许可证据同样已闭合。\n"
         "- 来源与许可边界是工程审计记录，不是法律结论。\n"
         "- public-domain 字样仅转述锁定上游源码，不是本工具作出的法律"
         "判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。\n"
@@ -1099,16 +1635,116 @@ def libarchive_unicode_provenance(inputs_by_path):
     ).encode("utf-8")
 
 
-def unresolved_provenance():
+def lib_colors_provenance(inputs_by_path):
+    current = inputs_by_path[LIB_COLORS_CURRENT_PATH]
+    csswg_license = inputs_by_path[LIB_COLORS_CSSWG_LICENSE_PATH]
+    csswg_overview = inputs_by_path[LIB_COLORS_CSSWG_OVERVIEW_PATH]
+    w3c_html = inputs_by_path[LIB_COLORS_W3C_LICENSE_HTML_PATH]
+    w3c_notice = inputs_by_path[LIB_COLORS_W3C_NOTICE_PATH]
+    xorg_rgb = inputs_by_path[LIB_COLORS_XORG_RGB_PATH]
+    xorg_license = inputs_by_path[LIB_COLORS_XORG_LICENSE_PATH]
+    debian_rgb = inputs_by_path[LIB_COLORS_DEBIAN_RGB_PATH]
+    debian_license = inputs_by_path[LIB_COLORS_DEBIAN_LICENSE_PATH]
+
     return (
-        "===== BEGIN APPLE HOST NOTICE: unresolved-provenance =====\n"
-        "未闭合的外部来源与许可\n"
+        "===== BEGIN APPLE HOST NOTICE: lib-colors-provenance =====\n"
+        "已闭合的 lib_colors W3C HSL 与 X11 颜色表来源及许可\n"
         "\n"
-        "libdot 外部来源：lib_colors.js 的锁定注释说明 HSL 算法改编自 "
-        "W3C CSS Color 4，颜色表派生自 stock X11 rgb.txt；仓内没有所用"
-        "上游版本、X11 原始数据或对应权威条款。收录这些注释不表示外部"
-        "许可已经确定。\n"
-        "===== END APPLE HOST NOTICE: unresolved-provenance =====\n"
+        f"当前交付文件：{LIB_COLORS_CURRENT_PATH}；{current.size} 字节；"
+        f"SHA-256 {current.sha256}；Git blob "
+        f"{LIB_COLORS_CURRENT_GIT_BLOB}。运行时代码与子模块字节没有改写；"
+        "八份原始输入不作为独立资源进入 App bundle，三份适用许可正文"
+        "仅在本聚合声明中逐字收入。\n"
+        "\n"
+        "X11 颜色表历史与重放：\n"
+        f"- libapps 引入提交 {LIB_COLORS_X11_IMPORT_COMMIT}；tree "
+        f"{LIB_COLORS_X11_IMPORT_TREE}；作者时间 "
+        f"{LIB_COLORS_X11_IMPORT_DATE}；历史文件 blob "
+        f"{LIB_COLORS_X11_IMPORT_GIT_BLOB}。\n"
+        f"- X.Org 官方仓库 {LIB_COLORS_XORG_SOURCE_URL}；固定提交 "
+        f"{LIB_COLORS_XORG_REVISION}；tree {LIB_COLORS_XORG_TREE}。\n"
+        f"- {LIB_COLORS_XORG_RGB_PATH}；{xorg_rgb.size} 字节；SHA-256 "
+        f"{xorg_rgb.sha256}；blob {LIB_COLORS_XORG_RGB_GIT_BLOB}。\n"
+        f"- {LIB_COLORS_XORG_LICENSE_PATH}；{xorg_license.size} 字节；"
+        f"SHA-256 {xorg_license.sha256}；blob "
+        f"{LIB_COLORS_XORG_LICENSE_GIT_BLOB}。\n"
+        f"- Debian 官方仓库 {LIB_COLORS_DEBIAN_SOURCE_URL}；签名 tag "
+        f"{LIB_COLORS_DEBIAN_TAG}；tag object "
+        f"{LIB_COLORS_DEBIAN_TAG_OBJECT}；固定提交 "
+        f"{LIB_COLORS_DEBIAN_REVISION}；tree {LIB_COLORS_DEBIAN_TREE}。\n"
+        f"- {LIB_COLORS_DEBIAN_RGB_PATH}；{debian_rgb.size} 字节；"
+        f"SHA-256 {debian_rgb.sha256}；blob "
+        f"{LIB_COLORS_DEBIAN_RGB_GIT_BLOB}。\n"
+        f"- {LIB_COLORS_DEBIAN_LICENSE_PATH}；{debian_license.size} 字节；"
+        f"SHA-256 {debian_license.sha256}；blob "
+        f"{LIB_COLORS_DEBIAN_LICENSE_GIT_BLOB}。\n"
+        "\n"
+        "libapps 没有记录精确 X.Org revision 或 Debian 发行包。本工程"
+        "选择上述两份快照，是因为 Debian 表能够精确重放当前对象，且"
+        "删除 DebianRed 后逐字等于该 X.Org 表；这不表示 libapps 作者"
+        "明确选择了这两个 revision。\n"
+        "\n"
+        "Debian 原表删除唯一 23 字节 DebianRed 扩展行后必须逐字恢复 "
+        "X.Org 原表；该扩展的历史提交为 "
+        f"{LIB_COLORS_DEBIAN_EXTENSION_COMMIT}。X.Org 的 "
+        f"{LIB_COLORS_XORG_RAW_RECORD_COUNT} 条颜色记录归一化为 "
+        f"{LIB_COLORS_XORG_COLOR_COUNT} 个键；Debian 的 "
+        f"{LIB_COLORS_DEBIAN_RAW_RECORD_COUNT} 条颜色记录归一化为 "
+        f"{LIB_COLORS_COLOR_COUNT} 个键。校验器按名称小写、移除名称空白、"
+        "同名后项覆盖、键排序及固定 JavaScript 格式离线重放，必须逐字"
+        f"恢复 {LIB_COLORS_TABLE_SIZE} 字节、SHA-256 "
+        f"{LIB_COLORS_TABLE_SHA256} 的当前对象块；2012 历史对象的 "
+        "658 个键和值也必须与当前表一致。\n"
+        "\n"
+        "W3C HSL 算法历史与改编核对：\n"
+        f"- libapps 引入提交 {LIB_COLORS_HSL_IMPORT_COMMIT}；tree "
+        f"{LIB_COLORS_HSL_IMPORT_TREE}；作者时间 "
+        f"{LIB_COLORS_HSL_IMPORT_DATE}；历史文件 blob "
+        f"{LIB_COLORS_HSL_IMPORT_GIT_BLOB}。\n"
+        f"- CSSWG 官方仓库 {LIB_COLORS_CSSWG_SOURCE_URL}；本工程以该"
+        "作者时间为截止点选取固定提交 "
+        f"{LIB_COLORS_CSSWG_REVISION}；tree {LIB_COLORS_CSSWG_TREE}。"
+        "这不表示 libapps 作者明确记录或使用了该 Git 提交。\n"
+        f"- {LIB_COLORS_CSSWG_OVERVIEW_PATH}；{csswg_overview.size} 字节；"
+        f"SHA-256 {csswg_overview.sha256}；blob "
+        f"{LIB_COLORS_CSSWG_OVERVIEW_GIT_BLOB}。\n"
+        f"- {LIB_COLORS_CSSWG_LICENSE_PATH}；{csswg_license.size} 字节；"
+        f"SHA-256 {csswg_license.sha256}；blob "
+        f"{LIB_COLORS_CSSWG_LICENSE_GIT_BLOB}。\n"
+        "\n"
+        f"从 CSS Color 4 固定源提取并解码的算法为 "
+        f"{LIB_COLORS_HSL_SOURCE_SIZE} 字节、SHA-256 "
+        f"{LIB_COLORS_HSL_SOURCE_SHA256}；当前改编函数为 "
+        f"{LIB_COLORS_HSL_CURRENT_SIZE} 字节、SHA-256 "
+        f"{LIB_COLORS_HSL_CURRENT_SHA256}。固定关系保留原始分支与公式，"
+        "并将 hue 从角度归一化为六段、将饱和度和亮度百分比归一化为 "
+        "0–1、把 RGB 缩放到 0–255、返回 alpha，再按项目风格改写语法。"
+        "校验器会锁定两端字节并逐项核对这些公式与改动。\n"
+        "\n"
+        f"不可变公开工作草案交叉证据：{LIB_COLORS_W3C_TR_URL}；当前取得"
+        f"页面为 {LIB_COLORS_W3C_TR_SIZE} 字节、SHA-256 "
+        f"{LIB_COLORS_W3C_TR_SHA256}；该页面不复制进仓库或产品。\n"
+        "\n"
+        "CSSWG 根 LICENSE 指向 W3C Software and Document License。"
+        f"{LIB_COLORS_W3C_LICENSE_HTML_PATH} 是 2026-07-27 从版本化官方"
+        f"入口 {LIB_COLORS_W3C_LICENSE_URL} 取得的 2015 版页面；"
+        f"{w3c_html.size} 字节；SHA-256 {w3c_html.sha256}。它用于锁定"
+        "当前官方页面和条款标记，不能冒充 2019 年网页原件。完整、可见的"
+        f"许可正文来自 {LIB_COLORS_W3C_NOTICE_PATH}；{w3c_notice.size} "
+        f"字节；SHA-256 {w3c_notice.sha256}；Git blob "
+        f"{LIB_COLORS_W3C_NOTICE_GIT_BLOB}，并在后续完整许可 section "
+        "逐字收入。X.Org COPYING 与 Debian copyright 也分别逐字收入。\n"
+        "\n"
+        f"{LIB_COLORS_W3C_CHANGE_NOTICE}\n"
+        "\n"
+        "Changes and modifications: hue, saturation, and lightness inputs are "
+        "normalized for the libdot API; RGB channels are scaled to 0–255; an "
+        "alpha channel is returned; syntax and formatting follow the project "
+        "style.\n"
+        "\n"
+        "本节记录可重复的工程来源、改编与许可证据，不替代发行者的法律"
+        "审查，也不表示其他发行边界已经闭合。\n"
+        "===== END APPLE HOST NOTICE: lib-colors-provenance =====\n"
         "\n"
     ).encode("utf-8")
 
@@ -1118,7 +1754,7 @@ def audit_boundaries(inputs_by_path):
         material_provenance(inputs_by_path)
         + wcwidth_unicode_provenance(inputs_by_path)
         + libarchive_unicode_provenance(inputs_by_path)
-        + unresolved_provenance()
+        + lib_colors_provenance(inputs_by_path)
     )
 
 
@@ -1224,6 +1860,7 @@ def build_notice(root):
         fail("除共享 Unicode Data Files 许可外，宿主输入路径不得重复")
     verify_history_evidence(root, validator)
     verify_material_icon_evidence(root, inputs_by_path)
+    verify_lib_colors_evidence(root, inputs_by_path, validator)
     verify_wcwidth_unicode_evidence(root, inputs_by_path, validator)
     verify_libarchive_unicode_evidence(root, inputs_by_path, input_keys)
 
@@ -1235,6 +1872,18 @@ def build_notice(root):
         full_license_components.add(item.component)
         if item.path == MATERIAL_ICON_LICENSE_PATH:
             component = f"Material Design Icons {MATERIAL_ICON_REVISION}"
+            content = read_regular(root, item.path, "宿主完整许可文本")
+        elif item.path == LIB_COLORS_W3C_NOTICE_PATH:
+            component = (
+                "W3C Software and Document License "
+                f"{LIB_COLORS_W3C_LICENSE_VERSION}"
+            )
+            content = read_regular(root, item.path, "宿主完整许可文本")
+        elif item.path == LIB_COLORS_XORG_LICENSE_PATH:
+            component = f"X.Org rgb {LIB_COLORS_XORG_REVISION}"
+            content = read_regular(root, item.path, "宿主完整许可文本")
+        elif item.path == LIB_COLORS_DEBIAN_LICENSE_PATH:
+            component = f"Debian X.Org {LIB_COLORS_DEBIAN_TAG}"
             content = read_regular(root, item.path, "宿主完整许可文本")
         elif (
             item.path == WCWIDTH_UCD_LICENSE_PATH

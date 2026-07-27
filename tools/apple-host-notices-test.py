@@ -10,7 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
-from apple_host_manifest import HostInputError
+from apple_host_manifest import APPLE_HOST_RAW_INPUT_PATHS, HostInputError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,21 +51,21 @@ def test_production_output():
         b"===== BEGIN APPLE HOST NOTICE: overview ====="
     ):
         fail("宿主声明首行 marker 漂移")
-    if NOTICES.EXPECTED_NOTICE_TEXT_COUNT != 125:
+    if NOTICES.EXPECTED_NOTICE_TEXT_COUNT != 128:
         fail("宿主声明唯一正文组数量合同漂移")
     begin_count = first.count(b"===== BEGIN APPLE HOST NOTICE:")
-    if begin_count != 130 or begin_count != first.count(
+    if begin_count != 133 or begin_count != first.count(
         b"===== END APPLE HOST NOTICE:"
     ):
         fail("宿主声明 section marker 不平衡")
-    if first.count(b"===== BEGIN APPLE HOST NOTICE: text-") != 125:
+    if first.count(b"===== BEGIN APPLE HOST NOTICE: text-") != 128:
         fail("宿主声明正文 section 数量漂移")
     for identifier in (
         "overview",
         "material-provenance",
         "wcwidth-unicode-provenance",
         "libarchive-unicode-provenance",
-        "unresolved-provenance",
+        "lib-colors-provenance",
     ):
         begin = (
             f"===== BEGIN APPLE HOST NOTICE: {identifier} =====\n"
@@ -88,6 +88,12 @@ def test_production_output():
         ),
         "组件：libarchive 3.4.3\n",
         f"组件：Material Design Icons {NOTICES.MATERIAL_ICON_REVISION}\n",
+        (
+            "组件：W3C Software and Document License "
+            f"{NOTICES.LIB_COLORS_W3C_LICENSE_VERSION}\n"
+        ),
+        f"组件：X.Org rgb {NOTICES.LIB_COLORS_XORG_REVISION}\n",
+        f"组件：Debian X.Org {NOTICES.LIB_COLORS_DEBIAN_TAG}\n",
     ):
         if metadata.encode("utf-8") not in first:
             fail(f"宿主声明缺少锁定版本元数据：{metadata.strip()}")
@@ -98,6 +104,9 @@ def test_production_output():
         "deps/libapps/libdot/third_party/wcwidth/LICENSE.md",
         "deps/libarchive/COPYING",
         NOTICES.MATERIAL_ICON_LICENSE_PATH,
+        NOTICES.LIB_COLORS_W3C_NOTICE_PATH,
+        NOTICES.LIB_COLORS_XORG_LICENSE_PATH,
+        NOTICES.LIB_COLORS_DEBIAN_LICENSE_PATH,
     ):
         content = (ROOT / relative).read_bytes()
         if first.count(content) != 1:
@@ -115,6 +124,21 @@ def test_production_output():
     license_rows = (
         ROOT / "third_party/apple-host/license-inputs.tsv"
     ).read_text(encoding="utf-8").splitlines()[1:]
+    lib_colors_raw_inputs = {
+        NOTICES.LIB_COLORS_CSSWG_LICENSE_PATH,
+        NOTICES.LIB_COLORS_CSSWG_OVERVIEW_PATH,
+        NOTICES.LIB_COLORS_DEBIAN_LICENSE_PATH,
+        NOTICES.LIB_COLORS_DEBIAN_RGB_PATH,
+        NOTICES.LIB_COLORS_W3C_LICENSE_HTML_PATH,
+        NOTICES.LIB_COLORS_W3C_NOTICE_PATH,
+        NOTICES.LIB_COLORS_XORG_LICENSE_PATH,
+        NOTICES.LIB_COLORS_XORG_RGB_PATH,
+    }
+    if (
+        len(APPLE_HOST_RAW_INPUT_PATHS) != 21
+        or not lib_colors_raw_inputs.issubset(APPLE_HOST_RAW_INPUT_PATHS)
+    ):
+        fail("Apple 宿主原始输入路径合同漂移")
     hterm_provenance = {
         fields[3]
         for fields in (row.split("\t") for row in license_rows)
@@ -131,6 +155,20 @@ def test_production_output():
     }
     if hterm_provenance != expected_hterm_provenance:
         fail("hterm Material 图标 provenance 输入集合漂移")
+
+    libdot_provenance = {
+        fields[3]
+        for fields in (row.split("\t") for row in license_rows)
+        if fields[1:3] == ["libdot", "provenance"]
+    }
+    if libdot_provenance != {
+        NOTICES.LIB_COLORS_CSSWG_LICENSE_PATH,
+        NOTICES.LIB_COLORS_CSSWG_OVERVIEW_PATH,
+        NOTICES.LIB_COLORS_DEBIAN_RGB_PATH,
+        NOTICES.LIB_COLORS_W3C_LICENSE_HTML_PATH,
+        NOTICES.LIB_COLORS_XORG_RGB_PATH,
+    }:
+        fail("libdot W3C/X11 provenance 输入集合漂移")
 
     for current, upstream in NOTICES.MATERIAL_ICON_SOURCES:
         current_item = next(
@@ -239,8 +277,36 @@ def test_production_output():
         "deps/libapps/libdot/js/lib_colors.js:322-323",
         "deps/libapps/libdot/js/lib_colors.js:629-640",
         "deps/libapps/libdot/js/lib_colors.js:755-757",
-        "HSL 算法改编自 W3C CSS Color 4",
-        "颜色表派生自 stock X11 rgb.txt",
+        "The following algorithm has been adapted from:",
+        "This list of color name to RGB mapping is derived from the stock X11",
+        "已闭合的 lib_colors W3C HSL 与 X11 颜色表来源及许可",
+        NOTICES.LIB_COLORS_X11_IMPORT_COMMIT,
+        NOTICES.LIB_COLORS_X11_IMPORT_TREE,
+        NOTICES.LIB_COLORS_X11_IMPORT_GIT_BLOB,
+        NOTICES.LIB_COLORS_HSL_IMPORT_COMMIT,
+        NOTICES.LIB_COLORS_HSL_IMPORT_TREE,
+        NOTICES.LIB_COLORS_HSL_IMPORT_GIT_BLOB,
+        NOTICES.LIB_COLORS_XORG_SOURCE_URL,
+        NOTICES.LIB_COLORS_XORG_REVISION,
+        NOTICES.LIB_COLORS_XORG_TREE,
+        NOTICES.LIB_COLORS_DEBIAN_SOURCE_URL,
+        NOTICES.LIB_COLORS_DEBIAN_TAG,
+        NOTICES.LIB_COLORS_DEBIAN_TAG_OBJECT,
+        NOTICES.LIB_COLORS_DEBIAN_REVISION,
+        NOTICES.LIB_COLORS_CSSWG_SOURCE_URL,
+        NOTICES.LIB_COLORS_CSSWG_REVISION,
+        NOTICES.LIB_COLORS_CSSWG_TREE,
+        NOTICES.LIB_COLORS_TABLE_SHA256,
+        NOTICES.LIB_COLORS_HSL_SOURCE_SHA256,
+        NOTICES.LIB_COLORS_HSL_CURRENT_SHA256,
+        NOTICES.LIB_COLORS_W3C_TR_URL,
+        NOTICES.LIB_COLORS_W3C_TR_SHA256,
+        NOTICES.LIB_COLORS_W3C_LICENSE_URL,
+        NOTICES.LIB_COLORS_W3C_CHANGE_NOTICE,
+        "同名后项覆盖",
+        "不能冒充 2019 年网页原件",
+        "这不表示 libapps 作者明确选择了这两个 revision",
+        "八份原始输入不作为独立资源进入 App bundle",
         "deps/libarchive/libarchive/archive_string.c:2797-2800",
         "deps/libarchive/libarchive/archive_string.c:3043-3046",
         "Unicode Standard Annex #15",
@@ -257,12 +323,29 @@ def test_production_output():
     for relative, count in expected_unicode_path_counts.items():
         if first.count(relative.encode("utf-8")) != count:
             fail(f"宿主声明 Unicode 来源路径数量漂移：{relative}")
+    expected_lib_colors_path_counts = {
+        NOTICES.LIB_COLORS_CSSWG_LICENSE_PATH: 1,
+        NOTICES.LIB_COLORS_CSSWG_OVERVIEW_PATH: 1,
+        NOTICES.LIB_COLORS_W3C_LICENSE_HTML_PATH: 1,
+        NOTICES.LIB_COLORS_DEBIAN_RGB_PATH: 1,
+        NOTICES.LIB_COLORS_XORG_RGB_PATH: 1,
+        NOTICES.LIB_COLORS_W3C_NOTICE_PATH: 2,
+        NOTICES.LIB_COLORS_DEBIAN_LICENSE_PATH: 2,
+        NOTICES.LIB_COLORS_XORG_LICENSE_PATH: 2,
+    }
+    for relative, count in expected_lib_colors_path_counts.items():
+        if first.count(relative.encode("utf-8")) != count:
+            fail(f"宿主声明 lib_colors 来源路径数量漂移：{relative}")
     for stale in (
         "wcwidth Unicode 数据：完整 lib_wc.js 摘要与原始来源注释已锁定",
         "生成脚本读取 PropList.txt、UnicodeData.txt 与 EastAsianWidth.txt",
         "仓内没有这三份 13.0.0 原始字节或相应 Unicode 许可原文",
         "libarchive Unicode 来源：archive_string_composition.h",
         "来源数据、标准文本版本与适用许可仍须在公共发行前单独闭合",
+        "unresolved-provenance",
+        "未闭合的外部来源与许可",
+        "仓内没有所用上游版本",
+        "W3C/X11 缺口继续列在未闭合一节",
     ):
         if stale.encode("utf-8") in first:
             fail(f"宿主声明仍保留已闭合的 wcwidth 未决文案：{stale}")
@@ -364,6 +447,221 @@ def test_material_icon_formatting(temporary_root):
             temporary_root, inputs
         ),
         "固定格式化关系漂移",
+    )
+
+
+def test_lib_colors_replay():
+    xorg_rgb = (ROOT / NOTICES.LIB_COLORS_XORG_RGB_PATH).read_bytes()
+    debian_rgb = (ROOT / NOTICES.LIB_COLORS_DEBIAN_RGB_PATH).read_bytes()
+    current = (ROOT / NOTICES.LIB_COLORS_CURRENT_PATH).read_bytes()
+    colors = NOTICES.verify_lib_colors_rgb_replay(
+        xorg_rgb, debian_rgb, current
+    )
+    if len(colors) != NOTICES.LIB_COLORS_COLOR_COUNT:
+        fail("lib_colors 颜色表离线重放数量漂移")
+
+    records, synthetic = NOTICES.parse_lib_colors_rgb(
+        b"1 2 3 Foo Bar\n4 5 6 FooBar\n",
+        "合成 X11 表",
+    )
+    if records != 2 or synthetic != {"foobar": (4, 5, 6)}:
+        fail("X11 归一化重复键没有执行后项覆盖")
+    expect_failure(
+        lambda: NOTICES.parse_lib_colors_rgb(
+            b"256 2 3 Invalid\n", "合成 X11 表"
+        ),
+        "RGB 越界",
+    )
+
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_rgb_replay(
+            xorg_rgb,
+            debian_rgb.replace(
+                NOTICES.LIB_COLORS_DEBIAN_EXTENSION_LINE,
+                b"214   7  81\t\tDebianRed\n",
+                1,
+            ),
+            current,
+        ),
+        "DebianRed 唯一扩展行",
+    )
+
+    common_tail = b"144 238 144\t\tLightGreen\n"
+    if xorg_rgb.count(common_tail) != 1 or debian_rgb.count(common_tail) != 1:
+        fail("X11 颜色表负例缺少唯一共同变更点")
+    changed_tail = b"143 238 144\t\tLightGreen\n"
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_rgb_replay(
+            xorg_rgb.replace(common_tail, changed_tail, 1),
+            debian_rgb.replace(common_tail, changed_tail, 1),
+            current,
+        ),
+        "不能逐字重建当前 lib_colors 颜色表",
+    )
+
+    current_debian_red = b"'debianred': 'rgb(215, 7, 81)'"
+    if current.count(current_debian_red) != 1:
+        fail("当前颜色表负例缺少唯一 DebianRed 变更点")
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_rgb_replay(
+            xorg_rgb,
+            debian_rgb,
+            current.replace(
+                current_debian_red,
+                b"'debianred': 'rgb(214, 7, 81)'",
+                1,
+            ),
+        ),
+        "不能逐字重建当前 lib_colors 颜色表",
+    )
+
+    overview = (
+        ROOT / NOTICES.LIB_COLORS_CSSWG_OVERVIEW_PATH
+    ).read_bytes()
+    NOTICES.verify_lib_colors_hsl_adaptation(overview, current)
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_hsl_adaptation(
+            overview.replace(
+                b"(t2 - t1) * (4 - hue)",
+                b"(t2 - t1) * (5 - hue)",
+                1,
+            ),
+            current,
+        ),
+        "CSS Color 4 HSL 算法原始字节漂移",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_hsl_adaptation(
+            overview,
+            current.replace(
+                b"light <= 0.5 ? light * (sat + 1)",
+                b"light <= 0.4 ? light * (sat + 1)",
+                1,
+            ),
+        ),
+        "lib_colors 当前 HSL 改编函数字节漂移",
+    )
+
+
+def test_lib_colors_licenses():
+    csswg_license = (
+        ROOT / NOTICES.LIB_COLORS_CSSWG_LICENSE_PATH
+    ).read_bytes()
+    notice = (ROOT / NOTICES.LIB_COLORS_W3C_NOTICE_PATH).read_bytes()
+    license_html = (
+        ROOT / NOTICES.LIB_COLORS_W3C_LICENSE_HTML_PATH
+    ).read_bytes()
+    xorg_license = (
+        ROOT / NOTICES.LIB_COLORS_XORG_LICENSE_PATH
+    ).read_bytes()
+    debian_license = (
+        ROOT / NOTICES.LIB_COLORS_DEBIAN_LICENSE_PATH
+    ).read_bytes()
+    NOTICES.verify_lib_colors_licenses(
+        csswg_license,
+        notice,
+        license_html,
+        xorg_license,
+        debian_license,
+    )
+
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license.replace(
+                b"[W3C Software and Document License]",
+                b"[W3C Document License]",
+                1,
+            ),
+            notice,
+            license_html,
+            xorg_license,
+            debian_license,
+        ),
+        "CSSWG 根 LICENSE",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice.replace(
+                b"Permission to copy, modify, and distribute this work",
+                b"Permission to copy and distribute this work",
+                1,
+            ),
+            license_html,
+            xorg_license,
+            debian_license,
+        ),
+        "W3C Software and Document NOTICE",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice.replace(
+                b"COPYRIGHT HOLDERS WILL NOT BE LIABLE",
+                b"COPYRIGHT HOLDERS MAY BE LIABLE",
+                1,
+            ),
+            license_html,
+            xorg_license,
+            debian_license,
+        ),
+        "W3C Software and Document NOTICE",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice,
+            license_html.replace(
+                b"13 May 2015 and 31 December 2022",
+                b"13 May 2014 and 31 December 2022",
+                1,
+            ),
+            xorg_license,
+            debian_license,
+        ),
+        "W3C 2015 官方许可页面",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice,
+            license_html,
+            xorg_license.replace(
+                b"Copyright 1985, 1989, 1998  The Open Group",
+                b"Copyright 1985, 1989  The Open Group",
+                1,
+            ),
+            debian_license,
+        ),
+        "X.Org rgb COPYING",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice,
+            license_html,
+            xorg_license,
+            debian_license.replace(
+                b"Copyright 2004-2005 Canonical Ltd.",
+                b"Copyright 2004 Canonical Ltd.",
+                1,
+            ),
+        ),
+        "Debian X.Org copyright",
+    )
+    expect_failure(
+        lambda: NOTICES.verify_lib_colors_licenses(
+            csswg_license,
+            notice,
+            license_html,
+            xorg_license,
+            debian_license.replace(
+                b"Permission is hereby granted, free of charge",
+                b"Permission is granted, free of charge",
+                1,
+            ),
+        ),
+        "Debian X.Org copyright 授权条款",
     )
 
 
@@ -649,6 +947,8 @@ def main():
     ) as temporary:
         temporary_root = Path(temporary)
         test_material_icon_formatting(temporary_root)
+        test_lib_colors_replay()
+        test_lib_colors_licenses()
         test_wcwidth_unicode_replay()
         test_libarchive_unicode_replay()
         test_leading_comments_and_include_closure(temporary_root)

@@ -73,7 +73,11 @@ Apple 宿主侧 libarchive 与 hterm 闭包已经使用独立的确定性正文�
 许可也已形成固定证据链；libarchive Unicode 6.0.0 的数据、生成表重放、
 CompositionExclusions 语义、UAX #15 Revision 33 版本证据和固定官方 Git 树中的许可证据路径
 同样已经闭合。后者不把 2020 根 LICENSE 冒充 2010 归档内原件，也不分发技术报告
-全文。但 BLAKE2 许可分支、lib_colors 的 W3C/X11 来源及可选 Linux 产品范围仍须单独
-闭合。项目许可与规范仓库入口的产品接线不等于精确二进制 revision 或 Release 已经
-绑定：这些剩余外部来源、上述 LGPL 发行决策和固定对应源码制品仍须在公开 release
-位置形成可回读、可校验的完整交付链。
+全文。lib_colors 的 X11 引入历史、X.Org/Debian 原表与完整许可、W3C HSL
+引入历史、固定 CSSWG 材料、完整 NOTICE、明确改编声明、颜色表离线重放和
+HSL 改编核对也已由宿主锁闭合；所选 revision 只作为本工程的可重复证据，
+不冒充作者明确选择。
+但 BLAKE2 许可分支与可选 Linux 产品范围仍须单独闭合。项目许可与规范仓库入口
+的产品接线不等于精确二进制 revision 或 Release 已经绑定：上述 LGPL 发行决策、
+产品范围决策和固定对应源码制品仍须在公开 release 位置形成可回读、可校验的
+完整交付链。

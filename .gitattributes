@@ -2,3 +2,5 @@
 third_party/apple-host/APPLE-HOST-NOTICES.txt whitespace=-trailing-space
 third_party/apple-host/unicode-ucd/13.0.0/ReadMe.txt whitespace=-trailing-space
 third_party/apple-host/unicode-ucd/6.0.0/CompositionExclusions.txt whitespace=-blank-at-eof
+third_party/apple-host/csswg-drafts/7b4ea6de873df70dd4c79f3efe86bf2ea5964019/LICENSE.md whitespace=-trailing-space
+third_party/apple-host/w3c-software-and-document-license/2015/software-and-document-license.html whitespace=-blank-at-eol

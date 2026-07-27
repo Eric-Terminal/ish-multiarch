@@ -286,15 +286,18 @@ Material Design Icons 同期快照根 `LICENSE` 的完整许可按原始文件�
 Material README 只收入完整 License section，三个上游 SVG 只作为锁定
 输入与格式化映射证据。Unicode Data Files 完整许可来自官方 unicodetools
 固定提交，聚合显示只移除文件开头的 UTF-8 BOM。只有最终收入正文的字节
-完全相同才去重，来源路径不会丢失。
+完全相同才去重，来源路径不会丢失。lib_colors 还逐字收入 W3C 2015
+`NOTICE.txt`、X.Org `COPYING` 与 Debian `debian/copyright`；CSSWG
+`LICENSE.md`/`Overview.bs`、W3C 官方 HTML 与两份 `rgb.txt` 只作为
+provenance。
 
-收入宿主正文的八条完整许可归属记录中，Unicode Data Files 许可由
+收入宿主正文的 11 条完整许可归属记录中，Unicode Data Files 许可由
 wcwidth 与 libarchive 共享同一路径；连同 hterm/libdot 的相同字节去重后，
-仍为 6 份唯一文本。libarchive 闭包得到 97 份唯一前导文本，22 个锁定片段
-也各自唯一，因此生成 125 个唯一正文 section；再加 `overview`、
+为 9 份唯一文本。libarchive 闭包得到 97 份唯一前导文本，22 个锁定片段
+也各自唯一，因此生成 128 个唯一正文 section；再加 `overview`、
 `material-provenance`、`wcwidth-unicode-provenance`、
-`libarchive-unicode-provenance` 与 `unresolved-provenance`，文件共有
-130 对 BEGIN/END 标记。
+`libarchive-unicode-provenance` 与 `lib-colors-provenance`，文件共有
+133 对 BEGIN/END 标记。
 重建结果必须与受跟踪的 `APPLE-HOST-NOTICES.txt` 逐字一致。
 
 来源片段只在锁定文本或本地历史明确写出 imported、taken、adapted、
@@ -318,17 +321,21 @@ unicodetools 固定提交中的 Unicode 13.0.0 三份输入
 LICENSE，final ReadMe 与 `CompositionExclusions.txt` 只链接当时的可变
 Terms of Use；本工程记录的许可依据来自 Unicode 官方 2020 固定 Git 树的
 根 LICENSE，该树同时包含逐字相同的数据与许可文件。这不冒充 2010 归档内
-许可原件，也不声称 Unicode 在该提交中专门重新许可旧数据。当前未决节只继续记录
-`lib_colors.js` 的 W3C CSS Color 4 改编与 X11 `rgb.txt` 派生缺少固定
-上游材料；子模块中的 libarchive 测试源码、压缩夹具及其
+许可原件，也不声称 Unicode 在该提交中专门重新许可旧数据。lib_colors
+现在固定 X11 引入历史、X.Org 与 Debian 原表及完整许可，并以唯一
+`DebianRed` 扩展、后项覆盖和固定格式离线重建 658 项当前对象；HSL 路径固定
+引入历史、作者时间点前的 CSSWG 树、W3C 2015 NOTICE 和明确改编声明，并
+核对原始公式、输入归一化、RGB 255 缩放与 alpha 返回。所选 revision 是
+本工程的可重放证据，不冒充 libapps 作者明确使用；2026-07-27 取得的 W3C
+HTML 也不冒充 2019 年网页原件。子模块中的 libarchive 测试源码、压缩夹具及其
 `NormalizationTest.txt` 来源未进入 Apple App 编译、include 或资源闭包。
 
 这份宿主正文进入普通 `iSH` 与 `iSH+Linux`，共享 iPhone 查看器按 bundle
 中实际存在的资源显示：普通 iSH 依次显示项目许可、Alpine seed 与宿主正文，
 iSH+Linux 显示项目许可与公共宿主正文。Watch 显示项目许可与 Alpine seed，
 但不携带宿主正文；FileProvider 和测试产品也不携带宿主正文。该接线仍不是
-最终法律结论：BLAKE2 许可分支、W3C/X11、LGPL 方案，以及 `iSH+Linux`
-的 Linux GPLv2、在线 rootfs 和对应源码交付均保持未决。
+最终法律结论：BLAKE2 许可分支、LGPL 方案，以及 `iSH+Linux` 的 Linux
+GPLv2、在线 rootfs 和对应源码交付均保持未决。
 这些缺口继续阻断公共发行；本切片只是确定性记录证据与未知边界，不是法律闭合。
 
 当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入
@@ -336,7 +343,7 @@ iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 ta
 及公开 CI 的 bundle 字节比较覆盖；不携带固定 AArch64 seed 的 iSH+Linux 明确
 排除该资源。项目许可正文与当前公开仓库入口已经进入三种 App，公共宿主正文
 也已形成确定性生成门禁和产品接线；但精确二进制 revision、公开 Release、
-上述外部来源、LGPL 选择和对应源码资产尚未形成可从 release 位置回读的完整
+LGPL 选择和对应源码资产尚未形成可从 release 位置回读的完整
 交付链，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
 中 21 个输入与 pax-utils `elf.h` 的原始 notice 明确采用
 LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、没有指定版本。发行门禁还

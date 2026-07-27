@@ -63,6 +63,72 @@ MATERIAL_ICON_SNAPSHOT_PATHS = tuple(
     f"{MATERIAL_ICON_SNAPSHOT_BASE}/{path}"
     for path in MATERIAL_ICON_UPSTREAM_PATHS
 )
+LIB_COLORS_CSSWG_REVISION = (
+    "7b4ea6de873df70dd4c79f3efe86bf2ea5964019"
+)
+LIB_COLORS_CSSWG_SOURCE_URL = (
+    "https://github.com/w3c/csswg-drafts"
+)
+LIB_COLORS_CSSWG_SNAPSHOT_BASE = (
+    "third_party/apple-host/csswg-drafts/"
+    f"{LIB_COLORS_CSSWG_REVISION}"
+)
+LIB_COLORS_CSSWG_LICENSE_PATH = (
+    f"{LIB_COLORS_CSSWG_SNAPSHOT_BASE}/LICENSE.md"
+)
+LIB_COLORS_CSSWG_OVERVIEW_PATH = (
+    f"{LIB_COLORS_CSSWG_SNAPSHOT_BASE}/css-color-4/Overview.bs"
+)
+LIB_COLORS_W3C_LICENSE_VERSION = "2015"
+LIB_COLORS_W3C_LICENSE_URL = (
+    "https://www.w3.org/copyright/software-license-2015/"
+)
+LIB_COLORS_W3C_LICENSE_BASE = (
+    "third_party/apple-host/w3c-software-and-document-license/"
+    f"{LIB_COLORS_W3C_LICENSE_VERSION}"
+)
+LIB_COLORS_W3C_LICENSE_HTML_PATH = (
+    f"{LIB_COLORS_W3C_LICENSE_BASE}/software-and-document-license.html"
+)
+LIB_COLORS_W3C_NOTICE_PATH = (
+    f"{LIB_COLORS_W3C_LICENSE_BASE}/NOTICE.txt"
+)
+LIB_COLORS_XORG_REVISION = (
+    "d96f362956d9e58cbb46740f825d5bad50f0fbf1"
+)
+LIB_COLORS_XORG_SOURCE_URL = (
+    "https://gitlab.freedesktop.org/xorg/app/rgb"
+)
+LIB_COLORS_XORG_SNAPSHOT_BASE = (
+    "third_party/apple-host/xorg-rgb/"
+    f"{LIB_COLORS_XORG_REVISION}"
+)
+LIB_COLORS_XORG_LICENSE_PATH = (
+    f"{LIB_COLORS_XORG_SNAPSHOT_BASE}/COPYING"
+)
+LIB_COLORS_XORG_RGB_PATH = (
+    f"{LIB_COLORS_XORG_SNAPSHOT_BASE}/rgb.txt"
+)
+LIB_COLORS_DEBIAN_TAG = "xorg-1_7.6+12"
+LIB_COLORS_DEBIAN_TAG_OBJECT = (
+    "12c57230373f9f51f4af46b6312de742e2b402aa"
+)
+LIB_COLORS_DEBIAN_REVISION = (
+    "75d568a94a7ccfb37a51711c9f1ac42f584ec140"
+)
+LIB_COLORS_DEBIAN_SOURCE_URL = (
+    "https://salsa.debian.org/xorg-team/debian/xorg"
+)
+LIB_COLORS_DEBIAN_SNAPSHOT_BASE = (
+    "third_party/apple-host/debian-xorg/"
+    f"{LIB_COLORS_DEBIAN_REVISION}"
+)
+LIB_COLORS_DEBIAN_LICENSE_PATH = (
+    f"{LIB_COLORS_DEBIAN_SNAPSHOT_BASE}/debian/copyright"
+)
+LIB_COLORS_DEBIAN_RGB_PATH = (
+    f"{LIB_COLORS_DEBIAN_SNAPSHOT_BASE}/debian/local/rgb.txt"
+)
 WCWIDTH_UCD_VERSION = "13.0.0"
 WCWIDTH_UCD_ARCHIVE_URL = (
     "https://www.unicode.org/Public/zipped/13.0.0/UCD.zip"
@@ -278,6 +344,54 @@ REQUIRED_LICENSE_KEYS = {
         "deps/libapps/libdot/js/lib_colors.js",
     ),
     ("hterm-bundle", "libdot", "license", "deps/libapps/libdot/LICENSE"),
+    (
+        "hterm-bundle",
+        "libdot",
+        "license",
+        LIB_COLORS_DEBIAN_LICENSE_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "license",
+        LIB_COLORS_W3C_NOTICE_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "license",
+        LIB_COLORS_XORG_LICENSE_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "provenance",
+        LIB_COLORS_CSSWG_LICENSE_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "provenance",
+        LIB_COLORS_CSSWG_OVERVIEW_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "provenance",
+        LIB_COLORS_DEBIAN_RGB_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "provenance",
+        LIB_COLORS_W3C_LICENSE_HTML_PATH,
+    ),
+    (
+        "hterm-bundle",
+        "libdot",
+        "provenance",
+        LIB_COLORS_XORG_RGB_PATH,
+    ),
     ("hterm-bundle", "intl-segmenter", "license",
      "deps/libapps/libdot/third_party/intl-segmenter/LICENSE.md"),
     ("hterm-bundle", "wcwidth", "license",
