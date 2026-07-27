@@ -43,6 +43,14 @@ You'll need these things to build the project:
 
 Open the project in Xcode, open iSH.xcconfig, and change `ROOT_BUNDLE_IDENTIFIER` to something unique. You'll also need to update the development team ID in the project (not target!) build settings. Then click Run. There are scripts that should do everything else automatically. If you run into any problems, open an issue and I'll try to help.
 
+Apple 发行候选没有默认 profile，必须显式选择 `core` 或 `with-linux`。
+`core` 由普通 `iSH` iPhone App 和 `iSHWatch` 组成；`with-linux` 由与其
+互斥的 `iSH+Linux` iPhone App 和同一个 `iSHWatch` 组成。FileProvider
+只是所选 iPhone App 的嵌入扩展；静态库、XCFramework、aggregate 和
+LinkSmoke 只用于构建验收，不属于候选产品。profile 门禁通过不表示许可
+义务已经闭合或产品已经可以发布，具体命令与边界见
+[多架构实现说明](docs/multiarch/README.md#apple-发行候选-profile)。
+
 ## 构建与验证 watchOS App
 
 共享 Scheme `iSHWatch` 构建真正的 SwiftUI Watch App，包含终端、AArch64

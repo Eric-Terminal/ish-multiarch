@@ -378,13 +378,6 @@
 			remoteGlobalIDString = BB13F7D0200ACCA2003D1C4D;
 			remoteInfo = Ninja;
 		};
-		BB415921255EF9E300E0950C /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = BB792B4F1F96D90D00FFB7A4;
-			remoteInfo = iSH;
-		};
 		BB4A922724ED940C002F5A96 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
@@ -1550,6 +1543,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A1D000000000000000000006 /* Build configuration list for PBXNativeTarget "iSHWatch" */;
 			buildPhases = (
+				D7E4C6A0F1284B3E9A5C7012 /* 校验发行候选 Profile */,
 				A1D000000000000000000003 /* Sources */,
 				A1D000000000000000000004 /* Frameworks */,
 				A1D000000000000000000019 /* 生成 AArch64 RootFS */,
@@ -1677,7 +1671,6 @@
 			buildRules = (
 			);
 			dependencies = (
-				BB415922255EF9E300E0950C /* PBXTargetDependency */,
 			);
 			name = iSHUITests;
 			productName = iSHUITests;
@@ -1688,6 +1681,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = BB792B661F96D90D00FFB7A4 /* Build configuration list for PBXNativeTarget "iSH" */;
 			buildPhases = (
+				BBF200000000000000000001 /* 校验发行候选 Profile */,
 				BB21A17826890A5B00BD19B4 /* Sources */,
 				BB792B4D1F96D90D00FFB7A4 /* Frameworks */,
 				BBF1248B1FA7BF530088FB50 /* 生成 AArch64 RootFS */,
@@ -1797,6 +1791,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = BBEF1999268066D1001225BD /* Build configuration list for PBXNativeTarget "iSH+Linux" */;
 			buildPhases = (
+				BBF200000000000000000002 /* 校验发行候选 Profile */,
 				BB21A1722689084800BD19B4 /* Sources */,
 				BBEF196F268066D1001225BD /* Frameworks */,
 				BBEF1979268066D1001225BD /* Download Root */,
@@ -2091,6 +2086,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		D7E4C6A0F1284B3E9A5C7012 /* 校验发行候选 Profile */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/distribution/apple/release-profiles.tsv",
+				"$(SRCROOT)/tools/apple-release-profiles.py",
+			);
+			name = "校验发行候选 Profile";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\npython3 -B \"$SRCROOT/tools/apple-release-profiles.py\" check-build --profile core --role watch-app --target \"$TARGET_NAME\" --configuration \"$CONFIGURATION\" --kernel \"$ISH_KERNEL\" --rootfs fixed-alpine-seed\n";
+			showEnvVarsInLog = 0;
+		};
 		A1D000000000000000000019 /* 生成 AArch64 RootFS */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -2315,6 +2328,42 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
 			shellScript = "set -euo pipefail\nresources=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nseed=\"$resources/AArch64Rootfs.seed\"\nowner=\"$DERIVED_FILE_DIR/AArch64Rootfs.seed.owner\"\nseed_complete=1\nfor output in \"$seed/data/bin/busybox\" \"$seed/meta.db\" \\\n        \"$seed/rootfs-hardlinks.tsv\" \"$seed/rootfs-manifest.txt\"; do\n    [[ -f \"$output\" ]] || seed_complete=0\ndone\n# 只清理本阶段明确登记的残缺构建产物，未知目录仍交给打包器拒绝。\nif (( !seed_complete )) && [[ -f \"$owner\" && ! -L \"$owner\" ]] && \\\n        [[ $(sed -n '1p' \"$owner\") == \"$seed\" ]]; then\n    rm -rf \"$seed\"\nfi\n# Xcode 会为嵌套输出预建空目录；只移除它自己留下的空层级。\nrmdir \"$seed/data/bin\" \"$seed/data\" \"$seed\" 2>/dev/null || true\n\"$SRCROOT/tools/apple-aarch64-rootfs.sh\" \"$seed\"\nrm -f \"$resources/root.tar.gz\"\n# 归档时间戳早于源码会令 Xcode 永远判定输出过期；安装器不保留该宿主时间戳。\ntouch -m -r \"$seed/rootfs-manifest.txt\" \"$seed/data/bin/busybox\"\nowner_temporary=\"$owner.tmp.$$\"\ntrap 'rm -f \"$owner_temporary\"' EXIT\nprintf '%s\\n' \"$seed\" > \"$owner_temporary\"\nmv -f \"$owner_temporary\" \"$owner\"\ntrap - EXIT\n";
+			showEnvVarsInLog = 0;
+		};
+		BBF200000000000000000001 /* 校验发行候选 Profile */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/distribution/apple/release-profiles.tsv",
+				"$(SRCROOT)/tools/apple-release-profiles.py",
+			);
+			name = "校验发行候选 Profile";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\npython3 -B \"$SRCROOT/tools/apple-release-profiles.py\" check-build --profile core --role iphone-app --target \"$TARGET_NAME\" --configuration \"$CONFIGURATION\" --kernel \"$ISH_KERNEL\" --rootfs fixed-alpine-seed\n";
+			showEnvVarsInLog = 0;
+		};
+		BBF200000000000000000002 /* 校验发行候选 Profile */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/distribution/apple/release-profiles.tsv",
+				"$(SRCROOT)/tools/apple-release-profiles.py",
+			);
+			name = "校验发行候选 Profile";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\npython3 -B \"$SRCROOT/tools/apple-release-profiles.py\" check-build --profile with-linux --role iphone-app --target \"$TARGET_NAME\" --configuration \"$CONFIGURATION\" --kernel \"$ISH_KERNEL\" --rootfs online-root-tar\n";
 			showEnvVarsInLog = 0;
 		};
 		BBFB2C572590257E00545EAB /* ShellScript */ = {
@@ -2619,11 +2668,6 @@
 			isa = PBXTargetDependency;
 			target = BB13F7D0200ACCA2003D1C4D /* Ninja */;
 			targetProxy = BB21A1682689041500BD19B4 /* PBXContainerItemProxy */;
-		};
-		BB415922255EF9E300E0950C /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = BB792B4F1F96D90D00FFB7A4 /* iSH */;
-			targetProxy = BB415921255EF9E300E0950C /* PBXContainerItemProxy */;
 		};
 		BB4A922824ED940C002F5A96 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -3046,7 +3090,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
-				TEST_TARGET_NAME = iSH;
+				TEST_TARGET_NAME = "iSH+Linux";
 			};
 			name = DebugLinux;
 		};
@@ -3291,7 +3335,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).UITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_TARGET_NAME = iSH;
+				TEST_TARGET_NAME = "iSH+Linux";
 			};
 			name = ReleaseLinux;
 		};

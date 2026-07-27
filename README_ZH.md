@@ -43,6 +43,14 @@ AArch64 或 Watch App 已经通过这些渠道发布。
 
 使用 Xcode 打开项目，选择 iSH.xcconfig，并且修改 `ROOT_BUNDLE_IDENTIFIER` 为你的[唯一值](https://help.apple.com/xcode/mac/current/#/dev91fe7130a)。此外，还需要在项目（project）的构建设置（build settings）中更新开发团队 ID，注意这里指的不是目标（target）的构建设置（build settings）。然后点击 `运行`，之后应该有脚本帮你自动执行相关操作。如果遇到了任何问题，请提交 issue，我们会帮你解决。
 
+Apple 发行候选没有默认 profile，必须显式选择 `core` 或 `with-linux`。
+`core` 由普通 `iSH` iPhone App 和 `iSHWatch` 组成；`with-linux` 由与其
+互斥的 `iSH+Linux` iPhone App 和同一个 `iSHWatch` 组成。FileProvider
+只是所选 iPhone App 的嵌入扩展；静态库、XCFramework、aggregate 和
+LinkSmoke 只用于构建验收，不属于候选产品。profile 门禁通过不表示许可
+义务已经闭合或产品已经可以发布，具体命令与边界见
+[多架构实现说明](docs/multiarch/README.md#apple-发行候选-profile)。
+
 ## 构建与验证 watchOS App
 
 共享 Scheme `iSHWatch` 构建真正的 SwiftUI Watch App，包含终端、AArch64

@@ -27,14 +27,20 @@
 
 ## 当前产品边界
 
-- `iSH` 与可选 `iSH+Linux` 都以 `libarchive.a` 作为静态链接输入，并
+本锁覆盖两个互斥的发行候选 profile：`core` 选择 `iSH`，`with-linux`
+选择 `iSH+Linux`，两者都复用同一个 `iSHWatch`。工程不定义默认 profile。
+`iSHFileProvider` 只是所选 iPhone App 的嵌入扩展；静态库、XCFramework、
+aggregate、LinkSmoke 和测试 target 不作为独立候选产品。输入锁校验只证明
+输入与 target 路由一致，不代替许可审查或发布验收。
+
+- 互斥的 `iSH` 与 `iSH+Linux` iPhone target 都以 `libarchive.a` 作为静态链接输入，并
   交付由 `deps/libapps` 生成的 `hterm_all.js`。静态库本身不会复制进
   App bundle，只有链接器实际选取的对象进入最终 Mach-O；hterm 资源同时
   包含 hterm、libdot、intl-segmenter 与 wcwidth。
 - `iSHWatch` 不链接 libarchive，也不携带 hterm；其显式外部链接项均来自
   Apple SDK。`arm64_32` 不会因此获得另一套宿主第三方来源。
 - `iSHFileProvider` 只链接本项目生成的核心库，没有单独的 vendored
-  子模块输入。
+  子模块输入，也不是顶层候选产品。
 - `iSH+Linux` 还从锁定的 `deps/linux` 构建 `liblinux.a`，但是否公开分发
   该产品仍是独立的产品决定；本锁不能代替 Linux GPLv2 交付方案。
 
@@ -178,7 +184,7 @@ Frameworks、Resources、Sources 与 Copy Files phase 中的直接输入。
 任何失败都保留旧文件且不遗留临时文件。两种校验都不联网、不构建 App，也
 不启动 Simulator。
 
-`APPLE-HOST-NOTICES.txt` 只应进入普通 `iSH` 与可选 `iSH+Linux` 的资源。
+`APPLE-HOST-NOTICES.txt` 只应进入两个互斥 iPhone target 的资源。
 `iSHWatch` 没有 libarchive/hterm 宿主输入，因此不显示本文件；其共享许可页
 显示独立的项目许可与 Alpine seed 声明。`iSHFileProvider`、测试 target 与
 LinkSmoke 不应获得本文件。

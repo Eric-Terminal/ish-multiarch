@@ -54,6 +54,10 @@ if not meson.is_cross_build()
             'apple-aarch64-lgpl-surface-test.py')
         test('apple_aarch64_lgpl_surface', python3_cli,
             args: apple_aarch64_lgpl_surface_test, timeout: 60)
+        apple_release_profiles_test = files(
+            'apple-release-profiles-test.py')
+        test('apple_release_profiles', python3_cli,
+            args: apple_release_profiles_test, timeout: 60)
         apple_license_notices_app_test = files(
             'apple-license-notices-app-test.py')
         test('apple_license_notices_app', python3_cli,

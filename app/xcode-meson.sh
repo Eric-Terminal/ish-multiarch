@@ -30,10 +30,11 @@ if [[ -n ${ENABLE_ADDRESS_SANITIZER:-} ]]; then
 fi
 log=${ISH_LOG:-}
 log_handler=${ISH_LOGGER:-}
-kernel=ish
-if [[ -n ${ISH_KERNEL:-} ]]; then
-    kernel=$ISH_KERNEL
+if [[ ${ISH_KERNEL:-} != ish && ${ISH_KERNEL:-} != linux ]]; then
+    echo "错误：ISH_KERNEL 必须显式为 ish 或 linux。" >&2
+    exit 1
 fi
+kernel=$ISH_KERNEL
 kconfig=""
 
 write_cross_file() {

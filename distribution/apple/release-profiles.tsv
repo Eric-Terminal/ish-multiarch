@@ -1,0 +1,5 @@
+profile	role	target	scheme	debug_configuration	release_configuration	kernel	rootfs
+core	iphone-app	iSH	iSH	Debug-ApplePleaseFixFB19282108	Release	ish	fixed-alpine-seed
+core	watch-app	iSHWatch	iSHWatch	Debug-ApplePleaseFixFB19282108	Release	ish	fixed-alpine-seed
+with-linux	iphone-app	iSH+Linux	iSH+Linux	DebugLinux	ReleaseLinux	linux	online-root-tar
+with-linux	watch-app	iSHWatch	iSHWatch	Debug-ApplePleaseFixFB19282108	Release	ish	fixed-alpine-seed
