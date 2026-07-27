@@ -423,6 +423,93 @@ python3 -B tools/apple-release-profiles.py show --profile with-linux
 真机门禁已经闭合。`with-linux` 的 Linux GPLv2、在线 rootfs 与对应源码
 交付仍是额外未决项。
 
+### Apple 发行候选 manifest
+
+`tools/apple-release-manifest.py` 把一个已经由发行者选定的 profile、现存
+annotated tag、精确 revision、源码状态和本地候选资产绑定为可离线复核的
+`APPLE-RELEASE-MANIFEST.json`。工具没有默认 profile，也不会创建 tag、
+构建产品或上传 Release。发行者必须在外部先决定 `core` 或 `with-linux`，
+再显式传入对应参数。
+
+这里绑定的是固定 role/filename 声明与资产哈希，不重复从 IPA、dSYM 或
+源码 tar 内部推断产品身份；产品架构、bundle 与资源归属继续由前述
+Xcode/profile 构建门禁证明，签名与 entitlement 仍属于真机发行门禁。
+
+资产索引是无表头、UTF-8/LF 的
+`category<TAB>role<TAB>filename` 三列表，完整记录必须按字典序排列。
+`core` 的 11 项精确合同如下，均为必需项：
+
+```text
+checksum	alpine-rootfs	corresponding-source.sha256
+metadata	toolchain	apple-toolchain.tsv
+product	iphone-app	iphone-app.ipa
+product	watch-app	watch-app.ipa
+source	alpine-rootfs	alpine-minirootfs-3.24.1-aarch64-corresponding-source.tar
+source	deps-libapps	deps-libapps-source.tar
+source	deps-libarchive	deps-libarchive-source.tar
+source	deps-linux	deps-linux-source.tar
+source	project	project-source.tar
+symbols	iphone-app	iphone-app.dSYM.zip
+symbols	watch-app	watch-app.dSYM.zip
+```
+
+`with-linux` 使用同一合同并在相应字典序位置增加以下两项，共 13 项：
+
+```text
+checksum	online-rootfs	online-rootfs-corresponding-source.sha256
+source	online-rootfs	online-rootfs-corresponding-source.tar
+```
+
+每个 checksum 都必须是
+`64 个小写十六进制字符<TWO-SPACES>对应 source 文件名<LF>`。
+`apple-toolchain.tsv` 同样没有表头，每行是
+`key<TAB>非空值`；键必须按字典序恰好为 `clang_version`、
+`host_arch`、`iphoneos_sdk_build`、`ld_version`、`meson_version`、
+`ninja_version`、`source_date_epoch`、`watchos_sdk_build` 与
+`xcode_build`，其中 `source_date_epoch` 只能是十进制数字。
+
+在干净仓库中准备好候选资产与索引后，使用以下精确接口生成并重新验证：
+
+```sh
+python3 -B tools/apple-release-manifest.py render \
+    --root "$PWD" \
+    --profile core \
+    --revision "$(git rev-parse HEAD)" \
+    --tag vX.Y.Z \
+    --assets /absolute/path/to/apple-release-assets \
+    --index /absolute/path/to/apple-release-assets.tsv \
+    --output /absolute/path/to/apple-release-assets/APPLE-RELEASE-MANIFEST.json
+
+python3 -B tools/apple-release-manifest.py verify \
+    --root "$PWD" \
+    --manifest /absolute/path/to/apple-release-assets/APPLE-RELEASE-MANIFEST.json \
+    --assets /absolute/path/to/apple-release-assets
+```
+
+若实际候选是 `with-linux`，只把 `--profile core` 改为
+`--profile with-linux`，并使用上面的 13 项索引；工具不会替发行者作此
+决定。`render` 要求 40 位 revision 等于干净 HEAD，且显式 annotated tag
+恰好指向该提交。它还会交叉核对 profile 的 iPhone/Watch 产品合同、Git
+索引中的三个 gitlink 与宿主来源锁，记录项目源码入口、tag 对象、三份
+gitlink 的来源 URL/OID、三份项目/Alpine/Apple 宿主声明正文的路径、
+完整正文、字节数和 SHA-256，以及每项候选资产的字节数和 SHA-256。
+`verify` 会从仓库与资产目录独立重算这些绑定，而不是只信任 JSON 中已有
+的摘要。
+
+索引本身必须放在候选资产目录之外。`render` 开始时该目录必须恰好只有
+索引中的 11/13 项；manifest 可以像示例一样直接输出为目录内唯一的第
+12/14 项，也可以外置，除此之外不接受任何多余资产。索引中的叶节点必须
+是非空、权限为 0644 的普通文件，不能用目录或符号链接代替。归档成员
+路径不得是绝对路径或逃逸归档根，归档内的相对符号链接和 hardlink 只能
+指向归档根内；device、FIFO 或没有任何普通文件的归档会被拒绝。输出使用
+无时间戳的规范 UTF-8/LF JSON；既有输出不会被覆盖，`verify` 还会拒绝
+非规范编码或任何资产漂移。
+
+这个 manifest 只是候选目录的离线证据，不会上传或回读公共 Release，
+也不证明发布者已经选择首发 profile。它不能代替 Alpine/在线 rootfs 的
+LGPL 或 GPL 交付决定、签名与 entitlement 审计、实体 iPhone/Watch 安装
+运行证据或 App Store 交付。仓库当前仍没有据此完成的公共 Release。
+
 ### Xcode Scheme 验收
 
 Watch 侧提供三个相关共享 Scheme：

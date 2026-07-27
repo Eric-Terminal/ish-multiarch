@@ -64,7 +64,7 @@ jobs:
           brew install llvm lld ninja libarchive meson
       - name: Clone Linux
         run: deps/clone-linux.sh
-      - name: 验证 resolver、rootfs 与 TTY 生命周期回归
+      - name: 验证发行清单、resolver、rootfs 与 TTY 生命周期回归
         if: matrix.kernel == 'ish'
         shell: bash
         run: |
@@ -73,7 +73,7 @@ jobs:
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_aarch64_lgpl_surface \
-            apple_release_profiles \
+            apple_release_profiles apple_release_manifest \
             apple_license_notices_app \
             apple_host_delivery_inputs apple_host_link_closure \
             apple_host_notices apple_project_license_notices \
