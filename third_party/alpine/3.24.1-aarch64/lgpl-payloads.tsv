@@ -1,0 +1,3 @@
+source_origin	payload_package	payload_path
+busybox	busybox@1.37.0-r31	bin/busybox
+pax-utils	scanelf@1.3.9-r1	usr/bin/scanelf

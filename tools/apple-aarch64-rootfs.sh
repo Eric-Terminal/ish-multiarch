@@ -58,6 +58,7 @@ TEST_SHA256=${ISH_AARCH64_ROOTFS_TEST_SHA256:-}
 TEST_PACKAGES=${ISH_AARCH64_ROOTFS_TEST_PACKAGES:-}
 PACKAGE_LOCK="$ROOT/third_party/alpine/3.24.1-aarch64/packages.tsv"
 PACKAGE_REFERENCE=$REFERENCE_LOCK
+LGPL_PAYLOADS="$ROOT/third_party/alpine/3.24.1-aarch64/lgpl-payloads.tsv"
 case "$TEST_MODE" in
     '')
         if [[ -n "$TEST_SHA256" || -n "$TEST_PACKAGES" ]]; then
@@ -75,6 +76,7 @@ case "$TEST_MODE" in
         EXPECTED_SIZE=
         PACKAGE_LOCK=$TEST_PACKAGES
         PACKAGE_REFERENCE=--fixture
+        LGPL_PAYLOADS=--fixture
         SOURCE_KIND=test-fixture
         MANIFEST_VERSION=test-fixture
         MANIFEST_URL=test-fixture://synthetic
@@ -378,7 +380,7 @@ if [[ -n "$EXPECTED_SIZE" && "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]] ||
 fi
 
 "$ROOT/tools/apple-aarch64-rootfs-packages.sh" \
-    "$ARCHIVE" "$PACKAGE_LOCK" "$PACKAGE_REFERENCE"
+    "$ARCHIVE" "$PACKAGE_LOCK" "$PACKAGE_REFERENCE" "$LGPL_PAYLOADS"
 
 if [[ -z "$FAKEFSIFY" ]]; then
     FAKEFSIFY=$(build_fakefsify)

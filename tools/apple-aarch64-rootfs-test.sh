@@ -224,9 +224,9 @@ grep -F $'usr/lib/hardlink-alias\tusr/lib/hardlink-source' \
 [[ $(stat_inode "$OUTPUT/data/usr/lib/hardlink-source") == \
     $(stat_inode "$OUTPUT/data/usr/lib/hardlink-alias") ]]
 "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
-    "$FIXTURE_REFERENCE" >/dev/null
+    "$FIXTURE_REFERENCE" --fixture >/dev/null
 if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
-        >/dev/null 2>&1; then
+        "" --fixture >/dev/null 2>&1; then
     echo "错误：包来源校验器不能隐式跳过二进制参照。" >&2
     exit 1
 fi
@@ -257,7 +257,7 @@ for drift_column in 1 2 3 4 5 6 7 8 9 10 11; do
         -v value="$drift_value" 'NR == 2 { $column = value } { print }' \
         "$FIXTURE_REFERENCE" > "$DRIFT_REFERENCE"
     if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$FIXTURE_PACKAGES" \
-            "$DRIFT_REFERENCE" >/dev/null 2>&1; then
+            "$DRIFT_REFERENCE" --fixture >/dev/null 2>&1; then
         echo "错误：包来源校验器接受了漂移的二进制参照字段 $drift_column。" >&2
         exit 1
     fi
@@ -296,23 +296,24 @@ for invalid_packages in "$ORIGIN_DRIFT_PACKAGES" \
         "$LICENSE_DRIFT_PACKAGES" "$COMMIT_DRIFT_PACKAGES" \
         "$DUPLICATE_PACKAGES" "$UNSORTED_PACKAGES"; do
     if "$PACKAGE_VERIFIER" "$AARCH64_ARCHIVE" "$invalid_packages" \
-            --fixture >/dev/null 2>&1; then
+            --fixture --fixture >/dev/null 2>&1; then
         echo "错误：包来源校验器接受了漂移、重复或乱序清单。" >&2
         exit 1
     fi
 done
-if "$PACKAGE_VERIFIER" "$EMPTY_INSTALLED_ARCHIVE" "$EMPTY_PACKAGES" --fixture \
-        >/dev/null 2>&1; then
+if "$PACKAGE_VERIFIER" "$EMPTY_INSTALLED_ARCHIVE" "$EMPTY_PACKAGES" \
+        --fixture --fixture >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了空的 apk installed 数据库。" >&2
     exit 1
 fi
-if "$PACKAGE_VERIFIER" "$REPEATED_FIELD_ARCHIVE" "$BASE_PACKAGES" --fixture \
-        >/dev/null 2>&1; then
+if "$PACKAGE_VERIFIER" "$REPEATED_FIELD_ARCHIVE" "$BASE_PACKAGES" \
+        --fixture --fixture >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了重复的 apk installed 字段。" >&2
     exit 1
 fi
 if "$PACKAGE_VERIFIER" "$DUPLICATE_PACKAGE_ARCHIVE" \
-        "$DUPLICATE_ACTUAL_PACKAGES" --fixture >/dev/null 2>&1; then
+        "$DUPLICATE_ACTUAL_PACKAGES" --fixture --fixture \
+        >/dev/null 2>&1; then
     echo "错误：包来源校验器接受了重复的 apk installed 包名。" >&2
     exit 1
 fi

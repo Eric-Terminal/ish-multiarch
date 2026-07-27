@@ -50,6 +50,10 @@ if not meson.is_cross_build()
         test('apple_aarch64_rootfs_licenses',
             apple_aarch64_rootfs_licenses_test,
             args: [python3_cli.full_path()], timeout: 60)
+        apple_aarch64_lgpl_surface_test = files(
+            'apple-aarch64-lgpl-surface-test.py')
+        test('apple_aarch64_lgpl_surface', python3_cli,
+            args: apple_aarch64_lgpl_surface_test, timeout: 60)
         apple_license_notices_app_test = files(
             'apple-license-notices-app-test.py')
         test('apple_license_notices_app', python3_cli,

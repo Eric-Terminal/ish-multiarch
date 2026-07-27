@@ -72,7 +72,8 @@ jobs:
             -Dengine=asbestos -Dkernel=ish
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
             apple_aarch64_rootfs apple_aarch64_source_bundle \
-            apple_aarch64_rootfs_licenses apple_license_notices_app \
+            apple_aarch64_rootfs_licenses apple_aarch64_lgpl_surface \
+            apple_license_notices_app \
             apple_host_delivery_inputs apple_host_link_closure \
             apple_host_notices apple_project_license_notices \
             apple_meson_project_options \

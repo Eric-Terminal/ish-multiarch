@@ -13,6 +13,8 @@ utmps 与 skalibs 源码。它不替代仓库根目录的项目许可证，也�
 - `license-inputs.tsv` 把每个包版本映射到许可与来源证据，并锁定源码成员、大小、SHA-256、
   声明 section 与 section SHA-256。同一输入可以支持多个声明 section，同一 section 也可以
   汇总多个输入；其中 `license` 列记录包元数据表达式，不覆盖源码成员自己的许可声明。
+- `lgpl-payloads.tsv` 只把 BusyBox 与 pax-utils 两组源码事实映射到固定 rootfs
+  中的 canonical payload，不重复 23 项源码输入或完整归档已经锁定的摘要。
 - `license-inputs/` 保存无法从前述源码资产直接取得的权威文本字节，包括完整 LGPL 2.1
   正文。
 - `THIRD-PARTY-NOTICES.txt` 保存 19 个具名声明 section。marker 之外只允许空行，所有正文
@@ -24,6 +26,11 @@ utmps 与 skalibs 源码。它不替代仓库根目录的项目许可证，也�
 python3 tools/apple-aarch64-rootfs-licenses.py check-locks
 python3 tools/apple-aarch64-rootfs-licenses.py validate-sources \
     build/alpine-source-cache
+python3 -B tools/apple-aarch64-lgpl-surface.py check-locks
+python3 -B tools/apple-aarch64-lgpl-surface.py validate-sources \
+    build/alpine-source-cache
+python3 -B tools/apple-aarch64-lgpl-surface.py validate-rootfs \
+    build/apple-rootfs-cache/alpine-minirootfs-3.24.1-aarch64.tar.gz
 ```
 
 `check-locks` 不读取源码缓存，也不访问网络。它验证 16 个二进制包、12 个源码 origin、
@@ -34,10 +41,19 @@ section 中逐字出现且只出现一次。
 唯一定位清单指定的普通文件并核对其大小与 SHA-256。静态来源的 APKBUILD 还必须逐字锁定
 `pkgname/pkgver/pkgrel`。它不会下载或执行这些源码。
 
+LGPL 构建表面门禁复用同一份锁表，不维护第二份 23 行源码清单。它从固定
+BusyBox 配置、Kbuild 与 include 链推导实际编译表面，并复核 pax-utils 的
+Meson、include 与 scanelf 子包链；二进制子命令还会把两个 canonical payload
+与 apk installed 的 `F/R/Z` 记录、SHA-1 以及带可执行 `PT_LOAD` 的 AArch64
+`ET_DYN` 闭合。四份已经人工复核的 BusyBox/pax-utils aports 与上游源码
+快照另由门禁独立固定 SHA-512；升级快照必须显式更新该边界并重新审计，
+不能只改通用源码资产锁。正式 rootfs 打包会自动执行该二进制检查。
+
 合成回归可单独运行：
 
 ```sh
 tools/apple-aarch64-rootfs-licenses-test.sh "$(command -v python3)"
+python3 -B tools/apple-aarch64-lgpl-surface-test.py
 ```
 
 ## 解释边界
@@ -51,11 +67,17 @@ tools/apple-aarch64-rootfs-licenses-test.sh "$(command -v python3)"
 
 完整 GPLv2 正文逐字取自锁定的 `pax-utils-1.3.9/COPYING`。apk-tools 自带的 `LICENSE`
 存在改词与错误并行，仍作为上游来源证据保留，但不再充当共用 GPLv2 正文。BusyBox
-`volume_id` 的 21 个输入与 pax-utils `elf.h` 明确保留 LGPL-2.1-or-later 声明；
-`volume_id/bcache.c` 只写 LGPL、没有指定版本。本文不从 apk 的 GPL-2.0-only 元数据推断
-组合程序的法律结论，也不声称已经执行 LGPL 2.1 第 3 节的 notice replacement。公开发行前
-必须解决 bcache 的版本依据，并基于实际交付物确认采用该转换，或提供未转换 LGPL 条款要求
-的可重新链接材料。
+构建表面共有 22 项 LGPL 输入：20 个 C 文件和 2 个头文件；其中 21 项明确
+保留 LGPL-2.1-or-later 声明，`volume_id/bcache.c` 只写 LGPL、没有指定版本。
+固定配置实际启用的 `volume_id` C 闭包共有 26 项，另外 6 项是 5 个 GPLv2
+文件和一个 GPLv2-or-later 的 `get_devname.c`，因此本文不把整个目录归为
+LGPL。pax-utils `elf.h` 再增加一项 LGPL-2.1-or-later 输入。BusyBox 官方
+历史中引入 `bcache.c` 的提交
+`e0942acb9e186cbfc16afe704e10a8af9cd1cc58` 从首版起就没有写许可版本，
+后续整理也没有补充版本依据；该记录不解释无版本 LGPL 的法律效果。本文不从
+apk 的 GPL-2.0-only 元数据推断组合程序的法律结论，也不声称已经执行 LGPL
+2.1 第 3 节的 notice replacement。公开发行前必须解决 bcache 的版本依据，
+并基于实际交付物确认采用该转换，或提供未转换 LGPL 条款要求的可重新链接材料。
 
 校验器自动证明完整源码成员、权威文本和 section 各自的字节身份；除权威文本的逐字包含关系
 外，普通源码成员到 section 的摘录选择仍依赖本次人工内容审计，并非通用许可解释器。

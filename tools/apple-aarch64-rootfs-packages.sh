@@ -2,14 +2,17 @@
 set -euo pipefail
 export LC_ALL=C
 
-if [[ $# -ne 3 ]]; then
-    echo "用法：$0 <Alpine minirootfs 归档> <包来源清单> <二进制参照清单|--fixture>" >&2
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+if [[ $# -ne 4 ]]; then
+    echo "用法：$0 <Alpine minirootfs 归档> <包来源清单> <二进制参照清单|--fixture> <LGPL payload 清单|--fixture>" >&2
     exit 2
 fi
 
 ARCHIVE=$1
 LOCK=$2
 REFERENCE=$3
+LGPL_PAYLOADS=$4
 if [[ ! -f "$ARCHIVE" ]]; then
     echo "错误：rootfs 归档不存在：$ARCHIVE" >&2
     exit 1
@@ -22,6 +25,16 @@ if [[ "$REFERENCE" == --fixture ]]; then
     REFERENCE=
 elif [[ ! -f "$REFERENCE" ]]; then
     echo "错误：二进制参照清单不存在：$REFERENCE" >&2
+    exit 1
+fi
+if [[ "$LGPL_PAYLOADS" == --fixture ]]; then
+    LGPL_PAYLOADS=
+elif [[ ! -f "$LGPL_PAYLOADS" ]]; then
+    echo "错误：LGPL payload 清单不存在：$LGPL_PAYLOADS" >&2
+    exit 1
+fi
+if [[ -n "$LGPL_PAYLOADS" && -z "$REFERENCE" ]]; then
+    echo "错误：生产 LGPL payload 门禁不能跳过二进制参照。" >&2
     exit 1
 fi
 
@@ -214,6 +227,19 @@ if [[ -n "$REFERENCE" ]]; then
         echo "错误：rootfs 包数量或来源数量与二进制参照不一致。" >&2
         exit 1
     fi
+fi
+
+if [[ -n "$LGPL_PAYLOADS" ]]; then
+    PYTHON3=$(command -v python3 || true)
+    if [[ -z "$PYTHON3" ]]; then
+        echo "错误：找不到 Python 3，无法验证 LGPL payload。" >&2
+        exit 1
+    fi
+    "$PYTHON3" -B "$ROOT/tools/apple-aarch64-lgpl-surface.py" \
+        validate-rootfs "$ARCHIVE" \
+        --packages "$LOCK" \
+        --payloads "$LGPL_PAYLOADS" \
+        --binary-reference "$REFERENCE"
 fi
 
 echo "Alpine rootfs apk 包元数据清单验证通过"

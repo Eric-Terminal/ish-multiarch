@@ -170,9 +170,12 @@ AArch64 minirootfs 转换为 fakefs 种子。输出目录只有 `meta.db`、`dat
 
 正式打包还会离线读取归档内的 apk installed 数据库，并与
 `third_party/alpine/3.24.1-aarch64/packages.tsv` 逐项核对 16 个二进制包的版本、
-apk origin、apk 元数据声明的许可证表达式和 aports commit 字段。这个门禁只锁定二进制
-归档与受跟踪 apk 包元数据清单的一致性，不验证 aports 对象或上游源码字节，也不等于已经
-交付第三方许可证文本或完整对应源码；发行前仍须完成下文的来源与许可门禁。
+apk origin、apk 元数据声明的许可证表达式和 aports commit 字段。
+`lgpl-payloads.tsv` 还把源码事实限定到归档中的 `bin/busybox` 与
+`usr/bin/scanelf`：两项都必须是唯一普通、带可执行 `PT_LOAD` 的 AArch64
+`ET_DYN`，并由各自 apk installed 记录的 `F/R/Z` 所有权与 SHA-1 字段逐字闭合。这个二进制门禁不验证 aports
+对象或上游源码字节，也不等于已经交付第三方许可证文本或完整对应源码；
+发行前仍须完成下文的来源与许可门禁。
 
 对应源码门禁与日常 App 构建分离。`binary-reference.tsv` 把包清单关联到固定二进制归档和
 apk installed 数据库；`static-link-sources.tsv` 另行记录 BusyBox 静态吸收的 utmps 与
@@ -224,19 +227,30 @@ Resources。它的当前 SHA-256 由
 清单锁定输入大小、SHA-256、声明 section 和 section SHA-256。
 `THIRD-PARTY-NOTICES.txt` 的 19 个具名 section 只允许空行出现在 marker 之外。完整
 GPLv2 正文来自锁定的 pax-utils COPYING，完整 LGPL 2.1 正文来自受跟踪权威文本；apk-tools
-中内容异常的 LICENSE 只保留为来源证据。以下第一条
-命令只读受跟踪文件，第二条还会纯离线核对现有源码缓存；两者都不联网、不构建 guest：
+中内容异常的 LICENSE 只保留为来源证据。以下前两条命令分别只读受跟踪文件和纯离线核对
+现有源码缓存；后三条分别核对 LGPL 映射、源码构建表面与固定 rootfs 二进制表面。五条都不
+联网、不构建 guest：
 
 ```sh
 python3 tools/apple-aarch64-rootfs-licenses.py check-locks
 python3 tools/apple-aarch64-rootfs-licenses.py validate-sources \
     build/alpine-source-cache
+python3 -B tools/apple-aarch64-lgpl-surface.py check-locks
+python3 -B tools/apple-aarch64-lgpl-surface.py validate-sources \
+    build/alpine-source-cache
+python3 -B tools/apple-aarch64-lgpl-surface.py validate-rootfs \
+    build/apple-rootfs-cache/alpine-minirootfs-3.24.1-aarch64.tar.gz
 ```
 
 该门禁验证包、源码成员、权威文本和声明正文各自的字节身份，并逐字验证权威文本进入目标
 section；普通源码成员到 notice 摘录的选择经过人工内容审计，不把机器锁误称为通用许可
-解释器。它不会把 APKBUILD maintainer 当成版权所有者，也不替代法律审查。通用 MIT 模板
-中的所有者占位符会原样保留，避免在固定源码没有给出所有者声明时自行推断。详细边界见
+解释器。LGPL 构建表面门禁另从相同锁表推导 23 项源码事实，机械复核
+BusyBox 的 APKBUILD、固定配置、Kbuild 与 include 链，以及 pax-utils 的
+Meson、include 与 scanelf 子包安装链；正式 rootfs 打包会自动重放最后一条
+二进制门禁。四份已经人工复核的 BusyBox/pax-utils aports 与上游源码快照
+还由该门禁独立固定 SHA-512；升级任一快照都必须显式更新门禁并重新审计，
+不能只改通用源码资产锁。它不会把 APKBUILD maintainer 当成版权所有者，也不替代法律审查。
+通用 MIT 模板中的所有者占位符会原样保留，避免在固定源码没有给出所有者声明时自行推断。详细边界见
 `third_party/alpine/3.24.1-aarch64/LICENSE-NOTICES.md`。
 
 项目自身许可与当前公开源码仓库入口使用另一份独立的确定性资源：
@@ -348,11 +362,17 @@ iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 ta
 排除该资源。项目许可正文与当前公开仓库入口已经进入三种 App，公共宿主正文
 也已形成确定性生成门禁和产品接线；但精确二进制 revision、公开 Release、
 LGPL 选择和对应源码资产尚未形成可从 release 位置回读的完整
-交付链，因此仍不能声称来源与许可交付已经完成。BusyBox `volume_id`
-中 21 个输入与 pax-utils `elf.h` 的原始 notice 明确采用
-LGPL-2.1-or-later；`volume_id/bcache.c` 只写 LGPL、没有指定版本。发行门禁还
-必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节转换，或同时提供
-未转换条款要求的可重新链接材料。
+交付链，因此仍不能声称来源与许可交付已经完成。BusyBox 的构建表面包含
+22 项 LGPL 输入：20 个 C 文件和 2 个头文件；其中 21 项原始 notice 明确
+采用 LGPL-2.1-or-later，`volume_id/bcache.c` 只写 LGPL、没有指定版本。
+固定配置实际启用的 `volume_id` C 闭包共有 26 项，另外 6 项是 5 个
+GPLv2 文件和一个 GPLv2-or-later 的 `get_devname.c`，不能把整个目录误写成
+LGPL。pax-utils 的 `elf.h` 再提供一项 LGPL-2.1-or-later 输入。BusyBox
+官方历史中引入 `bcache.c` 的提交
+`e0942acb9e186cbfc16afe704e10a8af9cd1cc58` 从首版起就没有写许可版本，
+后续格式与配置整理也没有提供版本依据；这项历史事实不是法律推断。发行门禁
+还必须解决该版本依据，并证明实际交付物采用了 LGPL 2.1 第 3 节转换，或同时
+提供未转换条款要求的可重新链接材料。
 
 Apple 端的 `ish_apple_rootfs_seed_install` 只负责把前述只读 fakefs rootfs seed 首次安装到
 调用者提供的 Application Support 父目录。它会验证固定格式的官方 AArch64 manifest、
