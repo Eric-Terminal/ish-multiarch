@@ -58,6 +58,10 @@ if not meson.is_cross_build()
             'apple-host-delivery-inputs-test.py')
         test('apple_host_delivery_inputs', python3_cli,
             args: apple_host_delivery_inputs_test, timeout: 60)
+        apple_host_link_closure_test = files(
+            'apple-host-link-closure-test.py')
+        test('apple_host_link_closure', python3_cli,
+            args: apple_host_link_closure_test, timeout: 30)
         apple_host_notices_test = files(
             'apple-host-notices-test.py')
         test('apple_host_notices', python3_cli,

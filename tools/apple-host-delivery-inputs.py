@@ -763,6 +763,38 @@ def verify_main_project(
     ]:
         fail("iSH+Linux 的强制链接边界漂移")
 
+    app = read_utf8(root, "app/App.xcconfig", "Apple App 配置")
+    ensure_tracked_file(root, "app/App.xcconfig", gitlinks)
+    link_configuration = "\n".join((project, app, linux))
+    if re.search(r"(?:^|[\s,])-all_load(?=[\s,]|$)", link_configuration):
+        fail("Apple App 不能强制加载整个 libarchive")
+    if re.search(
+        r"(?:^|[\s,])-force_load(?:\s+|,)\S*libarchive\.a(?=[\s,]|$)",
+        link_configuration,
+    ):
+        fail("Apple App 不能强制加载整个 libarchive")
+
+
+def verify_fakefs_archive_surface(root, gitlinks):
+    relative = "tools/fakefs.c"
+    source = read_utf8(root, relative, "fakefs 归档实现")
+    ensure_tracked_file(root, relative, gitlinks)
+    selectors = set(
+        re.findall(
+            r"\b(archive_(?:read_support_(?:filter|format)|"
+            r"write_(?:add_filter|set_format))_[A-Za-z0-9_]+)\s*\(",
+            source,
+        )
+    )
+    expected = {
+        "archive_read_support_filter_gzip",
+        "archive_read_support_format_tar",
+        "archive_write_add_filter_gzip",
+        "archive_write_set_format_pax",
+    }
+    if selectors != expected or re.search(r"\bblake2[A-Za-z0-9_]*\s*\(", source):
+        fail("fakefs 的 libarchive 格式或过滤器边界漂移")
+
 
 def verify_license_inputs(
     root, inputs, gitlinks, libarchive_sources, hterm_inputs
@@ -834,6 +866,7 @@ def check_locks(root):
     verify_main_project(
         root, targets, dependencies, gitlinks, libarchive_product_id
     )
+    verify_fakefs_archive_surface(root, gitlinks)
     verify_license_inputs(
         root, inputs, gitlinks, libarchive_sources, hterm_inputs
     )

@@ -77,7 +77,11 @@ CompositionExclusions 语义、UAX #15 Revision 33 版本证据和固定官方 G
 引入历史、固定 CSSWG 材料、完整 NOTICE、明确改编声明、颜色表离线重放和
 HSL 改编核对也已由宿主锁闭合；所选 revision 只作为本工程的可重复证据，
 不冒充作者明确选择。
-但 BLAKE2 许可分支与可选 Linux 产品范围仍须单独闭合。项目许可与规范仓库入口
-的产品接线不等于精确二进制 revision 或 Release 已经绑定：上述 LGPL 发行决策、
-产品范围决策和固定对应源码制品仍须在公开 release 位置形成可回读、可校验的
-完整交付链。
+libarchive 的 BLAKE2 编译对象当前只进入未单独交付的 `libarchive.a`
+中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 均由 LinkMap 和符号门禁
+证明没有拉入对应对象，Watch 不链接 libarchive。未来启用 RAR5/format-all、
+改变强制加载或单独交付该静态库时，必须重新评估并明确许可分支。可选
+Linux 产品范围仍须单独闭合。项目许可与规范仓库入口的产品接线不等于
+精确二进制 revision 或 Release 已经绑定：上述 LGPL 发行决策、产品范围
+决策和固定对应源码制品仍须在公开 release 位置形成可回读、可校验的完整
+交付链。

@@ -27,8 +27,10 @@
 
 ## 当前产品边界
 
-- `iSH` 交付 `libarchive.a` 和由 `deps/libapps` 生成的
-  `hterm_all.js`。后者同时包含 hterm、libdot、intl-segmenter 与 wcwidth。
+- `iSH` 与可选 `iSH+Linux` 都以 `libarchive.a` 作为静态链接输入，并
+  交付由 `deps/libapps` 生成的 `hterm_all.js`。静态库本身不会复制进
+  App bundle，只有链接器实际选取的对象进入最终 Mach-O；hterm 资源同时
+  包含 hterm、libdot、intl-segmenter 与 wcwidth。
 - `iSHWatch` 不链接 libarchive，也不携带 hterm；其显式外部链接项均来自
   Apple SDK。`arm64_32` 不会因此获得另一套宿主第三方来源。
 - `iSHFileProvider` 只链接本项目生成的核心库，没有单独的 vendored
@@ -181,7 +183,7 @@ Frameworks、Resources、Sources 与 Copy Files phase 中的直接输入。
 显示独立的项目许可与 Alpine seed 声明。`iSHFileProvider`、测试 target 与
 LinkSmoke 不应获得本文件。
 
-## 不在本锁内闭合的事项
+## 不在本锁内闭合的事项与未来重审边界
 
 - Alpine AArch64 guest seed 使用相邻的独立来源、许可和对应源码锁。
 - 项目许可正文与当前公开仓库入口使用独立的确定性资源，已经进入普通
@@ -189,8 +191,11 @@ LinkSmoke 不应获得本文件。
   release revision、gitlink 和对应源码资产。
 - BusyBox 静态输入的 LGPL 版本依据和最终发行方案仍须单独决定。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
-- BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一，本生成器不替发行者
-  选择分支。
+- BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一；libarchive 的
+  BLAKE2 编译对象当前只进入未单独交付的 `libarchive.a` 中间产物，普通
+  iSH 与 iSH+Linux 的最终 Mach-O 均由 LinkMap 和符号门禁证明没有拉入
+  对应对象，Watch 不链接 libarchive。未来启用 RAR5/format-all、改变
+  强制加载或单独交付该静态库时，必须重新评估并明确许可分支。
 - Material 图标、wcwidth UCD、libarchive Unicode 与 lib_colors 的来源
   证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及

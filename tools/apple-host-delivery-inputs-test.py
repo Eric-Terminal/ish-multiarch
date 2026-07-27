@@ -102,6 +102,7 @@ def production_input_paths():
     hterm_inputs = LOCKS.verify_hterm(ROOT, dependencies, gitlinks)
     paths = {
         ".gitmodules",
+        "app/App.xcconfig",
         "app/Linux.xcconfig",
         "app/WatchApp.xcconfig",
         "deps/config.h",
@@ -112,6 +113,7 @@ def production_input_paths():
         "third_party/apple-host/license-inputs.tsv",
         "third_party/apple-host/notice-fragments.tsv",
         "third_party/apple-host/target-inputs.tsv",
+        "tools/fakefs.c",
     }
     paths.update(libarchive_sources)
     paths.update(hterm_inputs)
@@ -417,6 +419,35 @@ def case_linux_force_load_in_comment(root):
     original = matches[0]
     replacement = f"// {original}\nLINUX_APP_LDFLAGS = -Wl,-ld_classic"
     replace_once(path, original + "\n", replacement + "\n")
+
+
+def case_fakefs_format_all(root):
+    replace_once(
+        root / "tools/fakefs.c",
+        "archive_read_support_format_tar(archive);",
+        "archive_read_support_format_all(archive);",
+    )
+
+
+def case_app_all_load(root):
+    replace_once(
+        root / "app/App.xcconfig",
+        "OTHER_LDFLAGS = -ObjC $(LINUX_APP_LDFLAGS) "
+        "-u _accessibilityfixes_init",
+        "OTHER_LDFLAGS = -ObjC -Wl,-all_load $(LINUX_APP_LDFLAGS) "
+        "-u _accessibilityfixes_init",
+    )
+
+
+def case_app_force_load_libarchive(root):
+    replace_once(
+        root / "app/App.xcconfig",
+        "OTHER_LDFLAGS = -ObjC $(LINUX_APP_LDFLAGS) "
+        "-u _accessibilityfixes_init",
+        "OTHER_LDFLAGS = -ObjC -Wl,-force_load,"
+        "$(BUILT_PRODUCTS_DIR)/libarchive.a $(LINUX_APP_LDFLAGS) "
+        "-u _accessibilityfixes_init",
+    )
 
 
 def case_gitlink_drift(root):
@@ -761,6 +792,18 @@ def main():
             "linux-force-load-comment": (
                 case_linux_force_load_in_comment,
                 "iSH+Linux 的强制链接边界漂移",
+            ),
+            "fakefs-format-all": (
+                case_fakefs_format_all,
+                "fakefs 的 libarchive 格式或过滤器边界漂移",
+            ),
+            "app-all-load": (
+                case_app_all_load,
+                "Apple App 不能强制加载整个 libarchive",
+            ),
+            "app-force-load-libarchive": (
+                case_app_force_load_libarchive,
+                "Apple App 不能强制加载整个 libarchive",
             ),
         }
         for name, (mutate, expected_error) in cases.items():

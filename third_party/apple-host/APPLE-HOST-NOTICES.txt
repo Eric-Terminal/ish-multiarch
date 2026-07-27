@@ -1,12 +1,12 @@
 ===== BEGIN APPLE HOST NOTICE: overview =====
 Apple 宿主第三方声明
 
-覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同交付的 hterm 生成资源及 libarchive 静态库的锁定原始文本，并在后续专节记录已闭合的来源证据与仍由发行门禁处理的边界。
+覆盖范围：本文件汇集普通 iSH 与可选 iSH+Linux 共同使用的 hterm 生成资源及 libarchive 静态链接输入的锁定原始文本，并在后续专节记录已闭合的来源证据与仍由发行门禁处理的边界。
 
-未决边界：
+交付与重审边界：
 - Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；本文件不能代表 iSH+Linux 的完整发行义务已经闭合。
 - Alpine guest seed、项目自身许可、LGPL 与对应源码交付继续由各自的发行门禁处理。
-- libarchive 的 BLAKE2 声明列出 CC0 1.0 Universal、OpenSSL 与 Apache 2.0 三种选项；这里只逐字收录，不替发行者选择分支。
+- libarchive 的 BLAKE2 编译对象当前只进入未单独交付的 libarchive.a 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 不拉入对应对象，Watch 不链接 libarchive。未来启用 RAR5/format-all、改变强制加载或单独交付 libarchive.a 时，必须重新评估并明确许可分支。
 - 三个已交付 Material 图标的来源、格式化关系与适用许可证据见后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与许可路径也已闭合；lib_colors 的 W3C HSL 算法、X11 颜色表、改编关系与适用许可证据同样已闭合。
 - 来源与许可边界是工程审计记录，不是法律结论。
 - public-domain 字样仅转述锁定上游源码，不是本工具作出的法律判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。

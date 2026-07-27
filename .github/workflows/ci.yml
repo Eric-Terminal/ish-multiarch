@@ -73,7 +73,7 @@ jobs:
           meson test -C "$RUNNER_TEMP/ish-rootfs-test-build" \
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_license_notices_app \
-            apple_host_delivery_inputs \
+            apple_host_delivery_inputs apple_host_link_closure \
             apple_host_notices apple_project_license_notices \
             apple_meson_project_options \
             apple_watch_package_prebuilt \
@@ -98,9 +98,13 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath "$derived" \
             ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
+            LD_GENERATE_MAP_FILE=YES \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-link-\$(CURRENT_ARCH).map" \
             CODE_SIGNING_ALLOWED=NO
           app="$derived/Build/Products/Release-iphoneos/iSH.app"
+          link_map="$RUNNER_TEMP/iSH-link-arm64.map"
           test -x "$app/iSH"
+          python3 -B tools/apple-host-link-closure.py "$app/iSH" "$link_map"
           cmp -s \
             third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
             "$app/THIRD-PARTY-NOTICES.txt"
@@ -247,9 +251,13 @@ jobs:
             -arch x86_64 \
             -sdk iphonesimulator \
             -derivedDataPath "$derived" \
+            LD_GENERATE_MAP_FILE=YES \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-link-\$(CURRENT_ARCH).map" \
             CODE_SIGNING_ALLOWED=NO
           app="$derived/Build/Products/ReleaseLinux-iphonesimulator/iSH.app"
+          link_map="$RUNNER_TEMP/iSH+Linux-link-x86_64.map"
           test -x "$app/iSH"
+          python3 -B tools/apple-host-link-closure.py "$app/iSH" "$link_map"
           cmp -s \
             third_party/apple-host/APPLE-HOST-NOTICES.txt \
             "$app/APPLE-HOST-NOTICES.txt"

@@ -270,11 +270,12 @@ python3 tools/apple-host-notices.py check-locks
 `deps/linux` 的 gitlink、版本来源、实际构建输入路径集合、许可、源码内
 声明与 provenance 来源证据，以及 target 路由，并拒绝三个既有 gitlink
 未声明进入主工程构建 phase。
-普通 `iSH` 携带 `libarchive.a` 与 `hterm_all.js`；
-后者的静态 concat 闭包同时包含 hterm、libdot、intl-segmenter 和
-wcwidth。Watch 与 FileProvider 没有这两项 vendored 输入，Watch 的显式
-外部链接项只按 Apple SDK 边界登记。完整格式与非目标见
-`third_party/apple-host/README.md`。
+普通 `iSH` 与可选 `iSH+Linux` 都以 `libarchive.a` 作为静态链接输入，并
+携带 `hterm_all.js`；静态库本身不会复制进 App bundle，只有链接器实际
+选取的对象进入最终 Mach-O。hterm 的静态 concat 闭包同时包含 hterm、
+libdot、intl-segmenter 和 wcwidth。Watch 与 FileProvider 没有这两项
+vendored 输入，Watch 的显式外部链接项只按 Apple SDK 边界登记。完整格式
+与非目标见 `third_party/apple-host/README.md`。
 
 第二条命令会从 libarchive 的 128 个实际 Xcode 编译源出发，递归闭合锁定
 gitlink 内的 37 个本地双引号 include，并逐字提取每个文件开头连续的 C
@@ -334,9 +335,12 @@ HTML 也不冒充 2019 年网页原件。子模块中的 libarchive 测试源码
 中实际存在的资源显示：普通 iSH 依次显示项目许可、Alpine seed 与宿主正文，
 iSH+Linux 显示项目许可与公共宿主正文。Watch 显示项目许可与 Alpine seed，
 但不携带宿主正文；FileProvider 和测试产品也不携带宿主正文。该接线仍不是
-最终法律结论：BLAKE2 许可分支、LGPL 方案，以及 `iSH+Linux` 的 Linux
-GPLv2、在线 rootfs 和对应源码交付均保持未决。
-这些缺口继续阻断公共发行；本切片只是确定性记录证据与未知边界，不是法律闭合。
+最终法律结论。libarchive 的 BLAKE2 编译对象当前只进入未单独交付的
+`libarchive.a` 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 均由
+LinkMap 和符号门禁证明没有拉入对应对象，Watch 不链接 libarchive。未来
+启用 RAR5/format-all、改变强制加载或单独交付该静态库时，必须重新评估并
+明确许可分支。LGPL 方案，以及 `iSH+Linux` 的 Linux GPLv2、在线 rootfs
+和对应源码交付仍保持未决；这些缺口继续阻断公共发行。
 
 当前仓库已经锁定对应源码制品和 Alpine 声明正文。声明文件现已逐字进入
 iPhone 与 Watch App，并由各自的只读查看入口、UI 用例、静态 target 归属门禁
