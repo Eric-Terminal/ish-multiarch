@@ -87,6 +87,14 @@
     [self waitForPromptWithTimeout:30];
 }
 
+- (void)test终端冷启动与重新连接 {
+    [self.app terminate];
+    [self.app launch];
+    XCTAssertTrue([self.app.webViews.firstMatch waitForExistenceWithTimeout:180],
+                  @"重新启动后终端界面没有在期限内出现");
+    [self waitForPromptWithTimeout:300];
+}
+
 - (void)testAArch64基础网络与软件源 {
     [self runGuestStage:@"ARCH"
                 command:@"uname -m >\"$l\" 2>&1 && grep -qx aarch64 \"$l\""

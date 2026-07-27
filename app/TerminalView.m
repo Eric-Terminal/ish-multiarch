@@ -104,15 +104,14 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     }
 
     _terminal = terminal;
+    if (_terminal == nil)
+        return;
     [_terminal addObserver:self forKeyPath:@"loaded" options:NSKeyValueObservingOptionInitial context:nil];
-    // 只有真正绑定到界面的终端才需要创建并加载 WKWebView。
-    (void) _terminal.webView;
-    if (_terminal.loaded)
-        [self installTerminalView];
+    // 可见终端必须先进入视图层级，WebKit 才能可靠完成首次导航。
+    [self installTerminalView];
 }
 
 - (void)installTerminalView {
-    NSAssert(_terminal.loaded, @"should probably not be installing a non-loaded terminal");
     UIView *superview = self.terminal.webView.superview;
     if (superview != nil) {
         NSAssert(superview == self.scrollbarView, @"installing terminal that is already installed elsewhere");
