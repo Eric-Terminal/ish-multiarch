@@ -1246,6 +1246,22 @@ static void test_fast_data_processing_differential(void) {
     assert(result.exclusive.write_epoch == 5);
     assert(result.exclusive.sync_identity == 7);
 
+    const dword_t bti_hints[] = {
+        UINT32_C(0xd503241f),
+        UINT32_C(0xd503245f),
+        UINT32_C(0xd503249f),
+        UINT32_C(0xd50324df),
+    };
+    for (size_t index = 0; index < array_size(bti_hints); index++) {
+        init_differential_cpu(&initial);
+        result = run_fast_differential(
+                bti_hints[index], initial, AARCH64_STEP_RETIRED);
+        assert(result.pc == CODE_PAGE + 4);
+        assert(result.cycle == initial.cycle + 1);
+        assert(result.x[0] == initial.x[0]);
+        assert(result.nzcv == initial.nzcv);
+    }
+
     init_differential_cpu(&initial);
     result = run_fast_differential(encode_move_wide(true,
             AARCH64_OP_MOVN, 1, UINT16_C(0x1234), 2),

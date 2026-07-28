@@ -104,7 +104,10 @@ static bool decode_simd_transfer(byte_t size_field, byte_t operation,
 }
 
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
-    if (word == UINT32_C(0xd503201f)) {
+    // 未实现 BTI 状态机时，四种 BTI landing pad 都按兼容 hint 退休。
+    bool noop_hint = word == UINT32_C(0xd503201f) ||
+            (word & UINT32_C(0xffffff3f)) == UINT32_C(0xd503241f);
+    if (noop_hint) {
         *decoded = (struct aarch64_decoded) {
             .opcode = AARCH64_OP_NOP,
             .width = 64,

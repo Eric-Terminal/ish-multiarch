@@ -862,6 +862,29 @@ static void test_svc_decode(void) {
     assert(instruction.operands.exception.immediate == 42);
 }
 
+static void test_compatible_hints(void) {
+    const dword_t bti_hints[] = {
+        UINT32_C(0xd503241f),
+        UINT32_C(0xd503245f),
+        UINT32_C(0xd503249f),
+        UINT32_C(0xd50324df),
+    };
+    for (size_t index = 0; index < array_size(bti_hints); index++) {
+        struct aarch64_decoded instruction = decode(bti_hints[index]);
+        assert(instruction.opcode == AARCH64_OP_NOP);
+        assert(instruction.width == 64);
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x123456789abcdef0),
+            .x = {[0] = UINT64_C(0xfedcba9876543210)},
+            .nzcv = UINT32_C(0xa0000000),
+        };
+        execute_instruction(&cpu, &instruction);
+        assert(cpu.pc == UINT64_C(0x123456789abcdef4));
+        assert(cpu.x[0] == UINT64_C(0xfedcba9876543210));
+        assert(cpu.nzcv == UINT32_C(0xa0000000));
+    }
+}
+
 int main(void) {
     struct cpu_state cpu = {.pc = 0x1000};
     struct aarch64_decoded nop = decode(UINT32_C(0xd503201f));
@@ -887,6 +910,7 @@ int main(void) {
     test_signed_load_decode();
     test_load_store_pair_decode();
     test_svc_decode();
+    test_compatible_hints();
 
     struct aarch64_decoded invalid;
     assert(!aarch64_decode(UINT32_C(0x32800000), &invalid));
@@ -921,5 +945,7 @@ int main(void) {
     assert(!aarch64_decode(UINT32_C(0xa8c10400), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa9400040), &invalid));
     assert(!aarch64_decode(UINT32_C(0xa8810400), &invalid));
+    // 相邻的 CHKFEAT 不属于 BTI 掩码，本切片仍应交给未定义指令路径。
+    assert(!aarch64_decode(UINT32_C(0xd503251f), &invalid));
     return 0;
 }
