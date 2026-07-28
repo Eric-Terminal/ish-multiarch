@@ -5,6 +5,7 @@
 #include "guest/aarch64/execute.h"
 
 #define CONVERSION_FIXED_MASK UINT32_C(0xfffffc00)
+#define FIXED_CONVERSION_FIXED_MASK UINT32_C(0xffff0000)
 
 _Static_assert((UINT32_C(1) << AARCH64_FPCR_RMODE_SHIFT) ==
         UINT32_C(0x00400000), "FPCR 舍入模式位必须匹配 AArch64 ABI");
@@ -31,8 +32,26 @@ static const struct conversion_case conversions[] = {
     {UINT32_C(0x9e630000), AARCH64_OP_UCVTF_GENERAL, 64, 64},
 };
 
+static const struct conversion_case fixed_conversions[] = {
+    {UINT32_C(0x1e020000), AARCH64_OP_SCVTF_GENERAL, 32, 32},
+    {UINT32_C(0x1e420000), AARCH64_OP_SCVTF_GENERAL, 32, 64},
+    {UINT32_C(0x9e020000), AARCH64_OP_SCVTF_GENERAL, 64, 32},
+    {UINT32_C(0x9e420000), AARCH64_OP_SCVTF_GENERAL, 64, 64},
+    {UINT32_C(0x1e030000), AARCH64_OP_UCVTF_GENERAL, 32, 32},
+    {UINT32_C(0x1e430000), AARCH64_OP_UCVTF_GENERAL, 32, 64},
+    {UINT32_C(0x9e030000), AARCH64_OP_UCVTF_GENERAL, 64, 32},
+    {UINT32_C(0x9e430000), AARCH64_OP_UCVTF_GENERAL, 64, 64},
+};
+
 static dword_t encode(unsigned conversion, byte_t rn, byte_t rd) {
     return conversions[conversion].bits | (dword_t) rn << 5 | rd;
+}
+
+static dword_t encode_fixed(unsigned conversion, byte_t fraction_bits,
+        byte_t rn, byte_t rd) {
+    byte_t scale = 64 - fraction_bits;
+    return fixed_conversions[conversion].bits |
+            (dword_t) scale << 10 | (dword_t) rn << 5 | rd;
 }
 
 static bool is_conversion_opcode(enum aarch64_opcode opcode) {
@@ -45,6 +64,20 @@ static bool is_conversion_encoding(dword_t word) {
     for (unsigned i = 0; i < sizeof(conversions) / sizeof(conversions[0]); i++) {
         if (bits == conversions[i].bits)
             return true;
+    }
+    return false;
+}
+
+static bool is_fixed_conversion_encoding(dword_t word) {
+    dword_t bits = word & FIXED_CONVERSION_FIXED_MASK;
+    for (unsigned i = 0;
+            i < sizeof(fixed_conversions) / sizeof(fixed_conversions[0]);
+            i++) {
+        if (bits != fixed_conversions[i].bits)
+            continue;
+        byte_t fraction_bits =
+                64 - (byte_t) ((word >> 10) & UINT32_C(0x3f));
+        return fraction_bits <= fixed_conversions[i].source_width;
     }
     return false;
 }
@@ -71,6 +104,20 @@ static void assert_decode(dword_t word, unsigned conversion,
     assert(instruction.width == conversions[conversion].source_width);
     assert(instruction.operands.integer_to_fp.destination_width ==
             conversions[conversion].destination_width);
+    assert(instruction.operands.integer_to_fp.fraction_bits == 0);
+    assert(instruction.operands.integer_to_fp.rd == rd);
+    assert(instruction.operands.integer_to_fp.rn == rn);
+}
+
+static void assert_fixed_decode(dword_t word, unsigned conversion,
+        byte_t fraction_bits, byte_t rd, byte_t rn) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode == fixed_conversions[conversion].opcode);
+    assert(instruction.width == fixed_conversions[conversion].source_width);
+    assert(instruction.operands.integer_to_fp.destination_width ==
+            fixed_conversions[conversion].destination_width);
+    assert(instruction.operands.integer_to_fp.fraction_bits ==
+            fraction_bits);
     assert(instruction.operands.integer_to_fp.rd == rd);
     assert(instruction.operands.integer_to_fp.rn == rn);
 }
@@ -85,6 +132,21 @@ static void test_llvm_vectors(void) {
     assert_decode(UINT32_C(0x9e2300a3), 6, 3, 5);
     assert_decode(UINT32_C(0x9e6300a3), 7, 3, 5);
     assert_decode(UINT32_C(0x9e630000), 7, 0, 0);
+}
+
+static void test_fixed_llvm_vectors(void) {
+    assert_fixed_decode(UINT32_C(0x1e02fc00), 0, 1, 0, 0);
+    assert_fixed_decode(UINT32_C(0x1e4280c5), 1, 32, 5, 6);
+    assert_fixed_decode(UINT32_C(0x9e02fd07), 2, 1, 7, 8);
+    assert_fixed_decode(UINT32_C(0x9e4201cd), 3, 64, 13, 14);
+    assert_fixed_decode(UINT32_C(0x1e03fe0f), 4, 1, 15, 16);
+    assert_fixed_decode(UINT32_C(0x1e438251), 5, 32, 17, 18);
+    assert_fixed_decode(UINT32_C(0x9e03fe93), 6, 1, 19, 20);
+    assert_fixed_decode(UINT32_C(0x9e4302d5), 7, 64, 21, 22);
+    assert_fixed_decode(UINT32_C(0x1e02fdac), 0, 1, 12, 13);
+    assert_fixed_decode(UINT32_C(0x9e4301ee), 7, 64, 14, 15);
+    assert(encode_fixed(1, 2, 0, 0) == UINT32_C(0x1e42f800));
+    assert_fixed_decode(UINT32_C(0x1e42f800), 1, 2, 0, 0);
 }
 
 static void test_encoding_space(void) {
@@ -115,6 +177,41 @@ static void test_encoding_space(void) {
     assert(decoded_count == 8192);
 }
 
+static void test_fixed_encoding_space(void) {
+    unsigned decoded_count = 0;
+    for (unsigned conversion = 0;
+            conversion < sizeof(fixed_conversions) /
+                    sizeof(fixed_conversions[0]);
+            conversion++) {
+        for (byte_t fraction_bits = 1;
+                fraction_bits <= fixed_conversions[conversion].source_width;
+                fraction_bits++) {
+            for (unsigned rn = 0; rn < 32; rn++) {
+                for (unsigned rd = 0; rd < 32; rd++) {
+                    dword_t word = encode_fixed(conversion,
+                            fraction_bits, (byte_t) rn, (byte_t) rd);
+                    struct aarch64_decoded instruction =
+                            decode(word);
+                    decoded_count++;
+                    assert(instruction.opcode ==
+                            fixed_conversions[conversion].opcode);
+                    assert(instruction.width ==
+                            fixed_conversions[conversion].source_width);
+                    assert(instruction.operands.integer_to_fp.
+                            destination_width ==
+                            fixed_conversions[conversion].
+                                    destination_width);
+                    assert(instruction.operands.integer_to_fp.
+                            fraction_bits == fraction_bits);
+                    assert(instruction.operands.integer_to_fp.rn == rn);
+                    assert(instruction.operands.integer_to_fp.rd == rd);
+                }
+            }
+        }
+    }
+    assert(decoded_count == 393216);
+}
+
 static void test_fixed_bits(void) {
     for (unsigned conversion = 0;
             conversion < sizeof(conversions) / sizeof(conversions[0]);
@@ -127,10 +224,49 @@ static void test_fixed_bits(void) {
             bool conversion_decoded = decoded &&
                     is_conversion_opcode(instruction.opcode);
             assert(conversion_decoded ==
-                    is_conversion_encoding(candidate));
+                    (is_conversion_encoding(candidate) ||
+                            is_fixed_conversion_encoding(candidate)));
         }
     }
     assert(CONVERSION_FIXED_MASK == UINT32_C(0xfffffc00));
+}
+
+static void test_fixed_conversion_bits(void) {
+    for (unsigned conversion = 0;
+            conversion < sizeof(fixed_conversions) /
+                    sizeof(fixed_conversions[0]);
+            conversion++) {
+        dword_t base = encode_fixed(conversion, 1, 1, 0);
+        for (unsigned bit = 16; bit < 32; bit++) {
+            struct aarch64_decoded instruction;
+            dword_t candidate = base ^ (UINT32_C(1) << bit);
+            bool decoded = aarch64_decode(candidate, &instruction);
+            bool fixed_conversion_decoded = decoded &&
+                    is_conversion_opcode(instruction.opcode) &&
+                    instruction.operands.integer_to_fp.fraction_bits != 0;
+            assert(fixed_conversion_decoded ==
+                    is_fixed_conversion_encoding(candidate));
+        }
+    }
+    assert(FIXED_CONVERSION_FIXED_MASK == UINT32_C(0xffff0000));
+}
+
+static void test_rejected_fixed_widths(void) {
+    for (unsigned conversion = 0;
+            conversion < sizeof(fixed_conversions) /
+                    sizeof(fixed_conversions[0]);
+            conversion++) {
+        if (fixed_conversions[conversion].source_width != 32)
+            continue;
+        for (byte_t fraction_bits = 33; fraction_bits <= 64;
+                fraction_bits++) {
+            struct aarch64_decoded instruction;
+            bool decoded = aarch64_decode(
+                    encode_fixed(conversion, fraction_bits, 1, 0),
+                    &instruction);
+            assert(!decoded);
+        }
+    }
 }
 
 static void test_rejected_neighbors(void) {
@@ -141,8 +277,8 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x7e61d8e6),
         UINT32_C(0x0e21d928),
         UINT32_C(0x6e61d96a),
-        UINT32_C(0x1e02fdac),
-        UINT32_C(0x9e4301ee),
+        UINT32_C(0x1ec2fc00),
+        UINT32_C(0x9ec30000),
     };
     for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
         struct aarch64_decoded instruction;
@@ -170,6 +306,96 @@ static qword_t converted_bits(unsigned conversion, qword_t source,
     *fpsr = cpu.fpsr;
     return conversions[conversion].destination_width == 32 ?
             cpu.v[6].s[0] : cpu.v[6].d[0];
+}
+
+static qword_t fixed_converted_bits(unsigned conversion,
+        byte_t fraction_bits, qword_t source, dword_t fpcr,
+        dword_t initial_fpsr, dword_t *fpsr) {
+    struct cpu_state cpu = {
+        .pc = UINT64_C(0x1800),
+        .fpcr = fpcr,
+        .fpsr = initial_fpsr,
+    };
+    cpu.x[5] = source;
+    cpu.v[6].d[0] = UINT64_MAX;
+    cpu.v[6].d[1] = UINT64_MAX;
+    execute_instruction(&cpu,
+            encode_fixed(conversion, fraction_bits, 5, 6));
+    assert(cpu.pc == UINT64_C(0x1804));
+    assert(cpu.x[5] == source);
+    assert(cpu.v[6].d[1] == 0);
+    if (fixed_conversions[conversion].destination_width == 32)
+        assert((cpu.v[6].d[0] >> 32) == 0);
+    *fpsr = cpu.fpsr;
+    return fixed_conversions[conversion].destination_width == 32 ?
+            cpu.v[6].s[0] : cpu.v[6].d[0];
+}
+
+static void test_fixed_conversions(void) {
+    dword_t fpsr;
+    qword_t result = fixed_converted_bits(
+            1, 2, 6, 0, 0, &fpsr);
+    assert(result == UINT64_C(0x3ff8000000000000));
+    assert(fpsr == 0);
+
+    result = fixed_converted_bits(
+            1, 2, UINT32_C(0xfffffffa), 0, 0, &fpsr);
+    assert(result == UINT64_C(0xbff8000000000000));
+    assert(fpsr == 0);
+
+    result = fixed_converted_bits(
+            4, 32, UINT32_C(0x80000000), 0, 0, &fpsr);
+    assert(result == UINT32_C(0x3f000000));
+    assert(fpsr == 0);
+
+    result = fixed_converted_bits(
+            3, 64, UINT64_C(0x8000000000000000), 0, 0, &fpsr);
+    assert(result == UINT64_C(0xbfe0000000000000));
+    assert(fpsr == 0);
+
+    result = fixed_converted_bits(
+            6, 64, 1, 0, 0, &fpsr);
+    assert(result == UINT32_C(0x1f800000));
+    assert(fpsr == 0);
+
+    static const dword_t modes[] = {
+        0,
+        UINT32_C(1) << AARCH64_FPCR_RMODE_SHIFT,
+        UINT32_C(2) << AARCH64_FPCR_RMODE_SHIFT,
+        UINT32_C(3) << AARCH64_FPCR_RMODE_SHIFT,
+    };
+    static const qword_t expected[] = {
+        UINT64_C(0x3ff0000000000000),
+        UINT64_C(0x3ff0000000000000),
+        UINT64_C(0x3fefffffffffffff),
+        UINT64_C(0x3fefffffffffffff),
+    };
+    for (unsigned mode = 0; mode < sizeof(modes) / sizeof(modes[0]);
+            mode++) {
+        result = fixed_converted_bits(7, 64, UINT64_MAX,
+                modes[mode], UINT32_C(0x08000000), &fpsr);
+        assert(result == expected[mode]);
+        assert(fpsr == (UINT32_C(0x08000000) | AARCH64_FPSR_IXC));
+    }
+
+    static const qword_t negative_tie[] = {
+        UINT32_C(0xbb800000),
+        UINT32_C(0xbb800000),
+        UINT32_C(0xbb800001),
+        UINT32_C(0xbb800000),
+    };
+    for (unsigned mode = 0; mode < sizeof(modes) / sizeof(modes[0]);
+            mode++) {
+        result = fixed_converted_bits(0, 32, UINT32_C(0xfeffffff),
+                modes[mode], 0, &fpsr);
+        assert(result == negative_tie[mode]);
+        assert(fpsr == AARCH64_FPSR_IXC);
+    }
+
+    result = fixed_converted_bits(1, 2,
+            UINT64_C(0xdeadbeef00000006), 0, 0, &fpsr);
+    assert(result == UINT64_C(0x3ff8000000000000));
+    assert(fpsr == 0);
 }
 
 static void test_basic_conversions(void) {
@@ -369,15 +595,43 @@ static void test_zero_register(void) {
     }
 }
 
+static void test_fixed_zero_register(void) {
+    for (unsigned conversion = 0;
+            conversion < sizeof(fixed_conversions) /
+                    sizeof(fixed_conversions[0]);
+            conversion++) {
+        struct cpu_state cpu = {
+            .pc = UINT64_C(0x3400),
+            .sp = UINT64_C(0x8877665544332211),
+            .fpsr = UINT32_C(0x08000001),
+        };
+        cpu.v[31].d[0] = UINT64_MAX;
+        cpu.v[31].d[1] = UINT64_MAX;
+        execute_instruction(&cpu,
+                encode_fixed(conversion, 1, 31, 31));
+        assert(cpu.v[31].d[0] == 0);
+        assert(cpu.v[31].d[1] == 0);
+        assert(cpu.sp == UINT64_C(0x8877665544332211));
+        assert(cpu.fpsr == UINT32_C(0x08000001));
+        assert(cpu.pc == UINT64_C(0x3404));
+    }
+}
+
 int main(void) {
     test_llvm_vectors();
+    test_fixed_llvm_vectors();
     test_encoding_space();
+    test_fixed_encoding_space();
     test_fixed_bits();
+    test_fixed_conversion_bits();
     test_rejected_neighbors();
+    test_rejected_fixed_widths();
+    test_fixed_conversions();
     test_basic_conversions();
     test_nearest_even_boundaries();
     test_directed_rounding();
     test_extremes_and_exactness();
     test_zero_register();
+    test_fixed_zero_register();
     return 0;
 }

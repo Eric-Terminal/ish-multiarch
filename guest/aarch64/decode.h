@@ -377,6 +377,7 @@ struct aarch64_decoded {
             byte_t rd;
             byte_t rn;
             byte_t destination_width;
+            byte_t fraction_bits;
         } integer_to_fp;
         struct {
             byte_t rd;

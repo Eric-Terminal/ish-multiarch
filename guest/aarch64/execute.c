@@ -1111,20 +1111,24 @@ static bool integer_to_fp_rounds_up(qword_t significand,
 }
 
 static qword_t integer_to_fp_bits(qword_t magnitude, bool negative,
-        byte_t destination_width, dword_t fpcr, bool *inexact) {
+        byte_t destination_width, byte_t fractional_bits,
+        dword_t fpcr, bool *inexact) {
     *inexact = false;
     if (magnitude == 0)
         return 0;
 
-    unsigned fraction_bits = destination_width == 32 ? 23 : 52;
-    unsigned precision = fraction_bits + 1;
+    unsigned fraction_width = destination_width == 32 ? 23 : 52;
+    unsigned precision = fraction_width + 1;
     unsigned exponent_bias = destination_width == 32 ? 127 : 1023;
-    unsigned exponent = 63U - (unsigned) __builtin_clzll(magnitude);
+    unsigned source_exponent =
+            63U - (unsigned) __builtin_clzll(magnitude);
+    int exponent = (int) source_exponent - fractional_bits;
     qword_t significand;
-    if (exponent <= fraction_bits) {
-        significand = magnitude << (fraction_bits - exponent);
+    if (source_exponent <= fraction_width) {
+        significand = magnitude <<
+                (fraction_width - source_exponent);
     } else {
-        unsigned discarded_bits = exponent - fraction_bits;
+        unsigned discarded_bits = source_exponent - fraction_width;
         qword_t discarded_mask =
                 (UINT64_C(1) << discarded_bits) - 1;
         qword_t remainder = magnitude & discarded_mask;
@@ -1141,17 +1145,17 @@ static qword_t integer_to_fp_bits(qword_t magnitude, bool negative,
     }
 
     qword_t fraction_mask =
-            (UINT64_C(1) << fraction_bits) - 1;
+            (UINT64_C(1) << fraction_width) - 1;
     qword_t sign = negative ?
             UINT64_C(1) << (destination_width - 1) : 0;
     return sign |
-            (qword_t) (exponent + exponent_bias) << fraction_bits |
+            (qword_t) (exponent + (int) exponent_bias) << fraction_width |
             (significand & fraction_mask);
 }
 
 static void convert_integer_to_fp(struct cpu_state *cpu, byte_t rd,
         qword_t source, byte_t source_width, byte_t destination_width,
-        bool signed_conversion) {
+        byte_t fractional_bits, bool signed_conversion) {
     bool negative = signed_conversion &&
             (source & (UINT64_C(1) << (source_width - 1))) != 0;
     qword_t magnitude = source;
@@ -1162,7 +1166,7 @@ static void convert_integer_to_fp(struct cpu_state *cpu, byte_t rd,
 
     bool inexact;
     qword_t bits = integer_to_fp_bits(magnitude, negative,
-            destination_width, cpu->fpcr, &inexact);
+            destination_width, fractional_bits, cpu->fpcr, &inexact);
     union aarch64_vector_reg result = {0};
     if (destination_width == 32)
         result.s[0] = (dword_t) bits;
@@ -1182,6 +1186,7 @@ static void execute_integer_to_fp(struct cpu_state *cpu,
     convert_integer_to_fp(cpu, instruction->operands.integer_to_fp.rd,
             source, instruction->width,
             instruction->operands.integer_to_fp.destination_width,
+            instruction->operands.integer_to_fp.fraction_bits,
             instruction->opcode == AARCH64_OP_SCVTF_GENERAL);
     cpu->pc += 4;
 }
@@ -1495,7 +1500,7 @@ static void execute_scalar_integer_to_fp(struct cpu_state *cpu,
     byte_t rn = instruction->operands.data_processing_1source.rn;
     qword_t source = read_scalar_fp(cpu, rn, instruction->width);
     convert_integer_to_fp(cpu, rd, source, instruction->width,
-            instruction->width,
+            instruction->width, 0,
             instruction->opcode == AARCH64_OP_SCVTF_SCALAR);
     cpu->pc += 4;
 }

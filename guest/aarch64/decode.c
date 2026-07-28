@@ -243,6 +243,46 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rn = (word >> 5) & 0x1f,
                 .destination_width =
                         integer_to_fp_conversions[i].destination_width,
+                .fraction_bits = 0,
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+        byte_t source_width;
+        byte_t destination_width;
+    } fixed_integer_to_fp_conversions[] = {
+        {UINT32_C(0x1e020000), AARCH64_OP_SCVTF_GENERAL, 32, 32},
+        {UINT32_C(0x1e420000), AARCH64_OP_SCVTF_GENERAL, 32, 64},
+        {UINT32_C(0x9e020000), AARCH64_OP_SCVTF_GENERAL, 64, 32},
+        {UINT32_C(0x9e420000), AARCH64_OP_SCVTF_GENERAL, 64, 64},
+        {UINT32_C(0x1e030000), AARCH64_OP_UCVTF_GENERAL, 32, 32},
+        {UINT32_C(0x1e430000), AARCH64_OP_UCVTF_GENERAL, 32, 64},
+        {UINT32_C(0x9e030000), AARCH64_OP_UCVTF_GENERAL, 64, 32},
+        {UINT32_C(0x9e430000), AARCH64_OP_UCVTF_GENERAL, 64, 64},
+    };
+    dword_t fixed_integer_to_fp = word & UINT32_C(0xffff0000);
+    for (unsigned i = 0; i < sizeof(fixed_integer_to_fp_conversions) /
+            sizeof(fixed_integer_to_fp_conversions[0]); i++) {
+        if (fixed_integer_to_fp !=
+                fixed_integer_to_fp_conversions[i].bits)
+            continue;
+        byte_t fraction_bits =
+                64 - (byte_t) ((word >> 10) & UINT32_C(0x3f));
+        if (fraction_bits > fixed_integer_to_fp_conversions[i].source_width)
+            continue;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = fixed_integer_to_fp_conversions[i].opcode,
+            .width = fixed_integer_to_fp_conversions[i].source_width,
+            .operands.integer_to_fp = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .destination_width =
+                        fixed_integer_to_fp_conversions[i].destination_width,
+                .fraction_bits = fraction_bits,
             },
         };
         return true;
