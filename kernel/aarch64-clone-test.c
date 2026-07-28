@@ -612,6 +612,10 @@ static int run_clone_scenario(void) {
     if (process == NULL ||
             !task_attach_aarch64_process(parent, process))
         return 22;
+    parent_group.rusage = (struct rusage_) {
+        .utime = {41, 123456},
+        .stime = {43, 654321},
+    };
     unsigned futex_edge_error = exercise_futex_edges(parent);
     if (futex_edge_error != 0)
         return 45 + (int) futex_edge_error;
@@ -635,6 +639,11 @@ static int run_clone_scenario(void) {
             child->pid == child_pid && child->tgid == child_pid &&
             child->group != parent->group &&
             child->group->leader == child &&
+            memcmp(&child->group->rusage,
+                    &(struct rusage_) {0},
+                    sizeof(child->group->rusage)) == 0 &&
+            parent->group->rusage.utime.sec == 41 &&
+            parent->group->rusage.stime.sec == 43 &&
             child->exit_signal == SIGCHLD_ &&
             task_has_aarch64_process(child) &&
             child->aarch64_process != parent->aarch64_process &&

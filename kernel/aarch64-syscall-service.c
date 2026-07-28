@@ -21,6 +21,7 @@
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
 #include "kernel/aarch64-fd-service.h"
+#include "kernel/aarch64-resource-wire.h"
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-time-service.h"
@@ -158,6 +159,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SETSID = 157,
     AARCH64_LINUX_SYS_GETGROUPS = 158,
     AARCH64_LINUX_SYS_UNAME = 160,
+    AARCH64_LINUX_SYS_GETRUSAGE = 165,
     AARCH64_LINUX_SYS_UMASK = 166,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
@@ -3915,6 +3917,29 @@ static qword_t dispatch_rt_sigaction(
     return 0;
 }
 
+static qword_t dispatch_getrusage(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct rusage_ rusage;
+    int error = resource_getrusage_task(task,
+            (sdword_t) (dword_t) syscall->arguments[0], &rusage);
+    if (error < 0)
+        return syscall_result(error);
+
+    struct aarch64_linux_rusage wire =
+            aarch64_linux_pack_rusage(&rusage);
+    qword_t address = syscall->arguments[1];
+    if (!aarch64_user_range_fits(address, sizeof(wire)))
+        return user_range_error(
+                fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &wire, sizeof(wire), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_prlimit64(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -4229,6 +4254,9 @@ static qword_t dispatch_syscall_inner(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UNAME:
             return dispatch_uname(context, syscall, fault);
+        case AARCH64_LINUX_SYS_GETRUSAGE:
+            return dispatch_getrusage(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UMASK:
             return sys_umask((dword_t) syscall->arguments[0]);
         case AARCH64_LINUX_SYS_GETPID:

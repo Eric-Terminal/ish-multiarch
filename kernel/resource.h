@@ -70,6 +70,9 @@ struct rusage_ rusage_get_current(void);
 void rusage_add(struct rusage_ *dst, struct rusage_ *src);
 #define RUSAGE_SELF_ 0
 #define RUSAGE_CHILDREN_ -1
+#define RUSAGE_THREAD_ 1
+int resource_getrusage_task(
+        struct task *task, sdword_t who, struct rusage_ *rusage);
 dword_t sys_getrusage(dword_t who, addr_t rusage_addr);
 
 int_t sys_sched_getaffinity(pid_t_ pid, dword_t cpusetsize, addr_t cpuset_addr);

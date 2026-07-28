@@ -213,8 +213,10 @@ struct rusage_ rusage_get_current(void) {
 #elif __APPLE__
     thread_basic_info_data_t info;
     mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-    kern_return_t error = thread_info(mach_thread_self(),
+    mach_port_t thread = mach_thread_self();
+    kern_return_t error = thread_info(thread,
             THREAD_BASIC_INFO, (thread_info_t) &info, &count);
+    mach_port_deallocate(mach_task_self(), thread);
     if (error != KERN_SUCCESS)
         return rusage;
     rusage.utime.sec = info.user_time.seconds;
@@ -239,20 +241,37 @@ void rusage_add(struct rusage_ *dst, struct rusage_ *src) {
     timeval_add(&dst->stime, &src->stime);
 }
 
-dword_t sys_getrusage(dword_t who, addr_t rusage_addr) {
-    struct rusage_ rusage;
+int resource_getrusage_task(
+        struct task *task, sdword_t who, struct rusage_ *rusage) {
+    assert(task != NULL && task == current && rusage != NULL);
     switch (who) {
-        case RUSAGE_SELF_:
-            rusage = rusage_get_current();
-            break;
+        case RUSAGE_SELF_: {
+            *rusage = rusage_get_current();
+            lock(&task->group->lock);
+            struct rusage_ finished_threads = task->group->rusage;
+            unlock(&task->group->lock);
+            rusage_add(rusage, &finished_threads);
+            return 0;
+        }
         case RUSAGE_CHILDREN_:
-            lock(&current->group->lock);
-            rusage = current->group->children_rusage;
-            unlock(&current->group->lock);
-            break;
+            lock(&task->group->lock);
+            *rusage = task->group->children_rusage;
+            unlock(&task->group->lock);
+            return 0;
+        case RUSAGE_THREAD_:
+            *rusage = rusage_get_current();
+            return 0;
         default:
             return _EINVAL;
     }
+}
+
+dword_t sys_getrusage(dword_t who, addr_t rusage_addr) {
+    struct rusage_ rusage;
+    int error = resource_getrusage_task(
+            current, (sdword_t) who, &rusage);
+    if (error < 0)
+        return error;
     if (user_put(rusage_addr, rusage))
         return _EFAULT;
     return 0;

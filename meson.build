@@ -582,6 +582,13 @@ if get_option('kernel') == 'ish'
         test('aarch64_prlimit_syscall',
             aarch64_prlimit_syscall_test)
 
+        aarch64_getrusage_syscall_test = executable(
+            'aarch64_getrusage_syscall_test',
+            'kernel/aarch64-getrusage-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_getrusage_syscall',
+            aarch64_getrusage_syscall_test)
+
         aarch64_socket_syscall_test = executable(
             'aarch64_socket_syscall_test',
             'kernel/aarch64-socket-syscall-test.c',
