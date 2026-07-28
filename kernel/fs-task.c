@@ -639,6 +639,22 @@ int file_fstat_task(struct task *task, fd_t fd_number, struct statbuf *stat) {
     return result;
 }
 
+static int file_statfs_mount(
+        struct mount *mount, struct statfsbuf *stat) {
+    int result = 0;
+    if (mount->fs->statfs != NULL)
+        result = mount->fs->statfs(mount, stat);
+    if (result < 0)
+        return result;
+    if (stat->type == 0)
+        stat->type = (sqword_t) (dword_t) mount->fs->magic;
+    if (stat->frsize == 0)
+        stat->frsize = stat->bsize;
+    stat->flags = ST_VALID_ | (mount->flags &
+            (MS_READONLY_ | MS_NOSUID_ | MS_NODEV_ | MS_NOEXEC_));
+    return 0;
+}
+
 int file_fstatfs_task(
         struct task *task, fd_t fd_number, struct statfsbuf *stat) {
     memset(stat, 0, sizeof(*stat));
@@ -646,18 +662,26 @@ int file_fstatfs_task(
     if (fd == NULL)
         return _EBADF;
 
-    int result = 0;
-    if (fd->mount->fs->statfs != NULL)
-        result = fd->mount->fs->statfs(fd->mount, stat);
-    if (result == 0) {
-        if (stat->type == 0)
-            stat->type = fd->mount->fs->magic;
-        if (stat->frsize == 0)
-            stat->frsize = stat->bsize;
-        stat->flags = ST_VALID_ | (fd->mount->flags &
-                (MS_READONLY_ | MS_NOSUID_ | MS_NODEV_ | MS_NOEXEC_));
-    }
+    int result = file_statfs_mount(fd->mount, stat);
     fd_close(fd);
+    return result;
+}
+
+int file_statfs_task(
+        struct task *task, const char *path, struct statfsbuf *stat) {
+    memset(stat, 0, sizeof(*stat));
+    char normalized[MAX_PATH];
+    int result = path_normalize_task(
+            task, AT_PWD, path, normalized, N_SYMLINK_FOLLOW);
+    if (result < 0)
+        return result;
+
+    struct mount *mount = find_mount_and_trim_path(normalized);
+    struct statbuf target = {};
+    result = mount->fs->stat(mount, normalized, &target);
+    if (result == 0)
+        result = file_statfs_mount(mount, stat);
+    mount_release(mount);
     return result;
 }
 

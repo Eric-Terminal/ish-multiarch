@@ -471,6 +471,8 @@ static int probe_stat(struct mount *mount,
     struct kernel_probe *probe = mount->data;
     probe->stat_calls++;
     strcpy(probe->last_stat_path, path);
+    if (strcmp(path, "/work/statfs-missing") == 0)
+        return _ENOENT;
     if (strcmp(path, "/work/metadata") == 0 ||
             strcmp(path, "/work/link") == 0) {
         *stat = probe->stat;
@@ -1437,7 +1439,7 @@ int main(void) {
             .bfree = UINT64_C(0x3132333435363738),
             .bavail = UINT64_C(0x4142434445464748),
             .files = UINT64_C(0x5152535455565758),
-            .ffree = UINT64_C(0x6162636465666768),
+            .ffree = UINT64_MAX,
             .fsid = UINT64_C(0x7172737475767778),
             .namelen = INT64_C(0x0102030405060708),
             .frsize = 0,
@@ -1507,7 +1509,7 @@ int main(void) {
         .bfree = INT64_C(0x3132333435363738),
         .bavail = INT64_C(0x4142434445464748),
         .files = INT64_C(0x5152535455565758),
-        .ffree = INT64_C(0x6162636465666768),
+        .ffree = -1,
         .fsid = {INT32_C(0x75767778), INT32_C(0x71727374)},
         .namelen = INT64_C(0x0102030405060708),
         .frsize = INT64_C(0x1112131415161718),
@@ -1540,6 +1542,120 @@ int main(void) {
             fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
             "AArch64 fstatfs 在 provider 后拒绝跨越用户地址上限");
 
+    const size_t statfs_path_offset = 0x9200;
+    const qword_t statfs_path_address =
+            USER_BASE + statfs_path_offset;
+    static const char statfs_link_path[] = "link";
+    memcpy(memory.bytes + statfs_path_offset,
+            statfs_link_path, sizeof(statfs_link_path));
+    memset(memory.bytes + statfs_offset, 0xa5,
+            sizeof(struct aarch64_linux_statfs));
+    unsigned stat_before = kernel.stat_calls;
+    unsigned statfs_before = kernel.statfs_calls;
+    unsigned readlink_before = kernel.readlink_calls;
+    reset_user_access(&memory);
+    fixture.mount->flags = MS_READONLY_ | MS_NODEV_;
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address, USER_BASE + statfs_offset,
+            UINT64_MAX, UINT64_MAX);
+    CHECK(statfs_result == 0 &&
+            kernel.stat_calls > stat_before &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0 &&
+            kernel.readlink_calls > readlink_before &&
+            strcmp(kernel.last_readlink_path, "/work/metadata") == 0 &&
+            kernel.statfs_calls == statfs_before + 1 &&
+            memory.read_calls == sizeof(statfs_link_path) &&
+            memory.write_calls == 1 &&
+            memory.write_bytes == sizeof(expected_statfs) &&
+            memcmp(memory.bytes + statfs_offset,
+                    &expected_statfs, sizeof(expected_statfs)) == 0,
+            "AArch64 statfs 跟随最终符号链接并输出同族 LP64 wire");
+    fixture.mount->flags = saved_mount_flags;
+
+    unsigned stat_after_success = kernel.stat_calls;
+    static const char missing_statfs_path[] = "statfs-missing";
+    memcpy(memory.bytes + statfs_path_offset,
+            missing_statfs_path, sizeof(missing_statfs_path));
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 63, 0, 0);
+    CHECK(statfs_result == encoded_error(_ENOENT) &&
+            kernel.stat_calls > stat_after_success &&
+            strcmp(kernel.last_stat_path, "/work/statfs-missing") == 0 &&
+            kernel.statfs_calls == statfs_before + 1 &&
+            memory.write_calls == 0,
+            "AArch64 statfs 先验证最终对象存在再检查输出地址");
+
+    unsigned stat_after_missing = kernel.stat_calls;
+    static const char metadata_statfs_path[] = "metadata";
+    memcpy(memory.bytes + statfs_path_offset,
+            metadata_statfs_path, sizeof(metadata_statfs_path));
+    kernel.statfs_error = _EIO;
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 63, 0, 0);
+    CHECK(statfs_result == encoded_error(_EIO) &&
+            kernel.stat_calls > stat_after_missing &&
+            kernel.statfs_calls == statfs_before + 2 &&
+            memory.write_calls == 0,
+            "AArch64 statfs 的 provider 错误优先于输出地址故障");
+    kernel.statfs_error = 0;
+
+    unsigned stat_after_provider_error = kernel.stat_calls;
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address,
+            AARCH64_LINUX_USER_ADDRESS_MAX - 63, 0, 0);
+    CHECK(statfs_result == encoded_error(_EFAULT) &&
+            kernel.stat_calls > stat_after_provider_error &&
+            kernel.statfs_calls == statfs_before + 3 &&
+            memory.write_calls == 0 &&
+            fault.address == AARCH64_LINUX_USER_ADDRESS_MAX - 63 &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE,
+            "AArch64 statfs 在路径与 provider 成功后检查输出范围");
+
+    unsigned stat_after_output_error = kernel.stat_calls;
+    reset_user_access(&memory);
+    memory.fail_write_at = USER_BASE + statfs_offset + 64;
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address, USER_BASE + statfs_offset, 0, 0);
+    CHECK(statfs_result == encoded_error(_EFAULT) &&
+            kernel.stat_calls > stat_after_output_error &&
+            kernel.statfs_calls == statfs_before + 4 &&
+            memory.write_calls == 1 && memory.write_bytes == 64 &&
+            fault.address == USER_BASE + statfs_offset + 64 &&
+            fault.access == GUEST_MEMORY_WRITE &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "AArch64 statfs 保留完整 wire 写回中的精确 guest fault");
+
+    unsigned stat_after_callback_error = kernel.stat_calls;
+    reset_user_access(&memory);
+    memory.fail_read_at = statfs_path_address + 2;
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address, USER_BASE + statfs_offset, 0, 0);
+    CHECK(statfs_result == encoded_error(_EFAULT) &&
+            kernel.stat_calls == stat_after_callback_error &&
+            kernel.statfs_calls == statfs_before + 4 &&
+            memory.read_calls == 3 && memory.write_calls == 0 &&
+            fault.address == statfs_path_address + 2 &&
+            fault.access == GUEST_MEMORY_READ &&
+            fault.kind == GUEST_MEMORY_FAULT_UNMAPPED,
+            "AArch64 statfs 保留 pathname 中途读取故障");
+
+    memory.bytes[statfs_path_offset] = '\0';
+    reset_user_access(&memory);
+    statfs_result = invoke(&fixture, &memory, &fault, 43,
+            statfs_path_address, USER_BASE + statfs_offset, 0, 0);
+    CHECK(statfs_result == encoded_error(_ENOENT) &&
+            kernel.stat_calls == stat_after_callback_error &&
+            kernel.statfs_calls == statfs_before + 4 &&
+            memory.read_calls == 1 && memory.write_calls == 0,
+            "AArch64 statfs 空路径返回 ENOENT 且不访问 provider");
+
+    reset_user_access(&memory);
     CHECK(invoke(&fixture, &memory, &fault, 32, 99,
             UINT64_MAX, 0, 0) == encoded_error(_EBADF) &&
             kernel.flock_calls == 0,

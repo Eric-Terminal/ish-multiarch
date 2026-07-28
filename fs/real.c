@@ -560,14 +560,14 @@ int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {
     struct statvfs vfs = {};
     if (fstatvfs(mount->root_fd, &vfs) < 0)
         return errno_map();
-    stat->bsize = vfs.f_bsize;
+    stat->bsize = (sqword_t) vfs.f_bsize;
     stat->blocks = vfs.f_blocks;
     stat->bfree = vfs.f_bfree;
     stat->bavail = vfs.f_bavail;
     stat->files = vfs.f_files;
     stat->ffree = vfs.f_ffree;
-    stat->namelen = vfs.f_namemax;
-    stat->frsize = vfs.f_frsize;
+    stat->namelen = (sqword_t) vfs.f_namemax;
+    stat->frsize = (sqword_t) vfs.f_frsize;
     return 0;
 }
 

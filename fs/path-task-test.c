@@ -71,6 +71,7 @@ struct open_probe {
     unsigned setattrs;
     unsigned mode_fsetattrs;
     unsigned ownership_fsetattrs;
+    unsigned statfs_calls;
     unsigned utimes;
     unsigned futimes;
     uid_t_ owner;
@@ -81,6 +82,8 @@ struct open_probe {
     unsigned resize_calls;
     int resize_error;
     int mode_error;
+    int statfs_error;
+    struct statfsbuf statfs;
     struct attr last_attr;
     struct timespec last_atime;
     struct timespec last_mtime;
@@ -183,6 +186,8 @@ static struct fd *probe_open_identity(struct mount *mount,
 static int probe_stat(struct mount *mount, const char *path, struct statbuf *stat) {
     struct open_probe *probe = mount->data;
     strcpy(probe->last_stat_path, path);
+    if (strcmp(path, "/target/statfs-missing") == 0)
+        return _ENOENT;
     struct access_identity_gate *gate = probe->access_gate;
     if (gate != NULL && strcmp(path, gate->path) == 0) {
         assert(pthread_mutex_lock(&gate->mutex) == 0);
@@ -202,6 +207,16 @@ static int probe_stat(struct mount *mount, const char *path, struct statbuf *sta
         .uid = probe->owner,
         .gid = probe->group,
     };
+    return 0;
+}
+
+static int probe_statfs(
+        struct mount *mount, struct statfsbuf *stat) {
+    struct open_probe *probe = mount->data;
+    probe->statfs_calls++;
+    if (probe->statfs_error != 0)
+        return probe->statfs_error;
+    *stat = probe->statfs;
     return 0;
 }
 
@@ -355,6 +370,8 @@ static int probe_symlink(struct mount *mount,
 }
 
 static const struct fs_ops probe_fs = {
+    .magic = (int) UINT32_C(0x92345678),
+    .statfs = probe_statfs,
     .open = probe_open,
     .open_identity = probe_open_identity,
     .readlink = probe_readlink,
@@ -542,6 +559,10 @@ int main(void) {
         .owner = 1000,
         .group = 100,
         .file_mode = S_IFREG | 0400,
+        .statfs = {
+            .bsize = INT64_C(0x100000001),
+            .blocks = UINT64_C(0x200000002),
+        },
     };
     lock(&mounts_lock);
     int mount_error = do_mount(&probe_fs, "", "", "", 0);
@@ -1061,6 +1082,39 @@ int main(void) {
     CHECK(file_statat_task(&target.task, AT_FDCWD_, "", INT32_MIN,
             &target_stat) == _EINVAL && target_stat.inode == 0,
             "statat 拒绝未知 flags 并清零 host 结果");
+
+    struct statfsbuf target_statfs;
+    memset(&target_statfs, 0xff, sizeof(target_statfs));
+    int saved_mount_flags = mount->flags;
+    mount->flags = MS_READONLY_ | MS_NOSUID_;
+    CHECK(file_statfs_task(&target.task, "child", &target_statfs) == 0 &&
+            strcmp(probe.last_stat_path, "/target/child") == 0 &&
+            probe.statfs_calls == 1 &&
+            target_statfs.type == INT64_C(0x92345678) &&
+            target_statfs.bsize == INT64_C(0x100000001) &&
+            target_statfs.frsize == INT64_C(0x100000001) &&
+            target_statfs.blocks == UINT64_C(0x200000002) &&
+            target_statfs.flags ==
+                    (ST_VALID_ | MS_READONLY_ | MS_NOSUID_),
+            "statfs 使用目标任务 cwd 并保留架构中立的固定 64 位结果");
+    mount->flags = saved_mount_flags;
+
+    CHECK(file_statfs_task(&target.task, "link", &target_statfs) == 0 &&
+            strcmp(probe.last_stat_path, "/sandbox/absolute") == 0 &&
+            probe.statfs_calls == 2,
+            "statfs 跟随末端符号链接并受目标任务 root 约束");
+    memset(&target_statfs, 0xff, sizeof(target_statfs));
+    CHECK(file_statfs_task(&target.task, "statfs-missing",
+                    &target_statfs) == _ENOENT &&
+            strcmp(probe.last_stat_path, "/target/statfs-missing") == 0 &&
+            probe.statfs_calls == 2 && target_statfs.type == 0,
+            "statfs 拒绝不存在的最终对象且不调用 filesystem provider");
+    probe.statfs_error = _EIO;
+    CHECK(file_statfs_task(&target.task, "child",
+                    &target_statfs) == _EIO &&
+            probe.statfs_calls == 3,
+            "statfs 原样传播 filesystem provider 错误");
+    probe.statfs_error = 0;
 
     unsigned opens_before = probe.opens;
     CHECK(file_openat_task(&target.task, 99, "",

@@ -81,19 +81,23 @@ struct newstat64 {
 } __attribute__((packed));
 
 struct statfsbuf {
-    long type;
-    long bsize;
-    uint64_t blocks;
-    uint64_t bfree;
-    uint64_t bavail;
-    uint64_t files;
-    uint64_t ffree;
-    uint64_t fsid;
-    long namelen;
-    long frsize;
-    long flags;
-    long spare[4];
+    sqword_t type;
+    sqword_t bsize;
+    qword_t blocks;
+    qword_t bfree;
+    qword_t bavail;
+    qword_t files;
+    qword_t ffree;
+    qword_t fsid;
+    sqword_t namelen;
+    sqword_t frsize;
+    sqword_t flags;
+    sqword_t spare[4];
 };
+
+_Static_assert(sizeof(struct statfsbuf) == 120 &&
+        _Alignof(struct statfsbuf) == 8,
+        "架构中立 statfs 结果不得随 arm64_32 host ABI 改变");
 
 #define ST_VALID_ 0x20
 

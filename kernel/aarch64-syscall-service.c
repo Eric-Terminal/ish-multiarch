@@ -102,6 +102,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SYMLINKAT = 36,
     AARCH64_LINUX_SYS_LINKAT = 37,
     AARCH64_LINUX_SYS_RENAMEAT = 38,
+    AARCH64_LINUX_SYS_STATFS = 43,
     AARCH64_LINUX_SYS_FSTATFS = 44,
     AARCH64_LINUX_SYS_TRUNCATE = 45,
     AARCH64_LINUX_SYS_FTRUNCATE = 46,
@@ -3408,14 +3409,9 @@ static struct aarch64_linux_stat pack_stat(const struct statbuf *source) {
 
 static struct aarch64_linux_statfs pack_statfs(
         const struct statfsbuf *source) {
-    return (struct aarch64_linux_statfs) {
+    struct aarch64_linux_statfs result = {
         .type = source->type,
         .bsize = source->bsize,
-        .blocks = (sqword_t) source->blocks,
-        .bfree = (sqword_t) source->bfree,
-        .bavail = (sqword_t) source->bavail,
-        .files = (sqword_t) source->files,
-        .ffree = (sqword_t) source->ffree,
         .fsid = {
             (sdword_t) (dword_t) source->fsid,
             (sdword_t) (dword_t) (source->fsid >> 32),
@@ -3424,6 +3420,45 @@ static struct aarch64_linux_statfs pack_statfs(
         .frsize = source->frsize,
         .flags = source->flags,
     };
+    // Linux 把容量声明为 signed long；按位搬运可保留完整无符号计数。
+    memcpy(&result.blocks, &source->blocks, sizeof(result.blocks));
+    memcpy(&result.bfree, &source->bfree, sizeof(result.bfree));
+    memcpy(&result.bavail, &source->bavail, sizeof(result.bavail));
+    memcpy(&result.files, &source->files, sizeof(result.files));
+    memcpy(&result.ffree, &source->ffree, sizeof(result.ffree));
+    return result;
+}
+
+static qword_t copy_statfs_to_user(
+        const struct guest_linux_syscall_context *context,
+        const struct statfsbuf *host_stat, qword_t address,
+        struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_statfs guest_stat = pack_statfs(host_stat);
+    if (!aarch64_user_range_fits(address, sizeof(guest_stat)))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &guest_stat, sizeof(guest_stat), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
+static qword_t dispatch_statfs(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    char path[MAX_PATH];
+    qword_t copied = copy_path_from_user(
+            context, syscall->arguments[0], path, fault);
+    if ((sqword_t) copied < 0)
+        return copied;
+
+    struct statfsbuf host_stat;
+    int error = file_statfs_task(task, path, &host_stat);
+    if (error < 0)
+        return syscall_result(error);
+    return copy_statfs_to_user(context, &host_stat,
+            syscall->arguments[1], fault);
 }
 
 static qword_t dispatch_fstatfs(
@@ -3435,16 +3470,8 @@ static qword_t dispatch_fstatfs(
             task, syscall_fd(syscall->arguments[0]), &host_stat);
     if (error < 0)
         return syscall_result(error);
-
-    struct aarch64_linux_statfs guest_stat = pack_statfs(&host_stat);
-    qword_t address = syscall->arguments[1];
-    if (!aarch64_user_range_fits(address, sizeof(guest_stat)))
-        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
-    assert(context->user.write != NULL);
-    if (!context->user.write(context->user.opaque,
-            address, &guest_stat, sizeof(guest_stat), fault))
-        return syscall_result(_EFAULT);
-    return 0;
+    return copy_statfs_to_user(context, &host_stat,
+            syscall->arguments[1], fault);
 }
 
 static qword_t copy_stat_to_user(
@@ -3951,6 +3978,8 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RENAMEAT:
             return dispatch_renameat(
                     context, syscall, task, fault, false);
+        case AARCH64_LINUX_SYS_STATFS:
+            return dispatch_statfs(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FSTATFS:
             return dispatch_fstatfs(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_TRUNCATE:
