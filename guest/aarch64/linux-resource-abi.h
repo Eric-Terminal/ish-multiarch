@@ -3,6 +3,11 @@
 
 #include "misc.h"
 
+struct aarch64_linux_rlimit64 {
+    qword_t cur;
+    qword_t max;
+} __attribute__((packed, aligned(8)));
+
 struct aarch64_linux_timeval {
     sqword_t sec;
     sqword_t usec;
@@ -27,6 +32,11 @@ struct aarch64_linux_rusage {
     sqword_t nivcsw;
 } __attribute__((packed, aligned(8)));
 
+_Static_assert(sizeof(struct aarch64_linux_rlimit64) == 16 &&
+        _Alignof(struct aarch64_linux_rlimit64) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_rlimit64, cur) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_rlimit64, max) == 8,
+        "AArch64 Linux rlimit64 ABI 必须固定为 16 字节且按 8 字节对齐");
 _Static_assert(sizeof(struct aarch64_linux_timeval) == 16 &&
         _Alignof(struct aarch64_linux_timeval) == 8 &&
         __builtin_offsetof(struct aarch64_linux_timeval, sec) == 0 &&

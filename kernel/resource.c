@@ -10,11 +10,22 @@
 #endif
 
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 #include "kernel/calls.h"
 
+#define LINUX_NR_OPEN_DEFAULT UINT64_C(1048576)
+
 static bool resource_valid(int resource) {
     return resource >= 0 && resource < RLIMIT_NLIMITS_;
+}
+
+static rlim_t_ i386_rlim64_to_internal(rlim_t_ value) {
+    return value >= UINT32_MAX ? RLIM_INFINITY_ : value;
+}
+
+static rlim_t_ i386_internal_to_rlim64(rlim_t_ value) {
+    return value >= UINT32_MAX ? UINT64_MAX : value;
 }
 
 static int rlimit_get(struct task *task, int resource, struct rlimit_ *limit) {
@@ -23,16 +34,6 @@ static int rlimit_get(struct task *task, int resource, struct rlimit_ *limit) {
     struct tgroup *group = task->group;
     lock(&group->lock);
     *limit = group->limits[resource];
-    unlock(&group->lock);
-    return 0;
-}
-
-static int rlimit_set(struct task *task, int resource, struct rlimit_ limit) {
-    if (!resource_valid(resource))
-        return _EINVAL;
-    struct tgroup *group = task->group;
-    lock(&group->lock);
-    group->limits[resource] = limit;
     unlock(&group->lock);
     return 0;
 }
@@ -54,10 +55,14 @@ static int do_getrlimit32(int resource, struct rlimit32_ *rlimit32) {
     int err = rlimit_get(current, resource, &rlimit);
     if (err < 0)
         return err;
-    STRACE(" {cur=%#x, max=%#x}", rlimit.cur, rlimit.max);
+    STRACE(" {cur=%#llx, max=%#llx}",
+            (unsigned long long) rlimit.cur,
+            (unsigned long long) rlimit.max);
 
-    rlimit32->max = rlimit.max;
-    rlimit32->cur = rlimit.cur;
+    rlimit32->cur = rlimit.cur >= UINT32_MAX ?
+            UINT32_MAX : (rlim32_t_) rlimit.cur;
+    rlimit32->max = rlimit.max >= UINT32_MAX ?
+            UINT32_MAX : (rlim32_t_) rlimit.max;
     return 0;
 }
 
@@ -89,53 +94,107 @@ dword_t sys_old_getrlimit32(dword_t resource, addr_t rlim_addr) {
     return 0;
 }
 
-static int check_setrlimit(int resource, struct rlimit_ new_limit) {
-    if (superuser())
-        return 0;
-    struct rlimit_ old_limit;
-    int err = rlimit_get(current, resource, &old_limit);
-    if (err < 0)
-        return err;
-    if (new_limit.max > old_limit.max)
-        return _EPERM;
-    return 0;
+// 调用方持有 pids_lock。项目尚无 user namespace 与 capability 模型，
+// 因而用有效 root 身份近似 Linux 的 CAP_SYS_RESOURCE。
+static bool prlimit_access_allowed_locked(
+        const struct task *caller, const struct task *target) {
+    if (caller == target || caller->euid == 0)
+        return true;
+    return caller->uid == target->uid &&
+            caller->uid == target->euid &&
+            caller->uid == target->suid &&
+            caller->gid == target->gid &&
+            caller->gid == target->egid &&
+            caller->gid == target->sgid;
+}
+
+int resource_prlimit_task(struct task *caller, pid_t_ pid,
+        dword_t resource, const struct rlimit_ *new_limit,
+        struct rlimit_ *old_limit) {
+    assert(caller != NULL);
+    lock(&pids_lock);
+    struct task *target = pid == 0 ?
+            caller : pid_get_task_zombie((dword_t) pid);
+    int error = 0;
+    if (target == NULL) {
+        error = _ESRCH;
+    } else if (!prlimit_access_allowed_locked(caller, target)) {
+        error = _EPERM;
+    } else if (resource >= RLIMIT_NLIMITS_) {
+        error = _EINVAL;
+    } else if (new_limit != NULL && new_limit->cur > new_limit->max) {
+        error = _EINVAL;
+    } else if (new_limit != NULL && resource == RLIMIT_NOFILE_ &&
+            new_limit->max > LINUX_NR_OPEN_DEFAULT) {
+        error = _EPERM;
+    } else if (target->zombie || target->exiting) {
+        error = _ESRCH;
+    } else {
+        struct tgroup *group = target->group;
+        lock(&group->lock);
+        struct rlimit_ previous = group->limits[resource];
+        if (new_limit != NULL && new_limit->max > previous.max &&
+                caller->euid != 0) {
+            error = _EPERM;
+        } else {
+            if (old_limit != NULL)
+                *old_limit = previous;
+            if (new_limit != NULL)
+                group->limits[resource] = *new_limit;
+        }
+        unlock(&group->lock);
+    }
+    unlock(&pids_lock);
+    return error;
 }
 
 dword_t sys_setrlimit32(dword_t resource, addr_t rlim_addr) {
-    struct rlimit_ rlimit;
-    if (user_get(rlim_addr, rlimit))
+    struct rlimit32_ wire;
+    if (user_get(rlim_addr, wire))
         return _EFAULT;
-    STRACE("setrlimit(%d, {cur=%#x, max=%#x})", resource, rlimit.cur, rlimit.max);
-    int err = check_setrlimit(resource, rlimit);
-    if (err < 0)
-        return err;
-    return rlimit_set(current, resource, rlimit);
+    struct rlimit_ rlimit = {
+        .cur = i386_rlim64_to_internal(wire.cur),
+        .max = i386_rlim64_to_internal(wire.max),
+    };
+    STRACE("setrlimit(%d, {cur=%#llx, max=%#llx})", resource,
+            (unsigned long long) rlimit.cur,
+            (unsigned long long) rlimit.max);
+    return resource_prlimit_task(
+            current, 0, resource, &rlimit, NULL);
 }
 
 dword_t sys_prlimit64(pid_t_ pid, dword_t resource, addr_t new_limit_addr, addr_t old_limit_addr) {
     STRACE("prlimit64(%d, %d)", pid, resource);
-    if (pid != 0)
-        return _EINVAL;
-
-    if (old_limit_addr != 0) {
-        struct rlimit_ rlimit;
-        int err = rlimit_get(current, resource, &rlimit);
-        if (err < 0)
-            return err;
-        STRACE(" old={cur=%#x, max=%#x}", rlimit.cur, rlimit.max);
-        if (user_put(old_limit_addr, rlimit))
+    struct rlimit_ new_limit;
+    if (new_limit_addr != 0) {
+        struct rlimit_ wire;
+        if (user_get(new_limit_addr, wire))
             return _EFAULT;
+        new_limit = (struct rlimit_) {
+            .cur = i386_rlim64_to_internal(wire.cur),
+            .max = i386_rlim64_to_internal(wire.max),
+        };
+        STRACE(" new={cur=%#llx, max=%#llx}",
+                (unsigned long long) new_limit.cur,
+                (unsigned long long) new_limit.max);
     }
 
-    if (new_limit_addr != 0) {
-        struct rlimit_ rlimit;
-        if (user_get(new_limit_addr, rlimit))
+    struct rlimit_ old_limit;
+    int error = resource_prlimit_task(current, pid, resource,
+            new_limit_addr != 0 ? &new_limit : NULL,
+            old_limit_addr != 0 ? &old_limit : NULL);
+    if (error < 0)
+        return error;
+    if (old_limit_addr != 0) {
+        STRACE(" old={cur=%#llx, max=%#llx}",
+                (unsigned long long) old_limit.cur,
+                (unsigned long long) old_limit.max);
+        struct rlimit_ wire = {
+            .cur = i386_internal_to_rlim64(old_limit.cur),
+            .max = i386_internal_to_rlim64(old_limit.max),
+        };
+        if (user_put(old_limit_addr, wire))
             return _EFAULT;
-        STRACE(" new={cur=%#x, max=%#x}", rlimit.cur, rlimit.max);
-        int err = check_setrlimit(resource, rlimit);
-        if (err < 0)
-            return err;
-        return rlimit_set(current, resource, rlimit);
     }
     return 0;
 }

@@ -13,6 +13,7 @@
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-futex-abi.h"
 #include "guest/aarch64/linux-process-abi.h"
+#include "guest/aarch64/linux-resource-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-signal-info.h"
 #include "guest/aarch64/linux-socket-abi.h"
@@ -184,6 +185,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_TGSIGQUEUEINFO = 240,
     AARCH64_LINUX_SYS_ACCEPT4 = 242,
     AARCH64_LINUX_SYS_WAIT4 = 260,
+    AARCH64_LINUX_SYS_PRLIMIT64 = 261,
     AARCH64_LINUX_SYS_RENAMEAT2 = 276,
     AARCH64_LINUX_SYS_GETRANDOM = 278,
     AARCH64_LINUX_SYS_PREADV2 = 286,
@@ -3913,6 +3915,53 @@ static qword_t dispatch_rt_sigaction(
     return 0;
 }
 
+static qword_t dispatch_prlimit64(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t new_address = syscall->arguments[2];
+    struct rlimit_ new_limit;
+    if (new_address != 0) {
+        struct aarch64_linux_rlimit64 wire;
+        if (!aarch64_user_range_fits(new_address, sizeof(wire)))
+            return user_range_error(
+                    fault, new_address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                new_address, &wire, sizeof(wire), fault))
+            return syscall_result(_EFAULT);
+        new_limit = (struct rlimit_) {
+            .cur = wire.cur,
+            .max = wire.max,
+        };
+    }
+
+    qword_t old_address = syscall->arguments[3];
+    struct rlimit_ old_limit;
+    int error = resource_prlimit_task(task,
+            syscall_pid(syscall->arguments[0]),
+            (dword_t) syscall->arguments[1],
+            new_address != 0 ? &new_limit : NULL,
+            old_address != 0 ? &old_limit : NULL);
+    if (error < 0)
+        return syscall_result(error);
+    if (old_address == 0)
+        return 0;
+
+    struct aarch64_linux_rlimit64 wire = {
+        .cur = old_limit.cur,
+        .max = old_limit.max,
+    };
+    if (!aarch64_user_range_fits(old_address, sizeof(wire)))
+        return user_range_error(
+                fault, old_address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            old_address, &wire, sizeof(wire), fault))
+        return syscall_result(_EFAULT);
+    return 0;
+}
+
 static qword_t dispatch_syscall_inner(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -4261,6 +4310,9 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_WAIT4:
             return aarch64_linux_dispatch_wait4(
                     context, syscall, fault);
+        case AARCH64_LINUX_SYS_PRLIMIT64:
+            return dispatch_prlimit64(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_RENAMEAT2:
             return dispatch_renameat(
                     context, syscall, task, fault, true);
