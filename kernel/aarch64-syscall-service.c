@@ -132,6 +132,9 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_FSTAT = 80,
     AARCH64_LINUX_SYS_FSYNC = 82,
     AARCH64_LINUX_SYS_FDATASYNC = 83,
+    AARCH64_LINUX_SYS_TIMERFD_CREATE = 85,
+    AARCH64_LINUX_SYS_TIMERFD_SETTIME = 86,
+    AARCH64_LINUX_SYS_TIMERFD_GETTIME = 87,
     AARCH64_LINUX_SYS_UTIMENSAT = 88,
     AARCH64_LINUX_SYS_FUTEX = 98,
     AARCH64_LINUX_SYS_SET_ROBUST_LIST = 99,
@@ -4031,6 +4034,15 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_FDATASYNC:
             return syscall_result(file_sync_task(task,
                     syscall_fd(syscall->arguments[0]), true));
+        case AARCH64_LINUX_SYS_TIMERFD_CREATE:
+            return aarch64_linux_dispatch_timerfd_create(
+                    syscall, task);
+        case AARCH64_LINUX_SYS_TIMERFD_SETTIME:
+            return aarch64_linux_dispatch_timerfd_settime(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_TIMERFD_GETTIME:
+            return aarch64_linux_dispatch_timerfd_gettime(
+                    context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UTIMENSAT:
             return dispatch_utimensat(
                     context, syscall, task, fault);

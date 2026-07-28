@@ -9,6 +9,7 @@
 #include "fs/stat.h"
 #include "fs/proc.h"
 #include "fs/sockrestart.h"
+#include "util/timer.h"
 
 struct task;
 struct unix_pending_peer;
@@ -50,7 +51,11 @@ struct fd {
         } eventfd;
         struct {
             struct timer *timer;
+            clockid_t clockid;
+            struct timer_time interval;
+            struct timer_time next;
             uint64_t expirations;
+            bool expired;
         } timerfd;
         struct {
             int domain;

@@ -567,6 +567,14 @@ if get_option('kernel') == 'ish'
         test('aarch64_eventfd_syscall',
             aarch64_eventfd_syscall_test)
 
+        aarch64_timerfd_syscall_test = executable(
+            'aarch64_timerfd_syscall_test',
+            'kernel/aarch64-timerfd-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_timerfd_syscall',
+            aarch64_timerfd_syscall_test,
+            timeout: 60)
+
         aarch64_socket_syscall_test = executable(
             'aarch64_socket_syscall_test',
             'kernel/aarch64-socket-syscall-test.c',

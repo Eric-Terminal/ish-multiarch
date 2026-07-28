@@ -11,6 +11,7 @@
 #include "kernel/errno.h"
 #include "kernel/resource.h"
 #include "kernel/time.h"
+#include "kernel/timerfd.h"
 #include "fs/poll.h"
 
 static int clockid_to_real(uint_t clock, clockid_t *real) {
@@ -532,71 +533,297 @@ void tgroup_timers_destroy(struct tgroup *group) {
 
 static struct fd_ops timerfd_ops;
 
-static void timerfd_callback(struct fd *fd) {
+#define TIMERFD_NANOSECONDS_PER_SECOND UINT64_C(1000000000)
+#define TIMERFD_KTIME_MAX_SECONDS INT64_C(9223372036)
+#define TIMERFD_KTIME_MAX_NANOSECONDS INT64_C(854775807)
+#define TIMERFD_KTIME_MAX UINT64_C(9223372036854775807)
+
+_Static_assert(
+        (uint64_t) TIMERFD_KTIME_MAX_SECONDS *
+                        TIMERFD_NANOSECONDS_PER_SECOND +
+                TIMERFD_KTIME_MAX_NANOSECONDS ==
+                TIMERFD_KTIME_MAX,
+        "timerfd 时间上限必须匹配 Linux KTIME_MAX");
+
+static bool valid_timerfd_spec(struct timer_spec spec) {
+    return spec.value.sec >= 0 && spec.value.nsec >= 0 &&
+            spec.value.nsec < (int64_t) TIMERFD_NANOSECONDS_PER_SECOND &&
+            spec.interval.sec >= 0 && spec.interval.nsec >= 0 &&
+            spec.interval.nsec <
+                    (int64_t) TIMERFD_NANOSECONDS_PER_SECOND;
+}
+
+static struct timer_time timerfd_clamp_time(struct timer_time time) {
+    assert(time.sec >= 0 && time.nsec >= 0 &&
+            time.nsec < (int64_t) TIMERFD_NANOSECONDS_PER_SECOND);
+    if (time.sec > TIMERFD_KTIME_MAX_SECONDS ||
+            (time.sec == TIMERFD_KTIME_MAX_SECONDS &&
+                    time.nsec > TIMERFD_KTIME_MAX_NANOSECONDS)) {
+        return (struct timer_time) {
+            .sec = TIMERFD_KTIME_MAX_SECONDS,
+            .nsec = TIMERFD_KTIME_MAX_NANOSECONDS,
+        };
+    }
+    return time;
+}
+
+static uint64_t timerfd_time_to_nanoseconds(struct timer_time time) {
+    time = timerfd_clamp_time(time);
+    uint64_t nanoseconds =
+            (uint64_t) time.sec * TIMERFD_NANOSECONDS_PER_SECOND +
+            (uint64_t) time.nsec;
+    assert(nanoseconds <= TIMERFD_KTIME_MAX);
+    return nanoseconds;
+}
+
+static struct timer_time timerfd_time_from_nanoseconds(
+        uint64_t nanoseconds) {
+    assert(nanoseconds <= TIMERFD_KTIME_MAX);
+    return (struct timer_time) {
+        .sec = (int64_t) (
+                nanoseconds / TIMERFD_NANOSECONDS_PER_SECOND),
+        .nsec = (int64_t) (
+                nanoseconds % TIMERFD_NANOSECONDS_PER_SECOND),
+    };
+}
+
+static uint64_t timerfd_now(clockid_t clockid) {
+    struct timer_time now = timer_time_from_timespec(
+            timespec_now(clockid));
+    assert(now.sec >= 0 && now.nsec >= 0);
+    return timerfd_time_to_nanoseconds(now);
+}
+
+static uint64_t timerfd_add_saturated(
+        uint64_t time, uint64_t duration) {
+    assert(time <= TIMERFD_KTIME_MAX &&
+            duration <= TIMERFD_KTIME_MAX);
+    return duration > TIMERFD_KTIME_MAX - time ?
+            TIMERFD_KTIME_MAX : time + duration;
+}
+
+static uint64_t timerfd_forward_deadline(
+        uint64_t deadline, uint64_t interval, uint64_t now,
+        uint64_t *periods) {
+    assert(deadline != 0 && interval != 0 &&
+            deadline <= TIMERFD_KTIME_MAX &&
+            interval <= TIMERFD_KTIME_MAX &&
+            now <= TIMERFD_KTIME_MAX && periods != NULL);
+
+    uint64_t elapsed = now >= deadline ? now - deadline : 0;
+    uint64_t elapsed_periods = elapsed / interval;
+    *periods = elapsed_periods + 1;
+    uint64_t capacity = TIMERFD_KTIME_MAX - deadline;
+    if (*periods > capacity / interval)
+        return TIMERFD_KTIME_MAX;
+    return deadline + *periods * interval;
+}
+
+// 调用方持有 fd->lock。底层定时器只接收一次性相对时长。
+static int timerfd_program_locked(
+        struct fd *fd, uint64_t deadline) {
+    struct timer_spec one_shot = {};
+    if (deadline != 0) {
+        uint64_t now = timerfd_now(fd->timerfd.clockid);
+        uint64_t remaining = deadline > now ? deadline - now : 1;
+        one_shot.value = timerfd_time_from_nanoseconds(remaining);
+    }
+    return timer_set(fd->timerfd.timer, one_shot, NULL);
+}
+
+static void timerfd_snapshot_locked(
+        struct fd *fd, uint64_t now,
+        struct timer_spec *spec) {
+    *spec = (struct timer_spec) {
+        .interval = fd->timerfd.interval,
+    };
+    uint64_t deadline =
+            timerfd_time_to_nanoseconds(fd->timerfd.next);
+    if (deadline == 0)
+        return;
+
+    uint64_t interval =
+            timerfd_time_to_nanoseconds(fd->timerfd.interval);
+    if (interval != 0 && now >= deadline) {
+        uint64_t periods;
+        deadline = timerfd_forward_deadline(
+                deadline, interval, now, &periods);
+    }
+    if (deadline > now)
+        spec->value = timerfd_time_from_nanoseconds(deadline - now);
+}
+
+// 首次到期后保持 host timer 停止，直到 read/gettime 批量计数并重臂。
+static int timerfd_refresh_periodic_locked(struct fd *fd) {
+    uint64_t interval =
+            timerfd_time_to_nanoseconds(fd->timerfd.interval);
+    if (!fd->timerfd.expired || interval == 0)
+        return 0;
+
+    uint64_t deadline =
+            timerfd_time_to_nanoseconds(fd->timerfd.next);
+    assert(deadline != 0);
+    uint64_t periods;
+    uint64_t next = timerfd_forward_deadline(
+            deadline, interval, timerfd_now(fd->timerfd.clockid),
+            &periods);
+    int error = timerfd_program_locked(fd, next);
+    if (error < 0)
+        return error;
+
+    fd->timerfd.next = timerfd_time_from_nanoseconds(next);
+    fd->timerfd.expirations += periods - 1;
+    fd->timerfd.expired = false;
+    return 0;
+}
+
+static void timerfd_callback(void *opaque) {
+    struct fd *fd = opaque;
     lock(&fd->lock);
     if (!timer_callback_is_current(fd->timerfd.timer)) {
         unlock(&fd->lock);
         return;
     }
-    fd->timerfd.expirations++;
+    if (!fd->timerfd.expired) {
+        fd->timerfd.expired = true;
+        fd->timerfd.expirations++;
+    }
     notify(&fd->cond);
     unlock(&fd->lock);
     poll_wakeup(fd, POLL_READ);
 }
 
-fd_t sys_timerfd_create(int_t clockid, int_t flags) {
-    STRACE("timerfd_create(%d, %#x)", clockid, flags);
+fd_t timerfd_create_task(
+        struct task *task, int_t clockid, int_t flags) {
     if (flags & ~(O_CLOEXEC_ | O_NONBLOCK_))
         return _EINVAL;
     clockid_t real_clockid;
-    if (timer_clockid_to_real(clockid, &real_clockid)) return _EINVAL;
+    if (timer_clockid_to_real(clockid, &real_clockid))
+        return _EINVAL;
 
     struct fd *fd = adhoc_fd_create(&timerfd_ops);
     if (fd == NULL)
         return _ENOMEM;
 
+    fd->flags = O_RDWR_;
+    fd->timerfd.clockid = real_clockid;
     fd->timerfd.timer = timer_new(
-            real_clockid, (timer_callback_t) timerfd_callback, fd);
+            real_clockid, timerfd_callback, fd);
     if (fd->timerfd.timer == NULL) {
         fd_close(fd);
         return _ENOMEM;
     }
-    return f_install(fd, flags);
+    return f_install_task(task, fd, flags);
 }
 
-int_t sys_timerfd_settime(fd_t f, int_t flags, addr_t new_value_addr, addr_t old_value_addr) {
-    STRACE("timerfd_settime(%d, %d, %#x, %#x)", f, flags, new_value_addr, old_value_addr);
-    if (flags & ~(TIMER_ABSTIME_))
+fd_t sys_timerfd_create(int_t clockid, int_t flags) {
+    STRACE("timerfd_create(%d, %#x)", clockid, flags);
+    return timerfd_create_task(current, clockid, flags);
+}
+
+int_t timerfd_settime_task(
+        struct task *task, fd_t f, int_t flags,
+        const struct timer_spec *new_spec,
+        struct timer_spec *old_spec) {
+    assert(task != NULL && new_spec != NULL);
+    if ((flags & ~TFD_TIMER_ABSTIME_) ||
+            !valid_timerfd_spec(*new_spec))
         return _EINVAL;
-    struct fd *fd = f_get(f);
+
+    struct timer_spec normalized = {
+        .value = timerfd_clamp_time(new_spec->value),
+        .interval = timerfd_clamp_time(new_spec->interval),
+    };
+    struct fd *fd = f_get_task_retain(task, f);
     if (fd == NULL)
         return _EBADF;
-    if (fd->ops != &timerfd_ops)
+    if (fd->ops != &timerfd_ops) {
+        fd_close(fd);
         return _EINVAL;
+    }
+
+    lock(&fd->lock);
+    uint64_t now = timerfd_now(fd->timerfd.clockid);
+    struct timer_spec previous;
+    timerfd_snapshot_locked(fd, now, &previous);
+
+    uint64_t value = timerfd_time_to_nanoseconds(normalized.value);
+    uint64_t next = 0;
+    if (value != 0) {
+        next = flags & TFD_TIMER_ABSTIME_ ?
+                value : timerfd_add_saturated(now, value);
+    }
+    int err = timerfd_program_locked(fd, next);
+    if (err == 0) {
+        fd->timerfd.interval = normalized.interval;
+        fd->timerfd.next = timerfd_time_from_nanoseconds(next);
+        fd->timerfd.expirations = 0;
+        fd->timerfd.expired = false;
+        if (old_spec != NULL)
+            *old_spec = previous;
+    }
+    unlock(&fd->lock);
+    fd_close(fd);
+    return err;
+}
+
+int_t timerfd_gettime_task(
+        struct task *task, fd_t f,
+        struct timer_spec *current_spec) {
+    assert(task != NULL && current_spec != NULL);
+    struct fd *fd = f_get_task_retain(task, f);
+    if (fd == NULL)
+        return _EBADF;
+    if (fd->ops != &timerfd_ops) {
+        fd_close(fd);
+        return _EINVAL;
+    }
+
+    lock(&fd->lock);
+    int err = timerfd_refresh_periodic_locked(fd);
+    if (err == 0) {
+        timerfd_snapshot_locked(fd,
+                timerfd_now(fd->timerfd.clockid), current_spec);
+    }
+    unlock(&fd->lock);
+    fd_close(fd);
+    return err;
+}
+
+int_t sys_timerfd_settime(
+        fd_t f, int_t flags,
+        addr_t new_value_addr, addr_t old_value_addr) {
+    STRACE("timerfd_settime(%d, %d, %#x, %#x)",
+            f, flags, new_value_addr, old_value_addr);
     struct itimerspec_ value;
     if (user_get(new_value_addr, value))
         return _EFAULT;
     if (!valid_guest_itimerspec(value))
         return _EINVAL;
     struct timer_spec spec = timer_spec_to_real(value);
-    struct timer_spec old_spec;
-
-    lock(&fd->lock);
-    int err = flags & TIMER_ABSTIME_
-            ? timer_set_absolute(fd->timerfd.timer, spec, &old_spec)
-            : timer_set(fd->timerfd.timer, spec, &old_spec);
-    if (err == 0)
-        fd->timerfd.expirations = 0;
-    unlock(&fd->lock);
+    struct timer_spec previous;
+    int err = timerfd_settime_task(
+            current, f, flags, &spec, &previous);
     if (err < 0)
         return err;
 
     if (old_value_addr) {
-        struct itimerspec_ old_value = timer_spec_from_real(old_spec);
+        struct itimerspec_ old_value = timer_spec_from_real(previous);
         if (user_put(old_value_addr, old_value))
             return _EFAULT;
     }
+    return 0;
+}
 
+int_t sys_timerfd_gettime(fd_t f, addr_t value_addr) {
+    STRACE("timerfd_gettime(%d, %#x)", f, value_addr);
+    struct timer_spec current_spec;
+    int err = timerfd_gettime_task(current, f, &current_spec);
+    if (err < 0)
+        return err;
+    struct itimerspec_ value = timer_spec_from_real(current_spec);
+    if (user_put(value_addr, value))
+        return _EFAULT;
     return 0;
 }
 
@@ -616,8 +843,15 @@ static ssize_t timerfd_read(struct fd *fd, void *buf, size_t bufsize) {
         }
     }
 
-    *(uint64_t *) buf = fd->timerfd.expirations;
+    int err = timerfd_refresh_periodic_locked(fd);
+    if (err < 0) {
+        unlock(&fd->lock);
+        return err;
+    }
+    memcpy(buf, &fd->timerfd.expirations, sizeof(uint64_t));
     fd->timerfd.expirations = 0;
+    if (timer_time_is_zero(fd->timerfd.interval))
+        fd->timerfd.expired = false;
     unlock(&fd->lock);
     return sizeof(uint64_t);
 }

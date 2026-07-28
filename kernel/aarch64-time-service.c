@@ -18,6 +18,7 @@
 #include "kernel/errno.h"
 #include "kernel/resource.h"
 #include "kernel/task.h"
+#include "kernel/timerfd.h"
 #include "util/timer.h"
 
 #define AARCH64_TIME_USER_ADDRESS_LIMIT \
@@ -80,6 +81,96 @@ static qword_t write_guest_timespec(
             address, &wire, sizeof(wire), fault))
         return time_result(_EFAULT);
     return 0;
+}
+
+static qword_t read_guest_itimerspec(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, struct timer_spec *spec,
+        struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_timespec interval;
+    qword_t result = read_guest_timespec(context,
+            address + __builtin_offsetof(
+                    struct aarch64_linux_itimerspec, interval),
+            &interval, fault);
+    if ((sqword_t) result < 0)
+        return result;
+
+    struct aarch64_linux_timespec value;
+    result = read_guest_timespec(context,
+            address + __builtin_offsetof(
+                    struct aarch64_linux_itimerspec, value),
+            &value, fault);
+    if ((sqword_t) result < 0)
+        return result;
+
+    *spec = (struct timer_spec) {
+        .interval = {interval.sec, interval.nsec},
+        .value = {value.sec, value.nsec},
+    };
+    return 0;
+}
+
+static qword_t write_guest_itimerspec(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, const struct timer_spec *spec,
+        struct guest_linux_user_fault *fault) {
+    qword_t result = write_guest_timespec(context,
+            address + __builtin_offsetof(
+                    struct aarch64_linux_itimerspec, interval),
+            spec->interval, fault);
+    if ((sqword_t) result < 0)
+        return result;
+    return write_guest_timespec(context,
+            address + __builtin_offsetof(
+                    struct aarch64_linux_itimerspec, value),
+            spec->value, fault);
+}
+
+static int_t time_syscall_int(qword_t argument) {
+    return (int_t) (sdword_t) (dword_t) argument;
+}
+
+qword_t aarch64_linux_dispatch_timerfd_create(
+        const struct guest_linux_syscall *syscall, struct task *task) {
+    return time_result(timerfd_create_task(task,
+            time_syscall_int(syscall->arguments[0]),
+            time_syscall_int(syscall->arguments[1])));
+}
+
+qword_t aarch64_linux_dispatch_timerfd_settime(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct timer_spec new_value;
+    qword_t result = read_guest_itimerspec(context,
+            syscall->arguments[2], &new_value, fault);
+    if ((sqword_t) result < 0)
+        return result;
+
+    struct timer_spec old_value;
+    int_t error = timerfd_settime_task(task,
+            (fd_t) time_syscall_int(syscall->arguments[0]),
+            time_syscall_int(syscall->arguments[1]),
+            &new_value, &old_value);
+    if (error < 0)
+        return time_result(error);
+    if (syscall->arguments[3] == 0)
+        return 0;
+    return write_guest_itimerspec(context,
+            syscall->arguments[3], &old_value, fault);
+}
+
+qword_t aarch64_linux_dispatch_timerfd_gettime(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct timer_spec value;
+    int_t error = timerfd_gettime_task(task,
+            (fd_t) time_syscall_int(syscall->arguments[0]), &value);
+    if (error < 0)
+        return time_result(error);
+    return write_guest_itimerspec(context,
+            syscall->arguments[1], &value, fault);
 }
 
 static struct timer_time cpu_time_now(void) {
