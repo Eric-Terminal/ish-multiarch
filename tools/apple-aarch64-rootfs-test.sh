@@ -73,7 +73,13 @@ make_archive() {
     local tree="$TMP/tree"
     rm -rf "$tree"
     mkdir -p "$tree/bin" "$tree/etc" "$tree/usr/lib" \
-        "$tree/lib/apk/db"
+        "$tree/lib/apk/db" "$tree/root" "$tree/home" "$tree/tmp" \
+        "$tree/var/empty/nested"
+    chmod 0700 "$tree/root"
+    chmod 0755 "$tree/home"
+    chmod 1777 "$tree/tmp"
+    chmod 0750 "$tree/var/empty"
+    chmod 0711 "$tree/var/empty/nested"
 
     # 只需构造足够识别 class/data/e_machine 的 ELF 头，转换器不会执行它。
     printf '\177ELF' > "$tree/bin/busybox"
@@ -212,6 +218,20 @@ printf '%s\n' \
 run_packager "$AARCH64_ARCHIVE" "$OUTPUT"
 [[ -f "$OUTPUT/meta.db" && -f "$OUTPUT/data/bin/busybox" ]]
 [[ ! -e "$OUTPUT/meta.db-wal" && ! -e "$OUTPUT/meta.db-shm" ]]
+[[ -d "$OUTPUT/data/root" && -d "$OUTPUT/data/home" && \
+    -d "$OUTPUT/data/tmp" && -d "$OUTPUT/data/var/empty/nested" ]]
+[[ $("$SQLITE3_BIN" "$OUTPUT/meta.db" \
+    "select substr(hex(stat), 1, 8) from paths join stats using (inode) where path = X'2F726F6F74'") == \
+    C0410000 ]]
+[[ $("$SQLITE3_BIN" "$OUTPUT/meta.db" \
+    "select substr(hex(stat), 1, 8) from paths join stats using (inode) where path = X'2F686F6D65'") == \
+    ED410000 ]]
+[[ $("$SQLITE3_BIN" "$OUTPUT/meta.db" \
+    "select substr(hex(stat), 1, 8) from paths join stats using (inode) where path = X'2F746D70'") == \
+    FF430000 ]]
+[[ $("$SQLITE3_BIN" "$OUTPUT/meta.db" \
+    "select substr(hex(stat), 1, 8) from paths join stats using (inode) where path = X'2F7661722F656D7074792F6E6573746564'") == \
+    C9410000 ]]
 grep -Fx 'guest_arch=aarch64' "$OUTPUT/rootfs-manifest.txt" >/dev/null
 grep -Fx 'source_kind=test-fixture' "$OUTPUT/rootfs-manifest.txt" >/dev/null
 grep -Fx 'alpine_version=test-fixture' "$OUTPUT/rootfs-manifest.txt" >/dev/null

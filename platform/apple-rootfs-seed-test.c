@@ -217,9 +217,10 @@ static int sqlite_exec_checked(sqlite3 *database, const char *sql) {
     return result == SQLITE_OK ? 0 : -1;
 }
 
-static int insert_stat(sqlite3 *database, sqlite3_int64 inode) {
-    static const uint32_t fake_stat[4] = {
-        UINT32_C(0100755), UINT32_C(0), UINT32_C(0), UINT32_C(0),
+static int insert_stat(
+        sqlite3 *database, sqlite3_int64 inode, uint32_t mode) {
+    const uint32_t fake_stat[4] = {
+        mode, UINT32_C(0), UINT32_C(0), UINT32_C(0),
     };
     sqlite3_stmt *statement = NULL;
     if (sqlite3_prepare_v2(database,
@@ -277,15 +278,15 @@ static int create_database(const struct fixture *fixture) {
             "pragma user_version=3;";
     int result = sqlite_exec_checked(database, schema);
     if (result == 0)
-        result = insert_stat(database, 1);
+        result = insert_stat(database, 1, UINT32_C(0040755));
     if (result == 0)
-        result = insert_stat(database, 2);
+        result = insert_stat(database, 2, UINT32_C(0100755));
     if (result == 0)
         result = insert_path(database, "", 1);
     if (result == 0)
         result = insert_path(database, "/bin/busybox", 2);
     if (result == 0 && fixture->hardlink_groups >= 1)
-        result = insert_stat(database, 3);
+        result = insert_stat(database, 3, UINT32_C(0100755));
     if (result == 0 && fixture->hardlink_groups >= 1)
         result = insert_path(database, "/usr/lib/alpha-alias", 3);
     if (result == 0 && fixture->hardlink_groups >= 1)
@@ -293,11 +294,34 @@ static int create_database(const struct fixture *fixture) {
     if (result == 0 && fixture->hardlink_groups >= 1)
         result = insert_path(database, "/usr/lib/alpha-source", 3);
     if (result == 0 && fixture->hardlink_groups >= 2)
-        result = insert_stat(database, 4);
+        result = insert_stat(database, 4, UINT32_C(0100755));
     if (result == 0 && fixture->hardlink_groups >= 2)
         result = insert_path(database, "/usr/lib/beta-alias", 4);
     if (result == 0 && fixture->hardlink_groups >= 2)
         result = insert_path(database, "/usr/lib/beta-source", 4);
+    static const struct {
+        sqlite3_int64 inode;
+        const char *path;
+        uint32_t mode;
+    } directories[] = {
+        {5, "/root", UINT32_C(0040700)},
+        {6, "/home", UINT32_C(0040755)},
+        {7, "/tmp", UINT32_C(0041777)},
+        {8, "/var", UINT32_C(0040755)},
+        {9, "/var/empty", UINT32_C(0040750)},
+        {10, "/var/empty/nested", UINT32_C(0040711)},
+        {11, "/bin", UINT32_C(0040755)},
+        {12, "/usr", UINT32_C(0040755)},
+        {13, "/usr/lib", UINT32_C(0040755)},
+    };
+    for (size_t i = 0; result == 0 &&
+            i < sizeof(directories) / sizeof(directories[0]); i++) {
+        result = insert_stat(database,
+                directories[i].inode, directories[i].mode);
+        if (result == 0)
+            result = insert_path(database,
+                    directories[i].path, directories[i].inode);
+    }
     if (sqlite3_close(database) != SQLITE_OK)
         result = -1;
     return result;
@@ -474,6 +498,77 @@ static int verify_database_inode(const char *root) {
     return valid;
 }
 
+static int database_mode_equals(
+        const char *root, const char *guest_path, uint32_t expected_mode) {
+    char database_path[PATH_MAX];
+    if (format_path(database_path, "%s/meta.db", root) < 0)
+        return 0;
+    sqlite3 *database = NULL;
+    if (sqlite3_open_v2(database_path, &database,
+            SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        sqlite3_close(database);
+        return 0;
+    }
+    sqlite3_stmt *statement = NULL;
+    int result = sqlite3_prepare_v2(database,
+            "select stat from paths join stats using (inode) where path = ?",
+            -1, &statement, NULL);
+    size_t path_length = strlen(guest_path);
+    if (result == SQLITE_OK)
+        result = sqlite3_bind_blob(statement, 1, guest_path,
+                (int) path_length, SQLITE_STATIC);
+    if (result == SQLITE_OK)
+        result = sqlite3_step(statement);
+    uint32_t guest_stat[4] = {0};
+    bool valid = result == SQLITE_ROW &&
+            sqlite3_column_type(statement, 0) == SQLITE_BLOB &&
+            sqlite3_column_bytes(statement, 0) == (int) sizeof(guest_stat);
+    if (valid)
+        memcpy(guest_stat, sqlite3_column_blob(statement, 0),
+                sizeof(guest_stat));
+    if (valid)
+        valid = sqlite3_step(statement) == SQLITE_DONE &&
+                guest_stat[0] == expected_mode;
+    if (sqlite3_finalize(statement) != SQLITE_OK)
+        valid = false;
+    if (sqlite3_close(database) != SQLITE_OK)
+        valid = false;
+    return valid;
+}
+
+static int verify_materialized_directories(const char *root) {
+    static const struct {
+        const char *relative_path;
+        const char *guest_path;
+        uint32_t guest_mode;
+    } directories[] = {
+        {"root", "/root", UINT32_C(0040700)},
+        {"home", "/home", UINT32_C(0040755)},
+        {"tmp", "/tmp", UINT32_C(0041777)},
+        {"var", "/var", UINT32_C(0040755)},
+        {"var/empty", "/var/empty", UINT32_C(0040750)},
+        {"var/empty/nested", "/var/empty/nested", UINT32_C(0040711)},
+        {"bin", "/bin", UINT32_C(0040755)},
+        {"usr", "/usr", UINT32_C(0040755)},
+        {"usr/lib", "/usr/lib", UINT32_C(0040755)},
+    };
+    for (size_t i = 0;
+            i < sizeof(directories) / sizeof(directories[0]); i++) {
+        char path[PATH_MAX];
+        struct stat metadata;
+        if (format_path(path, "%s/data/%s",
+                root, directories[i].relative_path) < 0 ||
+                lstat(path, &metadata) < 0 ||
+                !S_ISDIR(metadata.st_mode) ||
+                metadata.st_uid != geteuid() ||
+                (metadata.st_mode & 0777) != 0700 ||
+                !database_mode_equals(root, directories[i].guest_path,
+                        directories[i].guest_mode))
+            return 0;
+    }
+    return 1;
+}
+
 static int verify_receipt(const char *root, const char *digest) {
     char path[PATH_MAX];
     if (format_path(path, "%s/rootfs-installation.txt", root) < 0)
@@ -585,6 +680,8 @@ static int verify_installed_root_with_private(
             "发布持久 root 目录");
     CHECK(verify_receipt(root, digest_a), "写入精确安装 receipt");
     CHECK(verify_database_inode(root), "meta.db 记录复制后的真实 inode");
+    CHECK(verify_materialized_directories(root),
+            "按数据库恢复被 bundle 剥离的空目录并保留 guest 权限");
     if (fixture->hardlink_groups >= 1) {
         static const char *alpha_names[] = {
             "alpha-alias", "alpha-middle", "alpha-source",
@@ -930,6 +1027,66 @@ static int mutate_corrupt_database(const struct fixture *fixture) {
             write_file(path, corrupt, sizeof(corrupt) - 1, 0600);
 }
 
+static int replace_database_path(
+        const struct fixture *fixture, const char *old_path,
+        const void *new_path, size_t new_path_length) {
+    sqlite3 *database = NULL;
+    if (open_fixture_database(fixture, &database) < 0) {
+        sqlite3_close(database);
+        return -1;
+    }
+    sqlite3_stmt *statement = NULL;
+    int result = sqlite3_prepare_v2(database,
+            "update paths set path = ? where path = ?", -1,
+            &statement, NULL);
+    if (result == SQLITE_OK)
+        result = sqlite3_bind_blob(statement, 1,
+                new_path, (int) new_path_length, SQLITE_STATIC);
+    if (result == SQLITE_OK)
+        result = sqlite3_bind_blob(statement, 2, old_path,
+                (int) strlen(old_path), SQLITE_STATIC);
+    if (result == SQLITE_OK)
+        result = sqlite3_step(statement);
+    bool changed = result == SQLITE_DONE && sqlite3_changes(database) == 1;
+    int finalize_result = sqlite3_finalize(statement);
+    int close_result = sqlite3_close(database);
+    return changed && finalize_result == SQLITE_OK &&
+            close_result == SQLITE_OK ? 0 : -1;
+}
+
+static int mutate_directory_path_escape(const struct fixture *fixture) {
+    static const char path[] = "/../../escape-sentinel";
+    return replace_database_path(fixture, "/root",
+            path, sizeof(path) - 1);
+}
+
+static int mutate_directory_embedded_nul(const struct fixture *fixture) {
+    static const unsigned char path[] = {
+        '/', 'r', 'o', 'o', 't', '\0', 'e', 's', 'c', 'a', 'p', 'e',
+    };
+    return replace_database_path(fixture, "/root", path, sizeof(path));
+}
+
+static int mutate_directory_regular_conflict(const struct fixture *fixture) {
+    char path[PATH_MAX];
+    static const char contents[] = "not-a-directory\n";
+    return format_path(path, "%s/data/root", fixture->seed) < 0 ? -1 :
+            write_file(path, contents, sizeof(contents) - 1, 0600);
+}
+
+static int mutate_short_stat_blob(const struct fixture *fixture) {
+    sqlite3 *database = NULL;
+    if (open_fixture_database(fixture, &database) < 0) {
+        sqlite3_close(database);
+        return -1;
+    }
+    int result = sqlite_exec_checked(database,
+            "update stats set stat = X'00' where inode = 5");
+    if (sqlite3_close(database) != SQLITE_OK)
+        result = -1;
+    return result;
+}
+
 struct rejection_case {
     const char *name;
     int (*mutate)(const struct fixture *fixture);
@@ -954,6 +1111,10 @@ static int test_rejections(const char *workspace) {
         {"SQLite meta UPDATE trigger", mutate_meta_update_trigger},
         {"SQLite 跨组 inode", mutate_cross_group_database},
         {"损坏 SQLite", mutate_corrupt_database},
+        {"SQLite 目录路径逃逸", mutate_directory_path_escape},
+        {"SQLite 目录路径内嵌 NUL", mutate_directory_embedded_nul},
+        {"SQLite 目录与普通文件冲突", mutate_directory_regular_conflict},
+        {"SQLite stat blob 长度错误", mutate_short_stat_blob},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char fixture_name[64];
@@ -980,6 +1141,12 @@ static int test_rejections(const char *workspace) {
         char root[PATH_MAX];
         CHECK(format_path(root, "%s/root", fixture.persistent) == 0 &&
                 path_absent(root), "验证失败不能发布 final root");
+        if (cases[i].mutate == mutate_directory_path_escape) {
+            char escaped[PATH_MAX];
+            CHECK(format_path(escaped, "%s/escape-sentinel",
+                    fixture.persistent) == 0 && path_absent(escaped),
+                    "数据库路径逃逸不能在 staging 外创建对象");
+        }
         CHECK(verify_no_private_staging(&fixture),
                 "验证失败清理 owned staging 和 owner");
     }

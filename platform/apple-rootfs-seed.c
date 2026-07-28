@@ -17,6 +17,8 @@
 
 #include <sqlite3.h>
 
+#include "fs/fake-db.h"
+
 #ifndef __APPLE__
 #error "Apple rootfs seed 安装器只能构建到 Apple 平台"
 #endif
@@ -1193,6 +1195,122 @@ static int verify_sqlite_database_identity(
     return error;
 }
 
+static int materialize_relative_directory(
+        int data_directory, const char *path) {
+    struct relative_parent parent = {.directory = -1};
+    int error = open_relative_parent(data_directory, path, &parent);
+    int directory = -1;
+    bool created = false;
+    if (error == 0) {
+        directory = openat(parent.directory, parent.leaf,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (directory < 0 && errno == ENOENT) {
+            if (mkdirat(parent.directory, parent.leaf, 0700) < 0) {
+                error = errno_or_io();
+            } else {
+                created = true;
+                directory = openat(parent.directory, parent.leaf,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                if (directory < 0)
+                    error = errno_or_io();
+            }
+        } else if (directory < 0) {
+            error = errno_or_io();
+        }
+    }
+
+    struct stat metadata;
+    if (error == 0 && fstat(directory, &metadata) < 0)
+        error = errno_or_io();
+    if (error == 0 && (!S_ISDIR(metadata.st_mode) ||
+            metadata.st_uid != geteuid()))
+        error = EINVAL;
+    if (directory >= 0 && close(directory) < 0 && error == 0)
+        error = errno_or_io();
+    if (created && error == 0)
+        error = sync_directory(parent.directory);
+    if (parent.directory >= 0)
+        error = close_relative_parent(&parent, error);
+    return error;
+}
+
+static int materialize_database_directories(
+        sqlite3 *database, int data_directory) {
+    sqlite3_stmt *statement = NULL;
+    int result = sqlite3_prepare_v2(database,
+            "select paths.path, stats.stat from paths "
+            "join stats using (inode) "
+            "order by length(paths.path), paths.path",
+            -1, &statement, NULL);
+    if (result != SQLITE_OK)
+        return sqlite_error(database);
+
+    int error = 0;
+    bool found_root = false;
+    while (error == 0 && (result = sqlite3_step(statement)) == SQLITE_ROW) {
+        if (sqlite3_column_type(statement, 0) != SQLITE_BLOB ||
+                sqlite3_column_type(statement, 1) != SQLITE_BLOB) {
+            error = EINVAL;
+            break;
+        }
+        const void *path_bytes = sqlite3_column_blob(statement, 0);
+        int path_length = sqlite3_column_bytes(statement, 0);
+        const void *stat_bytes = sqlite3_column_blob(statement, 1);
+        int stat_length = sqlite3_column_bytes(statement, 1);
+        if (path_length < 0 || stat_length != (int) sizeof(struct ish_stat) ||
+                stat_bytes == NULL) {
+            error = EINVAL;
+            break;
+        }
+
+        struct ish_stat guest_stat;
+        memcpy(&guest_stat, stat_bytes, sizeof(guest_stat));
+        bool is_directory = (guest_stat.mode & S_IFMT) == S_IFDIR;
+        if (path_length == 0) {
+            if (found_root || !is_directory) {
+                error = EINVAL;
+                break;
+            }
+            found_root = true;
+            continue;
+        }
+        if (path_bytes == NULL || path_length > PATH_MAX ||
+                memchr(path_bytes, '\0', (size_t) path_length) != NULL ||
+                ((const unsigned char *) path_bytes)[0] != '/') {
+            error = path_length > PATH_MAX ? ENAMETOOLONG : EINVAL;
+            break;
+        }
+
+        char relative_path[PATH_MAX];
+        memcpy(relative_path, (const unsigned char *) path_bytes + 1,
+                (size_t) path_length - 1);
+        relative_path[path_length - 1] = '\0';
+        if (!valid_relative_path(relative_path)) {
+            error = EINVAL;
+            break;
+        }
+        unsigned depth = 1;
+        for (const char *cursor = relative_path; *cursor != '\0'; cursor++) {
+            if (*cursor == '/')
+                depth++;
+        }
+        if (depth > COPY_TREE_DEPTH_LIMIT) {
+            error = ELOOP;
+            break;
+        }
+        if (is_directory)
+            error = materialize_relative_directory(
+                    data_directory, relative_path);
+    }
+    if (error == 0 && result != SQLITE_DONE)
+        error = sqlite_error(database);
+    if (error == 0 && !found_root)
+        error = EINVAL;
+    if (sqlite3_finalize(statement) != SQLITE_OK && error == 0)
+        error = sqlite_error(database);
+    return error;
+}
+
 static int validate_and_update_database(
         int staging_directory, int data_directory,
         struct hardlink_manifest *hardlinks) {
@@ -1270,6 +1388,8 @@ static int validate_and_update_database(
                 "where stats.inode is null", &value);
     if (error == 0 && value != 0)
         error = EINVAL;
+    if (error == 0)
+        error = materialize_database_directories(database, data_directory);
     if (error == 0)
         error = validate_database_hardlinks(database, hardlinks);
     if (error == 0)
