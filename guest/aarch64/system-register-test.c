@@ -20,6 +20,14 @@ static void execute_instruction(struct cpu_state *cpu, dword_t word) {
 static void test_decode(void) {
     for (unsigned rt = 0; rt < 32; rt++) {
         struct aarch64_decoded instruction =
+                decode(UINT32_C(0xd53b0020) | (dword_t) rt);
+        assert(instruction.opcode == AARCH64_OP_MRS_CTR_EL0);
+        assert(instruction.width == 64);
+        assert(instruction.operands.system_register.rt == rt);
+        assert(!aarch64_decode(UINT32_C(0xd51b0020) | (dword_t) rt,
+                &instruction));
+
+        instruction =
                 decode(UINT32_C(0xd53b00e0) | (dword_t) rt);
         assert(instruction.opcode == AARCH64_OP_MRS_DCZID_EL0);
         assert(instruction.width == 64);
@@ -91,8 +99,21 @@ static void test_execute(void) {
     assert(cpu.x[2] == UINT64_C(0x10));
     assert(cpu.tpidr_el0 == UINT64_C(0x123456789abcdef0));
 
+    cpu.x[3] = UINT64_MAX;
+    execute_instruction(&cpu, UINT32_C(0xd53b0023));
+    assert(cpu.x[3] == AARCH64_CTR_EL0_VALUE);
+    assert((cpu.x[3] & UINT64_C(0x80000000)) != 0);
+    assert(((cpu.x[3] >> 28) & 3) == 3);
+    assert(((cpu.x[3] >> 20) & 0xf) == 2);
+    assert(((cpu.x[3] >> 16) & 0xf) == 4);
+    assert(((cpu.x[3] >> 14) & 3) == 3);
+    assert((cpu.x[3] & 0xf) == 4);
+
     cpu.x[30] = UINT64_C(0x7766554433221100);
     execute_instruction(&cpu, UINT32_C(0xd53b00ff));
+    assert(cpu.x[30] == UINT64_C(0x7766554433221100));
+
+    execute_instruction(&cpu, UINT32_C(0xd53b003f));
     assert(cpu.x[30] == UINT64_C(0x7766554433221100));
 
     execute_instruction(&cpu, UINT32_C(0xd53b4403));
@@ -144,7 +165,7 @@ static void test_execute(void) {
 
     execute_instruction(&cpu, UINT32_C(0xd51bd05f));
     assert(cpu.tpidr_el0 == 0);
-    assert(cpu.pc == UINT64_C(0x103c));
+    assert(cpu.pc == UINT64_C(0x1044));
     assert(cpu.sp == UINT64_C(0xfedcba9876543210));
     assert(cpu.nzcv == UINT32_C(0xb0000000));
 }

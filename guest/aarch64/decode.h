@@ -18,6 +18,7 @@ enum aarch64_opcode {
     AARCH64_OP_BLR,
     AARCH64_OP_RET,
     AARCH64_OP_LOAD_IMM12,
+    AARCH64_OP_LOAD_LITERAL,
     AARCH64_OP_STORE_IMM12,
     AARCH64_OP_PRFM_IMM12,
     AARCH64_OP_SVC,
@@ -108,6 +109,7 @@ enum aarch64_opcode {
     AARCH64_OP_MSR_FPSR,
     AARCH64_OP_MRS_TPIDR_EL0,
     AARCH64_OP_MSR_TPIDR_EL0,
+    AARCH64_OP_MRS_CTR_EL0,
     AARCH64_OP_MRS_DCZID_EL0,
     AARCH64_OP_MADD,
     AARCH64_OP_MSUB,
@@ -272,6 +274,10 @@ struct aarch64_decoded {
             enum aarch64_address_mode address_mode;
             bool signed_load;
         } load_store;
+        struct {
+            byte_t rt;
+            int64_t displacement;
+        } load_literal;
         struct {
             byte_t rt;
             byte_t rn;

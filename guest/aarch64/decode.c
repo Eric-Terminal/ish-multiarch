@@ -147,6 +147,14 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
     }
 
     dword_t system_register = word & UINT32_C(0xffffffe0);
+    if (system_register == UINT32_C(0xd53b0020)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_MRS_CTR_EL0,
+            .width = 64,
+            .operands.system_register.rt = word & 0x1f,
+        };
+        return true;
+    }
     if (system_register == UINT32_C(0xd53b00e0)) {
         *decoded = (struct aarch64_decoded) {
             .opcode = AARCH64_OP_MRS_DCZID_EL0,
@@ -1575,6 +1583,19 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
             .width = 64,
             .operands.branch_immediate.displacement =
                 sign_extend_branch(word & UINT32_C(0x03ffffff), 26),
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xff000000)) == UINT32_C(0x58000000)) {
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_LOAD_LITERAL,
+            .width = 64,
+            .operands.load_literal = {
+                .rt = word & 0x1f,
+                .displacement = sign_extend_branch(
+                        (word >> 5) & UINT32_C(0x7ffff), 19),
+            },
         };
         return true;
     }

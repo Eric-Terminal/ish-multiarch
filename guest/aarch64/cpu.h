@@ -71,6 +71,8 @@ _Static_assert(CPU_OFFSET(v) % 16 == 0,
         "AArch64 向量寄存器组必须按 16 字节对齐");
 
 #define AARCH64_NZCV_MASK UINT32_C(0xf0000000)
+// guest 没有分离的 I/D cache；公布 64 字节行和 16 字节独占粒度。
+#define AARCH64_CTR_EL0_VALUE UINT32_C(0xb024c004)
 #define AARCH64_FPCR_AHP UINT32_C(0x04000000)
 #define AARCH64_FPCR_RMODE_SHIFT 22
 #define AARCH64_FPCR_RMODE_MASK UINT32_C(0x00c00000)

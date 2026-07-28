@@ -1646,6 +1646,23 @@ static qword_t sign_extend_load(qword_t value, byte_t size) {
     return (value ^ sign) - sign;
 }
 
+static bool execute_load_literal(struct cpu_state *cpu,
+        struct guest_tlb *tlb,
+        const struct aarch64_decoded *instruction,
+        struct guest_memory_fault *fault) {
+    assert(tlb != NULL);
+    guest_addr_t address = cpu->pc +
+            (qword_t) instruction->operands.load_literal.displacement;
+    byte_t bytes[8];
+    if (!guest_tlb_read(tlb, address, bytes, sizeof(bytes),
+            GUEST_MEMORY_READ, fault))
+        return false;
+    write_register(cpu, instruction->operands.load_literal.rt,
+            64, false, load_little_endian(bytes, sizeof(bytes)));
+    cpu->pc += 4;
+    return true;
+}
+
 static bool execute_load_store(struct cpu_state *cpu, struct guest_tlb *tlb,
         const struct aarch64_decoded *instruction,
         struct guest_memory_fault *fault) {
@@ -2463,6 +2480,11 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     64, false);
             cpu->pc += 4;
             break;
+        case AARCH64_OP_MRS_CTR_EL0:
+            write_register(cpu, instruction->operands.system_register.rt,
+                    64, false, AARCH64_CTR_EL0_VALUE);
+            cpu->pc += 4;
+            break;
         case AARCH64_OP_MRS_DCZID_EL0:
             // 尚未实现 DC ZVA，因此通过 DZP 明确要求 guest 使用普通清零路径。
             write_register(cpu, instruction->operands.system_register.rt,
@@ -2526,6 +2548,10 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
                     (qword_t) instruction->operands.test_branch.displacement : 4;
             break;
         }
+        case AARCH64_OP_LOAD_LITERAL:
+            if (!execute_load_literal(cpu, tlb, instruction, &result.fault))
+                result.stop = AARCH64_EXECUTE_DATA_FAULT;
+            break;
         case AARCH64_OP_LOAD_IMM12:
         case AARCH64_OP_STORE_IMM12:
         case AARCH64_OP_LOAD_IMM9:
