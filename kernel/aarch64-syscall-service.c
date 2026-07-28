@@ -27,6 +27,7 @@
 #include "kernel/calls.h"
 #include "kernel/epoll.h"
 #include "kernel/errno.h"
+#include "kernel/eventfd.h"
 #include "kernel/fs.h"
 #include "kernel/random.h"
 #include "kernel/task.h"
@@ -87,6 +88,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_LREMOVEXATTR = 15,
     AARCH64_LINUX_SYS_FREMOVEXATTR = 16,
     AARCH64_LINUX_SYS_GETCWD = 17,
+    AARCH64_LINUX_SYS_EVENTFD2 = 19,
     AARCH64_LINUX_SYS_EPOLL_CREATE1 = 20,
     AARCH64_LINUX_SYS_EPOLL_CTL = 21,
     AARCH64_LINUX_SYS_EPOLL_PWAIT = 22,
@@ -3910,6 +3912,11 @@ static qword_t dispatch_syscall_inner(
             return syscall_result(_ENOTSUP);
         case AARCH64_LINUX_SYS_GETCWD:
             return dispatch_getcwd(context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_EVENTFD2:
+            return syscall_result(eventfd_create_task(task,
+                    (uint_t) (dword_t) syscall->arguments[0],
+                    (int_t) (sdword_t) (dword_t)
+                            syscall->arguments[1]));
         case AARCH64_LINUX_SYS_EPOLL_CREATE1:
             return syscall_result(epoll_create_task(task,
                     (int_t) (sdword_t) (dword_t) syscall->arguments[0]));

@@ -560,6 +560,13 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_syscall_service', aarch64_syscall_service_test)
 
+        aarch64_eventfd_syscall_test = executable(
+            'aarch64_eventfd_syscall_test',
+            'kernel/aarch64-eventfd-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_eventfd_syscall',
+            aarch64_eventfd_syscall_test)
+
         aarch64_socket_syscall_test = executable(
             'aarch64_socket_syscall_test',
             'kernel/aarch64-socket-syscall-test.c',

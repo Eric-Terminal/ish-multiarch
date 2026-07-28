@@ -46,6 +46,7 @@ struct fd {
         } epollfd;
         struct {
             uint64_t val;
+            bool semaphore;
         } eventfd;
         struct {
             struct timer *timer;

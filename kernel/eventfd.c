@@ -1,21 +1,32 @@
+#include <string.h>
+
 #include "kernel/calls.h"
+#include "kernel/eventfd.h"
 #include "kernel/fs.h"
 #include "fs/poll.h"
 
 static struct fd_ops eventfd_ops;
 
-int_t sys_eventfd2(uint_t initval, int_t flags) {
-    STRACE("eventfd(%d, %#x)", initval, flags);
-    if (flags & ~(O_CLOEXEC_|O_NONBLOCK_))
+fd_t eventfd_create_task(
+        struct task *task, uint_t initial_value, int_t flags) {
+    if (flags & ~(EFD_SEMAPHORE_ | O_CLOEXEC_ | O_NONBLOCK_))
         return _EINVAL;
 
     struct fd *fd = adhoc_fd_create(&eventfd_ops);
     if (fd == NULL)
         return _ENOMEM;
-    fd->eventfd.val = initval;
+    fd->eventfd.val = initial_value;
+    fd->eventfd.semaphore = (flags & EFD_SEMAPHORE_) != 0;
     fd->flags = O_RDWR_;
-    return f_install(fd, flags);
+    return f_install_task(
+            task, fd, flags & (O_CLOEXEC_ | O_NONBLOCK_));
 }
+
+int_t sys_eventfd2(uint_t initval, int_t flags) {
+    STRACE("eventfd(%d, %#x)", initval, flags);
+    return eventfd_create_task(current, initval, flags);
+}
+
 int_t sys_eventfd(uint_t initval) {
     return sys_eventfd2(initval, 0);
 }
@@ -36,8 +47,9 @@ static ssize_t eventfd_read(struct fd *fd, void *buf, size_t bufsize) {
         }
     }
 
-    *(uint64_t *) buf = fd->eventfd.val;
-    fd->eventfd.val = 0;
+    uint64_t value = fd->eventfd.semaphore ? 1 : fd->eventfd.val;
+    memcpy(buf, &value, sizeof(value));
+    fd->eventfd.val -= value;
     notify(&fd->cond);
     unlock(&fd->lock);
     poll_wakeup(fd, POLL_WRITE);
@@ -47,7 +59,8 @@ static ssize_t eventfd_read(struct fd *fd, void *buf, size_t bufsize) {
 static ssize_t eventfd_write(struct fd *fd, const void *buf, size_t bufsize) {
     if (bufsize < sizeof(uint64_t))
         return _EINVAL;
-    uint64_t increment = *(uint64_t *) buf;
+    uint64_t increment;
+    memcpy(&increment, buf, sizeof(increment));
     if (increment == UINT64_MAX)
         return _EINVAL;
 
