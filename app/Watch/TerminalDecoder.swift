@@ -1,3 +1,8 @@
+struct TerminalLine: Identifiable, Equatable {
+    let id: UInt64
+    let text: String
+}
+
 struct TerminalDecoder {
     private enum EscapeState {
         case text
@@ -9,6 +14,7 @@ struct TerminalDecoder {
 
     private var escapeState = EscapeState.text
     private var visibleBytes: [UInt8] = []
+    private var firstLineID: UInt64 = 0
     private let outputLimit: Int
 
     init(outputLimit: Int = 32 * 1024) {
@@ -17,6 +23,18 @@ struct TerminalDecoder {
 
     var text: String {
         String(decoding: visibleBytes, as: UTF8.self)
+    }
+
+    var lines: [TerminalLine] {
+        guard !visibleBytes.isEmpty else { return [] }
+        return visibleBytes.split(
+            separator: 0x0a,
+            omittingEmptySubsequences: false
+        ).enumerated().map { index, bytes in
+            TerminalLine(
+                id: firstLineID + UInt64(index),
+                text: String(decoding: bytes, as: UTF8.self))
+        }
     }
 
     mutating func append(_ bytes: [UInt8]) {
@@ -53,9 +71,11 @@ struct TerminalDecoder {
         guard count != 0 else { return }
         escapeState = .text
         if visibleBytes.last != 0x0a {
-            visibleBytes.append(0x0a)
+            appendTextByte(0x0a)
         }
-        visibleBytes.append(contentsOf: Array("[已省略 \(count) 字节输出]\n".utf8))
+        for byte in "[已省略 \(count) 字节输出]\n".utf8 {
+            appendTextByte(byte)
+        }
         trimIfNeeded()
     }
 
@@ -87,11 +107,17 @@ struct TerminalDecoder {
     private mutating func trimIfNeeded() {
         guard visibleBytes.count > outputLimit else { return }
         let minimumRemoval = visibleBytes.count - outputLimit
+        let removalCount: Int
         if let newline = visibleBytes[minimumRemoval...].firstIndex(of: 0x0a) {
-            visibleBytes.removeFirst(newline + 1)
+            removalCount = newline + 1
         } else {
-            visibleBytes.removeFirst(minimumRemoval)
+            removalCount = minimumRemoval
         }
+        let removedLineCount = visibleBytes.prefix(removalCount).reduce(0) {
+            $0 + ($1 == 0x0a ? 1 : 0)
+        }
+        visibleBytes.removeFirst(removalCount)
+        firstLineID += UInt64(removedLineCount)
         while let byte = visibleBytes.first, byte & 0xc0 == 0x80 {
             visibleBytes.removeFirst()
         }

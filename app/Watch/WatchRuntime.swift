@@ -4,6 +4,7 @@ import Combine
 @MainActor
 final class WatchRuntime: ObservableObject {
     @Published private(set) var output = ""
+    @Published private(set) var outputLines: [TerminalLine] = []
     @Published private(set) var status = "准备中"
     @Published private(set) var acceptsInput = false
     @Published private(set) var revision = 0
@@ -229,6 +230,7 @@ final class WatchRuntime: ObservableObject {
         }
         if changed {
             output = decoder.text
+            outputLines = decoder.lines
             revision &+= 1
         }
     }

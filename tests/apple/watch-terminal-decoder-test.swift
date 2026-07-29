@@ -7,6 +7,7 @@ struct WatchTerminalDecoderTest {
         testSplitUTF8()
         testDroppedOutputRecovery()
         testBoundedScrollback()
+        testStableLineIdentity()
         if failures == 0 {
             print("Watch 终端文本解码回归通过")
         } else {
@@ -59,5 +60,32 @@ struct WatchTerminalDecoderTest {
         decoder.append(Array("line1\nline2\n".utf8))
         expect(decoder.text == "line2\n",
                 "有界 scrollback 应优先在换行边界裁剪")
+        expect(
+            decoder.lines == [
+                TerminalLine(id: 1, text: "line2"),
+                TerminalLine(id: 2, text: ""),
+            ],
+            "裁剪后应保留剩余行的全局身份")
+    }
+
+    private static func testStableLineIdentity() {
+        var decoder = TerminalDecoder()
+        decoder.append(Array("first\nsec".utf8))
+        let before = decoder.lines
+        decoder.append(Array("ond\n".utf8))
+
+        expect(
+            before == [
+                TerminalLine(id: 0, text: "first"),
+                TerminalLine(id: 1, text: "sec"),
+            ],
+            "首次发布应按物理行分组")
+        expect(
+            decoder.lines == [
+                TerminalLine(id: 0, text: "first"),
+                TerminalLine(id: 1, text: "second"),
+                TerminalLine(id: 2, text: ""),
+            ],
+            "续写当前行时不应改变已有行身份")
     }
 }
