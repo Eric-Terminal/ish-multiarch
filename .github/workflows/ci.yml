@@ -74,6 +74,7 @@ jobs:
             apple_aarch64_rootfs apple_aarch64_source_bundle \
             apple_aarch64_rootfs_licenses apple_aarch64_lgpl_surface \
             apple_release_profiles apple_release_manifest \
+            apple_release_assets \
             apple_license_notices_app \
             apple_host_delivery_inputs apple_host_link_closure \
             apple_host_notices apple_project_license_notices \

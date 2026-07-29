@@ -423,6 +423,61 @@ python3 -B tools/apple-release-profiles.py show --profile with-linux
 真机门禁已经闭合。`with-linux` 的 Linux GPLv2、在线 rootfs 与对应源码
 交付仍是额外未决项。
 
+### Apple 发行公共资产
+
+`tools/apple-release-assets.py` 只生成两个候选 profile 共同使用、且不依赖
+签名、tag 或产品构建的五项公共资产：
+
+- `project-source.tar`
+- `deps-libapps-source.tar`
+- `deps-libarchive-source.tar`
+- `deps-linux-source.tar`
+- `apple-toolchain.tsv`
+
+在装有当前 Apple 工具链、Meson 与 Ninja 的干净仓库中，先固定完整
+revision，再生成到一个尚不存在的目录并立即只读复核：
+
+```sh
+revision=$(git rev-parse HEAD)
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$revision") \
+python3 -B tools/apple-release-assets.py render \
+    --root "$PWD" \
+    --revision "$revision" \
+    --output /absolute/path/to/apple-release-public-assets
+
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$revision") \
+python3 -B tools/apple-release-assets.py verify \
+    --root "$PWD" \
+    --revision "$revision" \
+    --assets /absolute/path/to/apple-release-public-assets
+```
+
+四份未压缩 tar 直接从父提交及三个 gitlink 的 Git 对象库流式生成，不读取
+工作树文件正文。因此 `deps/linux` 即使使用 sparse checkout，未物化的受
+跟踪源码也不会遗漏；项目 tar 中的三个 gitlink 只保留为空目录，各子仓库
+的完整 tree 分别进入自己的 tar。每个归档根都含对应完整 OID，成员按固定
+tree 次序写入 USTAR；普通文件按 Git executable bit 规范为 `0644` 或
+`0755`，目录为 `0755`，符号链接为 `0777`，所有成员使用
+`uid/gid=0`、空 owner 名与 `mtime=0`。逃逸链接、特殊节点、嵌套 gitlink、
+生成时缺对象、partial clone、gitlink 漂移、脏树和异常 index flag
+都会被拒绝。
+Linux 合法的 `skip-worktree` 条目可以缺席；若已经物化，其字节仍必须匹配
+固定 blob。
+
+`apple-toolchain.tsv` 沿用下节 manifest 的九键合同，记录当前 Xcode build、
+iPhoneOS/watchOS SDK build、Apple Clang/ld、Meson、Ninja、宿主架构与
+`SOURCE_DATE_EPOCH`。未显式设置 epoch 时使用父提交的 committer time。
+Meson 与 Ninja 优先使用 `MESON`、`NINJA` 环境变量指定的实际构建工具，
+未设置时才从 `PATH` 查找。
+`verify` 不重新调用 Xcode，只校验五项资产、仓库绑定和当前 epoch，因此可在
+离线环境重放。生成过程先在输出父目录内建立私有暂存，五项全部生成并复核
+后才以无覆盖目录 rename 一次发布；失败不会暴露部分候选。
+
+这个目录不是完整发行候选：发行者仍需在选定 profile 后，把五项原字节并入
+包含 Alpine 对应源码、IPA 与 dSYM 的 11/13 项候选目录，再运行下节
+manifest 门禁。普通 CI 只使用小型合成仓库验证算法，不生成约 1.1 GB 的
+真实 Linux 源码 tar。
+
 ### Apple 发行候选 manifest
 
 `tools/apple-release-manifest.py` 把一个已经由发行者选定的 profile、现存

@@ -62,6 +62,10 @@ if not meson.is_cross_build()
             'apple-release-manifest-test.py')
         test('apple_release_manifest', python3_cli,
             args: apple_release_manifest_test, timeout: 120)
+        apple_release_assets_test = files(
+            'apple-release-assets-test.py')
+        test('apple_release_assets', python3_cli,
+            args: apple_release_assets_test, timeout: 120)
         apple_license_notices_app_test = files(
             'apple-license-notices-app-test.py')
         test('apple_license_notices_app', python3_cli,
