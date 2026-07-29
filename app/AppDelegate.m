@@ -18,6 +18,7 @@
 #import "LocationDevice.h"
 #import "NSObject+SaneKVO.h"
 #import "Roots.h"
+#import "TerminalTabsState.h"
 #import "TerminalViewController.h"
 #import "UserPreferences.h"
 #import "UIApplication+OpenURL.h"
@@ -28,6 +29,7 @@
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#include "fs/tty.h"
 #include "platform/apple-resolver.h"
 
 #if ISH_LINUX
@@ -42,18 +44,38 @@
 @end
 
 #if !ISH_LINUX
-static void ios_handle_exit(struct task *task, int code) {
+static void ios_handle_exit(struct task *task, int __unused code) {
+    struct task *leader = task->group->leader;
     // we are interested in init and in children of init
     // this is called with pids_lock as an implementation side effect, please do not cite as an example of good API design
-    if (task->parent != NULL && task->parent->parent != NULL)
+    if (leader->parent != NULL && leader->parent->parent != NULL)
         return;
-    // pid should be saved now since task would be freed
-    pid_t pid = task->pid;
+
+    lock(&leader->group->lock);
+    int waitStatus = (int) leader->exit_code;
+    if (leader->group->doing_group_exit)
+        waitStatus = (int) leader->group->group_exit_code;
+    struct tty *tty = leader->group->tty;
+    Terminal *terminal = tty != NULL &&
+            tty->driver == &ios_pty_driver && tty->data != NULL ?
+            (__bridge Terminal *) tty->data : nil;
+    unlock(&leader->group->lock);
+    if (leader->parent != NULL && tty != NULL)
+        (void) task_kill_controlling_tty_locked(tty);
+
+    // leader 和 Terminal 都要在退出临界区内取得，避免 PID/PTY 复用串到新标签。
+    pid_t pid = leader->pid;
+    NSMutableDictionary *info = [@{
+        @"pid": @(pid),
+        @"code": @(waitStatus),
+    } mutableCopy];
+    if (terminal != nil)
+        info[@"terminal"] = terminal;
     dispatch_async(dispatch_get_main_queue(), ^{
+        [terminal markSessionExited];
         [[NSNotificationCenter defaultCenter] postNotificationName:ProcessExitedNotification
                                                             object:nil
-                                                          userInfo:@{@"pid": @(pid),
-                                                                     @"code": @(code)}];
+                                                          userInfo:info];
     });
 }
 
@@ -88,7 +110,7 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     fs_register(&iosfs_unsafe);
 
     // need to do this first so that we can have a valid current for the generic_mknod calls
-    err = become_first_process();
+    err = begin_first_process();
     if (err < 0)
         return err;
 
@@ -102,21 +124,30 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     // Register clipboard device driver and create device node for it
     err = dyn_dev_register(&clipboard_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_CLIPBOARD_MINOR);
     if (err != 0) {
+        cancel_prepared_process();
         return err;
     }
     generic_mknodat(AT_PWD, "/dev/clipboard", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_CLIPBOARD_MINOR));
     
     err = dyn_dev_register(&location_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_LOCATION_MINOR);
-    if (err != 0)
+    if (err != 0) {
+        cancel_prepared_process();
         return err;
+    }
     generic_mknodat(AT_PWD, "/dev/location", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_LOCATION_MINOR));
 
-    do_mount(&procfs, "proc", "/proc", "", 0);
-    do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
+    err = do_mount(&procfs, "proc", "/proc", "", 0);
+    if (err < 0) {
+        cancel_prepared_process();
+        return err;
+    }
+    err = do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
+    if (err < 0) {
+        cancel_prepared_process();
+        return err;
+    }
 
     iosfs_init(); // let it mount any filesystems from user defaults
-
-    [self configureDns];
     
     exit_hook = ios_handle_exit;
     die_handler = ios_handle_die;
@@ -128,8 +159,10 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     tty_drivers[TTY_CONSOLE_MAJOR] = &ios_console_driver;
     set_console_device(TTY_CONSOLE_MAJOR, 1);
     err = create_stdio("/dev/console", TTY_CONSOLE_MAJOR, 1);
-    if (err < 0)
+    if (err < 0) {
+        cancel_prepared_process();
         return err;
+    }
     
     NSArray<NSString *> *command;
     command = UserPreferences.shared.bootCommand;
@@ -138,9 +171,16 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     [Terminal convertCommand:command toArgs:argv limitSize:sizeof(argv)];
     const char *envp = "TERM=xterm-256color\0";
     err = do_execve(command[0].UTF8String, command.count, argv, envp);
-    if (err < 0)
+    if (err < 0) {
+        cancel_prepared_process();
         return err;
-    task_start(current);
+    }
+    err = commit_prepared_process();
+    if (err < 0) {
+        cancel_prepared_process();
+        return err;
+    }
+    [self configureDns];
 
 #else
     // Roots 已在进入内核前初始化；首次导入必须留在主线程，避免等待主线程时死锁。
@@ -296,11 +336,12 @@ void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 
 - (void)application:(UIApplication *)application didDiscardSceneSessions:(NSSet<UISceneSession *> *)sceneSessions API_AVAILABLE(ios(13.0)) {
     for (UISceneSession *sceneSession in sceneSessions) {
-        NSString *terminalUUID = sceneSession.stateRestorationActivity.userInfo[@"TerminalUUID"];
-        if (terminalUUID == nil)
-            continue;
-        NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:terminalUUID];
-        if (uuid != nil)
+        NSDictionary *restoration =
+                sceneSession.stateRestorationActivity.userInfo;
+        NSArray<NSUUID *> *terminalUUIDs = ISHRestoreTerminalTabUUIDs(
+                restoration[@"TerminalUUIDs"],
+                restoration[@"TerminalUUID"]);
+        for (NSUUID *uuid in terminalUUIDs)
             [[Terminal terminalWithUUID:uuid] destroy];
     }
 }

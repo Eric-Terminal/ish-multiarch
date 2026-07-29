@@ -135,6 +135,10 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 
     self.scrollbarView.contentView = webView;
     [self.scrollbarView addSubview:webView];
+    _terminal.presentationActive = YES;
+    self.scrollbarView.contentSize = _terminal.savedScrollContentSize;
+    [self.scrollbarView setContentOffset:
+            _terminal.savedScrollContentOffset animated:NO];
 }
 
 - (void)uninstallTerminalView {
@@ -145,6 +149,9 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         return;
     }
 
+    _terminal.savedScrollContentSize = self.scrollbarView.contentSize;
+    _terminal.savedScrollContentOffset = self.scrollbarView.contentOffset;
+    _terminal.presentationActive = NO;
     [_terminal.webView removeFromSuperview];
     self.scrollbarView.contentView = nil;
     for (int i = 0; i < sizeof(HANDLERS)/sizeof(HANDLERS[0]); i++) {
@@ -250,6 +257,8 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (message.webView != self.terminal.webView)
+        return;
     if ([message.name isEqualToString:@"syncFocus"]) {
         self.terminalFocused = self.terminalFocused;
     } else if ([message.name isEqualToString:@"focus"]) {
@@ -258,17 +267,22 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         }
     } else if ([message.name isEqualToString:@"newScrollHeight"]) {
         self.scrollbarView.contentSize = CGSizeMake(0, [message.body doubleValue]);
+        self.terminal.savedScrollContentSize =
+                self.scrollbarView.contentSize;
     } else if ([message.name isEqualToString:@"newScrollTop"]) {
         CGFloat newOffset = [message.body doubleValue];
         if (self.scrollbarView.contentOffset.y == newOffset)
             return;
         [self.scrollbarView setContentOffset:CGPointMake(0, newOffset) animated:NO];
+        self.terminal.savedScrollContentOffset =
+                self.scrollbarView.contentOffset;
     } else if ([message.name isEqualToString:@"openLink"]) {
         [UIApplication openURL:message.body];
     }
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    self.terminal.savedScrollContentOffset = scrollView.contentOffset;
     [self.terminal.webView evaluateJavaScript:[NSString stringWithFormat:@"exports.newScrollTop(%f)", scrollView.contentOffset.y] completionHandler:nil];
 }
 

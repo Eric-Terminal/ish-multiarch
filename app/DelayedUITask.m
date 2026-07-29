@@ -9,7 +9,7 @@
 
 @interface DelayedUITask ()
 
-@property id target;
+@property (weak) id target;
 @property SEL action;
 @property NSTimer *timer;
 
@@ -29,10 +29,18 @@
     if (!self.timer.valid) {
         self.timer = [NSTimer timerWithTimeInterval:1./60 repeats:NO block:^(NSTimer * _Nonnull timer) {
             self.timer = nil;
-            ((void (*)(id, SEL)) [self.target methodForSelector:self.action])(self.target, self.action);
+            id target = self.target;
+            if (target != nil)
+                ((void (*)(id, SEL)) [target methodForSelector:self.action])(
+                        target, self.action);
         }];
         [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSDefaultRunLoopMode];
     }
+}
+
+- (void)invalidate {
+    [self.timer invalidate];
+    self.timer = nil;
 }
 
 @end

@@ -12,6 +12,7 @@
 #include "fs/devices.h"
 #include "fs/tty.h"
 #include "fs/devices.h"
+#include "kernel/task.h"
 
 extern struct tty_driver ios_pty_driver;
 
@@ -42,6 +43,27 @@ typedef struct linux_tty *tty_t;
 
 @property NSNumber *terminalsKey;
 @property NSUUID *uuid;
+@property BOOL destroyed;
+
+@end
+
+@interface TerminalScriptMessageHandler : NSObject <WKScriptMessageHandler>
+@property (weak) id<WKScriptMessageHandler> handler;
+@end
+
+@implementation TerminalScriptMessageHandler
+
+- (instancetype)initWithHandler:(id<WKScriptMessageHandler>)handler {
+    if (self = [super init])
+        _handler = handler;
+    return self;
+}
+
+- (void)userContentController:(WKUserContentController *)controller
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    [self.handler userContentController:controller
+                didReceiveScriptMessage:message];
+}
 
 @end
 
@@ -67,9 +89,11 @@ typedef struct linux_tty *tty_t;
 @synthesize webView = _webView;
 
 static const int BUF_SIZE = 1<<14;
+static const int INACTIVE_BUF_SIZE = 1<<18;
 
 static NSMapTable<NSNumber *, Terminal *> *terminals;
 static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
+static NSMutableDictionary<NSUUID *, Terminal *> *retainedSessionTerminals;
 
 - (instancetype)initWithType:(int)type number:(int)num {
     @synchronized (Terminal.class) {
@@ -98,11 +122,12 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 - (WKWebView *)webView {
     if (_webView == nil) {
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
-        [config.userContentController addScriptMessageHandler:self name:@"load"];
-        [config.userContentController addScriptMessageHandler:self name:@"log"];
-        [config.userContentController addScriptMessageHandler:self name:@"sendInput"];
-        [config.userContentController addScriptMessageHandler:self name:@"resize"];
-        [config.userContentController addScriptMessageHandler:self name:@"propUpdate"];
+        id<WKScriptMessageHandler> handler =
+                [[TerminalScriptMessageHandler alloc] initWithHandler:self];
+        for (NSString *name in @[
+                @"load", @"log", @"sendInput", @"resize", @"propUpdate"])
+            [config.userContentController
+                    addScriptMessageHandler:handler name:name];
         // Make the web view really big so that if a program tries to write to the terminal before it's displayed, the text probably won't wrap too badly.
         CGRect webviewSize = CGRectMake(0, 0, 10000, 10000);
         _webView = [[CustomWebView alloc] initWithFrame:webviewSize configuration:config];
@@ -206,17 +231,34 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
                    completionHandler:nil];
 }
 
+- (void)setPresentationActive:(BOOL)presentationActive {
+#if !ISH_LINUX
+    lock(&_dataLock);
+    _presentationActive = presentationActive;
+    unlock(&_dataLock);
+#else
+    @synchronized (self) {
+        _presentationActive = presentationActive;
+    }
+#endif
+    if (presentationActive)
+        [self.refreshTask schedule];
+}
+
 - (int)sendOutput:(const void *)buf length:(int)len {
 #if !ISH_LINUX
     lock(&_dataLock);
     if (!NSThread.isMainThread) {
         // The main thread is the only one that can unblock this, so sleeping here would be a deadlock.
         // The only reason for this to be called on the main thread is if input is echoed.
-        while (_pendingData.length > BUF_SIZE)
+        NSUInteger limit = _presentationActive ?
+                BUF_SIZE : INACTIVE_BUF_SIZE;
+        while (_pendingData.length > limit)
             wait_for_ignore_signals(&_dataConsumed, &_dataLock, NULL);
     }
     [_pendingData appendData:[NSData dataWithBytes:buf length:len]];
-    [self.refreshTask schedule];
+    if (_presentationActive || !self.loaded)
+        [self.refreshTask schedule];
     unlock(&_dataLock);
 #else
     @synchronized (self) {
@@ -225,7 +267,8 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
             len = room;
         if (len > 0) {
             [_pendingData appendData:[NSData dataWithBytes:buf length:len]];
-            [_refreshTask schedule];
+            if (_presentationActive || !self.loaded)
+                [_refreshTask schedule];
         }
     }
 #endif
@@ -235,9 +278,11 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 #if ISH_LINUX
 - (int)roomForOutput {
     @synchronized (self) {
-        if (_pendingData.length > BUF_SIZE)
+        int limit = _presentationActive ?
+                BUF_SIZE : INACTIVE_BUF_SIZE;
+        if (_pendingData.length > limit)
             return 0;
-        return BUF_SIZE - (int) _pendingData.length;
+        return limit - (int) _pendingData.length;
     }
 }
 #endif
@@ -301,6 +346,10 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 
 #if !ISH_LINUX
     lock(&_dataLock);
+    if (!_presentationActive) {
+        unlock(&_dataLock);
+        return;
+    }
     if (_outputInProgress) {
         [self.refreshTask schedule];
         unlock(&_dataLock);
@@ -314,6 +363,8 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 #else
     NSData *data;
     @synchronized (self) {
+        if (!_presentationActive)
+            return;
         if (_outputInProgress) {
             [self.refreshTask schedule];
             return;
@@ -372,14 +423,37 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 
 + (Terminal *)terminalWithUUID:(NSUUID *)uuid {
     @synchronized (Terminal.class) {
-        return [terminalsByUUID objectForKey:uuid];
+        return retainedSessionTerminals[uuid] ?:
+                [terminalsByUUID objectForKey:uuid];
     }
 }
 
+- (void)setSessionProcessIdentifier:(int)sessionProcessIdentifier {
+    _sessionProcessIdentifier = sessionProcessIdentifier;
+    if (sessionProcessIdentifier == 0 || self.uuid == nil)
+        return;
+    @synchronized (Terminal.class) {
+        retainedSessionTerminals[self.uuid] = self;
+    }
+}
+
+- (void)markSessionExited {
+    if (self.destroyed)
+        return;
+    self.sessionProcessIdentifier = 0;
+    self.sessionExited = YES;
+}
+
 - (void)destroy {
+    @synchronized (self) {
+        if (self.destroyed)
+            return;
+        self.destroyed = YES;
+    }
 #if !ISH_LINUX
     struct tty *tty = [self acquireTty];
     if (tty != NULL) {
+        (void) task_kill_controlling_tty(tty);
         lock(&tty->lock);
         tty_hangup(tty);
         unlock(&tty->lock);
@@ -392,13 +466,43 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
 #endif
     @synchronized (Terminal.class) {
         [terminals removeObjectForKey:self.terminalsKey];
+        [terminalsByUUID removeObjectForKey:self.uuid];
+        [retainedSessionTerminals removeObjectForKey:self.uuid];
     }
+    [self.refreshTask invalidate];
+    [self.scrollToBottomTask invalidate];
+    if (_webView != nil) {
+        for (NSString *name in @[
+                @"load", @"log", @"sendInput", @"resize", @"propUpdate"])
+            [_webView.configuration.userContentController
+                    removeScriptMessageHandlerForName:name];
+        [_webView stopLoading];
+    }
+    self.sessionProcessIdentifier = 0;
+    self.sessionExited = YES;
+}
+
+- (void)detachTty:(tty_t)tty {
+    @synchronized (self) {
+        if (_tty == tty)
+            _tty = NULL;
+    }
+    @synchronized (Terminal.class) {
+        if ([terminals objectForKey:self.terminalsKey] == self)
+            [terminals removeObjectForKey:self.terminalsKey];
+    }
+}
+
+- (void)dealloc {
+    [self.refreshTask invalidate];
+    [self.scrollToBottomTask invalidate];
 }
 
 + (void)initialize {
     if (self == Terminal.class) {
         terminals = [NSMapTable strongToWeakObjectsMapTable];
         terminalsByUUID = [NSMapTable strongToWeakObjectsMapTable];
+        retainedSessionTerminals = [NSMutableDictionary dictionary];
     }
 }
 
@@ -445,7 +549,7 @@ static int ios_tty_write(struct tty *tty, const void *buf, size_t len, bool bloc
 static void ios_tty_cleanup(struct tty *tty) {
     Terminal *terminal = CFBridgingRelease(tty->data);
     tty->data = NULL;
-    terminal.tty = NULL;
+    [terminal detachTty:tty];
 }
 
 struct tty_driver_ops ios_tty_ops = {

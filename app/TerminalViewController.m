@@ -14,17 +14,91 @@
 #import "AboutViewController.h"
 #import "CurrentRoot.h"
 #import "NSObject+SaneKVO.h"
+#import "TerminalTabsState.h"
 #import "LinuxInterop.h"
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "kernel/calls.h"
 #include "fs/devices.h"
 
+@interface TerminalTabView : UIView
+
+@property (nonatomic) UIButton *selectionButton;
+@property (nonatomic) UIButton *closeButton;
+
+@end
+
+@implementation TerminalTabView
+
+- (instancetype)initWithIndex:(NSUInteger)index
+                         exited:(BOOL)exited {
+    if (self = [super init]) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.layer.cornerRadius = 8;
+        self.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+
+        _selectionButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        _selectionButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _selectionButton.tag = index;
+        _selectionButton.titleLabel.font =
+                [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        _selectionButton.titleLabel.adjustsFontForContentSizeCategory = YES;
+        _selectionButton.contentEdgeInsets =
+                UIEdgeInsetsMake(0, 12, 0, 6);
+        [_selectionButton setTitle:
+                [NSString stringWithFormat:@"Shell %lu%@",
+                 (unsigned long) index + 1, exited ? @" •" : @""]
+                            forState:UIControlStateNormal];
+        _selectionButton.accessibilityLabel =
+                [NSString stringWithFormat:@"Shell %lu",
+                 (unsigned long) index + 1];
+        _selectionButton.accessibilityValue =
+                exited ? @"Exited" : @"Running";
+
+        _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _closeButton.tag = index;
+        _closeButton.titleLabel.font =
+                [UIFont systemFontOfSize:19 weight:UIFontWeightRegular];
+        _closeButton.titleLabel.adjustsFontForContentSizeCategory = YES;
+        [_closeButton setTitle:@"×" forState:UIControlStateNormal];
+        _closeButton.accessibilityLabel =
+                [NSString stringWithFormat:@"Close Shell %lu",
+                 (unsigned long) index + 1];
+
+        [self addSubview:_selectionButton];
+        [self addSubview:_closeButton];
+        [NSLayoutConstraint activateConstraints:@[
+            [self.heightAnchor constraintGreaterThanOrEqualToConstant:44],
+            [_selectionButton.leadingAnchor constraintEqualToAnchor:
+                    self.leadingAnchor],
+            [_selectionButton.topAnchor constraintEqualToAnchor:
+                    self.topAnchor],
+            [_selectionButton.bottomAnchor constraintEqualToAnchor:
+                    self.bottomAnchor],
+            [_selectionButton.widthAnchor
+                    constraintGreaterThanOrEqualToConstant:64],
+            [_closeButton.leadingAnchor constraintEqualToAnchor:
+                    _selectionButton.trailingAnchor],
+            [_closeButton.trailingAnchor constraintEqualToAnchor:
+                    self.trailingAnchor],
+            [_closeButton.topAnchor constraintEqualToAnchor:self.topAnchor],
+            [_closeButton.bottomAnchor constraintEqualToAnchor:
+                    self.bottomAnchor],
+            [_closeButton.widthAnchor constraintEqualToConstant:44],
+        ]];
+    }
+    return self;
+}
+
+@end
+
 @interface TerminalViewController () <UIGestureRecognizerDelegate>
 
 @property UITapGestureRecognizer *tapRecognizer;
 @property (weak, nonatomic) IBOutlet TerminalView *termView;
 @property (weak, nonatomic) IBOutlet NSLayoutConstraint *bottomConstraint;
+@property (weak, nonatomic) IBOutlet NSLayoutConstraint *termViewTopConstraint;
 
 @property (weak, nonatomic) IBOutlet UIButton *tabKey;
 @property (weak, nonatomic) IBOutlet UIButton *controlKey;
@@ -46,18 +120,33 @@
 @property (weak, nonatomic) IBOutlet UIButton *pasteButton;
 @property (weak, nonatomic) IBOutlet UIButton *hideKeyboardButton;
 
-@property int sessionPid;
-@property (nonatomic) Terminal *sessionTerminal;
+@property (nonatomic) NSMutableArray<Terminal *> *sessionTerminals;
+@property (nonatomic) NSUInteger activeSessionIndex;
+
+@property (nonatomic) UIView *terminalTabsContainer;
+@property (nonatomic) UIScrollView *terminalTabsScrollView;
+@property (nonatomic) UIStackView *terminalTabsStackView;
+@property (nonatomic) UIButton *addTerminalButton;
+@property (nonatomic) UIButton *restartTerminalButton;
+@property (nonatomic) UIView *terminalTabsSeparator;
 
 @property BOOL ignoreKeyboardMotion;
 @property (nonatomic) BOOL hasExternalKeyboard;
+
+- (void)setupTerminalTabs;
+- (void)reloadTerminalTabs;
+- (void)activateSessionAtIndex:(NSUInteger)index;
+- (Terminal *)createSessionWithError:(int *)error;
 
 @end
 
 @implementation TerminalViewController
 
+static const NSUInteger MaximumTerminalSessions = 8;
+
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [self setupTerminalTabs];
 
     int bootError = [AppDelegate bootError];
     if (bootError != 0) {
@@ -72,6 +161,7 @@
     }
 
     self.terminal = self.terminal;
+    [self reloadTerminalTabs];
     [self.termView becomeFirstResponder];
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
@@ -131,6 +221,8 @@
 
 - (void)awakeFromNib {
     [super awakeFromNib];
+    self.sessionTerminals = [NSMutableArray array];
+    self.activeSessionIndex = NSNotFound;
 #if !ISH_LINUX
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(processExited:)
@@ -152,56 +244,123 @@
 - (void)startNewSession {
     if ([AppDelegate bootError] != 0)
         return;
-    int err = [self startSession];
-    if (err < 0) {
+    if (self.sessionTerminals.count >= MaximumTerminalSessions) {
+        [self showMessage:@"Shell limit reached"
+                 subtitle:@"Close a shell before opening another one."];
+        return;
+    }
+    int err = 0;
+    Terminal *terminal = [self createSessionWithError:&err];
+    if (terminal == nil) {
         [self showMessage:@"could not start session"
                  subtitle:[NSString stringWithFormat:@"error code %d", err]];
+        return;
     }
+    [self.sessionTerminals addObject:terminal];
+    [self activateSessionAtIndex:self.sessionTerminals.count - 1];
 }
 
-- (void)reconnectSessionFromTerminalUUID:(NSUUID *)uuid {
+- (NSArray<NSUUID *> *)sessionTerminalUUIDs {
+    NSMutableArray<NSUUID *> *terminalUUIDs = [NSMutableArray array];
+    for (Terminal *terminal in self.sessionTerminals)
+        [terminalUUIDs addObject:terminal.uuid];
+    return terminalUUIDs;
+}
+
+- (NSUUID *)activeSessionTerminalUUID {
+    if (self.activeSessionIndex == NSNotFound ||
+            self.activeSessionIndex >= self.sessionTerminals.count)
+        return nil;
+    return self.sessionTerminals[self.activeSessionIndex].uuid;
+}
+
+- (void)restoreSessionsFromTerminalUUIDs:(NSArray<NSUUID *> *)terminalUUIDs
+                      activeTerminalUUID:(nullable NSUUID *)activeTerminalUUID {
     if ([AppDelegate bootError] != 0)
         return;
-    self.sessionTerminal = [Terminal terminalWithUUID:uuid];
-    if (self.sessionTerminal == nil)
+
+    [self.sessionTerminals removeAllObjects];
+    NSMutableSet<NSUUID *> *seen = [NSMutableSet set];
+    for (NSUUID *uuid in terminalUUIDs) {
+        if ([seen containsObject:uuid])
+            continue;
+        [seen addObject:uuid];
+        Terminal *terminal = [Terminal terminalWithUUID:uuid];
+        // 只有通过普通 shell 启动链创建的 PTY 才能进入标签栏。
+        if (terminal != nil &&
+                (terminal.sessionProcessIdentifier != 0 ||
+                 terminal.isSessionExited)) {
+            [self.sessionTerminals addObject:terminal];
+        }
+    }
+
+    if (self.sessionTerminals.count == 0) {
+        self.activeSessionIndex = NSNotFound;
         [self startNewSession];
+        return;
+    }
+
+    NSUInteger activeIndex = [self.sessionTerminals
+            indexOfObjectPassingTest:^BOOL(
+                    Terminal *terminal,
+                    NSUInteger __unused index,
+                    BOOL * __unused stop) {
+        return activeTerminalUUID != nil &&
+                [terminal.uuid isEqual:activeTerminalUUID];
+    }];
+    [self activateSessionAtIndex:
+            activeIndex == NSNotFound ? 0 : activeIndex];
 }
 
-- (NSUUID *)sessionTerminalUUID {
-    return self.terminal.uuid;
-}
-
-- (int)startSession {
+- (Terminal *)createSessionWithError:(int *)error {
     NSArray<NSString *> *command = UserPreferences.shared.launchCommand;
 
 #if !ISH_LINUX
-    int err = become_new_init_child();
-    if (err < 0)
-        return err;
+    int err = begin_new_init_child();
+    if (err < 0) {
+        *error = err;
+        return nil;
+    }
     struct tty *tty;
-    self.sessionTerminal = nil;
     Terminal *terminal = [Terminal createPseudoTerminal:&tty];
     if (terminal == nil) {
         NSAssert(IS_ERR(tty), @"tty should be error");
-        return (int) PTR_ERR(tty);
+        *error = (int) PTR_ERR(tty);
+        cancel_prepared_process();
+        return nil;
     }
-    self.sessionTerminal = terminal;
     NSString *stdioFile = [NSString stringWithFormat:@"/dev/pts/%d", tty->num];
     err = create_stdio(stdioFile.fileSystemRepresentation, TTY_PSEUDO_SLAVE_MAJOR, tty->num);
     lock(&ttys_lock);
     tty_release(tty);
     unlock(&ttys_lock);
-    if (err < 0)
-        return err;
+    if (err < 0) {
+        *error = err;
+        [terminal destroy];
+        cancel_prepared_process();
+        return nil;
+    }
 
     char argv[4096];
     [Terminal convertCommand:command toArgs:argv limitSize:sizeof(argv)];
     const char *envp = "TERM=xterm-256color\0";
     err = do_execve(command[0].UTF8String, command.count, argv, envp);
-    if (err < 0)
-        return err;
-    self.sessionPid = current->pid;
-    task_start(current);
+    if (err < 0) {
+        *error = err;
+        [terminal destroy];
+        cancel_prepared_process();
+        return nil;
+    }
+    int sessionPid = current->pid;
+    err = commit_prepared_process();
+    if (err < 0) {
+        *error = err;
+        [terminal destroy];
+        cancel_prepared_process();
+        return nil;
+    }
+    terminal.sessionProcessIdentifier = sessionPid;
+    terminal.sessionExited = NO;
 #else
     const char *argv_arr[command.count + 1];
     for (NSUInteger i = 0; i < command.count; i++)
@@ -226,35 +385,50 @@
         });
     });
     NSAssert(err <= 0, @"session start did not finish??");
-    if (err < 0)
-        return err;
-    self.sessionTerminal = terminal;
-    self.sessionPid = sessionPid;
+    if (err < 0) {
+        *error = err;
+        return nil;
+    }
+    terminal.sessionProcessIdentifier = sessionPid;
+    terminal.sessionExited = NO;
 #endif
-    return 0;
+    *error = 0;
+    return terminal;
 }
 
 #if !ISH_LINUX
 - (void)processExited:(NSNotification *)notif {
+    Terminal *exitedTerminal = notif.userInfo[@"terminal"];
     int pid = [notif.userInfo[@"pid"] intValue];
-    if (pid != self.sessionPid)
+    NSUInteger index = [self.sessionTerminals
+            indexOfObjectPassingTest:^BOOL(
+                    Terminal *terminal,
+                    NSUInteger __unused index,
+                    BOOL * __unused stop) {
+        return exitedTerminal != nil ?
+                terminal == exitedTerminal :
+                terminal.sessionProcessIdentifier == pid;
+    }];
+    if (index == NSNotFound)
         return;
 
-    [self.sessionTerminal destroy];
-    // On iOS 13, there are multiple windows, so just close this one.
-    if (@available(iOS 13, *)) {
-        // On iPhone, destroying scenes will fail, but the error doesn't actually go to the error handler, which is really stupid. Apple doesn't fix bugs, so I'm forced to just add a check here.
-        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad && self.sceneSession != nil) {
-            [UIApplication.sharedApplication requestSceneSessionDestruction:self.sceneSession options:nil errorHandler:^(NSError *error) {
-                NSLog(@"scene destruction error %@", error);
-                self.sceneSession = nil;
-                [self processExited:notif];
-            }];
-            return;
-        }
+    Terminal *terminal = self.sessionTerminals[index];
+    uint32_t waitStatus =
+            [notif.userInfo[@"code"] unsignedIntValue];
+    uint32_t signal = waitStatus & 0x7f;
+    NSString *message;
+    if (signal == 0) {
+        uint32_t exitCode = (waitStatus >> 8) & 0xff;
+        message = [NSString stringWithFormat:
+                @"\r\n[Process exited with status %u]\r\n", exitCode];
+    } else {
+        message = [NSString stringWithFormat:
+                @"\r\n[Process terminated by signal %u]\r\n", signal];
     }
-    current = NULL; // it's been freed
-    [self startNewSession];
+    [terminal sendOutput:message.UTF8String
+                  length:(int) [message lengthOfBytesUsingEncoding:
+                          NSUTF8StringEncoding]];
+    [self reloadTerminalTabs];
 }
 #endif
 
@@ -265,6 +439,354 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 #endif
+
+#pragma mark Terminal tabs
+
+- (void)setupTerminalTabs {
+    if (self.terminalTabsContainer != nil)
+        return;
+
+    UIView *container = [UIView new];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    container.accessibilityIdentifier = @"terminal-tab-bar";
+    self.terminalTabsContainer = container;
+
+    UIScrollView *scrollView = [UIScrollView new];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.showsHorizontalScrollIndicator = NO;
+    scrollView.alwaysBounceHorizontal = YES;
+    scrollView.directionalLockEnabled = YES;
+    self.terminalTabsScrollView = scrollView;
+
+    UIStackView *tabs = [UIStackView new];
+    tabs.translatesAutoresizingMaskIntoConstraints = NO;
+    tabs.axis = UILayoutConstraintAxisHorizontal;
+    tabs.alignment = UIStackViewAlignmentCenter;
+    tabs.spacing = 4;
+    self.terminalTabsStackView = tabs;
+
+    UIButton *restart = [UIButton buttonWithType:UIButtonTypeSystem];
+    restart.translatesAutoresizingMaskIntoConstraints = NO;
+    restart.titleLabel.font =
+            [UIFont systemFontOfSize:21 weight:UIFontWeightRegular];
+    restart.titleLabel.adjustsFontForContentSizeCategory = YES;
+    [restart setTitle:@"↻" forState:UIControlStateNormal];
+    [restart addTarget:self
+                action:@selector(restartCurrentTerminalTab:)
+      forControlEvents:UIControlEventTouchUpInside];
+    restart.accessibilityLabel = @"Restart Shell";
+    restart.accessibilityIdentifier = @"restart-terminal-tab";
+    restart.hidden = YES;
+    self.restartTerminalButton = restart;
+
+    UIButton *add = [UIButton buttonWithType:UIButtonTypeSystem];
+    add.translatesAutoresizingMaskIntoConstraints = NO;
+    add.titleLabel.font =
+            [UIFont systemFontOfSize:23 weight:UIFontWeightRegular];
+    add.titleLabel.adjustsFontForContentSizeCategory = YES;
+    [add setTitle:@"+" forState:UIControlStateNormal];
+    [add addTarget:self
+                action:@selector(newTerminalTab:)
+      forControlEvents:UIControlEventTouchUpInside];
+    add.accessibilityLabel = @"New Shell";
+    add.accessibilityHint = @"Opens another independent shell session";
+    add.accessibilityIdentifier = @"new-terminal-tab";
+    self.addTerminalButton = add;
+
+    UIStackView *actions = [[UIStackView alloc]
+            initWithArrangedSubviews:@[restart, add]];
+    actions.translatesAutoresizingMaskIntoConstraints = NO;
+    actions.axis = UILayoutConstraintAxisHorizontal;
+    actions.alignment = UIStackViewAlignmentCenter;
+    actions.spacing = 2;
+
+    UIView *separator = [UIView new];
+    separator.translatesAutoresizingMaskIntoConstraints = NO;
+    self.terminalTabsSeparator = separator;
+
+    [self.view addSubview:container];
+    [container addSubview:scrollView];
+    [scrollView addSubview:tabs];
+    [container addSubview:actions];
+    [container addSubview:separator];
+
+    self.termViewTopConstraint.active = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [container.topAnchor constraintEqualToAnchor:
+                self.view.safeAreaLayoutGuide.topAnchor],
+        [container.leadingAnchor constraintEqualToAnchor:
+                self.view.safeAreaLayoutGuide.leadingAnchor],
+        [container.trailingAnchor constraintEqualToAnchor:
+                self.view.safeAreaLayoutGuide.trailingAnchor],
+        [container.heightAnchor constraintGreaterThanOrEqualToConstant:52],
+
+        [scrollView.leadingAnchor constraintEqualToAnchor:
+                container.leadingAnchor constant:4],
+        [scrollView.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:
+                container.bottomAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:
+                actions.leadingAnchor constant:-4],
+
+        [tabs.leadingAnchor constraintEqualToAnchor:
+                scrollView.contentLayoutGuide.leadingAnchor],
+        [tabs.trailingAnchor constraintEqualToAnchor:
+                scrollView.contentLayoutGuide.trailingAnchor],
+        [tabs.topAnchor constraintEqualToAnchor:
+                scrollView.contentLayoutGuide.topAnchor constant:4],
+        [tabs.bottomAnchor constraintEqualToAnchor:
+                scrollView.contentLayoutGuide.bottomAnchor constant:-4],
+        [tabs.heightAnchor constraintGreaterThanOrEqualToConstant:44],
+        [scrollView.contentLayoutGuide.heightAnchor constraintEqualToAnchor:
+                scrollView.frameLayoutGuide.heightAnchor],
+
+        [actions.trailingAnchor constraintEqualToAnchor:
+                container.trailingAnchor constant:-4],
+        [actions.centerYAnchor constraintEqualToAnchor:
+                container.centerYAnchor],
+        [restart.widthAnchor constraintEqualToConstant:44],
+        [restart.heightAnchor constraintEqualToConstant:44],
+        [add.widthAnchor constraintEqualToConstant:44],
+        [add.heightAnchor constraintEqualToConstant:44],
+
+        [separator.leadingAnchor constraintEqualToAnchor:
+                container.leadingAnchor],
+        [separator.trailingAnchor constraintEqualToAnchor:
+                container.trailingAnchor],
+        [separator.bottomAnchor constraintEqualToAnchor:
+                container.bottomAnchor],
+        [separator.heightAnchor constraintEqualToConstant:
+                1.0 / UIScreen.mainScreen.scale],
+
+        [self.termView.topAnchor constraintEqualToAnchor:
+                container.bottomAnchor],
+    ]];
+}
+
+- (void)reloadTerminalTabs {
+    if (self.terminalTabsStackView == nil)
+        return;
+
+    for (UIView *view in self.terminalTabsStackView.arrangedSubviews.copy) {
+        [self.terminalTabsStackView removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+
+    [self.sessionTerminals enumerateObjectsUsingBlock:
+            ^(Terminal *terminal,
+              NSUInteger index,
+              BOOL * __unused stop) {
+        TerminalTabView *tab = [[TerminalTabView alloc]
+                initWithIndex:index exited:terminal.isSessionExited];
+        [tab.selectionButton addTarget:self
+                                action:@selector(selectTerminalTab:)
+                      forControlEvents:UIControlEventTouchUpInside];
+        [tab.closeButton addTarget:self
+                            action:@selector(requestCloseTerminalTab:)
+                  forControlEvents:UIControlEventTouchUpInside];
+        tab.selectionButton.accessibilityIdentifier =
+                [NSString stringWithFormat:@"terminal-tab-%@",
+                 terminal.uuid.UUIDString];
+        tab.closeButton.accessibilityIdentifier =
+                [NSString stringWithFormat:@"close-terminal-tab-%@",
+                 terminal.uuid.UUIDString];
+        [self.terminalTabsStackView addArrangedSubview:tab];
+    }];
+
+    BOOL hasActiveSession =
+            self.activeSessionIndex != NSNotFound &&
+            self.activeSessionIndex < self.sessionTerminals.count;
+    self.restartTerminalButton.hidden = !hasActiveSession ||
+            !self.sessionTerminals[self.activeSessionIndex].isSessionExited;
+    self.addTerminalButton.enabled =
+            self.sessionTerminals.count < MaximumTerminalSessions;
+    self.addTerminalButton.accessibilityHint =
+            self.addTerminalButton.enabled ?
+            @"Opens another independent shell session" :
+            @"Close a shell before opening another one";
+    [self updateTerminalTabsStyle];
+
+    if (hasActiveSession) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.activeSessionIndex >=
+                    self.terminalTabsStackView.arrangedSubviews.count)
+                return;
+            UIView *tab = self.terminalTabsStackView
+                    .arrangedSubviews[self.activeSessionIndex];
+            CGRect rect = [tab convertRect:tab.bounds
+                                    toView:self.terminalTabsScrollView];
+            [self.terminalTabsScrollView scrollRectToVisible:rect
+                                                    animated:NO];
+        });
+    }
+}
+
+- (void)updateTerminalTabsStyle {
+    if (self.terminalTabsContainer == nil)
+        return;
+    UIColor *background = [[UIColor alloc]
+            ish_initWithHexString:UserPreferences.shared.palette
+                    .backgroundColor];
+    UIColor *foreground = [[UIColor alloc]
+            ish_initWithHexString:UserPreferences.shared.palette
+                    .foregroundColor];
+    self.terminalTabsContainer.backgroundColor = background;
+    self.terminalTabsSeparator.backgroundColor =
+            [foreground colorWithAlphaComponent:0.22];
+    self.addTerminalButton.tintColor = foreground;
+    self.restartTerminalButton.tintColor = foreground;
+
+    [self.terminalTabsStackView.arrangedSubviews
+            enumerateObjectsUsingBlock:
+            ^(TerminalTabView *tab,
+              NSUInteger index,
+              BOOL * __unused stop) {
+        Terminal *terminal = self.sessionTerminals[index];
+        BOOL selected = index == self.activeSessionIndex &&
+                self.terminal == terminal;
+        tab.backgroundColor = [foreground colorWithAlphaComponent:
+                selected ? 0.18 : 0.06];
+        tab.layer.borderColor = [foreground colorWithAlphaComponent:
+                selected ? 0.42 : 0.15].CGColor;
+        UIColor *titleColor = terminal.isSessionExited ?
+                [foreground colorWithAlphaComponent:0.58] : foreground;
+        [tab.selectionButton setTitleColor:titleColor
+                                  forState:UIControlStateNormal];
+        [tab.closeButton setTitleColor:
+                [foreground colorWithAlphaComponent:0.72]
+                              forState:UIControlStateNormal];
+        tab.selectionButton.accessibilityTraits =
+                UIAccessibilityTraitButton |
+                (selected ? UIAccessibilityTraitSelected : 0);
+    }];
+}
+
+- (void)activateSessionAtIndex:(NSUInteger)index {
+    if (index >= self.sessionTerminals.count)
+        return;
+    // 输入法组合文本尚未进入 PTY；切换前提交，避免草稿落到下一个标签。
+    if (self.terminal != self.sessionTerminals[index] &&
+            self.isViewLoaded && self.termView.markedTextRange != nil)
+        [self.termView unmarkText];
+    self.activeSessionIndex = index;
+    self.terminal = self.sessionTerminals[index];
+    [self reloadTerminalTabs];
+    if (self.isViewLoaded)
+        [self.termView becomeFirstResponder];
+}
+
+- (void)selectTerminalTab:(UIButton *)sender {
+    [self activateSessionAtIndex:(NSUInteger) sender.tag];
+}
+
+- (void)newTerminalTab:(id)sender {
+    [self startNewSession];
+}
+
+- (void)requestCloseTerminalTab:(UIButton *)sender {
+    NSUInteger index = (NSUInteger) sender.tag;
+    if (index >= self.sessionTerminals.count)
+        return;
+    Terminal *terminal = self.sessionTerminals[index];
+    NSUUID *terminalUUID = terminal.uuid;
+    if (terminal.isSessionExited) {
+        [self closeTerminalTabWithUUID:terminalUUID];
+        return;
+    }
+
+    UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Close Shell?"
+                             message:@"The running process and its scrollback "
+                                     "will be discarded."
+                      preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Close"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(
+                                                    UIAlertAction * __unused
+                                                            action) {
+        [self closeTerminalTabWithUUID:terminalUUID];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)closeTerminalTabWithUUID:(NSUUID *)terminalUUID {
+    NSUInteger index = [self.sessionTerminals
+            indexOfObjectPassingTest:^BOOL(
+                    Terminal *terminal,
+                    NSUInteger __unused index,
+                    BOOL * __unused stop) {
+        return [terminal.uuid isEqual:terminalUUID];
+    }];
+    if (index == NSNotFound)
+        return;
+
+    Terminal *terminal = self.sessionTerminals[index];
+    BOOL removedActiveSession = index == self.activeSessionIndex;
+    NSUInteger newActiveIndex = ISHTerminalTabIndexAfterRemoval(
+            index, self.activeSessionIndex,
+            self.sessionTerminals.count - 1);
+    [terminal destroy];
+    [self.sessionTerminals removeObjectAtIndex:index];
+    self.activeSessionIndex = newActiveIndex;
+
+    if (self.sessionTerminals.count == 0) {
+        self.terminal = nil;
+        [self reloadTerminalTabs];
+        [self startNewSession];
+    } else if (removedActiveSession || self.terminal == terminal) {
+        [self activateSessionAtIndex:newActiveIndex];
+    } else {
+        [self reloadTerminalTabs];
+    }
+}
+
+- (void)restartCurrentTerminalTab:(id)sender {
+    if (self.activeSessionIndex == NSNotFound ||
+            self.activeSessionIndex >= self.sessionTerminals.count)
+        return;
+    Terminal *oldTerminal =
+            self.sessionTerminals[self.activeSessionIndex];
+    if (!oldTerminal.isSessionExited)
+        return;
+
+    int err = 0;
+    Terminal *newTerminal = [self createSessionWithError:&err];
+    if (newTerminal == nil) {
+        [self showMessage:@"could not restart session"
+                 subtitle:[NSString stringWithFormat:@"error code %d", err]];
+        return;
+    }
+
+    [oldTerminal destroy];
+    self.sessionTerminals[self.activeSessionIndex] = newTerminal;
+    [self activateSessionAtIndex:self.activeSessionIndex];
+}
+
+- (void)cycleTerminalTab:(id)sender {
+    NSUInteger next = ISHCycledTerminalTabIndex(
+            self.activeSessionIndex, self.sessionTerminals.count, NO);
+    if (next != NSNotFound)
+        [self activateSessionAtIndex:next];
+}
+
+- (void)cycleTerminalTabBackward:(id)sender {
+    NSUInteger next = ISHCycledTerminalTabIndex(
+            self.activeSessionIndex, self.sessionTerminals.count, YES);
+    if (next != NSNotFound)
+        [self activateSessionAtIndex:next];
+}
+
+- (void)closeCurrentTerminalTab:(id)sender {
+    if (self.activeSessionIndex == NSNotFound ||
+            self.activeSessionIndex >= self.sessionTerminals.count)
+        return;
+    UIButton *close = [UIButton new];
+    close.tag = self.activeSessionIndex;
+    [self requestCloseTerminalTab:close];
+}
 
 - (void)showMessage:(NSString *)message subtitle:(NSString *)subtitle {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -298,6 +820,7 @@
         for (UIControl *control in self.barControls) {
             control.tintColor = tintColor;
         }
+        [self updateTerminalTabsStyle];
     }];
     UIView *oldBarView = self.termView.inputAccessoryView;
     if (UserPreferences.shared.hideExtraKeysWithExternalKeyboard && self.hasExternalKeyboard) {
@@ -463,10 +986,15 @@
 
 - (void)switchTerminal:(UIKeyCommand *)sender {
     unsigned i = (unsigned) sender.input.integerValue;
-    if (i == 7)
-        self.terminal = self.sessionTerminal;
-    else
+    if (i == 7) {
+        if (self.activeSessionIndex != NSNotFound &&
+                self.activeSessionIndex < self.sessionTerminals.count)
+            self.terminal = self.sessionTerminals[self.activeSessionIndex];
+    } else {
+        if (self.termView.markedTextRange != nil)
+            [self.termView unmarkText];
         self.terminal = [Terminal terminalWithType:TTY_CONSOLE_MAJOR number:i];
+    }
 }
 
 - (void)increaseFontSize:(UIKeyCommand *)command {
@@ -489,6 +1017,32 @@
                                  modifierFlags:UIKeyModifierCommand|UIKeyModifierAlternate|UIKeyModifierShift
                                         action:@selector(switchTerminal:)]];
         }
+        NSArray<UIKeyCommand *> *tabCommands = @[
+            [UIKeyCommand keyCommandWithInput:@"t"
+                                modifierFlags:UIKeyModifierCommand
+                                       action:@selector(newTerminalTab:)
+                         discoverabilityTitle:@"New Shell"],
+            [UIKeyCommand keyCommandWithInput:@"w"
+                                modifierFlags:UIKeyModifierCommand
+                                       action:@selector(closeCurrentTerminalTab:)
+                         discoverabilityTitle:@"Close Shell"],
+            [UIKeyCommand keyCommandWithInput:@"\t"
+                                modifierFlags:UIKeyModifierControl
+                                       action:@selector(cycleTerminalTab:)
+                         discoverabilityTitle:@"Next Shell"],
+            [UIKeyCommand keyCommandWithInput:@"\t"
+                                modifierFlags:
+                                        UIKeyModifierControl |
+                                        UIKeyModifierShift
+                                       action:@selector(
+                                               cycleTerminalTabBackward:)
+                         discoverabilityTitle:@"Previous Shell"],
+        ];
+        if (@available(iOS 15.0, *)) {
+            for (UIKeyCommand *command in tabCommands)
+                command.wantsPriorityOverSystemBehavior = YES;
+        }
+        [commands addObjectsFromArray:tabCommands];
         [commands addObject:
          [UIKeyCommand keyCommandWithInput:@"+"
                              modifierFlags:UIKeyModifierCommand
@@ -520,12 +1074,7 @@
 - (void)setTerminal:(Terminal *)terminal {
     _terminal = terminal;
     self.termView.terminal = self.terminal;
-}
-
-- (void)setSessionTerminal:(Terminal *)sessionTerminal {
-    if (_terminal == _sessionTerminal)
-        self.terminal = sessionTerminal;
-    _sessionTerminal = sessionTerminal;
+    [self updateTerminalTabsStyle];
 }
 
 @end

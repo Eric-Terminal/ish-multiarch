@@ -57,6 +57,7 @@
                         <outlet property="settingsBadge" destination="QyP-z0-o0M" id="B0a-GT-d21"/>
                         <outlet property="tabKey" destination="cJt-oG-BnW" id="YaE-o4-lKm"/>
                         <outlet property="termView" destination="FQi-r8-odu" id="QIa-yI-fmG"/>
+                        <outlet property="termViewTopConstraint" destination="WI3-Ir-VlB" id="TbS-Qk-7aR"/>
                         <outletCollection property="barButtons" destination="cJt-oG-BnW" id="Yjx-uz-RbI"/>
                         <outletCollection property="barButtons" destination="W9v-cj-FWz" id="OFf-FH-2Xy"/>
                         <outletCollection property="barButtons" destination="IPm-l0-f25" id="dHH-gh-Tzq"/>

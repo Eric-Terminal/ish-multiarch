@@ -8,16 +8,12 @@
 #import "SceneDelegate.h"
 #import "AboutViewController.h"
 #import "AppDelegate.h"
+#import "TerminalTabsState.h"
 
 TerminalViewController *currentTerminalViewController = NULL;
 
-@interface SceneDelegate ()
-
-@property NSString *terminalUUID;
-
-@end
-
 static NSString *const TerminalUUID = @"TerminalUUID";
+static NSString *const TerminalUUIDs = @"TerminalUUIDs";
 
 @implementation SceneDelegate
 
@@ -33,17 +29,16 @@ static NSString *const TerminalUUID = @"TerminalUUID";
         return;
 
     TerminalViewController *vc = (TerminalViewController *) self.window.rootViewController;
-    vc.sceneSession = session;
-    if (session.stateRestorationActivity == nil) {
+    NSDictionary *restoration = session.stateRestorationActivity.userInfo;
+    NSArray<NSUUID *> *terminalUUIDs = ISHRestoreTerminalTabUUIDs(
+            restoration[TerminalUUIDs], restoration[TerminalUUID]);
+    NSUUID *activeUUID = ISHActiveTerminalTabUUID(
+            restoration[TerminalUUID], terminalUUIDs);
+    if (terminalUUIDs.count == 0) {
         [vc startNewSession];
     } else {
-        self.terminalUUID = session.stateRestorationActivity.userInfo[TerminalUUID];
-        NSUUID *uuid = self.terminalUUID == nil ? nil :
-                [[NSUUID alloc] initWithUUIDString:self.terminalUUID];
-        if (uuid == nil)
-            [vc startNewSession];
-        else
-            [vc reconnectSessionFromTerminalUUID:uuid];
+        [vc restoreSessionsFromTerminalUUIDs:terminalUUIDs
+                          activeTerminalUUID:activeUUID];
     }
 }
 
@@ -51,9 +46,15 @@ static NSString *const TerminalUUID = @"TerminalUUID";
     NSUserActivity *activity = [[NSUserActivity alloc] initWithActivityType:@"app.ish.scene"];
     TerminalViewController *vc = (TerminalViewController *) self.window.rootViewController;
     if ([vc isKindOfClass:TerminalViewController.class]) {
-        self.terminalUUID = vc.sessionTerminalUUID.UUIDString;
-        if (self.terminalUUID != nil) {
-            [activity addUserInfoEntriesFromDictionary:@{TerminalUUID: self.terminalUUID}];
+        NSMutableArray<NSString *> *terminalUUIDs = [NSMutableArray array];
+        for (NSUUID *uuid in vc.sessionTerminalUUIDs)
+            [terminalUUIDs addObject:uuid.UUIDString];
+        NSString *activeUUID = vc.activeSessionTerminalUUID.UUIDString;
+        if (terminalUUIDs.count != 0 && activeUUID != nil) {
+            [activity addUserInfoEntriesFromDictionary:@{
+                TerminalUUID: activeUUID,
+                TerminalUUIDs: terminalUUIDs,
+            }];
         }
     }
     return activity;

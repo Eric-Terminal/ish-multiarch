@@ -11,5 +11,6 @@
 
 - (instancetype)initWithTarget:(id)target action:(SEL)action;
 - (void)schedule;
+- (void)invalidate;
 
 @end

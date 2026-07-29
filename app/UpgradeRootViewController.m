@@ -30,19 +30,24 @@
 #if !ISH_LINUX
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(processExited:) name:ProcessExitedNotification object:nil];
 
-    lock(&pids_lock);
-    current = pid_get_task(1); // pray
-    unlock(&pids_lock);
+    int prepareError = begin_new_init_child();
+    if (prepareError < 0) {
+        self.upgradeButton.enabled = NO;
+        [self showAlertWithTitle:@"无法准备终端"
+                         message:@"错误代码 %d", prepareError];
+        return;
+    }
     self.terminal = [Terminal createPseudoTerminal:&self->_tty];
-    current = NULL;
     if (self.terminal == nil) {
         int err = (int) PTR_ERR(self.tty);
         self.tty = NULL;
+        cancel_prepared_process();
         self.upgradeButton.enabled = NO;
         [self showAlertWithTitle:@"无法打开终端"
                          message:@"错误代码 %d", err];
         return;
     }
+    cancel_prepared_process();
     
     self.terminalView.terminal = self.terminal;
 #endif
@@ -74,22 +79,43 @@
 
 #if !ISH_LINUX
 - (void)processExited:(NSNotification *)notif {
+    Terminal *exitedTerminal = notif.userInfo[@"terminal"];
     int pid = [notif.userInfo[@"pid"] intValue];
-    if (pid != self.upgradePid)
+    if (exitedTerminal != nil ?
+            exitedTerminal != self.terminal :
+            pid != self.upgradePid)
         return;
     self.upgradePid = 0;
     [self setDismissable:YES];
-    int code = [notif.userInfo[@"code"] intValue];
+    uint32_t waitStatus =
+            [notif.userInfo[@"code"] unsignedIntValue];
     [self printToTerminal:@"\n"];
-    if (code != 0) {
-        [self printToTerminal:@"Upgrade failed with exit status %d.\nPlease send a bug report.\n", code];
+    if (waitStatus != 0) {
+        uint32_t signal = waitStatus & 0x7f;
+        if (signal == 0) {
+            [self printToTerminal:
+                    @"Upgrade failed with exit status %u.\n"
+                     "Please send a bug report.\n",
+                    (waitStatus >> 8) & 0xff];
+        } else {
+            [self printToTerminal:
+                    @"Upgrade was terminated by signal %u.\n"
+                     "Please send a bug report.\n", signal];
+        }
     } else {
-        lock(&pids_lock);
-        current = pid_get_task(1); // pray
-        unlock(&pids_lock);
-        FsUpdateRepositories();
-        current = NULL;
-        [self printToTerminal:@"Upgrade complete!\nIf anything that was working before stops working, please send a bug report.\n"];
+        int updateError = begin_new_init_child();
+        if (updateError < 0) {
+            [self printToTerminal:
+                    @"Upgrade completed, but repository metadata could not "
+                     "be saved (error %d).\n", updateError];
+        } else {
+            FsUpdateRepositories();
+            cancel_new_init_child();
+            [self printToTerminal:
+                    @"Upgrade complete!\n"
+                     "If anything that was working before stops working, "
+                     "please send a bug report.\n"];
+        }
     }
     [self.terminal destroy];
     self.terminal = nil;
@@ -100,20 +126,30 @@
     if (self.upgradePid != 0)
         return _EEXIST;
 #if !ISH_LINUX
-    int err = become_new_init_child();
+    int err = begin_new_init_child();
     if (err < 0)
         return err;
     FsUpdateOnlyRepositoriesFile();
     NSString *stdioFile = [NSString stringWithFormat:@"/dev/pts/%d", self.tty->num];
     err = create_stdio(stdioFile.fileSystemRepresentation, TTY_PSEUDO_SLAVE_MAJOR, self.tty->num);
-    if (err < 0)
+    if (err < 0) {
+        cancel_prepared_process();
         return err;
+    }
     err = do_execve("/sbin/apk", 2, "/sbin/apk\0upgrade\0", "TERM=xterm-256color\0");
-    if (err < 0)
+    if (err < 0) {
+        cancel_prepared_process();
         return err;
-    self.upgradePid = current->pid;
-    task_start(current);
-    current = NULL;
+    }
+    int upgradePid = current->pid;
+    err = commit_prepared_process();
+    if (err < 0) {
+        cancel_prepared_process();
+        return err;
+    }
+    self.upgradePid = upgradePid;
+    self.terminal.sessionProcessIdentifier = upgradePid;
+    self.terminal.sessionExited = NO;
     return 0;
 #else
     return _ENOSYS;
