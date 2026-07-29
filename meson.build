@@ -363,6 +363,12 @@ if get_option('kernel') == 'ish'
         fd_task_test = executable('fd_task_test', 'fs/fd-task-test.c', dependencies: ish)
         test('fd_task', fd_task_test)
 
+        host_stdio_test = executable(
+            'host_stdio_test',
+            'kernel/host-stdio-test.c',
+            dependencies: ish)
+        test('host_stdio', host_stdio_test)
+
         pty_lifecycle_test = executable(
             'pty_lifecycle_test',
             'fs/pty-lifecycle-test.c',

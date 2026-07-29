@@ -8,11 +8,19 @@
 #include "fs/real.h"
 #include "debug.h"
 
-static struct fd *pipe_f_create(struct task *task, int pipe_fd) {
+struct fd *file_pipe_wrap_host_fd(struct task *task, int host_fd) {
+    if (task == NULL || host_fd < 0) {
+        if (host_fd >= 0)
+            close(host_fd);
+        return ERR_PTR(_EINVAL);
+    }
+
     struct fd *fd = adhoc_fd_create(&realfs_fdops);
-    if (fd == NULL)
-        return NULL;
-    fd->real_fd = pipe_fd;
+    if (fd == NULL) {
+        close(host_fd);
+        return ERR_PTR(_ENOMEM);
+    }
+    fd->real_fd = host_fd;
     fd->type = S_IFIFO;
     fd->stat.mode = S_IFIFO | 0660;
     fd->stat.uid = task->uid;
@@ -31,17 +39,17 @@ int file_pipe2_task(
     if (pipe(p) < 0)
         return errno_map();
 
-    struct fd *read_end = pipe_f_create(task, p[0]);
-    if (read_end == NULL) {
-        close(p[0]);
+    struct fd *read_end = file_pipe_wrap_host_fd(task, p[0]);
+    if (IS_ERR(read_end)) {
+        int error = (int) PTR_ERR(read_end);
         close(p[1]);
-        return _ENOMEM;
+        return error;
     }
-    struct fd *write_end = pipe_f_create(task, p[1]);
-    if (write_end == NULL) {
+    struct fd *write_end = file_pipe_wrap_host_fd(task, p[1]);
+    if (IS_ERR(write_end)) {
+        int error = (int) PTR_ERR(write_end);
         fd_close(read_end);
-        close(p[1]);
-        return _ENOMEM;
+        return error;
     }
 
     if (flags & O_NONBLOCK_) {

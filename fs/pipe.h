@@ -12,6 +12,12 @@ struct file_pipe_result {
     struct fd *ends[2];
 };
 
+/*
+ * 将一个宿主管道端包装为 guest fd 对象。
+ * 无论成功失败都接管 host_fd；成功返回对象，失败返回 ERR_PTR。
+ */
+struct fd *file_pipe_wrap_host_fd(struct task *task, int host_fd);
+
 // 成功时返回两个已安装描述符；失败时目标 task 不保留任何一端。
 int file_pipe2_task(
         struct task *task, int flags, struct file_pipe_result *result);

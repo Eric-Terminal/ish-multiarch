@@ -4,7 +4,7 @@
 #include "fs/devices.h"
 #include "fs/fd.h"
 #include "fs/path.h"
-#include "fs/real.h"
+#include "fs/pipe.h"
 #include "fs/tty.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
@@ -218,38 +218,80 @@ int create_stdio(const char *file, int major, int minor) {
     return 0;
 }
 
-static struct fd *open_fd_from_actual_fd(int fd_no) {
-    struct fd *fd = adhoc_fd_create(&realfs_fdops);
-    if (fd == NULL) {
-        return NULL;
+static void close_distinct_host_fds(int host_fds[3], size_t start) {
+    for (size_t index = start; index < 3; index++) {
+        if (host_fds[index] < 0)
+            continue;
+        bool already_closed = false;
+        for (size_t previous = start; previous < index; previous++) {
+            if (host_fds[previous] == host_fds[index]) {
+                already_closed = true;
+                break;
+            }
+        }
+        if (!already_closed)
+            close(host_fds[index]);
     }
-    fd->real_fd = fd_no;
-    fd->dir = NULL;
-    return fd;
 }
 
-static int install_actual_fd(int actual_fd, fd_t guest_fd) {
-    struct fd *fd = open_fd_from_actual_fd(actual_fd);
-    if (fd == NULL)
-        return -1;
-    fd_t installed = f_install_task(current, fd, 0);
-    if (installed != guest_fd) {
-        if (installed >= 0)
-            f_close_task(current, installed);
-        return -1;
+int create_host_stdio(
+        struct task *task,
+        int stdin_fd, int stdout_fd, int stderr_fd) {
+    int host_fds[3] = {stdin_fd, stdout_fd, stderr_fd};
+    if (task == NULL || stdin_fd < 0 || stdout_fd < 0 || stderr_fd < 0 ||
+            stdin_fd == stdout_fd || stdin_fd == stderr_fd ||
+            stdout_fd == stderr_fd) {
+        close_distinct_host_fds(host_fds, 0);
+        return _EINVAL;
     }
-    return 0;
+
+    size_t installed_count = 0;
+    int error = 0;
+    for (fd_t number = 0; number < 3; number++) {
+        struct fd *fd = file_pipe_wrap_host_fd(
+                task, host_fds[number]);
+        host_fds[number] = -1;
+        if (IS_ERR(fd)) {
+            error = (int) PTR_ERR(fd);
+            close_distinct_host_fds(host_fds, (size_t) number + 1);
+            break;
+        }
+
+        fd_t installed = f_install_task(task, fd, 0);
+        if (installed != number) {
+            error = installed < 0 ? installed : _EBUSY;
+            if (installed >= 0)
+                f_close_task(task, installed);
+            close_distinct_host_fds(host_fds, (size_t) number + 1);
+            break;
+        }
+        installed_count++;
+    }
+
+    if (error == 0)
+        return 0;
+    while (installed_count != 0) {
+        installed_count--;
+        f_close_task(task, (fd_t) installed_count);
+    }
+    return error;
 }
 
 int create_piped_stdio(void) {
-    if (install_actual_fd(STDIN_FILENO, 0) < 0) {
-        return -1;
+    int duplicates[3] = {-1, -1, -1};
+    const int standard_fds[3] = {
+        STDIN_FILENO,
+        STDOUT_FILENO,
+        STDERR_FILENO,
+    };
+    for (size_t index = 0; index < 3; index++) {
+        duplicates[index] = dup(standard_fds[index]);
+        if (duplicates[index] < 0) {
+            int error = errno_map();
+            close_distinct_host_fds(duplicates, 0);
+            return error;
+        }
     }
-    if (install_actual_fd(STDOUT_FILENO, 1) < 0) {
-        return -1;
-    }
-    if (install_actual_fd(STDERR_FILENO, 2) < 0) {
-        return -1;
-    }
-    return 0;
+    return create_host_stdio(
+            current, duplicates[0], duplicates[1], duplicates[2]);
 }
