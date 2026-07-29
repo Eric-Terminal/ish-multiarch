@@ -1,8 +1,10 @@
 import Foundation
 import Combine
+import WatchKit
 
 @MainActor
 final class WatchRuntime: ObservableObject {
+    let hostname: String
     @Published private(set) var output = ""
     @Published private(set) var outputLines: [TerminalLine] = []
     @Published private(set) var status = "准备中"
@@ -21,6 +23,7 @@ final class WatchRuntime: ObservableObject {
         let seed: String
         let persistentParent: String
         let socketPrefix: String
+        let hostname: String
     }
 
     private enum SetupError: LocalizedError {
@@ -50,6 +53,12 @@ final class WatchRuntime: ObservableObject {
     private var sawOutput = false
     private var setupFailure: String?
     private var inputFailure: String?
+
+    init() {
+        let deviceName = WKInterfaceDevice.current().name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        hostname = deviceName.isEmpty ? "iSH" : deviceName
+    }
 
     func run() async {
         startIfNeeded()
@@ -142,7 +151,8 @@ final class WatchRuntime: ObservableObject {
         return RuntimePaths(
             seed: seed.path,
             persistentParent: roots.path,
-            socketPrefix: socketPrefix)
+            socketPrefix: socketPrefix,
+            hostname: hostname)
     }
 
     nonisolated private static func startRuntime(
@@ -150,8 +160,13 @@ final class WatchRuntime: ObservableObject {
         paths.seed.withCString { seed in
             paths.persistentParent.withCString { persistentParent in
                 paths.socketPrefix.withCString { socketPrefix in
-                    ish_watch_runtime_start(
-                        seed, persistentParent, socketPrefix)
+                    paths.hostname.withCString { hostname in
+                        ish_watch_runtime_start(
+                            seed,
+                            persistentParent,
+                            socketPrefix,
+                            hostname)
+                    }
                 }
             }
         }

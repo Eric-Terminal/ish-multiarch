@@ -1,7 +1,7 @@
 #include "platform/apple-watch-runtime.h"
 
 static int (*volatile start_entry)(
-        const char *, const char *, const char *) =
+        const char *, const char *, const char *, const char *) =
         ish_watch_runtime_start;
 static int (*volatile phase_entry)(void) =
         ish_watch_runtime_current_phase;

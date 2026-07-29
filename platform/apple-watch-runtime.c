@@ -239,10 +239,12 @@ static bool socket_prefix_fits(const char *socket_prefix) {
 int ish_watch_runtime_start(
         const char *seed_root,
         const char *persistent_parent,
-        const char *socket_prefix) {
+        const char *socket_prefix,
+        const char *hostname) {
     if (seed_root == NULL || seed_root[0] == '\0' ||
             persistent_parent == NULL || persistent_parent[0] == '\0' ||
-            socket_prefix == NULL || socket_prefix[0] == '\0')
+            socket_prefix == NULL || socket_prefix[0] == '\0' ||
+            hostname == NULL || hostname[0] == '\0')
         return _EINVAL;
     if (!socket_prefix_fits(socket_prefix))
         return _ENAMETOOLONG;
@@ -270,15 +272,22 @@ int ish_watch_runtime_start(
     char *owned_socket_prefix = strdup(socket_prefix);
     if (owned_socket_prefix == NULL)
         return runtime_fail(_ENOMEM);
+    char *owned_hostname = strdup(hostname);
+    if (owned_hostname == NULL) {
+        free(owned_socket_prefix);
+        return runtime_fail(_ENOMEM);
+    }
 
     error = mount_root(&fakefs, root_data);
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail(error);
     }
 
     error = become_first_process();
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail(error);
     }
@@ -292,11 +301,13 @@ int ish_watch_runtime_start(
 
     error = do_mount(&procfs, "proc", "/proc", "", 0);
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
     error = do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
@@ -311,6 +322,7 @@ int ish_watch_runtime_start(
     error = create_stdio(
             "/dev/console", TTY_CONSOLE_MAJOR, WATCH_CONSOLE_NUMBER);
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
@@ -321,10 +333,13 @@ int ish_watch_runtime_start(
     error = do_execve(
             "/bin/login", 3, login_arguments, environment);
     if (error < 0) {
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
 
+    extern const char *uname_hostname_override;
+    uname_hostname_override = owned_hostname;
     sock_tmp_prefix = owned_socket_prefix;
     expected = ISH_WATCH_RUNTIME_PREPARING;
     if (!atomic_compare_exchange_strong_explicit(

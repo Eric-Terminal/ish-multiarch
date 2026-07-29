@@ -18,7 +18,8 @@ enum ish_watch_runtime_phase {
 int ish_watch_runtime_start(
         const char *seed_root,
         const char *persistent_parent,
-        const char *socket_prefix);
+        const char *socket_prefix,
+        const char *hostname);
 
 int ish_watch_runtime_current_phase(void);
 int ish_watch_runtime_last_error(void);

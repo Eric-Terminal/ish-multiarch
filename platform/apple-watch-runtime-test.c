@@ -106,35 +106,44 @@ int main(void) {
             "拒绝零行窗口尺寸");
 
     CHECK(ish_watch_runtime_start(
-            NULL, "/tmp", "/tmp/ishsock") == _EINVAL,
+            NULL, "/tmp", "/tmp/ishsock", "Watch") == _EINVAL,
             "拒绝缺失 seed 路径");
     check_idle("缺失 seed 路径不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "", "/tmp", "/tmp/ishsock") == _EINVAL,
+            "", "/tmp", "/tmp/ishsock", "Watch") == _EINVAL,
             "拒绝空 seed 路径");
     check_idle("空 seed 路径不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", NULL, "/tmp/ishsock") == _EINVAL,
+            "/tmp", NULL, "/tmp/ishsock", "Watch") == _EINVAL,
             "拒绝缺失持久化目录");
     check_idle("缺失持久化目录不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "", "/tmp/ishsock") == _EINVAL,
+            "/tmp", "", "/tmp/ishsock", "Watch") == _EINVAL,
             "拒绝空持久化目录");
     check_idle("空持久化目录不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp", NULL) == _EINVAL,
+            "/tmp", "/tmp", NULL, "Watch") == _EINVAL,
             "拒绝缺失 socket 前缀");
     check_idle("缺失 socket 前缀不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp", "") == _EINVAL,
+            "/tmp", "/tmp", "", "Watch") == _EINVAL,
             "拒绝空 socket 前缀");
     check_idle("空 socket 前缀不消耗一次性启动机会");
+    CHECK(ish_watch_runtime_start(
+            "/tmp", "/tmp", "/tmp/ishsock", NULL) == _EINVAL,
+            "拒绝缺失 hostname");
+    check_idle("缺失 hostname 不消耗一次性启动机会");
+    CHECK(ish_watch_runtime_start(
+            "/tmp", "/tmp", "/tmp/ishsock", "") == _EINVAL,
+            "拒绝空 hostname");
+    check_idle("空 hostname 不消耗一次性启动机会");
 
     char long_socket_prefix[256];
     memset(long_socket_prefix, 's', sizeof(long_socket_prefix) - 1);
     long_socket_prefix[sizeof(long_socket_prefix) - 1] = '\0';
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp", long_socket_prefix) == _ENAMETOOLONG,
+            "/tmp", "/tmp", long_socket_prefix, "Watch") ==
+            _ENAMETOOLONG,
             "拒绝无法放入 sockaddr_un 的 socket 前缀");
     check_idle("过长 socket 前缀不消耗一次性启动机会");
 
@@ -144,7 +153,7 @@ int main(void) {
     memset(long_parent, 'p', sizeof(long_parent) - 1);
     long_parent[sizeof(long_parent) - 1] = '\0';
     int start_error = ish_watch_runtime_start(
-            "/dev/null", long_parent, "/tmp/ishsock");
+            "/dev/null", long_parent, "/tmp/ishsock", "Watch");
     CHECK(start_error == _ENAMETOOLONG,
             "rootfs 宿主错误应映射为负 Linux errno");
     CHECK(ish_watch_runtime_current_phase() == ISH_WATCH_RUNTIME_FAILED,
@@ -152,7 +161,7 @@ int main(void) {
     CHECK(ish_watch_runtime_last_error() == start_error,
             "失败态应保留公共 API 返回的同一错误");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp", "/tmp/ishsock") == _EALREADY,
+            "/tmp", "/tmp", "/tmp/ishsock", "Watch") == _EALREADY,
             "失败后拒绝第二次启动全局 guest");
 
     if (failures == 0)
