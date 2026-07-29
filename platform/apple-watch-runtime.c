@@ -20,7 +20,6 @@
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "platform/apple-resolver.h"
-#include "platform/apple-rootfs-seed.h"
 
 #define WATCH_OUTPUT_CAPACITY (64 * 1024)
 #define WATCH_CONSOLE_NUMBER 1
@@ -237,37 +236,26 @@ static bool socket_prefix_fits(const char *socket_prefix) {
 }
 
 int ish_watch_runtime_start(
-        const char *seed_root,
-        const char *persistent_parent,
+        const char *root_data,
         const char *socket_prefix,
-        const char *hostname) {
-    if (seed_root == NULL || seed_root[0] == '\0' ||
-            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+        const char *hostname,
+        const char *launch_command) {
+    if (root_data == NULL || root_data[0] == '\0' ||
             socket_prefix == NULL || socket_prefix[0] == '\0' ||
-            hostname == NULL || hostname[0] == '\0')
+            hostname == NULL || hostname[0] == '\0' ||
+            launch_command == NULL || launch_command[0] == '\0')
         return _EINVAL;
     if (!socket_prefix_fits(socket_prefix))
         return _ENAMETOOLONG;
+    size_t command_length = strlen(launch_command);
+    if (command_length >= 4096)
+        return _E2BIG;
 
     int expected = ISH_WATCH_RUNTIME_IDLE;
     if (!atomic_compare_exchange_strong_explicit(
             &runtime_phase, &expected, ISH_WATCH_RUNTIME_PREPARING,
             memory_order_acq_rel, memory_order_acquire))
         return _EALREADY;
-
-    enum ish_apple_rootfs_seed_result install_result;
-    int error = ish_apple_rootfs_seed_install(
-            seed_root, persistent_parent, "aarch64", &install_result);
-    if (error != 0)
-        return runtime_fail(err_map(error));
-    (void) install_result;
-
-    char root_data[PATH_MAX];
-    int root_length = snprintf(
-            root_data, sizeof(root_data), "%s/aarch64/data",
-            persistent_parent);
-    if (root_length < 0 || (size_t) root_length >= sizeof(root_data))
-        return runtime_fail(_ENAMETOOLONG);
 
     char *owned_socket_prefix = strdup(socket_prefix);
     if (owned_socket_prefix == NULL)
@@ -278,7 +266,7 @@ int ish_watch_runtime_start(
         return runtime_fail(_ENOMEM);
     }
 
-    error = mount_root(&fakefs, root_data);
+    int error = mount_root(&fakefs, root_data);
     if (error < 0) {
         free(owned_hostname);
         free(owned_socket_prefix);
@@ -327,11 +315,27 @@ int ish_watch_runtime_start(
         return runtime_fail_after_task(error);
     }
 
-    static const char login_arguments[] =
-            "/bin/login\0-f\0root\0";
+    static const char shell_path[] = "/bin/sh";
+    static const char shell_option[] = "-c";
+    size_t arguments_length = sizeof(shell_path) +
+            sizeof(shell_option) + command_length + 1;
+    char *arguments = malloc(arguments_length);
+    if (arguments == NULL) {
+        free(owned_hostname);
+        free(owned_socket_prefix);
+        return runtime_fail_after_task(_ENOMEM);
+    }
+    char *argument = arguments;
+    memcpy(argument, shell_path, sizeof(shell_path));
+    argument += sizeof(shell_path);
+    memcpy(argument, shell_option, sizeof(shell_option));
+    argument += sizeof(shell_option);
+    memcpy(argument, launch_command, command_length + 1);
+
     static const char environment[] = "TERM=xterm-256color\0";
     error = do_execve(
-            "/bin/login", 3, login_arguments, environment);
+            shell_path, 3, arguments, environment);
+    free(arguments);
     if (error < 0) {
         free(owned_hostname);
         free(owned_socket_prefix);

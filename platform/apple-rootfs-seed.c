@@ -18,6 +18,7 @@
 #include <sqlite3.h>
 
 #include "fs/fake-db.h"
+#include "platform/apple-rootfs-storage-private.h"
 
 #ifndef __APPLE__
 #error "Apple rootfs seed 安装器只能构建到 Apple 平台"
@@ -97,6 +98,10 @@ static int sync_directory(int directory) {
     if (errno == EINVAL || errno == ENOTSUP)
         return 0;
     return errno_or_io();
+}
+
+int ish_apple_rootfs_sync_directory(int directory) {
+    return sync_directory(directory);
 }
 
 static int sync_directory_phase(int directory, int phase) {
@@ -311,6 +316,10 @@ static int remove_entry_at(int parent, const char *name, unsigned depth) {
     if (error == 0 && unlinkat(parent, name, AT_REMOVEDIR) < 0)
         error = errno_or_io();
     return error;
+}
+
+int ish_apple_rootfs_remove_entry_at(int parent, const char *name) {
+    return remove_entry_at(parent, name, 0);
 }
 
 static int copy_regular_at(

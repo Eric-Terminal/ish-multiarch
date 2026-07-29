@@ -146,6 +146,88 @@ final class iSHWatchUITests: XCTestCase {
             "关闭设置后没有返回终端")
     }
 
+    func test设置包含显示启动文件系统与运行信息() throws {
+        let app = XCUIApplication()
+        recoveryApp = app
+        app.launch()
+
+        openSettings(in: app)
+        openSettingsPage(
+            "watch-display-settings-link",
+            page: "watch-display-settings-view",
+            in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                "watch-color-scheme-picker"].exists,
+            "终端显示页缺少配色设置")
+
+        reopenSettings(in: app)
+        openSettingsPage(
+            "watch-startup-settings-link",
+            page: "watch-startup-settings-view",
+            in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                "watch-custom-hostname-toggle"].exists,
+            "启动页缺少自定义主机名开关")
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                "watch-next-hostname-value"].exists,
+            "启动页缺少下次启动主机名预览")
+        let launchCommand = app.descendants(matching: .any)[
+            "watch-launch-command-input"]
+        scrollToElement(launchCommand, in: app)
+        XCTAssertTrue(launchCommand.exists, "启动页缺少启动命令入口")
+
+        reopenSettings(in: app)
+        openSettingsPage(
+            "watch-filesystems-link",
+            page: "watch-filesystems-view",
+            in: app)
+        let root = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "watch-filesystem-")).firstMatch
+        XCTAssertTrue(
+            root.waitForExistence(timeout: 180),
+            "文件系统页没有显示本次启动使用的 Linux 环境")
+        let currentRootMarker = app.descendants(
+            matching: .any
+        ).matching(
+            NSPredicate(
+                format: "identifier IN %@",
+                [
+                    "watch-active-filesystem",
+                    "watch-claimed-filesystem",
+                ])
+        ).firstMatch
+        XCTAssertTrue(
+            currentRootMarker.waitForExistence(timeout: 180),
+            "文件系统页没有标记本次启动使用的环境")
+        let createRoot = app.buttons["create-watch-filesystem"]
+        scrollToElement(createRoot, in: app)
+        XCTAssertTrue(createRoot.exists, "文件系统页缺少新建环境入口")
+
+        reopenSettings(in: app)
+        openSettingsPage(
+            "watch-runtime-details-link",
+            page: "watch-runtime-details-view",
+            in: app)
+
+        reopenSettings(in: app)
+        openSettingsPage(
+            "watch-about-link",
+            page: "watch-about-view",
+            in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["watch-about-guest"].exists,
+            "关于页缺少 Guest 架构")
+        let hostPointer = app.descendants(matching: .any)[
+            "watch-about-host-pointer"]
+        scrollToElement(hostPointer, in: app)
+        XCTAssertTrue(hostPointer.exists, "关于页缺少宿主 ABI 信息")
+    }
+
     func testAArch64终端命令与快捷键() throws {
         let app = XCUIApplication()
         recoveryApp = app
@@ -999,6 +1081,49 @@ final class iSHWatchUITests: XCTestCase {
             input: input,
             send: send,
             terminal: terminal)
+    }
+
+    private func openSettings(in app: XCUIApplication) {
+        let settings = app.buttons.matching(
+            identifier: "watch-settings-button").firstMatch
+        XCTAssertTrue(
+            settings.waitForExistence(timeout: 30),
+            "Watch 设置入口没有出现")
+        settings.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                "watch-settings-view"].waitForExistence(timeout: 10),
+            "Watch 设置页没有打开")
+    }
+
+    private func reopenSettings(in app: XCUIApplication) {
+        app.terminate()
+        app.launch()
+        openSettings(in: app)
+    }
+
+    private func openSettingsPage(
+        _ linkIdentifier: String,
+        page pageIdentifier: String,
+        in app: XCUIApplication
+    ) {
+        let link = app.buttons[linkIdentifier]
+        scrollToElement(link, in: app)
+        XCTAssertTrue(link.exists, "设置页缺少入口 \(linkIdentifier)")
+        link.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                pageIdentifier].waitForExistence(timeout: 10),
+            "设置子页没有打开：\(pageIdentifier)")
+    }
+
+    private func scrollToElement(
+        _ element: XCUIElement,
+        in app: XCUIApplication
+    ) {
+        for _ in 0..<6 where !element.isHittable {
+            app.swipeUp()
+        }
     }
 
     private func commandInput(in app: XCUIApplication) -> XCUIElement {

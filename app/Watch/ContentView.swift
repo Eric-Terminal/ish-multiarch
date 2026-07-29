@@ -11,6 +11,8 @@ struct ContentView: View {
     @ObservedObject var runtime: WatchRuntime
     @AppStorage("watchTerminalFontSize")
     private var terminalFontSize = 11.0
+    @AppStorage(WatchPreferenceKeys.colorScheme)
+    private var colorSchemePreference = "system"
     @State private var command = ""
     @State private var earliestVisibleLineID: UInt64?
     @State private var latestVisibleLineID: UInt64?
@@ -100,6 +102,7 @@ struct ContentView: View {
             bottomVisibilityWorkItem?.cancel()
             bottomVisibilityWorkItem = nil
         }
+        .preferredColorScheme(preferredColorScheme)
     }
 
     private var visibleLines: [TerminalLine] {
@@ -165,6 +168,17 @@ struct ContentView: View {
             return .red
         }
         return .secondary
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch colorSchemePreference {
+        case "light":
+            return .light
+        case "dark":
+            return .dark
+        default:
+            return nil
+        }
     }
 
     private func terminalTextBlock(

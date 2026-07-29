@@ -4,7 +4,10 @@ import WatchKit
 
 @MainActor
 final class WatchRuntime: ObservableObject {
+    let automaticHostname: String
     let hostname: String
+    let launchCommand: String
+    let rootStore: WatchRootStore
     @Published private(set) var output = ""
     @Published private(set) var outputLines: [TerminalLine] = []
     @Published private(set) var status = "准备中"
@@ -20,26 +23,17 @@ final class WatchRuntime: ObservableObject {
     }
 
     private struct RuntimePaths: Sendable {
-        let seed: String
-        let persistentParent: String
+        let rootData: String
         let socketPrefix: String
         let hostname: String
+        let launchCommand: String
     }
 
     private enum SetupError: LocalizedError {
-        case missingSeed
-        case missingApplicationSupport
-        case cannotCreateRoot(String)
         case socketPrefixTooLong
 
         var errorDescription: String? {
             switch self {
-            case .missingSeed:
-                return "App 中缺少 AArch64 Linux 种子"
-            case .missingApplicationSupport:
-                return "无法取得应用支持目录"
-            case let .cannotCreateRoot(message):
-                return "无法创建 Linux 数据目录：\(message)"
             case .socketPrefixTooLong:
                 return "应用临时目录过长，无法创建本地 socket"
             }
@@ -54,10 +48,22 @@ final class WatchRuntime: ObservableObject {
     private var setupFailure: String?
     private var inputFailure: String?
 
-    init() {
+    init(rootStore: WatchRootStore = WatchRootStore()) {
+        self.rootStore = rootStore
+        let defaults = UserDefaults.standard
         let deviceName = WKInterfaceDevice.current().name
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        hostname = deviceName.isEmpty ? "iSH" : deviceName
+        automaticHostname = WatchPreferences.hostname(
+            deviceName: deviceName,
+            usesCustomHostname: false,
+            customHostname: "")
+        hostname = WatchPreferences.hostname(
+            deviceName: deviceName,
+            usesCustomHostname: defaults.bool(
+                forKey: WatchPreferenceKeys.customHostnameEnabled),
+            customHostname: defaults.string(
+                forKey: WatchPreferenceKeys.customHostname) ?? "")
+        launchCommand = WatchPreferences.launchCommand(
+            defaults.string(forKey: WatchPreferenceKeys.launchCommand))
     }
 
     func run() async {
@@ -105,50 +111,34 @@ final class WatchRuntime: ObservableObject {
         started = true
         status = "准备 Linux"
 
-        let paths: RuntimePaths
-        do {
-            paths = try preparePaths()
-        } catch {
-            setupFailure = error.localizedDescription
-            status = setupFailure ?? "准备 Linux 失败"
-            return
-        }
-
         startTask = Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                Self.startRuntime(paths)
-            }.value
             guard let self else { return }
-            if result < 0 {
+            do {
+                let root = try await self.rootStore.prepareForLaunch()
+                let paths = try self.preparePaths(rootData: root.dataPath)
+                let result = await Task.detached(priority: .userInitiated) {
+                    Self.startRuntime(paths)
+                }.value
+                if result < 0 {
+                    self.publish(
+                        status: Self.errorMessage(
+                            prefix: "启动失败", code: result),
+                        acceptsInput: false)
+                } else {
+                    self.rootStore.activate(root.name)
+                    self.status = "等待终端"
+                    _ = self.poll()
+                }
+            } catch {
+                self.setupFailure = error.localizedDescription
                 self.publish(
-                    status: Self.errorMessage(prefix: "启动失败", code: result),
+                    status: self.setupFailure ?? "准备 Linux 失败",
                     acceptsInput: false)
-            } else {
-                self.status = "等待终端"
-                _ = self.poll()
             }
         }
     }
 
-    private func preparePaths() throws -> RuntimePaths {
-        guard let seed = Bundle.main.url(
-                forResource: "AArch64Rootfs", withExtension: "seed") else {
-            throw SetupError.missingSeed
-        }
-        guard let applicationSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask).first else {
-            throw SetupError.missingApplicationSupport
-        }
-        let roots = applicationSupport.appendingPathComponent(
-            "LinuxRoots", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(
-                at: roots, withIntermediateDirectories: true)
-        } catch {
-            throw SetupError.cannotCreateRoot(error.localizedDescription)
-        }
-
+    private func preparePaths(rootData: String) throws -> RuntimePaths {
         // 真机去掉等价的 /private 前缀，使容器内绝对路径落入 Darwin sun_path 上限。
         let socketPrefix: String
 #if targetEnvironment(simulator)
@@ -165,23 +155,23 @@ final class WatchRuntime: ObservableObject {
             throw SetupError.socketPrefixTooLong
         }
         return RuntimePaths(
-            seed: seed.path,
-            persistentParent: roots.path,
+            rootData: rootData,
             socketPrefix: socketPrefix,
-            hostname: hostname)
+            hostname: hostname,
+            launchCommand: launchCommand)
     }
 
     nonisolated private static func startRuntime(
             _ paths: RuntimePaths) -> Int32 {
-        paths.seed.withCString { seed in
-            paths.persistentParent.withCString { persistentParent in
-                paths.socketPrefix.withCString { socketPrefix in
-                    paths.hostname.withCString { hostname in
+        paths.rootData.withCString { rootData in
+            paths.socketPrefix.withCString { socketPrefix in
+                paths.hostname.withCString { hostname in
+                    paths.launchCommand.withCString { launchCommand in
                         ish_watch_runtime_start(
-                            seed,
-                            persistentParent,
+                            rootData,
                             socketPrefix,
-                            hostname)
+                            hostname,
+                            launchCommand)
                     }
                 }
             }

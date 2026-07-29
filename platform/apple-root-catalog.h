@@ -7,6 +7,7 @@
 #include "platform/apple-rootfs-seed.h"
 
 #define ISH_APPLE_ROOT_NAME_CAPACITY 64
+#define ISH_APPLE_ROOT_PATH_CAPACITY 1024
 
 struct ish_apple_root_entry {
     char name[ISH_APPLE_ROOT_NAME_CAPACITY];
@@ -46,6 +47,16 @@ int ish_apple_root_catalog_create(
         const char *seed_root,
         const char *persistent_parent,
         char name[ISH_APPLE_ROOT_NAME_CAPACITY]);
+
+/*
+ * 先在同一父目录原子隐藏，再安全递归删除；中断后会在后续目录操作中续清理。
+ * active_name 与 selected_name 用于保护本次运行和下次启动使用的 root。
+ */
+int ish_apple_root_catalog_delete(
+        const char *persistent_parent,
+        const char *name,
+        const char *active_name,
+        const char *selected_name);
 
 // 根据父目录和已校验名称生成 fakefs data 路径。
 int ish_apple_root_catalog_data_path(

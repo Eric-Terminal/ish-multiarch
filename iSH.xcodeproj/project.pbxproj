@@ -39,6 +39,8 @@
 		A1D000000000000000000017 /* WatchRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000012 /* WatchRuntime.swift */; };
 		A1D000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB792B5C1F96D90D00FFB7A4 /* Assets.xcassets */; };
 		A1D00000000000000000001B /* WatchSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001A /* WatchSettingsView.swift */; };
+		A1D00000000000000000001D /* WatchRootStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001C /* WatchRootStore.swift */; };
+		A1D00000000000000000001F /* WatchPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001E /* WatchPreferences.swift */; };
 		A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000000F /* iSHWatchUITests.swift */; };
 		A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
 		A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
@@ -500,6 +502,8 @@
 		A1D000000000000000000012 /* WatchRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntime.swift; sourceTree = "<group>"; };
 		A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "iSHWatch-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1D00000000000000000001A /* WatchSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSettingsView.swift; sourceTree = "<group>"; };
+		A1D00000000000000000001C /* WatchRootStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootStore.swift; sourceTree = "<group>"; };
+		A1D00000000000000000001E /* WatchPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPreferences.swift; sourceTree = "<group>"; };
 		A1E000000000000000000002 /* iSHWatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iSHWatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1E00000000000000000000E /* WatchUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchUITests.xcconfig; sourceTree = "<group>"; };
 		A1E00000000000000000000F /* iSHWatchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iSHWatchUITests.swift; sourceTree = "<group>"; };
@@ -933,6 +937,8 @@
 				A1F000000000000000000007 /* ThirdPartyNoticesView.swift */,
 				A1D000000000000000000011 /* TerminalDecoder.swift */,
 				A1D000000000000000000012 /* WatchRuntime.swift */,
+				A1D00000000000000000001C /* WatchRootStore.swift */,
+				A1D00000000000000000001E /* WatchPreferences.swift */,
 				A1D00000000000000000001A /* WatchSettingsView.swift */,
 				A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */,
 			);
@@ -2397,6 +2403,8 @@
 				A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */,
 				A1D000000000000000000016 /* TerminalDecoder.swift in Sources */,
 				A1D000000000000000000017 /* WatchRuntime.swift in Sources */,
+				A1D00000000000000000001D /* WatchRootStore.swift in Sources */,
+				A1D00000000000000000001F /* WatchPreferences.swift in Sources */,
 				A1D00000000000000000001B /* WatchSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

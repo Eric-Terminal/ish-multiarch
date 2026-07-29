@@ -62,6 +62,11 @@ struct child_report {
     int result;
 };
 
+struct catalog_child_report {
+    int error;
+    char name[ISH_APPLE_ROOT_NAME_CAPACITY];
+};
+
 static int format_path(char output[PATH_MAX], const char *format, ...) {
     va_list arguments;
     va_start(arguments, format);
@@ -1583,6 +1588,60 @@ static pid_t spawn_install_child(
     _exit(122);
 }
 
+static int run_catalog_create_child(int argc, char **argv) {
+    if (argc != 6)
+        return 123;
+    int start_file;
+    int report_file;
+    if (parse_file_descriptor(argv[4], &start_file) < 0 ||
+            parse_file_descriptor(argv[5], &report_file) < 0)
+        return 123;
+    unsigned char token;
+    if (read_all(start_file, &token, 1) < 0)
+        return 124;
+    close(start_file);
+    struct catalog_child_report report = {0};
+    report.error = ish_apple_root_catalog_create(
+            argv[2], argv[3], report.name);
+    int write_result = write_all(
+            report_file, &report, sizeof(report));
+    close(report_file);
+    return write_result == 0 ? 0 : 125;
+}
+
+static pid_t spawn_catalog_create_child(
+        const struct fixture *fixture, int start_pipe[2],
+        int report_pipe[2]) {
+    char start_file[32];
+    char report_file[32];
+    int start_length = snprintf(start_file, sizeof(start_file),
+            "%d", start_pipe[0]);
+    int report_length = snprintf(report_file, sizeof(report_file),
+            "%d", report_pipe[1]);
+    if (start_length < 0 || (size_t) start_length >= sizeof(start_file) ||
+            report_length < 0 ||
+            (size_t) report_length >= sizeof(report_file)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    char *const arguments[] = {
+        executable_path,
+        "--catalog-create-child",
+        (char *) fixture->seed,
+        (char *) fixture->persistent,
+        start_file,
+        report_file,
+        NULL,
+    };
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    close(start_pipe[1]);
+    close(report_pipe[0]);
+    execv(executable_path, arguments);
+    _exit(126);
+}
+
 static int test_concurrent_install(const char *workspace) {
     struct fixture fixture;
     CHECK(create_fixture(workspace, "concurrent", 2, &fixture) == 0,
@@ -1648,8 +1707,12 @@ static int test_root_catalog(const char *workspace) {
                     ".aarch64-2.installing.owner") &&
             ish_apple_root_catalog_is_private_name(
                     ".aarch64.installing.0123456789abcdef0123456789abcdef") &&
+            ish_apple_root_catalog_is_private_name(
+                    ".aarch64-2.deleting.0123456789abcdef0123456789abcdef") &&
             !ish_apple_root_catalog_is_private_name(
-                    ".aarch64.installing.not-a-token"),
+                    ".aarch64.installing.not-a-token") &&
+            !ish_apple_root_catalog_is_private_name(
+                    ".aarch64.deleting.not-a-token"),
             "安装事务私有名称边界");
 
     struct fixture fixture;
@@ -1701,12 +1764,93 @@ static int test_root_catalog(const char *workspace) {
                     fixture.persistent) == 0 &&
             strcmp(data_path, expected_path) == 0,
             "catalog 生成选中 root 数据路径");
+
+    CHECK(ish_apple_root_catalog_delete(
+                    fixture.persistent, "aarch64-2",
+                    "aarch64-2", "aarch64-2") == EBUSY,
+            "catalog 拒绝删除当前或已选 root");
+    CHECK(ish_apple_root_catalog_delete(
+                    fixture.persistent, "aarch64",
+                    "aarch64-2", "aarch64-2") == 0 &&
+            format_path(expected_path, "%s/aarch64",
+                    fixture.persistent) == 0 &&
+            access(expected_path, F_OK) < 0 && errno == ENOENT,
+            "catalog 原子删除未受保护的 root");
+
+    CHECK(ish_apple_root_catalog_create(
+                    fixture.seed, fixture.persistent, created) == 0 &&
+            strcmp(created, "aarch64") == 0,
+            "删除后可重用最低托管名称");
+    char tombstone[PATH_MAX];
+    char root_path[PATH_MAX];
+    CHECK(format_path(root_path, "%s/aarch64",
+                    fixture.persistent) == 0 &&
+            format_path(tombstone,
+                    "%s/.aarch64.deleting."
+                    "0123456789abcdef0123456789abcdef",
+                    fixture.persistent) == 0 &&
+            rename(root_path, tombstone) == 0,
+            "创建中断删除墓碑");
+    count = 0;
+    CHECK(ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    NULL, 0, &count) == ERANGE &&
+            count == 1 &&
+            access(tombstone, F_OK) < 0 && errno == ENOENT,
+            "catalog 枚举会续清理中断删除墓碑");
+    return 0;
+}
+
+static int test_concurrent_catalog_create(const char *workspace) {
+    struct fixture fixture;
+    CHECK(create_fixture(
+                    workspace, "concurrent-catalog", 0, &fixture) == 0,
+            "创建并发 catalog 夹具");
+    int start_pipe[2];
+    int report_pipe[2];
+    CHECK(pipe(start_pipe) == 0 && pipe(report_pipe) == 0,
+            "创建并发 catalog 同步管道");
+    pid_t first = spawn_catalog_create_child(
+            &fixture, start_pipe, report_pipe);
+    CHECK(first > 0, "创建第一个 catalog 子进程");
+    pid_t second = spawn_catalog_create_child(
+            &fixture, start_pipe, report_pipe);
+    CHECK(second > 0, "创建第二个 catalog 子进程");
+    close(start_pipe[0]);
+    close(report_pipe[1]);
+    unsigned char tokens[2] = {1, 1};
+    CHECK(write_all(start_pipe[1], tokens, sizeof(tokens)) == 0,
+            "同时释放两个 catalog 子进程");
+    close(start_pipe[1]);
+    struct catalog_child_report reports[2];
+    CHECK(read_all(report_pipe[0], reports, sizeof(reports)) == 0,
+            "收集并发 catalog 结果");
+    close(report_pipe[0]);
+    int first_status;
+    int second_status;
+    CHECK(waitpid(first, &first_status, 0) == first &&
+            waitpid(second, &second_status, 0) == second &&
+            WIFEXITED(first_status) && WEXITSTATUS(first_status) == 0 &&
+            WIFEXITED(second_status) && WEXITSTATUS(second_status) == 0,
+            "并发 catalog 子进程正常退出");
+    CHECK(reports[0].error == 0 && reports[1].error == 0,
+            "并发 catalog 创建都应成功");
+    CHECK(strcmp(reports[0].name, reports[1].name) != 0,
+            "并发 catalog 创建必须返回不同 root");
+    size_t count = 0;
+    CHECK(ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    NULL, 0, &count) == ERANGE && count == 2,
+            "并发 catalog 最终发布两个托管 root");
     return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--install-child") == 0)
         return run_install_child(argc, argv);
+    if (argc >= 2 &&
+            strcmp(argv[1], "--catalog-create-child") == 0)
+        return run_catalog_create_child(argc, argv);
     uint32_t executable_capacity = (uint32_t) sizeof(executable_path);
     if (_NSGetExecutablePath(executable_path, &executable_capacity) != 0) {
         fprintf(stderr, "无法取得 Apple rootfs seed 测试程序路径\n");
@@ -1746,6 +1890,8 @@ int main(int argc, char **argv) {
         status = test_concurrent_install(workspace);
     if (status == 0)
         status = test_root_catalog(workspace);
+    if (status == 0)
+        status = test_concurrent_catalog_create(workspace);
     if (status != 0 && getenv("ISH_KEEP_ROOTFS_SEED_TEST_TEMP") != NULL) {
         fprintf(stderr, "保留失败现场：%s\n", workspace);
         return status;

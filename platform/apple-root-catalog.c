@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdint.h>
@@ -9,6 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include "platform/apple-rootfs-storage-private.h"
+
+#define DELETION_TOKEN_BYTES 16
+#define DELETION_TOKEN_HEX_LENGTH (DELETION_TOKEN_BYTES * 2)
 
 struct root_candidate {
     uint64_t index;
@@ -62,11 +69,43 @@ static bool has_private_suffix(const char *name, const char *suffix) {
     return ish_apple_root_catalog_is_managed_name(root_name);
 }
 
+static bool has_hexadecimal_token(const char *value, size_t length) {
+    if (strlen(value) != length)
+        return false;
+    for (const char *cursor = value; *cursor != '\0'; cursor++) {
+        if (!((*cursor >= '0' && *cursor <= '9') ||
+                (*cursor >= 'a' && *cursor <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+static bool is_deletion_name(const char *name) {
+    static const char marker[] = ".deleting.";
+    if (name == NULL || name[0] != '.')
+        return false;
+    const char *marker_position = strstr(name + 1, marker);
+    if (marker_position == NULL || marker_position == name + 1 ||
+            !has_hexadecimal_token(
+                marker_position + sizeof(marker) - 1,
+                DELETION_TOKEN_HEX_LENGTH))
+        return false;
+
+    char root_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+    size_t root_length = (size_t) (marker_position - (name + 1));
+    if (root_length >= sizeof(root_name))
+        return false;
+    memcpy(root_name, name + 1, root_length);
+    root_name[root_length] = '\0';
+    return ish_apple_root_catalog_is_managed_name(root_name);
+}
+
 bool ish_apple_root_catalog_is_private_name(const char *name) {
     if (name == NULL || name[0] != '.')
         return false;
     if (has_private_suffix(name, ".install.lock") ||
-            has_private_suffix(name, ".installing.owner"))
+            has_private_suffix(name, ".installing.owner") ||
+            is_deletion_name(name))
         return true;
 
     static const char marker[] = ".installing.";
@@ -84,13 +123,42 @@ bool ish_apple_root_catalog_is_private_name(const char *name) {
     if (!ish_apple_root_catalog_is_managed_name(root_name))
         return false;
 
-    for (const char *cursor = marker_position + sizeof(marker) - 1;
-            *cursor != '\0'; cursor++) {
-        if (!((*cursor >= '0' && *cursor <= '9') ||
-                (*cursor >= 'a' && *cursor <= 'f')))
-            return false;
+    return has_hexadecimal_token(
+            marker_position + sizeof(marker) - 1,
+            DELETION_TOKEN_HEX_LENGTH);
+}
+
+static int open_parent_directory(const char *persistent_parent) {
+    int directory = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    return directory < 0 ? -errno : directory;
+}
+
+static void cleanup_deletions(const char *persistent_parent) {
+    int parent = open_parent_directory(persistent_parent);
+    if (parent < 0)
+        return;
+    int iterator_file = dup(parent);
+    if (iterator_file < 0) {
+        close(parent);
+        return;
     }
-    return true;
+    DIR *iterator = fdopendir(iterator_file);
+    if (iterator == NULL) {
+        close(iterator_file);
+        close(parent);
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(iterator)) != NULL) {
+        if (is_deletion_name(entry->d_name))
+            (void) ish_apple_rootfs_remove_entry_at(
+                    parent, entry->d_name);
+    }
+    (void) ish_apple_rootfs_sync_directory(parent);
+    closedir(iterator);
+    close(parent);
 }
 
 static int compare_candidates(const void *left, const void *right) {
@@ -218,6 +286,7 @@ int ish_apple_root_catalog_list(
             count == NULL || (entries == NULL && capacity != 0))
         return EINVAL;
 
+    cleanup_deletions(persistent_parent);
     struct root_candidate *candidates;
     size_t candidate_count;
     int error = collect_candidates(
@@ -275,6 +344,12 @@ static int install_new_candidate(
                 return ENOSPC;
             continue;
         }
+        if (error == 0 &&
+                *result == ISH_APPLE_ROOTFS_SEED_ALREADY_PRESENT) {
+            if (index == UINT64_MAX)
+                return ENOSPC;
+            continue;
+        }
         return error;
     }
 }
@@ -290,6 +365,7 @@ int ish_apple_root_catalog_prepare(
             active_name == NULL || result == NULL)
         return EINVAL;
 
+    cleanup_deletions(persistent_parent);
     if (preferred_name != NULL &&
             ish_apple_root_catalog_is_managed_name(preferred_name)) {
         int error = ish_apple_rootfs_seed_install(
@@ -340,9 +416,56 @@ int ish_apple_root_catalog_create(
             persistent_parent == NULL || persistent_parent[0] == '\0' ||
             name == NULL)
         return EINVAL;
+    cleanup_deletions(persistent_parent);
     enum ish_apple_rootfs_seed_result result;
     return install_new_candidate(
             seed_root, persistent_parent, name, &result);
+}
+
+int ish_apple_root_catalog_delete(
+        const char *persistent_parent,
+        const char *name,
+        const char *active_name,
+        const char *selected_name) {
+    if (persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !ish_apple_root_catalog_is_managed_name(name))
+        return EINVAL;
+    if ((active_name != NULL && strcmp(name, active_name) == 0) ||
+            (selected_name != NULL && strcmp(name, selected_name) == 0))
+        return EBUSY;
+
+    int parent = open_parent_directory(persistent_parent);
+    if (parent < 0)
+        return -parent;
+
+    unsigned char random[DELETION_TOKEN_BYTES];
+    arc4random_buf(random, sizeof(random));
+    static const char hexadecimal[] = "0123456789abcdef";
+    char token[DELETION_TOKEN_HEX_LENGTH + 1];
+    for (size_t index = 0; index < sizeof(random); index++) {
+        token[index * 2] = hexadecimal[random[index] >> 4u];
+        token[index * 2 + 1] = hexadecimal[random[index] & 0x0fu];
+    }
+    token[DELETION_TOKEN_HEX_LENGTH] = '\0';
+
+    char tombstone[NAME_MAX + 1];
+    int length = snprintf(tombstone, sizeof(tombstone),
+            ".%s.deleting.%s", name, token);
+    int error = 0;
+    if (length < 0 || (size_t) length >= sizeof(tombstone))
+        error = ENAMETOOLONG;
+    else if (renameat(parent, name, parent, tombstone) < 0)
+        error = errno;
+    else
+        error = ish_apple_rootfs_sync_directory(parent);
+
+    if (error == 0) {
+        (void) ish_apple_rootfs_remove_entry_at(parent, tombstone);
+        (void) ish_apple_rootfs_sync_directory(parent);
+    }
+    if (close(parent) < 0 && error == 0)
+        error = errno;
+    return error;
 }
 
 int ish_apple_root_catalog_data_path(

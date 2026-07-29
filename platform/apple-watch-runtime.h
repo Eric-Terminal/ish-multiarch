@@ -14,12 +14,12 @@ enum ish_watch_runtime_phase {
     ISH_WATCH_RUNTIME_FAILED = 4,
 };
 
-// 路径均属于宿主文件系统。成功返回 0，失败返回负 Linux errno。
+// root_data 与 socket_prefix 属于宿主文件系统。成功返回 0，失败返回负 Linux errno。
 int ish_watch_runtime_start(
-        const char *seed_root,
-        const char *persistent_parent,
+        const char *root_data,
         const char *socket_prefix,
-        const char *hostname);
+        const char *hostname,
+        const char *launch_command);
 
 int ish_watch_runtime_current_phase(void);
 int ish_watch_runtime_last_error(void);

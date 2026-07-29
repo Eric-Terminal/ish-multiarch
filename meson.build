@@ -185,6 +185,8 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
     apple_watch_decoder_test_shell = find_program('bash')
     test('apple_watch_terminal_decoder', apple_watch_decoder_test_shell,
         args: files('tools/apple-watch-terminal-decoder-test.sh'))
+    test('apple_watch_preferences', apple_watch_decoder_test_shell,
+        args: files('tools/apple-watch-preferences-test.sh'))
 endif
 
 subdir('deps')
