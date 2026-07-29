@@ -70,6 +70,7 @@ struct child_report {
 enum catalog_child_operation {
     CATALOG_CHILD_CREATE = 1,
     CATALOG_CHILD_COPY = 2,
+    CATALOG_CHILD_RESUMABLE_COPY = 3,
 };
 
 struct catalog_child_report {
@@ -1947,6 +1948,67 @@ static pid_t spawn_catalog_copy_child(
     _exit(130);
 }
 
+static int run_catalog_resumable_copy_child(int argc, char **argv) {
+    if (argc != 8)
+        return 131;
+    int start_file;
+    int report_file;
+    if (parse_file_descriptor(argv[6], &start_file) < 0 ||
+            parse_file_descriptor(argv[7], &report_file) < 0)
+        return 131;
+    unsigned char token;
+    if (read_all(start_file, &token, 1) < 0)
+        return 132;
+    close(start_file);
+    struct catalog_child_report report = {
+        .operation = CATALOG_CHILD_RESUMABLE_COPY,
+    };
+    report.error = ish_apple_root_catalog_copy_resumable(
+            argv[2], argv[3], argv[4], NULL, argv[5], report.name);
+    int write_result = write_all(
+            report_file, &report, sizeof(report));
+    close(report_file);
+    return write_result == 0 ? 0 : 133;
+}
+
+static pid_t spawn_catalog_resumable_copy_child(
+        const struct fixture *fixture,
+        const char *source_name,
+        const char *operation_token,
+        int start_pipe[2],
+        int report_pipe[2]) {
+    char start_file[32];
+    char report_file[32];
+    int start_length = snprintf(start_file, sizeof(start_file),
+            "%d", start_pipe[0]);
+    int report_length = snprintf(report_file, sizeof(report_file),
+            "%d", report_pipe[1]);
+    if (start_length < 0 || (size_t) start_length >= sizeof(start_file) ||
+            report_length < 0 ||
+            (size_t) report_length >= sizeof(report_file)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    char *const arguments[] = {
+        executable_path,
+        "--catalog-resumable-copy-child",
+        (char *) fixture->seed,
+        (char *) fixture->persistent,
+        (char *) source_name,
+        (char *) operation_token,
+        start_file,
+        report_file,
+        NULL,
+    };
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    close(start_pipe[1]);
+    close(report_pipe[0]);
+    execv(executable_path, arguments);
+    _exit(134);
+}
+
 static int test_concurrent_install(const char *workspace) {
     struct fixture fixture;
     CHECK(create_fixture(workspace, "concurrent", 2, &fixture) == 0,
@@ -2016,10 +2078,14 @@ static int test_root_catalog(const char *workspace) {
                     ".aarch64.installing.0123456789abcdef0123456789abcdef") &&
             ish_apple_root_catalog_is_private_name(
                     ".aarch64-2.deleting.0123456789abcdef0123456789abcdef") &&
+            ish_apple_root_catalog_is_private_name(
+                    ".copy-operation.lock") &&
             !ish_apple_root_catalog_is_private_name(
                     ".aarch64.installing.not-a-token") &&
             !ish_apple_root_catalog_is_private_name(
-                    ".aarch64.deleting.not-a-token"),
+                    ".aarch64.deleting.not-a-token") &&
+            !ish_apple_root_catalog_is_private_name(
+                    ".copy-operation.other.lock"),
             "安装事务私有名称边界");
 
     struct fixture fixture;
@@ -2376,11 +2442,8 @@ static int test_root_catalog_copy_rejections(const char *workspace) {
                     missing.seed, missing.persistent,
                     ".aarch64.installing.owner",
                     "aarch64-999", destination) == EINVAL &&
-            ish_apple_root_catalog_copy(
-                    missing.seed, missing.persistent,
-                    "aarch64", NULL, destination) == EINVAL &&
             verify_no_catalog_staging(missing.persistent),
-            "拒绝不存在、私有复制源或缺失活动名称且不留半成品");
+            "拒绝不存在或私有复制源且不留半成品");
 
     struct fixture corrupted;
     CHECK(create_fixture(
@@ -2488,10 +2551,267 @@ static int test_root_catalog_copy_target_conflict(const char *workspace) {
     char destination[ISH_APPLE_ROOT_NAME_CAPACITY];
     CHECK(ish_apple_root_catalog_copy(
                     fixture.seed, fixture.persistent,
-                    source, "aarch64-999", destination) == 0 &&
+                    source, NULL, destination) == 0 &&
             strcmp(destination, "aarch64-3") == 0 &&
             file_equals(conflict, foreign, sizeof(foreign) - 1),
-            "目标冲突时跳过占用项且不覆盖原对象");
+            "启动 claim 前可复制来源，并跳过被占用的目标");
+    return 0;
+}
+
+static int test_root_catalog_resumable_copy(const char *workspace) {
+    struct fixture fixture;
+    CHECK(create_fixture(
+                    workspace, "root-copy-resumable", 0, &fixture) == 0,
+            "创建可恢复复制夹具");
+    char source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    enum ish_apple_rootfs_seed_result result;
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent,
+                    NULL, source, &result) == 0 &&
+            strcmp(source, "aarch64") == 0,
+            "准备可恢复复制源");
+
+    char destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    char oversized_token[130];
+    memset(oversized_token, 'a', sizeof(oversized_token) - 1);
+    oversized_token[sizeof(oversized_token) - 1] = '\0';
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, NULL, destination) == EINVAL &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, "", destination) == EINVAL &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, ".hidden", destination) == EINVAL &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, "bad/token", destination) == EINVAL &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, oversized_token, destination) == EINVAL,
+            "严格拒绝缺失、越界或含路径语法的复制 token");
+
+    int claim = -1;
+    CHECK(ish_apple_root_catalog_claim_active(
+                    fixture.persistent, source, &claim) == 0 &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, "operation-blocked",
+                    destination) == EBUSY &&
+            ish_apple_root_catalog_release_active(claim) == 0,
+            "NULL active 仍由共享生命周期 claim 阻止复制");
+
+    static const char operation[] = "operation-stable-1";
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, operation, destination) == 0 &&
+            strcmp(destination, "aarch64-2") == 0,
+            "稳定 token 选择最低空闲目标并发布");
+    char destination_root[PATH_MAX];
+    char marker_path[PATH_MAX];
+    char expected_marker[512];
+    int marker_length = snprintf(expected_marker, sizeof(expected_marker),
+            "format=ish-rootfs-copy-operation-v1\n"
+            "token=%s\nsource=%s\ndestination=%s\n",
+            operation, source, destination);
+    CHECK(marker_length > 0 &&
+            (size_t) marker_length < sizeof(expected_marker) &&
+            format_path(destination_root, "%s/%s",
+                    fixture.persistent, destination) == 0 &&
+            format_path(marker_path, "%s/.ish-copy-operation.%s",
+                    destination_root, operation) == 0 &&
+            file_equals(marker_path,
+                    expected_marker, (size_t) marker_length),
+            "发布前写入绑定 token、来源与目标的顶层内部凭据");
+
+    char retried_destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    size_t count = 0;
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, operation, retried_destination) == 0 &&
+            strcmp(retried_destination, destination) == 0 &&
+            ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    NULL, 0, &count) == ERANGE &&
+            count == 2,
+            "同一 token 重试返回原目标且不生成重复副本");
+
+    char other_source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_create(
+                    fixture.seed, fixture.persistent,
+                    other_source) == 0 &&
+            strcmp(other_source, "aarch64-3") == 0 &&
+            ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    other_source, NULL, operation,
+                    retried_destination) == EEXIST,
+            "同一 token 绑定其他来源时保守拒绝");
+
+    char ordinary_copy[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy(
+                    fixture.seed, fixture.persistent,
+                    destination, other_source, ordinary_copy) == 0 &&
+            strcmp(ordinary_copy, "aarch64-4") == 0,
+            "普通复制可继续使用带操作凭据的 root");
+    char ordinary_root[PATH_MAX];
+    CHECK(format_path(ordinary_root, "%s/%s",
+                    fixture.persistent, ordinary_copy) == 0 &&
+            format_path(marker_path, "%s/.ish-copy-operation.%s",
+                    ordinary_root, operation) == 0 &&
+            path_absent(marker_path),
+            "内部操作凭据不会传播到普通后续副本");
+
+    static const char committed_operation[] = "operation-committed-2";
+    ish_apple_rootfs_seed_test_fail_phase =
+            ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK;
+    char committed_destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, committed_operation,
+                    committed_destination) == 0 &&
+            strcmp(committed_destination, "aarch64-5") == 0 &&
+            ish_apple_rootfs_seed_test_fail_phase ==
+                    ROOTFS_SEED_TEST_NONE,
+            "final 已同步后 owner 收尾故障仍报告提交成功");
+    char owner_path[PATH_MAX];
+    CHECK(format_path(owner_path,
+                    "%s/.aarch64-5.installing.owner",
+                    fixture.persistent) == 0 &&
+            !path_absent(owner_path),
+            "模拟 Swift 未确认时保留可收敛的已提交现场");
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, committed_operation,
+                    retried_destination) == 0 &&
+            strcmp(retried_destination, committed_destination) == 0 &&
+            path_absent(owner_path),
+            "发布后未确认重试命中原目标并收敛 owner");
+
+    static const char rollback_operation[] = "operation-rollback-3";
+    ish_apple_rootfs_seed_test_fail_phase =
+            ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC;
+    char rollback_destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, rollback_operation,
+                    rollback_destination) == EIO &&
+            strcmp(rollback_destination, "aarch64-6") == 0,
+            "发布提交点同步失败会回滚并保留同名可重试现场");
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    fixture.seed, fixture.persistent,
+                    source, NULL, rollback_operation,
+                    retried_destination) == 0 &&
+            strcmp(retried_destination, rollback_destination) == 0 &&
+            verify_no_catalog_staging(fixture.persistent),
+            "提交点前失败可用同一 token 在原最低目标恢复");
+
+    struct fixture concurrent_fixture;
+    CHECK(create_fixture(
+                    workspace, "root-copy-resumable-concurrent",
+                    0, &concurrent_fixture) == 0,
+            "创建可恢复复制并发夹具");
+    char concurrent_source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    char concurrent_other_source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_prepare(
+                    concurrent_fixture.seed,
+                    concurrent_fixture.persistent,
+                    NULL, concurrent_source, &result) == 0 &&
+            ish_apple_root_catalog_create(
+                    concurrent_fixture.seed,
+                    concurrent_fixture.persistent,
+                    concurrent_other_source) == 0,
+            "准备两个可恢复复制并发来源");
+    int start_pipe[2];
+    int report_pipe[2];
+    CHECK(pipe(start_pipe) == 0 && pipe(report_pipe) == 0,
+            "创建可恢复复制并发同步管道");
+    static const char concurrent_operation[] = "operation-concurrent";
+    pid_t first = spawn_catalog_resumable_copy_child(
+            &concurrent_fixture, concurrent_source,
+            concurrent_operation, start_pipe, report_pipe);
+    CHECK(first > 0, "创建第一个可恢复复制子进程");
+    pid_t second = spawn_catalog_resumable_copy_child(
+            &concurrent_fixture, concurrent_other_source,
+            concurrent_operation, start_pipe, report_pipe);
+    CHECK(second > 0, "创建第二个可恢复复制子进程");
+    close(start_pipe[0]);
+    close(report_pipe[1]);
+    unsigned char start_tokens[2] = {1, 1};
+    CHECK(write_all(start_pipe[1],
+                    start_tokens, sizeof(start_tokens)) == 0,
+            "同时释放两个可恢复复制子进程");
+    close(start_pipe[1]);
+    struct catalog_child_report reports[2];
+    CHECK(read_all(report_pipe[0], reports, sizeof(reports)) == 0,
+            "收集可恢复复制并发结果");
+    close(report_pipe[0]);
+    int first_status;
+    int second_status;
+    CHECK(waitpid(first, &first_status, 0) == first &&
+            waitpid(second, &second_status, 0) == second &&
+            WIFEXITED(first_status) && WEXITSTATUS(first_status) == 0 &&
+            WIFEXITED(second_status) && WEXITSTATUS(second_status) == 0,
+            "可恢复复制并发子进程正常退出");
+    unsigned successes = 0;
+    const char *successful_name = NULL;
+    for (size_t index = 0; index < 2; index++) {
+        CHECK(reports[index].operation ==
+                        CATALOG_CHILD_RESUMABLE_COPY &&
+                (reports[index].error == 0 ||
+                 reports[index].error == EEXIST),
+                "同 token 异源并发只能有一方成功，另一方保守拒绝");
+        if (reports[index].error == 0) {
+            successes++;
+            if (successful_name == NULL)
+                successful_name = reports[index].name;
+            else
+                CHECK(strcmp(successful_name,
+                                reports[index].name) == 0,
+                        "并发成功结果必须指向同一目标");
+        }
+    }
+    count = 0;
+    CHECK(successes >= 1 &&
+            ish_apple_root_catalog_list(
+                    concurrent_fixture.seed,
+                    concurrent_fixture.persistent,
+                    NULL, 0, &count) == ERANGE &&
+            count == 3,
+            "并发冲突不覆盖目标且最多发布一个副本");
+
+    struct fixture symlink_fixture;
+    CHECK(create_fixture(
+                    workspace, "root-copy-operation-symlink",
+                    0, &symlink_fixture) == 0,
+            "创建操作凭据链接夹具");
+    char symlink_source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    char occupied[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_prepare(
+                    symlink_fixture.seed, symlink_fixture.persistent,
+                    NULL, symlink_source, &result) == 0 &&
+            ish_apple_root_catalog_create(
+                    symlink_fixture.seed, symlink_fixture.persistent,
+                    occupied) == 0,
+            "准备含未知操作凭据的有效 root");
+    char sentinel[PATH_MAX];
+    char occupied_root[PATH_MAX];
+    CHECK(format_path(sentinel, "%s/sentinel",
+                    symlink_fixture.base) == 0 &&
+            write_file(sentinel, "keep\n", 5, 0600) == 0 &&
+            format_path(occupied_root, "%s/%s",
+                    symlink_fixture.persistent, occupied) == 0 &&
+            format_path(marker_path,
+                    "%s/.ish-copy-operation.operation-symlink",
+                    occupied_root) == 0 &&
+            symlink(sentinel, marker_path) == 0,
+            "用指向外部文件的链接占用内部凭据");
+    CHECK(ish_apple_root_catalog_copy_resumable(
+                    symlink_fixture.seed, symlink_fixture.persistent,
+                    symlink_source, NULL, "operation-symlink",
+                    destination) == EEXIST &&
+            file_equals(sentinel, "keep\n", 5),
+            "不跟随未知凭据链接并保守拒绝继续复制");
     return 0;
 }
 
@@ -2715,6 +3035,9 @@ int main(int argc, char **argv) {
     if (argc >= 2 &&
             strcmp(argv[1], "--catalog-copy-child") == 0)
         return run_catalog_copy_child(argc, argv);
+    if (argc >= 2 &&
+            strcmp(argv[1], "--catalog-resumable-copy-child") == 0)
+        return run_catalog_resumable_copy_child(argc, argv);
     uint32_t executable_capacity = (uint32_t) sizeof(executable_path);
     if (_NSGetExecutablePath(executable_path, &executable_capacity) != 0) {
         fprintf(stderr, "无法取得 Apple rootfs seed 测试程序路径\n");
@@ -2762,6 +3085,8 @@ int main(int argc, char **argv) {
         status = test_root_catalog_copy_rejections(workspace);
     if (status == 0)
         status = test_root_catalog_copy_target_conflict(workspace);
+    if (status == 0)
+        status = test_root_catalog_resumable_copy(workspace);
     if (status == 0)
         status = test_root_catalog_copy_publish_recovery(workspace);
     if (status == 0)

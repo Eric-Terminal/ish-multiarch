@@ -33,12 +33,18 @@
 #define OWNER_TOKEN_BYTES 16
 #define OWNER_TOKEN_HEX_LENGTH (OWNER_TOKEN_BYTES * 2)
 #define OWNER_RECORD_LIMIT 512
+#define COPY_OPERATION_TOKEN_LIMIT 128
+#define COPY_OPERATION_RECORD_LIMIT 512
 
 static const char rootfs_manifest_name[] = "rootfs-manifest.txt";
 static const char hardlink_manifest_name[] = "rootfs-hardlinks.tsv";
 static const char install_receipt_name[] = "rootfs-installation.txt";
+static const char copy_operation_marker_prefix[] =
+        ".ish-copy-operation.";
 static const char owner_format[] = "format=ish-rootfs-install-owner-v2";
 static const char receipt_format[] = "format=ish-rootfs-install-v1\n";
+static const char copy_operation_format[] =
+        "format=ish-rootfs-copy-operation-v1";
 
 struct seed_manifest {
     char archive_sha256[65];
@@ -178,6 +184,37 @@ static bool valid_root_name(const char *name) {
             return false;
     }
     return true;
+}
+
+bool ish_apple_rootfs_copy_operation_token_is_valid(const char *token) {
+    if (token == NULL)
+        return false;
+    size_t length = strlen(token);
+    if (length == 0 || length > COPY_OPERATION_TOKEN_LIMIT)
+        return false;
+    if (!((token[0] >= 'a' && token[0] <= 'z') ||
+            (token[0] >= 'A' && token[0] <= 'Z') ||
+            (token[0] >= '0' && token[0] <= '9')))
+        return false;
+    for (size_t index = 0; index < length; index++) {
+        char byte = token[index];
+        if (!((byte >= 'a' && byte <= 'z') ||
+                (byte >= 'A' && byte <= 'Z') ||
+                (byte >= '0' && byte <= '9') ||
+                byte == '-' || byte == '_' || byte == '.'))
+            return false;
+    }
+    return true;
+}
+
+static int format_copy_operation_marker_name(
+        char output[NAME_MAX + 1],
+        const char *operation_token) {
+    if (!ish_apple_rootfs_copy_operation_token_is_valid(operation_token))
+        return EINVAL;
+    int length = snprintf(output, NAME_MAX + 1,
+            "%s%s", copy_operation_marker_prefix, operation_token);
+    return length < 0 || length > NAME_MAX ? ENAMETOOLONG : 0;
 }
 
 static int format_private_name(
@@ -744,6 +781,11 @@ static int copy_managed_root_contents(
         if (strcmp(entry->d_name, ".") == 0 ||
                 strcmp(entry->d_name, "..") == 0)
             continue;
+        // 复制操作凭据属于宿主事务元数据，不能继承到下一代副本。
+        if (depth == 0 && strncmp(
+                entry->d_name, copy_operation_marker_prefix,
+                sizeof(copy_operation_marker_prefix) - 1) == 0)
+            continue;
         char child_path[PATH_MAX];
         error = format_copy_path(
                 child_path, destination_path, entry->d_name);
@@ -843,6 +885,24 @@ static bool line_has_nonempty_value(
     size_t prefix_length = strlen(prefix);
     return length > prefix_length &&
             memcmp(line, prefix, prefix_length) == 0;
+}
+
+static int format_copy_operation_record(
+        char output[COPY_OPERATION_RECORD_LIMIT + 1],
+        const char *source_name,
+        const char *destination_name,
+        const char *operation_token) {
+    if (!valid_root_name(source_name) ||
+            !valid_root_name(destination_name) ||
+            !ish_apple_rootfs_copy_operation_token_is_valid(
+                    operation_token))
+        return EINVAL;
+    int length = snprintf(output, COPY_OPERATION_RECORD_LIMIT + 1,
+            "%s\ntoken=%s\nsource=%s\ndestination=%s\n",
+            copy_operation_format, operation_token,
+            source_name, destination_name);
+    return length < 0 || length > COPY_OPERATION_RECORD_LIMIT ?
+            EOVERFLOW : 0;
 }
 
 static bool valid_sha256(const char *digest, size_t length) {
@@ -1943,6 +2003,138 @@ static int inspect_existing_root(
     return open_existing_root(parent, root_name, present, NULL);
 }
 
+static int write_copy_operation_marker(
+        int root,
+        const char *source_name,
+        const char *destination_name,
+        const char *operation_token) {
+    char marker_name[NAME_MAX + 1];
+    char record[COPY_OPERATION_RECORD_LIMIT + 1];
+    int error = format_copy_operation_marker_name(
+            marker_name, operation_token);
+    if (error == 0)
+        error = format_copy_operation_record(
+            record, source_name, destination_name, operation_token);
+    if (error != 0)
+        return error;
+    return create_regular_at(root, marker_name,
+            record, strlen(record), true);
+}
+
+static int inspect_copy_operation_marker(
+        int root,
+        const char *source_name,
+        const char *destination_name,
+        const char *operation_token,
+        bool *present,
+        bool *matches) {
+    *present = false;
+    *matches = false;
+    char marker_name[NAME_MAX + 1];
+    char expected[COPY_OPERATION_RECORD_LIMIT + 1];
+    int error = format_copy_operation_marker_name(
+            marker_name, operation_token);
+    if (error == 0)
+        error = format_copy_operation_record(
+                expected, source_name,
+                destination_name, operation_token);
+    if (error != 0)
+        return error;
+    size_t expected_length = strlen(expected);
+
+    struct stat named;
+    if (fstatat(root, marker_name,
+            &named, AT_SYMLINK_NOFOLLOW) < 0) {
+        if (errno == ENOENT)
+            return 0;
+        return errno_or_io();
+    }
+    *present = true;
+    if (!S_ISREG(named.st_mode) ||
+            named.st_uid != geteuid() ||
+            named.st_nlink != 1 ||
+            named.st_size != (off_t) expected_length)
+        return 0;
+
+    int file = openat(root, marker_name,
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (file < 0)
+        return errno == ELOOP ? 0 : errno_or_io();
+    struct stat metadata;
+    if (fstat(file, &metadata) < 0)
+        error = errno_or_io();
+    else if (!S_ISREG(metadata.st_mode) ||
+            metadata.st_uid != geteuid() ||
+            metadata.st_nlink != 1 ||
+            metadata.st_size != (off_t) expected_length ||
+            metadata.st_dev != named.st_dev ||
+            metadata.st_ino != named.st_ino)
+        error = EAGAIN;
+
+    char bytes[COPY_OPERATION_RECORD_LIMIT];
+    size_t offset = 0;
+    while (error == 0 && offset < expected_length) {
+        ssize_t count = read(
+                file, bytes + offset, expected_length - offset);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            error = errno_or_io();
+        } else if (count == 0) {
+            error = EIO;
+        } else {
+            offset += (size_t) count;
+        }
+    }
+    if (error == 0) {
+        char extra;
+        ssize_t count;
+        do {
+            count = read(file, &extra, 1);
+        } while (count < 0 && errno == EINTR);
+        if (count < 0)
+            error = errno_or_io();
+        else if (count != 0)
+            error = EAGAIN;
+    }
+
+    struct stat verified;
+    if (error == 0 &&
+            fstatat(root, marker_name,
+                    &verified, AT_SYMLINK_NOFOLLOW) < 0)
+        error = errno_or_io();
+    if (error == 0 && (!S_ISREG(verified.st_mode) ||
+            verified.st_uid != geteuid() ||
+            verified.st_nlink != 1 ||
+            verified.st_size != metadata.st_size ||
+            verified.st_dev != metadata.st_dev ||
+            verified.st_ino != metadata.st_ino))
+        error = EAGAIN;
+    if (close(file) < 0 && error == 0)
+        error = errno_or_io();
+    if (error != 0)
+        return error;
+    *matches = memcmp(bytes, expected, expected_length) == 0;
+    return 0;
+}
+
+static int verify_named_root_identity(
+        int parent, const char *root_name, int root) {
+    struct stat opened;
+    struct stat named;
+    if (fstat(root, &opened) < 0)
+        return errno_or_io();
+    if (fstatat(parent, root_name,
+            &named, AT_SYMLINK_NOFOLLOW) < 0)
+        return errno_or_io();
+    if (!S_ISDIR(named.st_mode) ||
+            named.st_uid != geteuid() ||
+            opened.st_dev != named.st_dev ||
+            opened.st_ino != named.st_ino)
+        return EAGAIN;
+    return 0;
+}
+
 static void generate_owner_token(char token[OWNER_TOKEN_HEX_LENGTH + 1]) {
     unsigned char random[OWNER_TOKEN_BYTES];
     static const char hexadecimal[] = "0123456789abcdef";
@@ -2479,7 +2671,12 @@ static int prepare_copied_database(int staging) {
     return error;
 }
 
-static int build_copied_root(int source, int staging) {
+static int build_copied_root(
+        int source,
+        int staging,
+        const char *source_name,
+        const char *destination_name,
+        const char *operation_token) {
     struct root_copy_context context = {
         .destination_root = staging,
     };
@@ -2492,6 +2689,10 @@ static int build_copied_root(int source, int staging) {
         error = prepare_copied_database(staging);
     if (error == 0)
         error = validate_opened_root(staging);
+    if (error == 0 && operation_token != NULL)
+        error = write_copy_operation_marker(
+                staging, source_name,
+                destination_name, operation_token);
     if (error == 0)
         error = sync_directory(staging);
     return error;
@@ -2605,6 +2806,32 @@ int ish_apple_rootfs_lock_managed_root(
     return 0;
 }
 
+int ish_apple_rootfs_lock_copy_catalog(
+        const char *persistent_parent,
+        int *lock_out) {
+    if (persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            lock_out == NULL)
+        return EINVAL;
+    *lock_out = -1;
+    static const char lock_name[] = ".copy-operation.lock";
+
+    int parent = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0)
+        return errno_or_io();
+    int lock = -1;
+    int error = lock_file(parent, lock_name, LOCK_EX, &lock);
+    if (close(parent) < 0 && error == 0)
+        error = errno_or_io();
+    if (error != 0) {
+        if (lock >= 0)
+            (void) ish_apple_rootfs_unlock_managed_root(lock);
+        return error;
+    }
+    *lock_out = lock;
+    return 0;
+}
+
 static int install_locked(
         const char *seed_root, int parent, const char *root_name,
         const char *owner_name, enum ish_apple_rootfs_seed_result *result) {
@@ -2684,7 +2911,8 @@ static int copy_managed_root_locked(
         int parent,
         const char *source_name,
         const char *destination_name,
-        const char *owner_name) {
+        const char *owner_name,
+        const char *operation_token) {
     bool source_present;
     int source = -1;
     int error = open_existing_root(
@@ -2697,13 +2925,39 @@ static int copy_managed_root_locked(
         return ENOENT;
 
     bool destination_present;
-    error = inspect_existing_root(
-            parent, destination_name, &destination_present);
+    int destination = -1;
+    error = open_existing_root(
+            parent, destination_name,
+            &destination_present, &destination);
+    bool already_completed = false;
     if (error == 0 && destination_present) {
-        error = cleanup_staging_if_owned(
-                parent, owner_name, destination_name);
-        if (error == 0)
+        if (operation_token == NULL) {
             error = EEXIST;
+        } else {
+            bool marker_present;
+            bool marker_matches;
+            error = inspect_copy_operation_marker(
+                    destination, source_name, destination_name,
+                    operation_token, &marker_present, &marker_matches);
+            if (error == 0 && (!marker_present || !marker_matches))
+                error = EEXIST;
+            if (error == 0)
+                error = verify_named_root_identity(
+                        parent, destination_name, destination);
+            if (error == 0)
+                error = sync_directory(parent);
+            if (error == 0) {
+                already_completed = true;
+                (void) cleanup_staging_if_owned(
+                        parent, owner_name, destination_name);
+            }
+        }
+    }
+    if (destination >= 0 && close(destination) < 0 && error == 0)
+        error = errno_or_io();
+    if (already_completed) {
+        (void) close(source);
+        return 0;
     }
 
     int seed = -1;
@@ -2728,7 +2982,9 @@ static int copy_managed_root_locked(
         error = create_staging(parent, destination_name,
                 owner_name, &staging, &owner);
     if (error == 0)
-        error = build_copied_root(source, staging);
+        error = build_copied_root(
+                source, staging, source_name,
+                destination_name, operation_token);
     if (close(source) < 0 && error == 0)
         error = errno_or_io();
     if (staging >= 0 && close(staging) < 0 && error == 0)
@@ -2802,15 +3058,19 @@ int ish_apple_rootfs_seed_install(
     return completed ? 0 : error;
 }
 
-int ish_apple_rootfs_copy_managed_root(
+static int copy_claimed_managed_root(
         const char *seed_root,
         const char *persistent_parent,
         const char *source_name,
-        const char *destination_name) {
+        const char *destination_name,
+        const char *operation_token) {
     if (seed_root == NULL || seed_root[0] == '\0' ||
             persistent_parent == NULL || persistent_parent[0] == '\0' ||
             !valid_root_name(source_name) ||
             !valid_root_name(destination_name) ||
+            (operation_token != NULL &&
+             !ish_apple_rootfs_copy_operation_token_is_valid(
+                     operation_token)) ||
             strcmp(source_name, destination_name) == 0)
         return EINVAL;
 
@@ -2824,26 +3084,16 @@ int ish_apple_rootfs_copy_managed_root(
     if (error != 0)
         return error;
 
-    int source_lock = -1;
-    error = ish_apple_rootfs_lock_managed_root(
-            persistent_parent, source_name, true, true, &source_lock);
-    if (error == EEXIST)
-        error = EINVAL;
-    if (error != 0)
-        return error;
-
     int parent = open(persistent_parent,
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (parent < 0) {
-        error = errno_or_io();
-        (void) ish_apple_rootfs_unlock_managed_root(source_lock);
-        return error;
-    }
+    if (parent < 0)
+        return errno_or_io();
     int lock = -1;
     error = lock_file(parent, lock_name, LOCK_EX, &lock);
     if (error == 0)
         error = copy_managed_root_locked(seed_root, parent,
-                source_name, destination_name, owner_name);
+                source_name, destination_name,
+                owner_name, operation_token);
     bool completed = error == 0;
     if (lock >= 0) {
         while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}
@@ -2851,9 +3101,153 @@ int ish_apple_rootfs_copy_managed_root(
     }
     if (close(parent) < 0 && error == 0)
         error = errno_or_io();
+    return completed ? 0 : error;
+}
+
+int ish_apple_rootfs_copy_claimed_managed_root_for_operation(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *destination_name,
+        const char *operation_token) {
+    if (!ish_apple_rootfs_copy_operation_token_is_valid(
+                operation_token))
+        return EINVAL;
+    return copy_claimed_managed_root(
+            seed_root, persistent_parent,
+            source_name, destination_name, operation_token);
+}
+
+int ish_apple_rootfs_copy_managed_root(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *destination_name) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !valid_root_name(source_name) ||
+            !valid_root_name(destination_name) ||
+            strcmp(source_name, destination_name) == 0)
+        return EINVAL;
+
+    int source_lock = -1;
+    int error = ish_apple_rootfs_lock_managed_root(
+            persistent_parent, source_name, true, true, &source_lock);
+    if (error == EEXIST)
+        error = EINVAL;
+    if (error != 0)
+        return error;
+    error = copy_claimed_managed_root(
+            seed_root, persistent_parent,
+            source_name, destination_name, NULL);
+    bool completed = error == 0;
     int unlock_error =
             ish_apple_rootfs_unlock_managed_root(source_lock);
     if (error == 0)
         error = unlock_error;
     return completed ? 0 : error;
+}
+
+int ish_apple_rootfs_find_managed_copy_operation(
+        const char *persistent_parent,
+        const char *source_name,
+        const char *operation_token,
+        char *destination_name,
+        size_t destination_capacity,
+        bool *found) {
+    if (persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !valid_root_name(source_name) ||
+            !ish_apple_rootfs_copy_operation_token_is_valid(
+                    operation_token) ||
+            destination_name == NULL || destination_capacity == 0 ||
+            found == NULL)
+        return EINVAL;
+    destination_name[0] = '\0';
+    *found = false;
+
+    int parent = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0)
+        return errno_or_io();
+    int iterator_file = dup(parent);
+    if (iterator_file < 0) {
+        int error = errno_or_io();
+        close(parent);
+        return error;
+    }
+    DIR *iterator = fdopendir(iterator_file);
+    if (iterator == NULL) {
+        int error = errno_or_io();
+        close(iterator_file);
+        close(parent);
+        return error;
+    }
+
+    int error = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(iterator)) != NULL) {
+        if (!valid_root_name(entry->d_name)) {
+            errno = 0;
+            continue;
+        }
+
+        bool root_present;
+        int root = -1;
+        error = open_existing_root(
+                parent, entry->d_name, &root_present, &root);
+        if (error == EEXIST) {
+            error = 0;
+            errno = 0;
+            continue;
+        }
+        if (error != 0)
+            break;
+        if (!root_present) {
+            errno = 0;
+            continue;
+        }
+
+        bool marker_present;
+        bool marker_matches;
+        error = inspect_copy_operation_marker(
+                root, source_name, entry->d_name,
+                operation_token, &marker_present, &marker_matches);
+        if (error == 0)
+            error = verify_named_root_identity(
+                    parent, entry->d_name, root);
+        if (close(root) < 0 && error == 0)
+            error = errno_or_io();
+        if (error != 0)
+            break;
+        if (!marker_present) {
+            errno = 0;
+            continue;
+        }
+        if (!marker_matches ||
+                strcmp(entry->d_name, source_name) == 0) {
+            error = EEXIST;
+            break;
+        }
+        if (*found &&
+                strcmp(destination_name, entry->d_name) != 0) {
+            error = EEXIST;
+            break;
+        }
+        size_t name_length = strlen(entry->d_name);
+        if (name_length >= destination_capacity) {
+            error = ERANGE;
+            break;
+        }
+        memcpy(destination_name, entry->d_name, name_length + 1);
+        *found = true;
+        errno = 0;
+    }
+    if (entry == NULL && errno != 0 && error == 0)
+        error = errno_or_io();
+    if (closedir(iterator) < 0 && error == 0)
+        error = errno_or_io();
+    if (close(parent) < 0 && error == 0)
+        error = errno_or_io();
+    return error;
 }

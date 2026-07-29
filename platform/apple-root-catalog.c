@@ -106,6 +106,7 @@ bool ish_apple_root_catalog_is_private_name(const char *name) {
     if (has_private_suffix(name, ".install.lock") ||
             has_private_suffix(name, ".lifecycle.lock") ||
             has_private_suffix(name, ".installing.owner") ||
+            strcmp(name, ".copy-operation.lock") == 0 ||
             is_deletion_name(name))
         return true;
 
@@ -448,10 +449,13 @@ int ish_apple_root_catalog_copy(
     if (seed_root == NULL || seed_root[0] == '\0' ||
             persistent_parent == NULL || persistent_parent[0] == '\0' ||
             !ish_apple_root_catalog_is_managed_name(source_name) ||
-            !ish_apple_root_catalog_is_managed_name(active_name) ||
             destination_name == NULL)
         return EINVAL;
-    if (strcmp(source_name, active_name) == 0)
+    bool has_active_name = active_name != NULL && active_name[0] != '\0';
+    if (has_active_name &&
+            !ish_apple_root_catalog_is_managed_name(active_name))
+        return EINVAL;
+    if (has_active_name && strcmp(source_name, active_name) == 0)
         return EBUSY;
 
     cleanup_deletions(persistent_parent);
@@ -474,6 +478,121 @@ int ish_apple_root_catalog_copy(
         if (index == UINT64_MAX)
             return ENOSPC;
     }
+}
+
+int ish_apple_root_catalog_copy_resumable(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *active_name,
+        const char *operation_token,
+        char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY]) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !ish_apple_root_catalog_is_managed_name(source_name) ||
+            !ish_apple_rootfs_copy_operation_token_is_valid(
+                    operation_token) ||
+            destination_name == NULL)
+        return EINVAL;
+    bool has_active_name = active_name != NULL && active_name[0] != '\0';
+    if (has_active_name &&
+            !ish_apple_root_catalog_is_managed_name(active_name))
+        return EINVAL;
+    if (has_active_name && strcmp(source_name, active_name) == 0)
+        return EBUSY;
+
+    cleanup_deletions(persistent_parent);
+    int operation_lock = -1;
+    int error = ish_apple_rootfs_lock_copy_catalog(
+            persistent_parent, &operation_lock);
+    if (error != 0)
+        return error;
+    int source_lock = -1;
+    error = ish_apple_rootfs_lock_managed_root(
+            persistent_parent, source_name, true, true, &source_lock);
+    if (error == EEXIST)
+        error = EINVAL;
+    if (error != 0) {
+        (void) ish_apple_rootfs_unlock_managed_root(operation_lock);
+        return error;
+    }
+
+    bool completed = false;
+    bool found = false;
+    error = ish_apple_rootfs_find_managed_copy_operation(
+            persistent_parent, source_name, operation_token,
+            destination_name, ISH_APPLE_ROOT_NAME_CAPACITY, &found);
+    if (error == 0 && found) {
+        if (!ish_apple_root_catalog_is_managed_name(destination_name)) {
+            error = EEXIST;
+        } else {
+            error =
+                    ish_apple_rootfs_copy_claimed_managed_root_for_operation(
+                            seed_root, persistent_parent,
+                            source_name, destination_name,
+                            operation_token);
+            completed = error == 0;
+        }
+    }
+
+    for (uint64_t index = 1;
+            error == 0 && !found && !completed; index++) {
+        error = copy_candidate_name(index, destination_name);
+        if (error != 0)
+            break;
+        bool exists;
+        error = candidate_exists(
+                persistent_parent, destination_name, &exists);
+        if (error != 0)
+            break;
+        if (!exists && strcmp(destination_name, source_name) != 0) {
+            error =
+                    ish_apple_rootfs_copy_claimed_managed_root_for_operation(
+                            seed_root, persistent_parent,
+                            source_name, destination_name,
+                            operation_token);
+            if (error == 0) {
+                completed = true;
+                break;
+            }
+            if (error != EEXIST)
+                break;
+
+            error = ish_apple_rootfs_find_managed_copy_operation(
+                    persistent_parent, source_name, operation_token,
+                    destination_name, ISH_APPLE_ROOT_NAME_CAPACITY, &found);
+            if (error != 0)
+                break;
+            if (found) {
+                if (!ish_apple_root_catalog_is_managed_name(
+                            destination_name)) {
+                    error = EEXIST;
+                    break;
+                }
+                error =
+                        ish_apple_rootfs_copy_claimed_managed_root_for_operation(
+                                seed_root, persistent_parent,
+                                source_name, destination_name,
+                                operation_token);
+                completed = error == 0;
+                break;
+            }
+        }
+        if (index == UINT64_MAX) {
+            error = ENOSPC;
+            break;
+        }
+    }
+
+    int unlock_error =
+            ish_apple_rootfs_unlock_managed_root(source_lock);
+    if (error == 0)
+        error = unlock_error;
+    unlock_error =
+            ish_apple_rootfs_unlock_managed_root(operation_lock);
+    if (error == 0)
+        error = unlock_error;
+    return completed ? 0 : error;
 }
 
 int ish_apple_root_catalog_delete(

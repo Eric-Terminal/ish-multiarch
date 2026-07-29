@@ -60,7 +60,8 @@ int ish_apple_root_catalog_create(
 
 /*
  * 复制一个非活动的托管 root，并选择最低空闲名称原子发布。
- * active_name 必须是有效托管名称；source_name 与活动 root 相同时返回 EBUSY。
+ * active_name 非空时必须是有效托管名称，且与 source_name 相同时返回 EBUSY。
+ * 启动取得 runtime claim 之前可传 NULL；生命周期排他锁仍会拒绝活动来源。
  * final 名称及父目录同步完成后才视为成功；owner 收尾可由后续操作续清理。
  */
 int ish_apple_root_catalog_copy(
@@ -68,6 +69,21 @@ int ish_apple_root_catalog_copy(
         const char *persistent_parent,
         const char *source_name,
         const char *active_name,
+        char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY]);
+
+/*
+ * 以调用方持久化的稳定 token 恢复或开始复制：
+ * 先返回完全匹配 token 与 source 的已发布目标，否则选择最低空闲名称。
+ * 同一 token 绑定其他 source 时保守返回 EEXIST，绝不复用或覆盖其目标。
+ * token 为 1～128 字节 ASCII，首字节须为字母或数字，其余可含 -、_、.。
+ * active_name 的规则与 copy 相同；NULL 仍由生命周期锁判定活动冲突。
+ */
+int ish_apple_root_catalog_copy_resumable(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *active_name,
+        const char *operation_token,
         char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY]);
 
 /*
