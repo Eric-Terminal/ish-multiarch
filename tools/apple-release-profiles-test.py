@@ -17,8 +17,10 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR = ROOT / "tools" / "apple-release-profiles.py"
 FIXTURE_INPUTS = (
+    ".gitignore",
     "app/App.xcconfig",
     "app/iOS.xcconfig",
+    "app/Signing.local.xcconfig.example",
     "app/iSH.xcconfig",
     "app/Linux.xcconfig",
     "app/NotLinux.xcconfig",
@@ -352,6 +354,113 @@ def case_recursive_xcconfig_missing(root: Path) -> None:
         "app/WatchApp.xcconfig",
         '#include "WatchOS.xcconfig"',
         '#include "MissingWatchOS.xcconfig"',
+    )
+
+
+def case_signing_include_missing(root: Path) -> None:
+    replace_once(
+        root,
+        "app/iSH.xcconfig",
+        '#include? "Signing.local.xcconfig"\n',
+        "",
+    )
+
+
+def case_signing_include_order(root: Path) -> None:
+    replace_once(
+        root,
+        "app/iSH.xcconfig",
+        (
+            "ROOT_BUNDLE_IDENTIFIER = app.ish.iSH\n"
+            "DEVELOPMENT_TEAM =\n"
+            '#include? "Signing.local.xcconfig"\n'
+        ),
+        (
+            '#include? "Signing.local.xcconfig"\n'
+            "ROOT_BUNDLE_IDENTIFIER = app.ish.iSH\n"
+            "DEVELOPMENT_TEAM =\n"
+        ),
+    )
+
+
+def case_signing_duplicate_alias(root: Path) -> None:
+    replace_once(
+        root,
+        "app/iSH.xcconfig",
+        '#include? "Signing.local.xcconfig"\n',
+        (
+            '#include? "Signing.local.xcconfig"\n'
+            ' #include? "./Signing.local.xcconfig"\n'
+        ),
+    )
+
+
+def case_signing_unauthorized_include(root: Path) -> None:
+    replace_once(
+        root,
+        "app/WatchApp.xcconfig",
+        '#include "WatchOS.xcconfig"\n',
+        (
+            '#include "WatchOS.xcconfig"\n'
+            '#include? "WatchSigning.local.xcconfig"\n'
+        ),
+    )
+
+
+def case_signing_bundle_drift(root: Path) -> None:
+    replace_once(
+        root,
+        "app/iSH.xcconfig",
+        "ROOT_BUNDLE_IDENTIFIER = app.ish.iSH\n",
+        "ROOT_BUNDLE_IDENTIFIER = app.invalid.private\n",
+    )
+
+
+def case_signing_public_team(root: Path) -> None:
+    replace_once(
+        root,
+        "app/iSH.xcconfig",
+        "DEVELOPMENT_TEAM =\n",
+        "DEVELOPMENT_TEAM = ABCDE12345\n",
+    )
+
+
+def case_signing_conditional_bundle(root: Path) -> None:
+    path = root / "app/iSH.xcconfig"
+    write_utf8(
+        path,
+        path.read_text(encoding="utf-8")
+        + (
+            "ROOT_BUNDLE_IDENTIFIER[arch=arm64][sdk=iphoneos*] = "
+            "app.invalid.private\n"
+        ),
+    )
+
+
+def case_signing_indented_team(root: Path) -> None:
+    path = root / "app/iSH.xcconfig"
+    write_utf8(
+        path,
+        path.read_text(encoding="utf-8")
+        + " DEVELOPMENT_TEAM = ABCDE12345\n",
+    )
+
+
+def case_signing_example_drift(root: Path) -> None:
+    replace_once(
+        root,
+        "app/Signing.local.xcconfig.example",
+        "ROOT_BUNDLE_IDENTIFIER = com.example.iSH\n",
+        "ROOT_BUNDLE_IDENTIFIER = app.invalid.private\n",
+    )
+
+
+def case_signing_ignore_missing(root: Path) -> None:
+    replace_once(
+        root,
+        ".gitignore",
+        "/app/Signing.local.xcconfig\n",
+        "",
     )
 
 
@@ -859,6 +968,70 @@ def check_build_matrix() -> None:
         )
 
 
+def check_local_signing_override() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix="ish-release-profile-signing-"
+    ) as directory:
+        root = Path(directory) / "repo"
+        copy_fixture(root)
+        write_utf8(
+            root / "app/Signing.local.xcconfig",
+            (
+                "ROOT_BUNDLE_IDENTIFIER = dev.example.private\n"
+                "DEVELOPMENT_TEAM = ZYXWV98765\n"
+            ),
+        )
+        run_validator(root, ["check-locks"])
+
+
+def check_signing_git_boundary() -> None:
+    local = "app/Signing.local.xcconfig"
+    example = "app/Signing.local.xcconfig.example"
+    local_ignore = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "--",
+            local,
+        ],
+        check=False,
+    )
+    if local_ignore.returncode != 0:
+        fail("本地签名配置没有被 Git 实际忽略")
+
+    example_ignore = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "--",
+            example,
+        ],
+        check=False,
+    )
+    if example_ignore.returncode == 0:
+        fail("本地签名配置示例不能被 Git 忽略")
+    if example_ignore.returncode != 1:
+        fail("无法验证本地签名配置示例的 Git 忽略状态")
+
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", local],
+        check=False,
+        stdout=subprocess.PIPE,
+    )
+    if tracked.returncode != 0:
+        fail("无法验证本地签名配置的 Git 跟踪状态")
+    if tracked.stdout:
+        fail("本地签名配置不能进入 Git 索引")
+
+
 def main() -> None:
     run_validator(ROOT, ["check-locks"])
     for profile, expected in EXPECTED_SHOW.items():
@@ -878,6 +1051,8 @@ def main() -> None:
         expected_error="命令参数不完整或非法",
     )
     check_build_matrix()
+    check_local_signing_override()
+    check_signing_git_boundary()
 
     cases = {
         "manifest-row-missing": (
@@ -935,6 +1110,46 @@ def main() -> None:
         "recursive-xcconfig-missing": (
             case_recursive_xcconfig_missing,
             "xcconfig不存在",
+        ),
+        "signing-include-missing": (
+            case_signing_include_missing,
+            "缺少唯一的本地可选 include",
+        ),
+        "signing-include-order": (
+            case_signing_include_order,
+            "include 必须位于两个公共默认值之后",
+        ),
+        "signing-duplicate-alias": (
+            case_signing_duplicate_alias,
+            "含未授权的可选 xcconfig include",
+        ),
+        "signing-unauthorized-include": (
+            case_signing_unauthorized_include,
+            "含未授权的可选 xcconfig include",
+        ),
+        "signing-bundle-drift": (
+            case_signing_bundle_drift,
+            "默认 bundle ID 漂移",
+        ),
+        "signing-public-team": (
+            case_signing_public_team,
+            "公共签名配置不能固定开发团队",
+        ),
+        "signing-conditional-bundle": (
+            case_signing_conditional_bundle,
+            "含条件化或重复的根产品身份",
+        ),
+        "signing-indented-team": (
+            case_signing_indented_team,
+            "含条件化或重复的开发团队",
+        ),
+        "signing-example-drift": (
+            case_signing_example_drift,
+            "本地签名配置示例漂移",
+        ),
+        "signing-ignore-missing": (
+            case_signing_ignore_missing,
+            "没有唯一排除本地签名配置",
         ),
         "ordinary-kernel-missing": (
             case_ordinary_kernel_missing,

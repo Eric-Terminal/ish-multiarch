@@ -105,6 +105,18 @@ EXPECTED_CONFIG_INCLUDES = {
         "Linux.xcconfig",
     ),
 }
+SIGNING_CONFIG = "app/iSH.xcconfig"
+SIGNING_EXAMPLE_CONFIG = "app/Signing.local.xcconfig.example"
+SIGNING_INCLUDE = '#include? "Signing.local.xcconfig"'
+SIGNING_IGNORE = "/app/Signing.local.xcconfig"
+EXPECTED_SIGNING_EXAMPLE = (
+    "// 复制为 Signing.local.xcconfig，并替换为当前开发者"
+    "账号拥有的值。\n"
+    "// 本地文件已被 Git 忽略，不能把真实 Team ID 或私有"
+    "产品身份提交到仓库。\n"
+    "ROOT_BUNDLE_IDENTIFIER = com.example.iSH\n"
+    "DEVELOPMENT_TEAM = ABCDE12345\n"
+)
 PROFILE_INPUTS = (
     "$(SRCROOT)/distribution/apple/release-profiles.tsv",
     "$(SRCROOT)/tools/apple-release-profiles.py",
@@ -739,7 +751,7 @@ def inline_setting_keys(body: str, name: str) -> tuple[str, ...]:
     return tuple(
         re.findall(
             rf'(?:^|[;\n])\s*"?('
-            rf"{re.escape(name)}(?:\[[^\"\]\n]+\])?"
+            rf"{re.escape(name)}(?:\[[^\"\]\n]+\])*"
             rf')"?\s*=',
             body,
         )
@@ -878,6 +890,21 @@ def validate_xcconfig_tree(
         for number, line in enumerate(text.splitlines(), start=1):
             if not line.lstrip().startswith("#include"):
                 continue
+            optional = re.fullmatch(
+                r'[ \t]*#include\?[ \t]+"([^"\r\n]+)"'
+                r"[ \t]*(?://.*)?",
+                line,
+            )
+            if optional is not None:
+                if (
+                    relative != SIGNING_CONFIG
+                    or optional.group(1) != "Signing.local.xcconfig"
+                    or line != SIGNING_INCLUDE
+                ):
+                    fail(
+                        f"{relative}:{number} 含未授权的可选 xcconfig include"
+                    )
+                continue
             match = re.fullmatch(
                 r'[ \t]*#include[ \t]+"([^"\r\n]+)"'
                 r"[ \t]*(?://.*)?",
@@ -896,6 +923,62 @@ def validate_xcconfig_tree(
 
     for relative in base_paths:
         walk(relative)
+
+
+def validate_signing_override(root: Path) -> None:
+    public = read_utf8(root, SIGNING_CONFIG, "公共签名配置")
+    if inline_setting_keys(public, "ROOT_BUNDLE_IDENTIFIER") != (
+        "ROOT_BUNDLE_IDENTIFIER",
+    ):
+        fail("公共签名配置含条件化或重复的根产品身份")
+    if inline_setting_keys(public, "DEVELOPMENT_TEAM") != (
+        "DEVELOPMENT_TEAM",
+    ):
+        fail("公共签名配置含条件化或重复的开发团队")
+    lines = public.splitlines()
+    root_assignments = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"ROOT_BUNDLE_IDENTIFIER[ \t]*=[ \t]*.*", line)
+    ]
+    team_assignments = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"DEVELOPMENT_TEAM[ \t]*=[ \t]*.*", line)
+    ]
+    optional = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("#include?")
+    ]
+    if len(optional) != 1 or optional[0][1] != SIGNING_INCLUDE:
+        fail("公共签名配置缺少唯一的本地可选 include")
+    if (
+        len(root_assignments) != 1
+        or len(team_assignments) != 1
+        or root_assignments[0] + 1 != team_assignments[0]
+        or team_assignments[0] + 1 != optional[0][0]
+    ):
+        fail("本地签名配置 include 必须位于两个公共默认值之后")
+    if (
+        unique_setting(
+            public,
+            "ROOT_BUNDLE_IDENTIFIER",
+            "公共签名配置",
+        )
+        != "app.ish.iSH"
+    ):
+        fail("公共签名配置的默认 bundle ID 漂移")
+    if unique_setting(public, "DEVELOPMENT_TEAM", "公共签名配置"):
+        fail("公共签名配置不能固定开发团队")
+
+    example = read_utf8(root, SIGNING_EXAMPLE_CONFIG, "本地签名配置示例")
+    if example != EXPECTED_SIGNING_EXAMPLE:
+        fail("本地签名配置示例漂移")
+
+    ignore_lines = read_utf8(root, ".gitignore", "Git 忽略配置").splitlines()
+    if ignore_lines.count(SIGNING_IGNORE) != 1:
+        fail("Git 忽略配置没有唯一排除本地签名配置")
 
 
 def executable_shell_lines(
@@ -928,6 +1011,7 @@ def require_ordered_commands(
 def validate_configurations(root: Path, project: str) -> None:
     base_paths = validate_configuration_graph(project)
     validate_xcconfig_tree(root, base_paths)
+    validate_signing_override(root)
     for relative, expected in EXPECTED_CONFIG_INCLUDES.items():
         actual = config_includes(
             read_utf8(root, relative, f"{relative} 产品配置")

@@ -1,7 +1,7 @@
-// Change this to change all the bundle IDs and app groups
+// 公共回退值不包含个人签名身份；真机身份放在已忽略的本地配置中。
 ROOT_BUNDLE_IDENTIFIER = app.ish.iSH
-// It's easiest to specify your development team ID in the project build settings, but you can alternatively put it here to reduce merge conflicts
 DEVELOPMENT_TEAM =
+#include? "Signing.local.xcconfig"
 
 // Choose logging channels to enable. Separate by spaces. Try "verbose strace".
 ISH_LOG =

@@ -7,6 +7,7 @@ xcuserdata/
 
 cross-*.txt
 root.tar.gz
+/app/Signing.local.xcconfig
 
 node_modules
 app/xtermjs/xterm-dist

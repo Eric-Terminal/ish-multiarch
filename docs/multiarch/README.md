@@ -418,10 +418,25 @@ python3 -B tools/apple-release-profiles.py show --profile core
 python3 -B tools/apple-release-profiles.py show --profile with-linux
 ```
 
-`check-locks` 只证明清单、scheme、configuration、内核选择、rootfs 与产品
-归属一致；它不替发行者选择 profile，也不表示许可义务、公开 Release 或
-真机门禁已经闭合。`with-linux` 的 Linux GPLv2、在线 rootfs 与对应源码
-交付仍是额外未决项。
+`check-locks` 只证明清单、scheme、configuration、内核选择、rootfs、产品
+归属与本地签名配置入口一致；它不替发行者选择 profile，也不表示许可义务、
+公开 Release 或真机门禁已经闭合。`with-linux` 的 Linux GPLv2、在线
+rootfs 与对应源码交付仍是额外未决项。
+
+真机开发签名不在公共仓库固定个人 Team 或产品身份。先复制本地配置示例，
+再填入当前开发者账号实际拥有的反向域名根 ID 与 Team ID：
+
+```sh
+cp app/Signing.local.xcconfig.example app/Signing.local.xcconfig
+```
+
+`app/Signing.local.xcconfig` 已由 Git 忽略，并在公共默认值之后通过
+`#include?` 读取。`ROOT_BUNDLE_IDENTIFIER` 会统一派生 iPhone App、
+FileProvider、独立 Watch App、两端 UI Test Runner 与 App Group 的身份；
+`DEVELOPMENT_TEAM` 同样供这些 target 继承。示例中的 `com.example.iSH`
+和 `ABCDE12345` 不能直接用于签名，公共 `app/iSH.xcconfig` 也不得提交
+个人 Team。Developer Portal 中的 App ID、App Group、provisioning
+profile、设备注册和最终签名仍由对应 Apple 开发者账号管理。
 
 ### Apple 发行公共资产
 

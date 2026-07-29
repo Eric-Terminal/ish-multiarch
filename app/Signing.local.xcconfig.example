@@ -1,0 +1,4 @@
+// 复制为 Signing.local.xcconfig，并替换为当前开发者账号拥有的值。
+// 本地文件已被 Git 忽略，不能把真实 Team ID 或私有产品身份提交到仓库。
+ROOT_BUNDLE_IDENTIFIER = com.example.iSH
+DEVELOPMENT_TEAM = ABCDE12345
