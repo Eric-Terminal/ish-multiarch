@@ -5,11 +5,22 @@
 //  Created by Theodore Dubois on 11/13/20.
 //
 
+#import <CommonCrypto/CommonDigest.h>
 #import <XCTest/XCTest.h>
+
+typedef NS_ENUM(NSUInteger, ISHGuestTransportResult) {
+    ISHGuestTransportResultPass,
+    ISHGuestTransportResultRetryableFail,
+    ISHGuestTransportResultFail,
+    ISHGuestTransportResultTimeout,
+};
 
 @interface UITests : XCTestCase
 
 @property XCUIApplication *app;
+@property BOOL guestRecoveryRequired;
+
+- (BOOL)recoverGuestStateWithTimeout:(NSTimeInterval)timeout;
 
 @end
 
@@ -18,16 +29,38 @@
 - (void)setUp {
     self.continueAfterFailure = NO;
     self.app = [XCUIApplication new];
+    self.guestRecoveryRequired = YES;
+    // 产品门禁不允许一次性引导打断已经开始输入的物理命令。
+    self.app.launchArguments = @[@"-Skip Startup Message", @"1"];
     [self.app launch];
 
     XCTAssertTrue([self.app.webViews.firstMatch waitForExistenceWithTimeout:180],
                   @"终端界面没有在期限内出现");
     [self waitForPromptWithTimeout:300];
+
+    BOOL recovered = [self recoverGuestStateWithTimeout:90];
+    self.guestRecoveryRequired = !recovered;
+    XCTAssertTrue(recovered, @"上轮 guest 测试状态没有恢复");
 }
 
 - (void)tearDown {
-    [self.app terminate];
-    self.app = nil;
+    @try {
+        if (self.guestRecoveryRequired) {
+            [self.app terminate];
+            [self.app launch];
+            XCTAssertTrue(
+                    [self.app.webViews.firstMatch waitForExistenceWithTimeout:180],
+                    @"异常退出后无法重新打开终端执行恢复");
+            [self waitForPromptWithTimeout:300];
+            BOOL recovered = [self recoverGuestStateWithTimeout:90];
+            self.guestRecoveryRequired = !recovered;
+            XCTAssertTrue(recovered, @"异常退出后 guest 测试状态恢复失败");
+        }
+    } @finally {
+        [self.app terminate];
+        self.app = nil;
+        [super tearDown];
+    }
 }
 
 - (NSString *)terminalTail {
@@ -55,9 +88,258 @@
     [self waitForExpectations:@[prompt] timeout:timeout];
 }
 
+- (NSString *)commandUsingCDNIPv4:(NSString *)command {
+    // 公网软件门禁仍使用原 hostname、SNI 与证书，只稳定选择 DNS 当前的 A 记录。
+    NSString *prefix =
+            @"(hosts=/etc/hosts; host=dl-cdn.alpinelinux.org; "
+             "b=/root/.ish-ios-ipv4-gate-hosts; n=$b.new; g=; m=; "
+             "restore_hosts() { r=$1; trap - 0 HUP INT TERM; "
+             "if test -n \"$g\" && ! rm -f \"$g\"; then r=125; fi; "
+             "if test -n \"$m\" && ! rm -f \"$m\"; then r=125; fi; "
+             "if cp -p \"$b\" \"$hosts\" && cmp -s \"$b\" \"$hosts\" && "
+             "test \"$(stat -c '%u:%g:%a' \"$b\")\" = "
+             "\"$(stat -c '%u:%g:%a' \"$hosts\")\"; then "
+             "if ! rm -f \"$b\" \"$n\"; then r=125; fi; "
+             "else r=125; rm -f \"$n\" || :; fi; exit \"$r\"; }; "
+             "if test -f \"$b\"; then "
+             "if cp -p \"$b\" \"$hosts\" && cmp -s \"$b\" \"$hosts\" && "
+             "test \"$(stat -c '%u:%g:%a' \"$b\")\" = "
+             "\"$(stat -c '%u:%g:%a' \"$hosts\")\" && rm -f \"$b\" \"$n\"; "
+             "then :; else rm -f \"$n\" || :; exit 125; fi; fi; "
+             "rm -f \"$n\" || exit 125; "
+             "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY "
+             "ALL_PROXY all_proxy SSL_NO_VERIFY_HOSTNAME; "
+             "NO_PROXY=\"$host\"; no_proxy=\"$host\"; export NO_PROXY no_proxy; "
+             "ip=$(timeout -k 15 90 nslookup -type=A \"$host\" 2>>\"$l\" | "
+             "awk '$1 == \"Name:\" { answer=1; next } "
+             "answer && $1 == \"Address:\" && $2 ~ /^[0-9.]+$/ "
+             "{ print $2; exit }'); test -n \"$ip\" || exit; "
+             "printf 'PINNED_IPV4=%s\\n' \"$ip\" >>\"$l\" || exit; "
+             "cp -p \"$hosts\" \"$n\" && mv \"$n\" \"$b\" || exit; "
+             "trap 'restore_hosts $?' 0; trap 'restore_hosts 129' HUP; "
+             "trap 'restore_hosts 130' INT; trap 'restore_hosts 143' TERM; "
+             "printf '\\n%s\\t%s\\n' \"$ip\" \"$host\" >>\"$hosts\" || exit; "
+             "g=/tmp/ish-ipv4-getent-$t; rm -f \"$g\" || exit; "
+             "timeout -k 15 90 getent ahostsv4 \"$host\" "
+             ">\"$g\" 2>>\"$l\" || exit; "
+             "awk -v ip=\"$ip\" "
+             "'NF { seen=1; if ($1 != ip) bad=1 } "
+             "END { exit !(seen && !bad) }' \"$g\" || exit; "
+             "rm -f \"$g\" || exit; { ";
+    NSString *suffix =
+            @"; }; r=$?; restore_hosts \"$r\")";
+    return [NSString stringWithFormat:@"%@%@%@", prefix, command, suffix];
+}
+
+- (void)typeGuestLine:(NSString *)line {
+    // 分批合成键盘事件，期间不做 AX 查询或重新检查焦点。
+    const NSUInteger chunkLength = 512;
+    for (NSUInteger offset = 0; offset < line.length; offset += chunkLength) {
+        NSRange range = NSMakeRange(offset, MIN(chunkLength, line.length - offset));
+        [self.app typeText:[line substringWithRange:range]];
+    }
+    [self.app typeText:@"\n"];
+}
+
+- (ISHGuestTransportResult)waitForTransportPass:(NSString *)pass
+                                            fail:(NSString *)fail
+                                         timeout:(NSTimeInterval)timeout {
+    NSPredicate *predicate = [NSPredicate
+            predicateWithFormat:@"label CONTAINS %@ OR label CONTAINS %@", pass, fail];
+    XCUIElement *finished = [self.app.webViews.staticTexts
+            matchingPredicate:predicate].firstMatch;
+    NSTimeInterval pollInterval = 1;
+    if (timeout >= 3600)
+        pollInterval = 60;
+    else if (timeout >= 600)
+        pollInterval = 30;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    BOOL didFinish = finished.exists;
+    while (!didFinish) {
+        NSTimeInterval remaining = deadline.timeIntervalSinceNow;
+        if (remaining <= 0)
+            break;
+        [NSThread sleepForTimeInterval:MIN(pollInterval, remaining)];
+        didFinish = finished.exists;
+    }
+    if (!didFinish)
+        return ISHGuestTransportResultTimeout;
+    NSString *label = finished.label;
+    if ([label containsString:pass])
+        return ISHGuestTransportResultPass;
+    NSString *retryableFail = [fail stringByAppendingString:@":1"];
+    NSRange retryableRange = [label rangeOfString:retryableFail];
+    if (retryableRange.location != NSNotFound) {
+        NSUInteger end = NSMaxRange(retryableRange);
+        if (end == label.length ||
+                ![NSCharacterSet.decimalDigitCharacterSet
+                        characterIsMember:[label characterAtIndex:end]])
+            return ISHGuestTransportResultRetryableFail;
+    }
+    return ISHGuestTransportResultFail;
+}
+
+- (ISHGuestTransportResult)submitGuestLineResult:(NSString *)line
+                                             pass:(NSString *)pass
+                                             fail:(NSString *)fail
+                                          timeout:(NSTimeInterval)timeout {
+    NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
+    // BusyBox ash 的交互编辑缓冲最多接收 2046 个 ASCII 载荷字符。
+    XCTAssertLessThanOrEqual(lineData.length + 1, 1800u,
+                             @"guest 传输命令超过安全行长");
+    if (lineData.length + 1 > 1800)
+        return ISHGuestTransportResultFail;
+
+    // AX 查询会令 WebKit 丢失 first responder，每条物理命令前都重新聚焦。
+    [self.app.webViews.firstMatch tap];
+    [self typeGuestLine:line];
+    return [self waitForTransportPass:pass fail:fail timeout:timeout];
+}
+
+- (BOOL)submitGuestLine:(NSString *)line
+                   pass:(NSString *)pass
+                   fail:(NSString *)fail
+                timeout:(NSTimeInterval)timeout {
+    ISHGuestTransportResult result =
+            [self submitGuestLineResult:line pass:pass fail:fail timeout:timeout];
+    BOOL didFinish = result != ISHGuestTransportResultTimeout;
+    XCTAssertTrue(didFinish,
+                  @"guest 命令传输或执行未在期限内确认：\n%@",
+                  self.terminalTail);
+    if (!didFinish)
+        return NO;
+    BOOL didPass = result == ISHGuestTransportResultPass;
+    XCTAssertTrue(didPass, @"guest 脚本传输失败：\n%@", self.terminalTail);
+    return didPass;
+}
+
+- (BOOL)recoverGuestStateWithTimeout:(NSTimeInterval)timeout {
+    NSString *token = [NSUUID.UUID.UUIDString substringToIndex:8];
+    NSString *pass = [NSString stringWithFormat:@"ISH-RECOVER:%@:PASS", token];
+    NSString *fail = [NSString stringWithFormat:@"ISH-RECOVER:%@:FAIL", token];
+    NSString *line = [NSString stringWithFormat:
+            @"h=/etc/hosts; b=/root/.ish-ios-ipv4-gate-hosts; n=$b.new; r=0; "
+             "if test -f \"$b\"; then "
+             "if cp -p \"$b\" \"$h\" && cmp -s \"$b\" \"$h\" && "
+             "test \"$(stat -c '%%u:%%g:%%a' \"$b\")\" = "
+             "\"$(stat -c '%%u:%%g:%%a' \"$h\")\"; then "
+             "if ! rm -f \"$b\" \"$n\"; then r=125; fi; "
+             "else r=125; rm -f \"$n\" || :; fi; "
+             "elif ! rm -f \"$n\"; then r=125; fi; "
+             "if ! rm -f /tmp/.ish-ios-uitest-stage.b64 "
+             "/tmp/.ish-ios-uitest-stage.sh "
+             "/tmp/ish-ipv4-getent-* /tmp/ish-apkindex-*.list "
+             "/tmp/ish-apkindex.tar.gz; "
+             "then r=125; fi; "
+             "if test \"$r\" -eq 0; then "
+             "printf 'ISH-RECOVER:%%s:PASS\\n' '%@'; else "
+             "printf 'ISH-RECOVER:%%s:FAIL:%%s\\n' '%@' \"$r\"; fi",
+            token, token];
+    return [self submitGuestLine:line pass:pass fail:fail timeout:timeout];
+}
+
+- (BOOL)submitGuestScript:(NSString *)script
+                    token:(NSString *)token
+                  timeout:(NSTimeInterval)timeout {
+    NSData *scriptData = [script dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *encoded = [scriptData base64EncodedStringWithOptions:0];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(scriptData.bytes, (CC_LONG) scriptData.length, digest);
+    NSMutableString *expectedSHA256 =
+            [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++)
+        [expectedSHA256 appendFormat:@"%02x", digest[index]];
+    NSString *base64Path = @"/tmp/.ish-ios-uitest-stage.b64";
+    NSString *scriptPath = @"/tmp/.ish-ios-uitest-stage.sh";
+    const NSUInteger payloadLength = 1024;
+    const NSUInteger maximumAttempts = 2;
+
+    for (NSUInteger attempt = 1; attempt <= maximumAttempts; attempt++) {
+        NSString *transportToken =
+                [NSString stringWithFormat:@"%@-%lu", token, (unsigned long)attempt];
+        NSUInteger fragment = 0;
+        BOOL shouldRetry = NO;
+
+        for (NSUInteger offset = 0; offset < encoded.length;
+             offset += payloadLength) {
+            fragment++;
+            NSRange range =
+                    NSMakeRange(offset, MIN(payloadLength, encoded.length - offset));
+            NSString *payload = [encoded substringWithRange:range];
+            NSString *number = [NSString stringWithFormat:@"%04lu",
+                                                          (unsigned long)fragment];
+            NSString *pass = [NSString
+                    stringWithFormat:@"ISH-XFER:%@:%@:ACK", transportToken, number];
+            NSString *fail = [NSString
+                    stringWithFormat:@"ISH-XFER:%@:%@:FAIL", transportToken, number];
+            NSString *prepare =
+                    fragment == 1 ? @"rm -f \"$b\" \"$s\" && " : @"";
+            NSString *redirect = fragment == 1 ? @">" : @">>";
+            NSUInteger cumulative = NSMaxRange(range);
+            NSString *line = [NSString stringWithFormat:
+                    @"b='%@'; s='%@'; if %@printf '%%s' '%@' %@\"$b\" && "
+                     "test \"$(/bin/busybox wc -c <\"$b\")\" -eq %lu; then "
+                     "printf 'ISH-XFER:%%s:%%s:ACK\\n' '%@' '%@'; else r=$?; "
+                     "if ! rm -f \"$b\" \"$s\"; then r=125; fi; "
+                     "printf 'ISH-XFER:%%s:%%s:FAIL:%%s\\n' '%@' '%@' \"$r\"; fi",
+                    base64Path, scriptPath, prepare, payload, redirect,
+                    (unsigned long)cumulative, transportToken, number,
+                    transportToken, number];
+            ISHGuestTransportResult result = [self
+                    submitGuestLineResult:line pass:pass fail:fail timeout:60];
+            if (result == ISHGuestTransportResultTimeout) {
+                XCTFail(@"guest 脚本分片状态不确定，禁止盲目重试：\n%@",
+                        self.terminalTail);
+                return NO;
+            }
+            if (result == ISHGuestTransportResultRetryableFail) {
+                shouldRetry = YES;
+                break;
+            }
+            if (result == ISHGuestTransportResultFail) {
+                XCTFail(@"guest 脚本分片清理状态不安全，禁止重试：\n%@",
+                        self.terminalTail);
+                return NO;
+            }
+        }
+        if (shouldRetry)
+            continue;
+
+        NSString *done =
+                [NSString stringWithFormat:@"ISH-XFER:%@:FINAL:DONE", transportToken];
+        NSString *fail =
+                [NSString stringWithFormat:@"ISH-XFER:%@:FINAL:FAIL", transportToken];
+        NSString *execute = [NSString stringWithFormat:
+                @"b='%@'; s='%@'; t='%@'; r=0; "
+                 "if /bin/busybox base64 -d \"$b\" >\"$s\" && "
+                 "test \"$(/bin/busybox wc -c <\"$s\")\" -eq %lu && "
+                 "actual=$(/bin/busybox sha256sum \"$s\") && "
+                 "actual=${actual%%%% *} && test \"$actual\" = '%@' && "
+                 "rm -f \"$b\"; then /bin/busybox sh \"$s\"; r=$?; "
+                 "else r=125; fi; "
+                 "if ! rm -f \"$b\" \"$s\"; then r=125; fi; "
+                 "if test \"$r\" -eq 0; then "
+                 "printf 'ISH-XFER:%%s:FINAL:DONE\\n' \"$t\"; else "
+                 "printf 'ISH-XFER:%%s:FINAL:FAIL:%%s\\n' \"$t\" \"$r\"; fi",
+                base64Path, scriptPath, transportToken,
+                (unsigned long)scriptData.length, expectedSHA256];
+        return [self submitGuestLine:execute
+                                pass:done
+                                fail:fail
+                             timeout:timeout];
+    }
+
+    XCTFail(@"guest 脚本分片在一次安全重试后仍传输失败：\n%@",
+            self.terminalTail);
+    return NO;
+}
+
 - (void)runGuestStage:(NSString *)stage
                command:(NSString *)command
                timeout:(NSTimeInterval)timeout {
+    // 在下一条业务命令前确认 shell 就绪；最后一阶段无需等待无后继用途的提示符。
+    [self waitForPromptWithTimeout:180];
+
     NSString *token = [NSUUID.UUID.UUIDString substringToIndex:8];
     NSString *pass = [NSString stringWithFormat:@"ISH-IOS:%@:%@:PASS", token, stage];
     NSString *fail = [NSString stringWithFormat:@"ISH-IOS:%@:%@:FAIL", token, stage];
@@ -66,25 +348,33 @@
 
     // 标记在输入行中保持分段，只有 guest 实际执行 printf 后才会出现完整结果。
     NSString *script = [NSString stringWithFormat:
-            @"t='%@'; l='%@'; rm -f \"$l\"; if %@; then "
+            @"t='%@'; l='%@'; if rm -f \"$l\" && { %@; }; then "
              "printf 'ISH-IOS:%%s:' \"$t\"; printf '%@:PASS\\n'; "
              "else r=$?; tail -c 4096 \"$l\" 2>/dev/null; "
              "printf '\\nISH-IOS:%%s:' \"$t\"; "
              "printf '%@:FAIL:%%s\\n' \"$r\"; fi",
             token, log, command, stage, stage];
-    [self.app typeText:[script stringByAppendingString:@"\n"]];
+    BOOL usesIPv4Scope =
+            [command containsString:@"/root/.ish-ios-ipv4-gate-hosts"];
+    // 任一传输中断都可能留下固定 stage 文件；业务通过后再解除恢复责任。
+    self.guestRecoveryRequired = YES;
+    if (![self submitGuestScript:script token:token timeout:timeout])
+        return;
+    if (!usesIPv4Scope)
+        self.guestRecoveryRequired = NO;
 
     NSPredicate *finishedPredicate = [NSPredicate
             predicateWithFormat:@"label CONTAINS %@ OR label CONTAINS %@", pass, fail];
     XCUIElement *finished = [self.app.webViews.staticTexts
             matchingPredicate:finishedPredicate].firstMatch;
-    BOOL didFinish = [finished waitForExistenceWithTimeout:timeout];
-    XCTAssertTrue(didFinish, @"%@ 阶段超时：\n%@", stage, self.terminalTail);
+    BOOL didFinish = [finished waitForExistenceWithTimeout:30];
+    XCTAssertTrue(didFinish, @"%@ 阶段没有生成结果：\n%@", stage, self.terminalTail);
     if (!didFinish)
         return;
-    XCTAssertTrue([finished.label containsString:pass],
-                  @"%@ 阶段失败：\n%@", stage, self.terminalTail);
-    [self waitForPromptWithTimeout:30];
+    BOOL didPass = [finished.label containsString:pass];
+    XCTAssertTrue(didPass, @"%@ 阶段失败：\n%@", stage, self.terminalTail);
+    if (didPass && usesIPv4Scope)
+        self.guestRecoveryRequired = NO;
 }
 
 - (void)test终端冷启动与重新连接 {
@@ -104,37 +394,49 @@
                          "/etc/resolv.conf >\"$l\" 2>&1"
                 timeout:30];
     [self runGuestStage:@"GETENT"
-                command:@"timeout 90 getent hosts dl-cdn.alpinelinux.org "
+                command:@"timeout -k 15 90 getent hosts dl-cdn.alpinelinux.org "
                          ">\"$l\" 2>&1"
-                timeout:120];
+                timeout:150];
     [self runGuestStage:@"NSLOOKUP"
-                command:@"timeout 90 nslookup dl-cdn.alpinelinux.org "
+                command:@"timeout -k 15 90 nslookup dl-cdn.alpinelinux.org "
                          ">\"$l\" 2>&1"
-                timeout:120];
+                timeout:150];
     [self runGuestStage:@"HTTP-IPV4"
-                command:@"ip=$(nslookup dl-cdn.alpinelinux.org | "
+                command:@"ip=$(timeout -k 15 90 "
+                         "nslookup dl-cdn.alpinelinux.org | "
                          "awk '$1 == \"Address:\" && $2 ~ /^[0-9.]+$/ "
                          "{ print $2; exit }'); test -n \"$ip\" && "
                          "printf 'GET / HTTP/1.0\\r\\nHost: "
                          "dl-cdn.alpinelinux.org\\r\\nConnection: close\\r\\n\\r\\n' | "
-                         "timeout 90 nc \"$ip\" 80 >\"$l\" 2>&1 && "
+                         "timeout -k 15 90 nc \"$ip\" 80 >\"$l\" 2>&1 && "
                          "grep -Eq '^HTTP/1\\.[01] [0-9]{3}' \"$l\""
-                timeout:120];
+                timeout:270];
     [self runGuestStage:@"HTTP"
                 command:@"printf 'GET / HTTP/1.0\\r\\nHost: "
                          "dl-cdn.alpinelinux.org\\r\\nConnection: close\\r\\n\\r\\n' | "
-                         "timeout 90 nc dl-cdn.alpinelinux.org 80 "
+                         "timeout -k 15 90 nc dl-cdn.alpinelinux.org 80 "
                          ">\"$l\" 2>&1 && "
                          "grep -Eq '^HTTP/1\\.[01] [0-9]{3}' \"$l\""
-                timeout:120];
+                timeout:150];
     [self runGuestStage:@"HTTPS"
-                command:@"a=/tmp/ish-apkindex.tar.gz; rm -f \"$a\"; "
-                         "timeout -k 15 300 wget -q -T 60 -t 2 -O \"$a\" "
-                         "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/"
-                         "aarch64/APKINDEX.tar.gz >\"$l\" 2>&1 && "
-                         "test -s \"$a\" && "
-                         "tar -tzf \"$a\" 2>>\"$l\" | grep -qx APKINDEX"
-                timeout:360];
+                command:[self commandUsingCDNIPv4:
+                         @"a=/tmp/ish-apkindex.tar.gz; "
+                          "m=/tmp/ish-apkindex-$t.list; "
+                          "url=https://dl-cdn.alpinelinux.org/alpine/v3.24/"
+                          "main/aarch64/APKINDEX.tar.gz; wget_ok=; "
+                          "for attempt in 1 2; do rm -f \"$a\" \"$m\"; "
+                          "if timeout -k 15 300 wget -Y off -T 90 -O \"$a\" "
+                          "\"$url\" >>\"$l\" 2>&1 && test -s \"$a\" && "
+                          "timeout -k 15 120 tar -tzf \"$a\" "
+                          ">\"$m\" 2>>\"$l\" && "
+                          "grep -qx APKINDEX \"$m\"; then "
+                          "wget_ok=1; break; fi; "
+                          "printf 'HTTPS_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; "
+                          "test \"$wget_ok\" = 1 && "
+                          "grep -F \"Connecting to $host ($ip:\" "
+                          "\"$l\" >/dev/null && rm -f \"$m\" \"$a\""]
+                timeout:1260];
     [self runGuestStage:@"APK-CONFIG"
                 command:@"test \"$(apk --print-arch 2>\"$l\")\" = aarch64 && "
                          "grep -Fx 'https://dl-cdn.alpinelinux.org/alpine/"
@@ -144,11 +446,16 @@
                          ">/dev/null 2>>\"$l\""
                 timeout:30];
     [self runGuestStage:@"APK-UPDATE"
-                command:@"timeout -k 15 900 apk update >\"$l\" 2>&1"
-                timeout:1020];
+                command:[self commandUsingCDNIPv4:
+                         @"apk_ok=; for attempt in 1 2; do "
+                          "if timeout -k 15 900 apk --timeout 120 update "
+                          ">>\"$l\" 2>&1; then apk_ok=1; break; fi; "
+                          "printf 'APK_UPDATE_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; test \"$apk_ok\" = 1"]
+                timeout:2220];
     [self runGuestStage:@"APK-SEARCH"
                 command:@"o=/tmp/ish-apk-search.log; rm -f \"$o\"; "
-                         "timeout -k 15 1200 apk search -x busybox "
+                         "timeout -k 15 1200 apk --network=no search -x busybox "
                          ">\"$o\" 2>>\"$l\" && "
                          "grep -Eq '^busybox-[0-9]' \"$o\""
                 timeout:1320];
@@ -156,15 +463,22 @@
 
 - (void)testAArch64SQLite持久化 {
     [self runGuestStage:@"SQLITE-INSTALL"
-                command:@"if apk info -e 'sqlite=3.53.2-r0' "
-                         ">/dev/null 2>&1; then :; else "
-                         "timeout -k 15 900 apk --cache-max-age 10080 "
-                         "add --no-progress 'sqlite=3.53.2-r0' "
-                         ">\"$l\" 2>&1; fi && "
-                         "apk info -e 'sqlite=3.53.2-r0' >/dev/null 2>>\"$l\" && "
-                         "sqlite3 --version >>\"$l\" 2>&1 && "
-                         "test \"$(sqlite3 --version | awk '{print $1}')\" = 3.53.2"
-                timeout:1020];
+                command:[self commandUsingCDNIPv4:
+                         @"if apk info -e 'sqlite=3.53.2-r0' "
+                          ">/dev/null 2>&1; then :; else "
+                          "apk_ok=; for attempt in 1 2; do "
+                          "if timeout -k 15 900 apk --timeout 120 "
+                          "--cache-max-age 10080 add --no-progress "
+                          "'sqlite=3.53.2-r0' >>\"$l\" 2>&1; then "
+                          "apk_ok=1; break; fi; "
+                          "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; "
+                          "test \"$apk_ok\" = 1; fi && "
+                          "apk info -e 'sqlite=3.53.2-r0' >/dev/null 2>>\"$l\" && "
+                          "sqlite3 --version >>\"$l\" 2>&1 && "
+                          "test \"$(sqlite3 --version | "
+                          "awk '{print $1}')\" = 3.53.2"]
+                timeout:2220];
     [self runGuestStage:@"SQLITE-WAL"
                 command:@"d=/root/.ish-ios-sqlite-gate; "
                          "db=$d/matrix.db; o=$d/result; "
@@ -199,18 +513,24 @@
 
 - (void)testAArch64Python运行时 {
     [self runGuestStage:@"PYTHON-INSTALL"
-                command:@"if apk info -e 'python3=3.14.5-r0' "
-                         ">/dev/null 2>&1; then :; else "
-                         "timeout -k 30 3600 apk --cache-max-age 10080 "
-                         "add --no-progress 'python3=3.14.5-r0' "
-                         ">\"$l\" 2>&1; fi && "
-                         "apk info -e 'python3=3.14.5-r0' >>\"$l\" 2>&1 && "
-                         "timeout -k 30 900 python3 -I -c "
-                         "'import platform, sys; "
-                         "assert platform.machine() == \"aarch64\"; "
-                         "assert sys.version_info[:3] == (3, 14, 5)' "
-                         ">>\"$l\" 2>&1"
-                timeout:4680];
+                command:[self commandUsingCDNIPv4:
+                         @"if apk info -e 'python3=3.14.5-r0' "
+                          ">/dev/null 2>&1; then :; else "
+                          "apk_ok=; for attempt in 1 2; do "
+                          "if timeout -k 30 3600 apk --timeout 120 "
+                          "--cache-max-age 10080 add --no-progress "
+                          "'python3=3.14.5-r0' >>\"$l\" 2>&1; then "
+                          "apk_ok=1; break; fi; "
+                          "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; "
+                          "test \"$apk_ok\" = 1; fi && "
+                          "apk info -e 'python3=3.14.5-r0' >>\"$l\" 2>&1 && "
+                          "timeout -k 30 900 python3 -I -c "
+                          "'import platform, sys; "
+                          "assert platform.machine() == \"aarch64\"; "
+                          "assert sys.version_info[:3] == (3, 14, 5)' "
+                          ">>\"$l\" 2>&1"]
+                timeout:8700];
     [self runGuestStage:@"PYTHON-STDLIB"
                 command:@"timeout -k 15 300 python3 -I -c "
                          "'import hashlib, json, math, sqlite3, ssl, zlib; "
@@ -263,16 +583,23 @@
 
 - (void)testAArch64本地编译与Pthread线程 {
     [self runGuestStage:@"BUILD-INSTALL"
-                command:@"if apk info -e 'build-base=0.5-r4' "
-                         ">/dev/null 2>&1; then :; else "
-                         "timeout -k 30 14400 apk --cache-max-age 10080 "
-                         "add --no-progress 'build-base=0.5-r4' "
-                         ">\"$l\" 2>&1; fi && "
-                         "apk info -e 'build-base=0.5-r4' >>\"$l\" 2>&1 && "
-                         "command -v cc >>\"$l\" 2>&1 && "
-                         "machine=$(timeout -k 15 300 cc -dumpmachine 2>>\"$l\") && "
-                         "test \"$machine\" = aarch64-alpine-linux-musl"
-                timeout:15600];
+                command:[self commandUsingCDNIPv4:
+                         @"if apk info -e 'build-base=0.5-r4' "
+                          ">/dev/null 2>&1; then :; else "
+                          "apk_ok=; for attempt in 1 2; do "
+                          "if timeout -k 30 14400 apk --timeout 120 "
+                          "--cache-max-age 10080 add --no-progress "
+                          "'build-base=0.5-r4' >>\"$l\" 2>&1; then "
+                          "apk_ok=1; break; fi; "
+                          "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; "
+                          "test \"$apk_ok\" = 1; fi && "
+                          "apk info -e 'build-base=0.5-r4' >>\"$l\" 2>&1 && "
+                          "command -v cc >>\"$l\" 2>&1 && "
+                          "machine=$(timeout -k 15 300 cc -dumpmachine "
+                          "2>>\"$l\") && "
+                          "test \"$machine\" = aarch64-alpine-linux-musl"]
+                timeout:30000];
     [self runGuestStage:@"BUILD-C"
                 command:@"d=/root/.ish-ios-build-c-$t; rm -rf \"$d\"; "
                          "mkdir -p \"$d\" && printf '%s\\n' "
@@ -330,18 +657,25 @@
 
 - (void)testAArch64Git与SSH客户端 {
     [self runGuestStage:@"GITSSH-INSTALL"
-                command:@"if apk info -e 'git=2.54.0-r0' >/dev/null 2>&1 && "
-                         "apk info -e 'openssh-client-default=10.3_p1-r0' "
-                         ">/dev/null 2>&1; then :; else "
-                         "timeout -k 30 14400 apk --cache-max-age 10080 "
-                         "add --no-progress 'git=2.54.0-r0' "
-                         "'openssh-client-default=10.3_p1-r0' >\"$l\" 2>&1; fi && "
-                         "apk info -e 'git=2.54.0-r0' >>\"$l\" 2>&1 && "
-                         "apk info -e 'openssh-client-default=10.3_p1-r0' "
-                         ">>\"$l\" 2>&1 && "
-                         "test \"$(git --version)\" = 'git version 2.54.0' && "
-                         "ssh -V 2>&1 | grep -F 'OpenSSH_10.3p1' >>\"$l\""
-                timeout:15600];
+                command:[self commandUsingCDNIPv4:
+                         @"if apk info -e 'git=2.54.0-r0' >/dev/null 2>&1 && "
+                          "apk info -e 'openssh-client-default=10.3_p1-r0' "
+                          ">/dev/null 2>&1; then :; else "
+                          "apk_ok=; for attempt in 1 2; do "
+                          "if timeout -k 30 14400 apk --timeout 120 "
+                          "--cache-max-age 10080 add --no-progress "
+                          "'git=2.54.0-r0' "
+                          "'openssh-client-default=10.3_p1-r0' "
+                          ">>\"$l\" 2>&1; then apk_ok=1; break; fi; "
+                          "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' "
+                          "\"$attempt\" >>\"$l\"; done; "
+                          "test \"$apk_ok\" = 1; fi && "
+                          "apk info -e 'git=2.54.0-r0' >>\"$l\" 2>&1 && "
+                          "apk info -e 'openssh-client-default=10.3_p1-r0' "
+                          ">>\"$l\" 2>&1 && "
+                          "test \"$(git --version)\" = 'git version 2.54.0' && "
+                          "ssh -V 2>&1 | grep -F 'OpenSSH_10.3p1' >>\"$l\""]
+                timeout:30000];
     [self runGuestStage:@"GIT"
                 command:@"d=/root/.ish-ios-git-gate-$t; rm -rf \"$d\"; "
                          "mkdir -p \"$d/repo\" && git -C \"$d/repo\" init -q && "

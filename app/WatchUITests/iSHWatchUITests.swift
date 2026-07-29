@@ -1,15 +1,80 @@
+import Foundation
+import CryptoKit
 import XCTest
 
 @MainActor
 final class iSHWatchUITests: XCTestCase {
+    private enum GuestTransportResult: Equatable {
+        case pass
+        case retryableFail
+        case fail
+        case timeout
+    }
+
     private var didWarmSystemInput = false
+    private var didRecoverGuestState = false
+    private var guestRecoveryRequired = false
+    private var recoveryApp: XCUIApplication?
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        didWarmSystemInput = false
+        didRecoverGuestState = false
+        guestRecoveryRequired = false
+        recoveryApp = nil
+    }
+
+    override func tearDownWithError() throws {
+        defer {
+            recoveryApp?.terminate()
+            recoveryApp = nil
+        }
+
+        if guestRecoveryRequired, let app = recoveryApp {
+            app.terminate()
+            app.launch()
+            didWarmSystemInput = false
+
+            let input = app.textFields["command-input"]
+            let inputExists = input.waitForExistence(timeout: 180)
+            XCTAssertTrue(inputExists, "异常退出后无法重新打开命令输入框执行恢复")
+            if inputExists {
+                let inputReady = XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "enabled == true"),
+                    object: input)
+                let readyResult = XCTWaiter.wait(
+                    for: [inputReady],
+                    timeout: 180)
+                XCTAssertEqual(
+                    readyResult,
+                    .completed,
+                    "异常退出后命令输入框没有恢复可用")
+
+                let send = app.buttons["send-command"]
+                let terminal = app.staticTexts["terminal-output"]
+                let controlsExist =
+                    send.waitForExistence(timeout: 10) &&
+                    terminal.waitForExistence(timeout: 10)
+                XCTAssertTrue(controlsExist, "异常退出后恢复所需控件没有出现")
+                if readyResult == .completed && controlsExist {
+                    let recovered = recoverGuestState(
+                        timeout: 120,
+                        app: app,
+                        input: input,
+                        send: send,
+                        terminal: terminal)
+                    guestRecoveryRequired = !recovered
+                    XCTAssertTrue(recovered, "异常退出后 guest 测试状态恢复失败")
+                }
+            }
+        }
+
+        try super.tearDownWithError()
     }
 
     func test许可证与源码无需等待Linux即可查看() throws {
         let app = XCUIApplication()
+        recoveryApp = app
         app.launch()
 
         let entry = app.buttons["third-party-notices-button"]
@@ -58,6 +123,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64终端命令与快捷键() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -78,7 +145,7 @@ final class iSHWatchUITests: XCTestCase {
         input.tap()
         let systemInput = app.textViews.firstMatch
         XCTAssertTrue(
-            systemInput.waitForExistence(timeout: 10),
+            systemInput.waitForExistence(timeout: 60),
             "watchOS 系统输入框没有出现")
         systemInput.typeText("clear; uname -m")
 
@@ -103,13 +170,27 @@ final class iSHWatchUITests: XCTestCase {
             evaluatedWith: terminal)
         wait(for: [architecture], timeout: 60)
 
+        recoveryApp = app
+        didWarmSystemInput = true
+        guestRecoveryRequired = true
+        let recovered = recoverGuestState(
+            timeout: 120,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        guestRecoveryRequired = !recovered
+        didRecoverGuestState = recovered
+        XCTAssertTrue(recovered, "上轮 guest 测试状态没有恢复")
+
+        guestRecoveryRequired = true
         let clearToken = String(UUID().uuidString.prefix(8))
         let clearPass = "ISH-DNS:\(clearToken):CLEAR:PASS"
         let clearFail = "ISH-DNS:\(clearToken):CLEAR:FAIL"
         input.tap()
         let clearInput = app.textViews.firstMatch
         XCTAssertTrue(
-            clearInput.waitForExistence(timeout: 10),
+            clearInput.waitForExistence(timeout: 60),
             "清理解析器配置的 watchOS 系统输入框没有出现")
         clearInput.typeText(
             "t=\(clearToken); if rm -f /etc/resolv.conf && sync; then " +
@@ -160,7 +241,7 @@ final class iSHWatchUITests: XCTestCase {
         restartedInput.tap()
         let resolverInput = app.textViews.firstMatch
         XCTAssertTrue(
-            resolverInput.waitForExistence(timeout: 10),
+            resolverInput.waitForExistence(timeout: 60),
             "解析器门禁的 watchOS 系统输入框没有出现")
         resolverInput.typeText(
             "t=\(resolverToken); " +
@@ -188,9 +269,12 @@ final class iSHWatchUITests: XCTestCase {
                 resolverFail),
             evaluatedWith: restartedTerminal)
         wait(for: [resolverFinished], timeout: 60)
-        XCTAssertTrue(
-            restartedTerminal.label.contains(resolverPass),
-            restartedTerminal.label)
+        let resolverRecovered =
+            restartedTerminal.label.contains(resolverPass)
+        XCTAssertTrue(resolverRecovered, restartedTerminal.label)
+        if resolverRecovered {
+            guestRecoveryRequired = false
+        }
 
         let tab = app.buttons["send-tab"]
         let escape = app.buttons["send-escape"]
@@ -205,7 +289,7 @@ final class iSHWatchUITests: XCTestCase {
         restartedInput.tap()
         let completionInput = app.textViews.firstMatch
         XCTAssertTrue(
-            completionInput.waitForExistence(timeout: 10),
+            completionInput.waitForExistence(timeout: 60),
             "补全命令的 watchOS 系统输入框没有出现")
         completionInput.typeText("/ro")
         XCTAssertTrue(
@@ -227,6 +311,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64基础网络与软件源() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -260,9 +346,9 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "GETENT",
             command:
-                "timeout 90 getent hosts dl-cdn.alpinelinux.org " +
+                "timeout -k 15 90 getent hosts dl-cdn.alpinelinux.org " +
                 ">\"$l\" 2>&1",
-            timeout: 120,
+            timeout: 150,
             app: app,
             input: input,
             send: send,
@@ -270,9 +356,9 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "NSLOOKUP",
             command:
-                "timeout 90 nslookup dl-cdn.alpinelinux.org " +
+                "timeout -k 15 90 nslookup dl-cdn.alpinelinux.org " +
                 ">\"$l\" 2>&1",
-            timeout: 120,
+            timeout: 150,
             app: app,
             input: input,
             send: send,
@@ -280,14 +366,14 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "HTTP-IPV4",
             command:
-                "ip=$(nslookup dl-cdn.alpinelinux.org | " +
+                "ip=$(timeout -k 15 90 nslookup dl-cdn.alpinelinux.org | " +
                 "awk '$1 == \"Address:\" && $2 ~ /^[0-9.]+$/ " +
                 "{ print $2; exit }'); test -n \"$ip\" && " +
                 "printf 'GET / HTTP/1.0\\r\\nHost: " +
                 "dl-cdn.alpinelinux.org\\r\\nConnection: close\\r\\n\\r\\n' | " +
-                "timeout 90 nc \"$ip\" 80 >\"$l\" 2>&1; " +
+                "timeout -k 15 90 nc \"$ip\" 80 >\"$l\" 2>&1 && " +
                 "grep -Eq '^HTTP/1\\.[01] [0-9]{3}' \"$l\"",
-            timeout: 120,
+            timeout: 270,
             app: app,
             input: input,
             send: send,
@@ -297,24 +383,34 @@ final class iSHWatchUITests: XCTestCase {
             command:
                 "printf 'GET / HTTP/1.0\\r\\nHost: " +
                 "dl-cdn.alpinelinux.org\\r\\nConnection: close\\r\\n\\r\\n' | " +
-                "timeout 90 nc dl-cdn.alpinelinux.org 80 " +
-                ">\"$l\" 2>&1; " +
+                "timeout -k 15 90 nc dl-cdn.alpinelinux.org 80 " +
+                ">\"$l\" 2>&1 && " +
                 "grep -Eq '^HTTP/1\\.[01] [0-9]{3}' \"$l\"",
-            timeout: 120,
+            timeout: 150,
             app: app,
             input: input,
             send: send,
             terminal: terminal)
         runGuestStage(
             "HTTPS",
-            command:
-                "a=/tmp/ish-apkindex.tar.gz; rm -f \"$a\"; " +
-                "timeout -k 15 300 wget -q -T 60 -t 2 -O \"$a\" " +
-                "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/" +
-                "aarch64/APKINDEX.tar.gz >\"$l\" 2>&1 && " +
-                "test -s \"$a\" && " +
-                "tar -tzf \"$a\" 2>>\"$l\" | grep -qx APKINDEX",
-            timeout: 360,
+            command: commandUsingCDNIPv4(
+                "a=/tmp/ish-apkindex.tar.gz; " +
+                "m=/tmp/ish-apkindex-$t.list; " +
+                "url=https://dl-cdn.alpinelinux.org/alpine/v3.24/main/" +
+                "aarch64/APKINDEX.tar.gz; wget_ok=; " +
+                "for attempt in 1 2; do rm -f \"$a\" \"$m\"; " +
+                "if timeout -k 15 300 wget -Y off -T 90 -O \"$a\" " +
+                "\"$url\" >>\"$l\" 2>&1 && test -s \"$a\" && " +
+                "timeout -k 15 120 tar -tzf \"$a\" " +
+                ">\"$m\" 2>>\"$l\" && " +
+                "grep -qx APKINDEX \"$m\"; then " +
+                "wget_ok=1; break; fi; " +
+                "printf 'HTTPS_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; " +
+                "test \"$wget_ok\" = 1 && " +
+                "grep -F \"Connecting to $host ($ip:\" \"$l\" >/dev/null && " +
+                "rm -f \"$m\" \"$a\""),
+            timeout: 1260,
             app: app,
             input: input,
             send: send,
@@ -335,12 +431,17 @@ final class iSHWatchUITests: XCTestCase {
             terminal: terminal)
         runGuestStage(
             "APK-UPDATE",
-            command:
+            command: commandUsingCDNIPv4(
                 "s=/tmp/ish-apk-search.log; rm -f \"$s\"; " +
-                "timeout -k 15 900 apk update >\"$l\" 2>&1 && " +
-                "apk search -x busybox >\"$s\" 2>>\"$l\" && " +
-                "grep -Eq '^busybox-[0-9]' \"$s\"",
-            timeout: 1020,
+                "apk_ok=; for attempt in 1 2; do " +
+                "if timeout -k 15 900 apk --timeout 120 update " +
+                ">>\"$l\" 2>&1; then apk_ok=1; break; fi; " +
+                "printf 'APK_UPDATE_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; test \"$apk_ok\" = 1 && " +
+                "timeout -k 15 1200 apk --network=no search -x busybox " +
+                ">\"$s\" 2>>\"$l\" && " +
+                "grep -Eq '^busybox-[0-9]' \"$s\""),
+            timeout: 3420,
             app: app,
             input: input,
             send: send,
@@ -349,6 +450,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64SQLite持久化() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -372,17 +475,22 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "INSTALL",
             suite: "SQLITE",
-            command:
-                "if apk info -e sqlite >/dev/null 2>&1; then :; " +
-                "else timeout -k 15 900 apk --cache-max-age 10080 " +
-                "add --no-progress 'sqlite=3.53.2-r0' " +
-                ">\"$l\" 2>&1; fi && " +
-                "timeout -k 15 900 apk --cache-max-age 10080 " +
-                "fix --no-progress ncurses-terminfo-base " +
-                "libncursesw readline sqlite " +
-                ">>\"$l\" 2>&1 && " +
-                "sqlite3 --version >>\"$l\" 2>&1",
-            timeout: 1020,
+            command: commandUsingCDNIPv4(
+                "apk_ok=; for attempt in 1 2; do " +
+                "if { if apk info -e 'sqlite=3.53.2-r0' >/dev/null 2>&1; then :; " +
+                "else timeout -k 15 900 apk --timeout 120 " +
+                "--cache-max-age 10080 add --no-progress " +
+                "'sqlite=3.53.2-r0' >>\"$l\" 2>&1; fi; } && " +
+                "timeout -k 15 900 apk --timeout 120 " +
+                "--cache-max-age 10080 fix --no-progress " +
+                "ncurses-terminfo-base libncursesw readline sqlite " +
+                ">>\"$l\" 2>&1; then apk_ok=1; break; fi; " +
+                "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; test \"$apk_ok\" = 1 && " +
+                "apk info -e 'sqlite=3.53.2-r0' >>\"$l\" 2>&1 && " +
+                "sqlite3 --version >>\"$l\" 2>&1 && " +
+                "test \"$(sqlite3 --version | awk '{print $1}')\" = 3.53.2"),
+            timeout: 4050,
             app: app,
             input: input,
             send: send,
@@ -447,6 +555,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64Python运行时() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -470,17 +580,23 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "INSTALL",
             suite: "PYTHON",
-            command:
+            command: commandUsingCDNIPv4(
                 "if apk info -e 'python3=3.14.5-r0' " +
                 ">/dev/null 2>&1; then :; else " +
-                "timeout -k 30 3600 apk --cache-max-age 10080 " +
-                "add --no-progress 'python3=3.14.5-r0' >\"$l\" 2>&1; fi && " +
+                "apk_ok=; for attempt in 1 2; do " +
+                "if timeout -k 30 3600 apk --timeout 120 " +
+                "--cache-max-age 10080 add --no-progress " +
+                "'python3=3.14.5-r0' >>\"$l\" 2>&1; then " +
+                "apk_ok=1; break; fi; " +
+                "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; " +
+                "test \"$apk_ok\" = 1; fi && " +
                 "apk info -e 'python3=3.14.5-r0' >>\"$l\" 2>&1 && " +
                 "timeout -k 30 900 python3 -I -c 'import platform, sys; " +
                 "assert platform.machine() == \"aarch64\"; " +
                 "assert sys.version_info[:3] == (3, 14, 5)' " +
-                ">>\"$l\" 2>&1",
-            timeout: 4680,
+                ">>\"$l\" 2>&1"),
+            timeout: 8700,
             app: app,
             input: input,
             send: send,
@@ -524,7 +640,7 @@ final class iSHWatchUITests: XCTestCase {
                 "assert (p / \"renamed\").read_bytes() == " +
                 "b\"python-watch\\n\" * 64; " +
                 "assert (p / \"renamed\").stat().st_size == 832' " +
-                ">\"$l\" 2>&1 && sync && rm -rf \"$d\"",
+                ">>\"$l\" 2>&1 && sync && rm -rf \"$d\"",
             timeout: 720,
             app: app,
             input: input,
@@ -558,6 +674,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64本地编译与Pthread线程() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -581,15 +699,22 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "INSTALL",
             suite: "BUILD",
-            command:
+            command: commandUsingCDNIPv4(
                 "if apk info -e 'build-base=0.5-r4' " +
                 ">/dev/null 2>&1; then :; else " +
-                "timeout -k 30 7200 apk --cache-max-age 10080 " +
-                "add --no-progress 'build-base=0.5-r4' >\"$l\" 2>&1; fi && " +
+                "apk_ok=; for attempt in 1 2; do " +
+                "if timeout -k 30 7200 apk --timeout 120 " +
+                "--cache-max-age 10080 add --no-progress " +
+                "'build-base=0.5-r4' >>\"$l\" 2>&1; then " +
+                "apk_ok=1; break; fi; " +
+                "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; " +
+                "test \"$apk_ok\" = 1; fi && " +
                 "apk info -e 'build-base=0.5-r4' >>\"$l\" 2>&1 && " +
                 "command -v cc >>\"$l\" 2>&1 && " +
-                "test \"$(cc -dumpmachine)\" = aarch64-alpine-linux-musl",
-            timeout: 8280,
+                "machine=$(timeout -k 15 300 cc -dumpmachine 2>>\"$l\") && " +
+                "test \"$machine\" = aarch64-alpine-linux-musl"),
+            timeout: 15300,
             app: app,
             input: input,
             send: send,
@@ -663,6 +788,8 @@ final class iSHWatchUITests: XCTestCase {
 
     func testAArch64Git与SSH客户端() throws {
         let app = XCUIApplication()
+        recoveryApp = app
+        guestRecoveryRequired = true
         app.launch()
 
         let input = app.textFields["command-input"]
@@ -686,19 +813,25 @@ final class iSHWatchUITests: XCTestCase {
         runGuestStage(
             "INSTALL",
             suite: "DEV",
-            command:
+            command: commandUsingCDNIPv4(
                 "if apk info -e 'git=2.54.0-r0' >/dev/null 2>&1 && " +
                 "apk info -e 'openssh-client-default=10.3_p1-r0' " +
                 ">/dev/null 2>&1; then :; else " +
-                "timeout -k 30 7200 apk --cache-max-age 10080 " +
-                "add --no-progress 'git=2.54.0-r0' " +
-                "'openssh-client-default=10.3_p1-r0' >\"$l\" 2>&1; fi && " +
+                "apk_ok=; for attempt in 1 2; do " +
+                "if timeout -k 30 7200 apk --timeout 120 " +
+                "--cache-max-age 10080 add --no-progress " +
+                "'git=2.54.0-r0' " +
+                "'openssh-client-default=10.3_p1-r0' " +
+                ">>\"$l\" 2>&1; then apk_ok=1; break; fi; " +
+                "printf 'APK_INSTALL_IPV4_ATTEMPT_%s_FAILED\\n' " +
+                "\"$attempt\" >>\"$l\"; done; " +
+                "test \"$apk_ok\" = 1; fi && " +
                 "apk info -e 'git=2.54.0-r0' >>\"$l\" 2>&1 && " +
                 "apk info -e 'openssh-client-default=10.3_p1-r0' " +
                 ">>\"$l\" 2>&1 && " +
                 "test \"$(git --version)\" = 'git version 2.54.0' && " +
-                "ssh -V 2>&1 | grep -F 'OpenSSH_10.3p1' >>\"$l\"",
-            timeout: 8280,
+                "ssh -V 2>&1 | grep -F 'OpenSSH_10.3p1' >>\"$l\""),
+            timeout: 15000,
             app: app,
             input: input,
             send: send,
@@ -757,25 +890,118 @@ final class iSHWatchUITests: XCTestCase {
             terminal: terminal)
     }
 
-    private func runGuestStage(
-        _ stage: String,
-        suite: String = "NET",
-        command: String,
+    private func commandUsingCDNIPv4(_ command: String) -> String {
+        // 公网软件门禁仍使用原 hostname、SNI 与证书，只稳定选择 DNS 当前的 A 记录。
+        let prefix =
+            "(hosts=/etc/hosts; host=dl-cdn.alpinelinux.org; " +
+            "b=/root/.ish-watch-ipv4-gate-hosts; n=$b.new; g=; m=; " +
+            "restore_hosts() { r=$1; trap - 0 HUP INT TERM; " +
+            "if test -n \"$g\" && ! rm -f \"$g\"; then r=125; fi; " +
+            "if test -n \"$m\" && ! rm -f \"$m\"; then r=125; fi; " +
+            "if cp -p \"$b\" \"$hosts\" && cmp -s \"$b\" \"$hosts\" && " +
+            "test \"$(stat -c '%u:%g:%a' \"$b\")\" = " +
+            "\"$(stat -c '%u:%g:%a' \"$hosts\")\"; then " +
+            "if ! rm -f \"$b\" \"$n\"; then r=125; fi; " +
+            "else r=125; rm -f \"$n\" || :; fi; exit \"$r\"; }; " +
+            "if test -f \"$b\"; then " +
+            "if cp -p \"$b\" \"$hosts\" && cmp -s \"$b\" \"$hosts\" && " +
+            "test \"$(stat -c '%u:%g:%a' \"$b\")\" = " +
+            "\"$(stat -c '%u:%g:%a' \"$hosts\")\" && rm -f \"$b\" \"$n\"; " +
+            "then :; else rm -f \"$n\" || :; exit 125; fi; fi; " +
+            "rm -f \"$n\" || exit 125; " +
+            "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY " +
+            "ALL_PROXY all_proxy SSL_NO_VERIFY_HOSTNAME; " +
+            "NO_PROXY=\"$host\"; no_proxy=\"$host\"; export NO_PROXY no_proxy; " +
+            "ip=$(timeout -k 15 90 nslookup -type=A \"$host\" 2>>\"$l\" | " +
+            "awk '$1 == \"Name:\" { answer=1; next } " +
+            "answer && $1 == \"Address:\" && $2 ~ /^[0-9.]+$/ " +
+            "{ print $2; exit }'); test -n \"$ip\" || exit; " +
+            "printf 'PINNED_IPV4=%s\\n' \"$ip\" >>\"$l\" || exit; " +
+            "cp -p \"$hosts\" \"$n\" && mv \"$n\" \"$b\" || exit; " +
+            "trap 'restore_hosts $?' 0; trap 'restore_hosts 129' HUP; " +
+            "trap 'restore_hosts 130' INT; trap 'restore_hosts 143' TERM; " +
+            "printf '\\n%s\\t%s\\n' \"$ip\" \"$host\" >>\"$hosts\" || exit; " +
+            "g=/tmp/ish-ipv4-getent-$t; rm -f \"$g\" || exit; " +
+            "timeout -k 15 90 getent ahostsv4 \"$host\" " +
+            ">\"$g\" 2>>\"$l\" || exit; " +
+            "awk -v ip=\"$ip\" " +
+            "'NF { seen=1; if ($1 != ip) bad=1 } " +
+            "END { exit !(seen && !bad) }' \"$g\" || exit; " +
+            "rm -f \"$g\" || exit; { "
+        let suffix =
+            "; }; r=$?; restore_hosts \"$r\")"
+        return prefix + command + suffix
+    }
+
+    private func typeGuestLine(
+        _ line: String,
+        into systemInput: XCUIElement
+    ) {
+        // 分批合成键盘事件，但只把一条完整的短命令交给 Quickboard。
+        var start = line.startIndex
+        while start != line.endIndex {
+            let end = line.index(
+                start,
+                offsetBy: 512,
+                limitedBy: line.endIndex) ?? line.endIndex
+            systemInput.typeText(String(line[start..<end]))
+            start = end
+        }
+    }
+
+    private func waitForTransportPass(
+        _ pass: String,
+        fail: String,
+        timeout: TimeInterval,
+        terminal: XCUIElement
+    ) -> GuestTransportResult {
+        let pollInterval: TimeInterval
+        if timeout >= 3600 {
+            pollInterval = 60
+        } else if timeout >= 600 {
+            pollInterval = 30
+        } else {
+            pollInterval = 1
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var output = terminal.label
+        while !output.contains(pass) && !output.contains(fail) {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            Thread.sleep(forTimeInterval: min(pollInterval, remaining))
+            output = terminal.label
+        }
+
+        guard output.contains(pass) || output.contains(fail) else {
+            return .timeout
+        }
+        if output.contains(pass) {
+            return .pass
+        }
+        let retryableFail = fail + ":1"
+        if let range = output.range(of: retryableFail),
+           range.upperBound == output.endIndex ||
+               !output[range.upperBound].isNumber {
+            return .retryableFail
+        }
+        return .fail
+    }
+
+    private func submitGuestLineResult(
+        _ line: String,
+        pass: String,
+        fail: String,
         timeout: TimeInterval,
         app: XCUIApplication,
         input: XCUIElement,
         send: XCUIElement,
         terminal: XCUIElement
-    ) {
-        let token = String(UUID().uuidString.prefix(8))
-        let pass = "ISH-\(suite):\(token):\(stage):PASS"
-        let fail = "ISH-\(suite):\(token):\(stage):FAIL"
-        let log = "/tmp/ish-\(suite.lowercased())-\(stage.lowercased()).log"
-        let script =
-            "t=\(token); l=\(log); rm -f \"$l\"; if \(command); then " +
-            "printf 'ISH-\(suite):%s:\(stage):PASS\\n' \"$t\"; else r=$?; " +
-            "tail -c 4096 \"$l\" 2>/dev/null; " +
-            "printf '\\nISH-\(suite):%s:\(stage):FAIL:%s\\n' \"$t\" \"$r\"; fi"
+    ) -> GuestTransportResult {
+        let lineLength = line.lengthOfBytes(using: .utf8) + 1
+        // BusyBox ash 的交互编辑缓冲最多接收 2046 个 ASCII 载荷字符。
+        XCTAssertLessThanOrEqual(lineLength, 1800, "guest 传输命令超过安全行长")
+        guard lineLength <= 1800 else { return .fail }
 
         input.tap()
         let systemInput = app.textViews.firstMatch
@@ -790,22 +1016,271 @@ final class iSHWatchUITests: XCTestCase {
             // 冷启动错过系统展示期限后，复用已经预热的服务重试一次。
             input.tap()
         }
-        XCTAssertTrue(
-            systemInput.waitForExistence(timeout: 60),
-            "\(stage) 的 watchOS 系统输入框没有出现")
-        systemInput.typeText(script)
+        let inputExists = systemInput.waitForExistence(timeout: 60)
+        XCTAssertTrue(inputExists, "watchOS 系统输入框没有出现")
+        guard inputExists else { return .timeout }
+        typeGuestLine(line, into: systemInput)
 
         let done = app.buttons.matching(
             NSPredicate(format: "label IN %@", ["Done", "完成"])).firstMatch
-        XCTAssertTrue(
-            done.waitForExistence(timeout: 10),
-            "\(stage) 的 watchOS 系统输入界面没有完成按钮")
+        let doneExists = done.waitForExistence(timeout: 10)
+        XCTAssertTrue(doneExists, "watchOS 系统输入界面没有完成按钮")
+        guard doneExists else { return .timeout }
         done.tap()
-        let sendReady = expectation(
-            for: NSPredicate(format: "hittable == true"),
-            evaluatedWith: send)
-        wait(for: [sendReady], timeout: 10)
+
+        let sendReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"),
+            object: send)
+        let sendResult = XCTWaiter.wait(for: [sendReady], timeout: 10)
+        XCTAssertEqual(sendResult, .completed, "发送按钮没有恢复可点击状态")
+        guard sendResult == .completed else { return .timeout }
         send.tap()
+        return waitForTransportPass(
+            pass,
+            fail: fail,
+            timeout: timeout,
+            terminal: terminal)
+    }
+
+    private func submitGuestLine(
+        _ line: String,
+        pass: String,
+        fail: String,
+        timeout: TimeInterval,
+        app: XCUIApplication,
+        input: XCUIElement,
+        send: XCUIElement,
+        terminal: XCUIElement
+    ) -> Bool {
+        let result = submitGuestLineResult(
+            line,
+            pass: pass,
+            fail: fail,
+            timeout: timeout,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        XCTAssertNotEqual(
+            result,
+            .timeout,
+            "guest 命令传输或执行未在期限内确认：\(terminal.label)")
+        guard result != .timeout else { return false }
+        XCTAssertEqual(
+            result,
+            .pass,
+            "guest 脚本传输失败：\(terminal.label)")
+        return result == .pass
+    }
+
+    private func recoverGuestState(
+        timeout: TimeInterval,
+        app: XCUIApplication,
+        input: XCUIElement,
+        send: XCUIElement,
+        terminal: XCUIElement
+    ) -> Bool {
+        let token = String(UUID().uuidString.prefix(8))
+        let pass = "ISH-RECOVER:\(token):PASS"
+        let fail = "ISH-RECOVER:\(token):FAIL"
+        let line =
+            "h=/etc/hosts; b=/root/.ish-watch-ipv4-gate-hosts; " +
+            "n=$b.new; r=0; if test -f \"$b\"; then " +
+            "if cp -p \"$b\" \"$h\" && cmp -s \"$b\" \"$h\" && " +
+            "test \"$(stat -c '%u:%g:%a' \"$b\")\" = " +
+            "\"$(stat -c '%u:%g:%a' \"$h\")\"; then " +
+            "if ! rm -f \"$b\" \"$n\"; then r=125; fi; " +
+            "else r=125; rm -f \"$n\" || :; fi; " +
+            "elif ! rm -f \"$n\"; then r=125; fi; " +
+            "if ! grep -Eq '^nameserver[[:space:]]+[^[:space:]]+' " +
+            "/etc/resolv.conf || " +
+            "test \"$(stat -c '%u:%g:%a' /etc/resolv.conf 2>/dev/null)\" " +
+            "!= '0:0:644'; then r=125; fi; " +
+            "if ! rm -f /tmp/.ish-watch-uitest-stage.b64 " +
+            "/tmp/.ish-watch-uitest-stage.sh " +
+            "/tmp/ish-ipv4-getent-* /tmp/ish-apkindex-*.list " +
+            "/tmp/ish-apkindex.tar.gz; " +
+            "then r=125; fi; if test \"$r\" -eq 0; then " +
+            "printf 'ISH-RECOVER:%s:PASS\\n' '\(token)'; else " +
+            "printf 'ISH-RECOVER:%s:FAIL:%s\\n' '\(token)' \"$r\"; fi"
+        return submitGuestLine(
+            line,
+            pass: pass,
+            fail: fail,
+            timeout: timeout,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+    }
+
+    private func submitGuestScript(
+        _ script: String,
+        token: String,
+        timeout: TimeInterval,
+        app: XCUIApplication,
+        input: XCUIElement,
+        send: XCUIElement,
+        terminal: XCUIElement
+    ) -> Bool {
+        let scriptData = Data(script.utf8)
+        let encoded = scriptData.base64EncodedString()
+        let expectedSHA256 = SHA256.hash(data: scriptData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let base64Path = "/tmp/.ish-watch-uitest-stage.b64"
+        let scriptPath = "/tmp/.ish-watch-uitest-stage.sh"
+        let payloadLength = 1024
+        let maximumAttempts = 2
+
+        for attempt in 1...maximumAttempts {
+            let transportToken = "\(token)-\(attempt)"
+            var start = encoded.startIndex
+            var cumulative = 0
+            var fragment = 0
+            var shouldRetry = false
+
+            while start != encoded.endIndex {
+                let end = encoded.index(
+                    start,
+                    offsetBy: payloadLength,
+                    limitedBy: encoded.endIndex) ?? encoded.endIndex
+                let payload = String(encoded[start..<end])
+                cumulative += payload.utf8.count
+                fragment += 1
+                let number = String(format: "%04d", fragment)
+                let pass = "ISH-XFER:\(transportToken):\(number):ACK"
+                let fail = "ISH-XFER:\(transportToken):\(number):FAIL"
+                let prepare = fragment == 1
+                    ? "rm -f \"$b\" \"$s\" && "
+                    : ""
+                let redirect = fragment == 1 ? ">" : ">>"
+                let line =
+                    "b='\(base64Path)'; s='\(scriptPath)'; " +
+                    "if \(prepare)printf '%s' '\(payload)' \(redirect)\"$b\" && " +
+                    "test \"$(/bin/busybox wc -c <\"$b\")\" -eq \(cumulative); " +
+                    "then printf 'ISH-XFER:%s:%s:ACK\\n' " +
+                    "'\(transportToken)' '\(number)'; " +
+                    "else r=$?; if ! rm -f \"$b\" \"$s\"; then r=125; fi; " +
+                    "printf 'ISH-XFER:%s:%s:FAIL:%s\\n' " +
+                    "'\(transportToken)' '\(number)' \"$r\"; fi"
+                let result = submitGuestLineResult(
+                    line,
+                    pass: pass,
+                    fail: fail,
+                    timeout: 90,
+                    app: app,
+                    input: input,
+                    send: send,
+                    terminal: terminal)
+                if result == .timeout {
+                    XCTFail(
+                        "guest 脚本分片状态不确定，禁止盲目重试：" +
+                        terminal.label)
+                    return false
+                }
+                if result == .retryableFail {
+                    shouldRetry = true
+                    break
+                }
+                if result == .fail {
+                    XCTFail(
+                        "guest 脚本分片清理状态不安全，禁止重试：" +
+                        terminal.label)
+                    return false
+                }
+                start = end
+            }
+            if shouldRetry {
+                continue
+            }
+
+            let done = "ISH-XFER:\(transportToken):FINAL:DONE"
+            let fail = "ISH-XFER:\(transportToken):FINAL:FAIL"
+            let execute =
+                "b='\(base64Path)'; s='\(scriptPath)'; " +
+                "t='\(transportToken)'; r=0; " +
+                "if /bin/busybox base64 -d \"$b\" >\"$s\" && " +
+                "test \"$(/bin/busybox wc -c <\"$s\")\" -eq " +
+                "\(scriptData.count) && " +
+                "actual=$(/bin/busybox sha256sum \"$s\") && " +
+                "actual=${actual%% *} && test \"$actual\" = " +
+                "'\(expectedSHA256)' && " +
+                "rm -f \"$b\"; then /bin/busybox sh \"$s\"; r=$?; " +
+                "else r=125; fi; " +
+                "if ! rm -f \"$b\" \"$s\"; then r=125; fi; " +
+                "if test \"$r\" -eq 0; then " +
+                "printf 'ISH-XFER:%s:FINAL:DONE\\n' \"$t\"; else " +
+                "printf 'ISH-XFER:%s:FINAL:FAIL:%s\\n' \"$t\" \"$r\"; fi"
+            return submitGuestLine(
+                execute,
+                pass: done,
+                fail: fail,
+                timeout: timeout,
+                app: app,
+                input: input,
+                send: send,
+                terminal: terminal)
+        }
+
+        XCTFail(
+            "guest 脚本分片在一次安全重试后仍传输失败：\(terminal.label)")
+        return false
+    }
+
+    private func runGuestStage(
+        _ stage: String,
+        suite: String = "NET",
+        command: String,
+        timeout: TimeInterval,
+        app: XCUIApplication,
+        input: XCUIElement,
+        send: XCUIElement,
+        terminal: XCUIElement
+    ) {
+        recoveryApp = app
+        if !didRecoverGuestState {
+            guestRecoveryRequired = true
+            let recovered = recoverGuestState(
+                timeout: 120,
+                app: app,
+                input: input,
+                send: send,
+                terminal: terminal)
+            guestRecoveryRequired = !recovered
+            didRecoverGuestState = recovered
+            XCTAssertTrue(recovered, "上轮 guest 测试状态没有恢复")
+            guard recovered else { return }
+        }
+
+        let token = String(UUID().uuidString.prefix(8))
+        let pass = "ISH-\(suite):\(token):\(stage):PASS"
+        let fail = "ISH-\(suite):\(token):\(stage):FAIL"
+        let log = "/tmp/ish-\(suite.lowercased())-\(stage.lowercased()).log"
+        let script =
+            "t=\(token); l=\(log); " +
+            "if rm -f \"$l\" && { \(command); }; then " +
+            "printf 'ISH-\(suite):%s:\(stage):PASS\\n' \"$t\"; else r=$?; " +
+            "tail -c 4096 \"$l\" 2>/dev/null; " +
+            "printf '\\nISH-\(suite):%s:\(stage):FAIL:%s\\n' \"$t\" \"$r\"; fi"
+        let usesIPv4Scope =
+            command.contains("/root/.ish-watch-ipv4-gate-hosts")
+        // 任一传输中断都可能留下固定 stage 文件；业务通过后再解除恢复责任。
+        guestRecoveryRequired = true
+        guard submitGuestScript(
+            script,
+            token: token,
+            timeout: timeout,
+            app: app,
+            input: input,
+            send: send,
+            terminal: terminal)
+        else {
+            return
+        }
+        if !usesIPv4Scope {
+            guestRecoveryRequired = false
+        }
 
         let finished = expectation(
             for: NSPredicate(
@@ -813,7 +1288,11 @@ final class iSHWatchUITests: XCTestCase {
                 pass,
                 fail),
             evaluatedWith: terminal)
-        wait(for: [finished], timeout: timeout)
-        XCTAssertTrue(terminal.label.contains(pass), terminal.label)
+        wait(for: [finished], timeout: 30)
+        let didPass = terminal.label.contains(pass)
+        XCTAssertTrue(didPass, terminal.label)
+        if didPass && usesIPv4Scope {
+            guestRecoveryRequired = false
+        }
     }
 }
