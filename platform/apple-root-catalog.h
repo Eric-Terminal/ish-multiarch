@@ -42,11 +42,33 @@ int ish_apple_root_catalog_prepare(
         char active_name[ISH_APPLE_ROOT_NAME_CAPACITY],
         enum ish_apple_rootfs_seed_result *result);
 
+/*
+ * 在 runtime 使用 root 的整个生命周期持有共享 claim。
+ * 成功后必须把 claim_file 交给 release_active；复制和删除会与它互斥。
+ */
+int ish_apple_root_catalog_claim_active(
+        const char *persistent_parent,
+        const char *name,
+        int *claim_file);
+int ish_apple_root_catalog_release_active(int claim_file);
+
 // 始终安装一个新的托管 root，选择最低的未占用名称。
 int ish_apple_root_catalog_create(
         const char *seed_root,
         const char *persistent_parent,
         char name[ISH_APPLE_ROOT_NAME_CAPACITY]);
+
+/*
+ * 复制一个非活动的托管 root，并选择最低空闲名称原子发布。
+ * active_name 必须是有效托管名称；source_name 与活动 root 相同时返回 EBUSY。
+ * final 名称及父目录同步完成后才视为成功；owner 收尾可由后续操作续清理。
+ */
+int ish_apple_root_catalog_copy(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *active_name,
+        char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY]);
 
 /*
  * 先在同一父目录原子隐藏，再安全递归删除；中断后会在后续目录操作中续清理。

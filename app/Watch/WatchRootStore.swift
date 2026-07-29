@@ -12,6 +12,7 @@ final class WatchRootStore: ObservableObject {
     struct PreparedRoot: Sendable {
         let name: String
         let dataPath: String
+        fileprivate let claimFile: Int32
     }
 
     private struct Paths: Sendable {
@@ -26,6 +27,7 @@ final class WatchRootStore: ObservableObject {
         case catalog(operation: String, code: Int32)
         case invalidSelection
         case protectedRoot
+        case activeRoot
 
         var errorDescription: String? {
             switch self {
@@ -41,6 +43,8 @@ final class WatchRootStore: ObservableObject {
                 return "这个 Linux 文件系统已不存在"
             case .protectedRoot:
                 return "正在使用或下次启动选中的文件系统不能删除"
+            case .activeRoot:
+                return "正在使用的 Linux 文件系统不能复制"
             }
         }
     }
@@ -58,6 +62,7 @@ final class WatchRootStore: ObservableObject {
     private let defaults: UserDefaults
     private let paths: Paths?
     private let setupError: Error?
+    private var activeClaimFile: Int32 = -1
 
     init(
         bundle: Bundle = .main,
@@ -99,6 +104,12 @@ final class WatchRootStore: ObservableObject {
         }
     }
 
+    deinit {
+        if activeClaimFile >= 0 {
+            _ = ish_apple_root_catalog_release_active(activeClaimFile)
+        }
+    }
+
     func prepareForLaunch() async throws -> PreparedRoot {
         guard let paths else {
             throw setupError ?? StoreError.missingApplicationSupport
@@ -110,6 +121,11 @@ final class WatchRootStore: ObservableObject {
         let prepared = try await Task.detached(priority: .userInitiated) {
             try Self.prepare(paths: paths, preferred: preferred)
         }.value
+        let previousClaim = activeClaimFile
+        activeClaimFile = prepared.claimFile
+        if previousClaim >= 0 {
+            _ = ish_apple_root_catalog_release_active(previousClaim)
+        }
         // 从交给 runtime 起就保护该目录，避免 mount 期间被设置页删除。
         claimedName = prepared.name
         setSelectedName(prepared.name)
@@ -174,6 +190,52 @@ final class WatchRootStore: ObservableObject {
         }
         setSelectedName(name)
         errorMessage = nil
+    }
+
+    func copyAndSelect(_ name: String) async -> Bool {
+        guard !isWorking else { return false }
+        guard let paths else {
+            errorMessage = (
+                setupError ?? StoreError.missingApplicationSupport
+            ).localizedDescription
+            return false
+        }
+        guard name != claimedName, name != activeName else {
+            errorMessage = StoreError.activeRoot.localizedDescription
+            return false
+        }
+        guard entries.contains(where: { $0.name == name }) else {
+            errorMessage = StoreError.invalidSelection.localizedDescription
+            return false
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            guard let active = claimedName ?? activeName else {
+                throw StoreError.activeRoot
+            }
+            let copiedName = try await Task.detached(
+                priority: .userInitiated
+            ) {
+                try Self.copy(
+                    paths: paths,
+                    source: name,
+                    active: active)
+            }.value
+            setSelectedName(copiedName)
+            do {
+                entries = try await Self.loadEntries(paths: paths)
+                errorMessage = nil
+            } catch {
+                errorMessage =
+                    "复制已完成，但暂时无法刷新列表：\(error.localizedDescription)"
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     func delete(_ name: String) async -> Bool {
@@ -283,9 +345,22 @@ final class WatchRootStore: ObservableObject {
                 operation: "解析 Linux 文件系统路径",
                 code: pathCode)
         }
+        var claimFile: Int32 = -1
+        let claimCode = paths.parent.withCString { parent in
+            rootName.withCString { root in
+                ish_apple_root_catalog_claim_active(
+                    parent, root, &claimFile)
+            }
+        }
+        guard claimCode == 0 else {
+            throw StoreError.catalog(
+                operation: "锁定 Linux 文件系统",
+                code: claimCode)
+        }
         return PreparedRoot(
             name: rootName,
-            dataPath: String(cString: dataPath))
+            dataPath: String(cString: dataPath),
+            claimFile: claimFile)
     }
 
     nonisolated private static func create(
@@ -305,6 +380,35 @@ final class WatchRootStore: ObservableObject {
         guard code == 0 else {
             throw StoreError.catalog(
                 operation: "创建 Linux 文件系统",
+                code: code)
+        }
+        return String(cString: name)
+    }
+
+    nonisolated private static func copy(
+        paths: Paths,
+        source: String,
+        active: String
+    ) throws -> String {
+        var name = [CChar](
+            repeating: 0,
+            count: Int(ISH_APPLE_ROOT_NAME_CAPACITY))
+        let code = name.withUnsafeMutableBufferPointer { nameBuffer in
+            paths.seed.withCString { seed in
+                paths.parent.withCString { parent in
+                    source.withCString { sourceName in
+                        active.withCString { activeName in
+                            ish_apple_root_catalog_copy(
+                                seed, parent, sourceName,
+                                activeName, nameBuffer.baseAddress)
+                        }
+                    }
+                }
+            }
+        }
+        guard code == 0 else {
+            throw StoreError.catalog(
+                operation: "复制 Linux 文件系统",
                 code: code)
         }
         return String(cString: name)

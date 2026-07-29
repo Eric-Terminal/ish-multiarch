@@ -104,6 +104,7 @@ bool ish_apple_root_catalog_is_private_name(const char *name) {
     if (name == NULL || name[0] != '.')
         return false;
     if (has_private_suffix(name, ".install.lock") ||
+            has_private_suffix(name, ".lifecycle.lock") ||
             has_private_suffix(name, ".installing.owner") ||
             is_deletion_name(name))
         return true;
@@ -245,6 +246,7 @@ static int candidate_exists(
         const char *persistent_parent,
         const char *name,
         bool *exists) {
+    *exists = false;
     char path[PATH_MAX];
     int length = snprintf(path, sizeof(path), "%s/%s",
             persistent_parent, name);
@@ -256,10 +258,9 @@ static int candidate_exists(
         return 0;
     }
     if (errno == ENOENT) {
-        *exists = false;
         return 0;
     }
-    return errno;
+    return errno == 0 ? EIO : errno;
 }
 
 static int try_existing_candidate(
@@ -422,6 +423,59 @@ int ish_apple_root_catalog_create(
             seed_root, persistent_parent, name, &result);
 }
 
+int ish_apple_root_catalog_claim_active(
+        const char *persistent_parent,
+        const char *name,
+        int *claim_file) {
+    if (persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !ish_apple_root_catalog_is_managed_name(name) ||
+            claim_file == NULL)
+        return EINVAL;
+    return ish_apple_rootfs_lock_managed_root(
+            persistent_parent, name, false, true, claim_file);
+}
+
+int ish_apple_root_catalog_release_active(int claim_file) {
+    return ish_apple_rootfs_unlock_managed_root(claim_file);
+}
+
+int ish_apple_root_catalog_copy(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *active_name,
+        char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY]) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !ish_apple_root_catalog_is_managed_name(source_name) ||
+            !ish_apple_root_catalog_is_managed_name(active_name) ||
+            destination_name == NULL)
+        return EINVAL;
+    if (strcmp(source_name, active_name) == 0)
+        return EBUSY;
+
+    cleanup_deletions(persistent_parent);
+    for (uint64_t index = 1; ; index++) {
+        int error = copy_candidate_name(index, destination_name);
+        if (error != 0)
+            return error;
+        bool exists;
+        error = candidate_exists(
+                persistent_parent, destination_name, &exists);
+        if (error != 0)
+            return error;
+        if (!exists && strcmp(destination_name, source_name) != 0) {
+            error = ish_apple_rootfs_copy_managed_root(
+                    seed_root, persistent_parent,
+                    source_name, destination_name);
+            if (error != EEXIST)
+                return error;
+        }
+        if (index == UINT64_MAX)
+            return ENOSPC;
+    }
+}
+
 int ish_apple_root_catalog_delete(
         const char *persistent_parent,
         const char *name,
@@ -434,9 +488,16 @@ int ish_apple_root_catalog_delete(
             (selected_name != NULL && strcmp(name, selected_name) == 0))
         return EBUSY;
 
+    int lifecycle_lock = -1;
+    int error = ish_apple_rootfs_lock_managed_root(
+            persistent_parent, name, true, false, &lifecycle_lock);
+    if (error != 0)
+        return error;
     int parent = open_parent_directory(persistent_parent);
-    if (parent < 0)
+    if (parent < 0) {
+        (void) ish_apple_rootfs_unlock_managed_root(lifecycle_lock);
         return -parent;
+    }
 
     unsigned char random[DELETION_TOKEN_BYTES];
     arc4random_buf(random, sizeof(random));
@@ -451,7 +512,7 @@ int ish_apple_root_catalog_delete(
     char tombstone[NAME_MAX + 1];
     int length = snprintf(tombstone, sizeof(tombstone),
             ".%s.deleting.%s", name, token);
-    int error = 0;
+    error = 0;
     if (length < 0 || (size_t) length >= sizeof(tombstone))
         error = ENAMETOOLONG;
     else if (renameat(parent, name, parent, tombstone) < 0)
@@ -465,6 +526,10 @@ int ish_apple_root_catalog_delete(
     }
     if (close(parent) < 0 && error == 0)
         error = errno;
+    int unlock_error =
+            ish_apple_rootfs_unlock_managed_root(lifecycle_lock);
+    if (error == 0)
+        error = unlock_error;
     return error;
 }
 

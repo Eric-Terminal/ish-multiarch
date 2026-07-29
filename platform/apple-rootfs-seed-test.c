@@ -41,12 +41,17 @@ static const char owner_magic[] = "format=ish-rootfs-install-owner-v2";
 static char executable_path[PATH_MAX];
 
 extern int ish_apple_rootfs_seed_test_fail_phase;
+extern int ish_apple_rootfs_seed_test_force_sparse_fallback;
+extern size_t ish_apple_rootfs_seed_test_write_limit;
+extern unsigned ish_apple_rootfs_seed_test_sparse_fallback_count;
+extern unsigned ish_apple_rootfs_seed_test_limited_write_count;
 
 enum rootfs_seed_test_phase {
     ROOTFS_SEED_TEST_NONE,
     ROOTFS_SEED_TEST_CLEANUP_STAGING_SYNC,
     ROOTFS_SEED_TEST_CLEANUP_OWNER_SYNC,
     ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC,
+    ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK,
     ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC,
 };
 
@@ -62,8 +67,14 @@ struct child_report {
     int result;
 };
 
+enum catalog_child_operation {
+    CATALOG_CHILD_CREATE = 1,
+    CATALOG_CHILD_COPY = 2,
+};
+
 struct catalog_child_report {
     int error;
+    int operation;
     char name[ISH_APPLE_ROOT_NAME_CAPACITY];
 };
 
@@ -149,11 +160,63 @@ static int file_equals(const char *path, const void *expected, size_t length) {
     return matches;
 }
 
+static int file_bytes_equal_at(
+        const char *path, off_t offset,
+        const void *expected, size_t length) {
+    int file = open(path, O_RDONLY | O_CLOEXEC);
+    if (file < 0)
+        return 0;
+    unsigned char *actual = malloc(length == 0 ? 1 : length);
+    if (actual == NULL) {
+        close(file);
+        return 0;
+    }
+    size_t received = 0;
+    while (received < length) {
+        ssize_t count = pread(file, actual + received,
+                length - received, offset + (off_t) received);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (count == 0)
+            break;
+        received += (size_t) count;
+    }
+    int matches = received == length &&
+            memcmp(actual, expected, length) == 0;
+    free(actual);
+    close(file);
+    return matches;
+}
+
 static int path_absent(const char *path) {
     struct stat metadata;
     if (lstat(path, &metadata) == 0)
         return 0;
     return errno == ENOENT;
+}
+
+static int count_open_files(void) {
+    DIR *directory = opendir("/dev/fd");
+    if (directory == NULL)
+        return -1;
+    int count = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL)
+            break;
+        if (strcmp(entry->d_name, ".") != 0 &&
+                strcmp(entry->d_name, "..") != 0)
+            count++;
+    }
+    int iteration_error = errno;
+    if (closedir(directory) < 0 || iteration_error != 0)
+        return -1;
+    // opendir 自己占用一个描述符，关闭后从结果中排除。
+    return count - 1;
 }
 
 static int same_entry(const struct stat *before, const char *path) {
@@ -221,6 +284,108 @@ static int sqlite_exec_checked(sqlite3 *database, const char *sql) {
                 sqlite3_errmsg(database) : message);
     sqlite3_free(message);
     return result == SQLITE_OK ? 0 : -1;
+}
+
+static int wait_for_clean_exit(pid_t child) {
+    int status;
+    return waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int run_wal_crash_child(int argc, char **argv) {
+    if (argc != 3)
+        return 132;
+    sqlite3 *database = NULL;
+    int result = sqlite3_open_v2(
+            argv[2], &database, SQLITE_OPEN_READWRITE, NULL);
+    if (result == SQLITE_OK) {
+        result = sqlite_exec_checked(database,
+                "pragma journal_mode=wal;"
+                "pragma wal_autocheckpoint=0;"
+                "create table copy_probe (value text not null);"
+                "insert into copy_probe values ('wal-committed');");
+    }
+    // 模拟进程崩溃：不能执行 sqlite3_close 的自动 checkpoint。
+    _exit(result == 0 ? 0 : 133);
+}
+
+static int run_rollback_crash_child(int argc, char **argv) {
+    if (argc != 3)
+        return 134;
+    sqlite3 *database = NULL;
+    int result = sqlite3_open_v2(
+            argv[2], &database, SQLITE_OPEN_READWRITE, NULL);
+    if (result == SQLITE_OK) {
+        result = sqlite_exec_checked(database,
+                "pragma journal_mode=delete;"
+                "pragma synchronous=full;"
+                "pragma cache_size=1;"
+                "create table rollback_probe (value text not null);"
+                "insert into rollback_probe values ('rollback-base');"
+                "begin immediate;"
+                "update rollback_probe set value = 'uncommitted';");
+    }
+    if (result == 0 && sqlite3_db_cacheflush(database) != SQLITE_OK)
+        result = -1;
+    // 留下含未提交页面的 hot journal，由副本首次打开完成恢复。
+    _exit(result == 0 ? 0 : 135);
+}
+
+static int leave_wal_crash_state(const char *root) {
+    char database_path[PATH_MAX];
+    if (format_path(database_path, "%s/meta.db", root) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child < 0)
+        return -1;
+    if (child == 0) {
+        char *const arguments[] = {
+            executable_path,
+            "--wal-crash-child",
+            database_path,
+            NULL,
+        };
+        execv(executable_path, arguments);
+        _exit(136);
+    }
+    if (wait_for_clean_exit(child) < 0)
+        return -1;
+
+    char artifact[PATH_MAX];
+    struct stat metadata;
+    if (format_path(artifact, "%s/meta.db-wal", root) < 0 ||
+            stat(artifact, &metadata) < 0 || metadata.st_size == 0 ||
+            format_path(artifact, "%s/meta.db-shm", root) < 0 ||
+            stat(artifact, &metadata) < 0 || metadata.st_size == 0)
+        return -1;
+    static const char stale_shm[] = "stale-shm-from-crashed-process\n";
+    return write_file(artifact, stale_shm, sizeof(stale_shm) - 1, 0600);
+}
+
+static int leave_rollback_journal_crash_state(const char *root) {
+    char database_path[PATH_MAX];
+    if (format_path(database_path, "%s/meta.db", root) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child < 0)
+        return -1;
+    if (child == 0) {
+        char *const arguments[] = {
+            executable_path,
+            "--rollback-crash-child",
+            database_path,
+            NULL,
+        };
+        execv(executable_path, arguments);
+        _exit(137);
+    }
+    if (wait_for_clean_exit(child) < 0)
+        return -1;
+    char journal_path[PATH_MAX];
+    struct stat metadata;
+    return format_path(journal_path, "%s/meta.db-journal", root) == 0 &&
+            stat(journal_path, &metadata) == 0 && metadata.st_size > 0 ?
+            0 : -1;
 }
 
 static int insert_stat(
@@ -500,8 +665,55 @@ static int verify_database_inode(const char *root) {
                     (uintmax_t) metadata.st_ino &&
             sqlite3_step(statement) == SQLITE_DONE;
     sqlite3_finalize(statement);
+    statement = NULL;
+    valid = valid && sqlite3_prepare_v2(database,
+            "pragma quick_check", -1, &statement, NULL) == SQLITE_OK &&
+            sqlite3_step(statement) == SQLITE_ROW &&
+            sqlite3_column_type(statement, 0) == SQLITE_TEXT &&
+            strcmp((const char *) sqlite3_column_text(statement, 0),
+                    "ok") == 0 &&
+            sqlite3_step(statement) == SQLITE_DONE;
+    sqlite3_finalize(statement);
     sqlite3_close(database);
     return valid;
+}
+
+static int database_text_equals(
+        const char *root, const char *sql, const char *expected) {
+    char database_path[PATH_MAX];
+    if (format_path(database_path, "%s/meta.db", root) < 0)
+        return 0;
+    sqlite3 *database = NULL;
+    if (sqlite3_open_v2(database_path, &database,
+            SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        sqlite3_close(database);
+        return 0;
+    }
+    sqlite3_stmt *statement = NULL;
+    int valid = sqlite3_prepare_v2(
+            database, sql, -1, &statement, NULL) == SQLITE_OK &&
+            sqlite3_step(statement) == SQLITE_ROW &&
+            sqlite3_column_type(statement, 0) == SQLITE_TEXT &&
+            strcmp((const char *) sqlite3_column_text(statement, 0),
+                    expected) == 0 &&
+            sqlite3_step(statement) == SQLITE_DONE;
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+    return valid;
+}
+
+static int database_artifacts_absent(const char *root) {
+    static const char *artifacts[] = {
+        "meta.db-wal", "meta.db-shm", "meta.db-journal",
+    };
+    for (size_t i = 0;
+            i < sizeof(artifacts) / sizeof(artifacts[0]); i++) {
+        char path[PATH_MAX];
+        if (format_path(path, "%s/%s", root, artifacts[i]) < 0 ||
+                !path_absent(path))
+            return 0;
+    }
+    return 1;
 }
 
 static int database_mode_equals(
@@ -620,6 +832,29 @@ static int verify_private_staging_entries(
 
 static int verify_no_private_staging(const struct fixture *fixture) {
     return verify_private_staging_entries(fixture, NULL);
+}
+
+static int verify_no_catalog_staging(const char *persistent_parent) {
+    DIR *directory = opendir(persistent_parent);
+    if (directory == NULL)
+        return 0;
+    int valid = 1;
+    int iteration_error = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL) {
+            iteration_error = errno;
+            break;
+        }
+        if (strstr(entry->d_name, ".installing.") != NULL) {
+            valid = 0;
+            break;
+        }
+    }
+    if (closedir(directory) < 0)
+        valid = 0;
+    return valid && iteration_error == 0;
 }
 
 static int format_staging_name(
@@ -1346,9 +1581,15 @@ static int test_transaction_recovery(const char *workspace) {
         ish_apple_rootfs_seed_test_fail_phase = phase;
         enum ish_apple_rootfs_seed_result result =
                 ISH_APPLE_ROOTFS_SEED_ALREADY_PRESENT;
-        CHECK(ish_apple_rootfs_seed_install(fixture.seed,
-                fixture.persistent, "root", &result) == EIO,
-                "注入的目录 fsync 故障必须向调用方返回");
+        int install_error = ish_apple_rootfs_seed_install(
+                fixture.seed, fixture.persistent, "root", &result);
+        bool published_phase =
+                phase >= ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK;
+        CHECK((published_phase &&
+                    install_error == 0 &&
+                    result == ISH_APPLE_ROOTFS_SEED_INSTALLED) ||
+                (!published_phase && install_error == EIO),
+                "root 同步前故障返回错误，owner 收尾故障保持成功语义");
         CHECK(ish_apple_rootfs_seed_test_fail_phase ==
                 ROOTFS_SEED_TEST_NONE,
                 "单次故障注入必须在命中后复位");
@@ -1361,23 +1602,26 @@ static int test_transaction_recovery(const char *workspace) {
             CHECK(path_absent(staging) && path_absent(owner) &&
                     path_absent(root),
                     "清理第二阶段故障留下可重试的空状态");
+        } else if (phase == ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC) {
+            CHECK(path_absent(root) && !path_absent(owner),
+                    "root 同步失败会退回带 owner 的 staging");
         } else {
             struct stat root_metadata;
             CHECK(lstat(root, &root_metadata) == 0 &&
                     S_ISDIR(root_metadata.st_mode),
-                    "发布阶段故障发生时 final 已成为提交点");
-            CHECK((phase == ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC &&
+                    "root 同步成功后 final 已成为提交点");
+            CHECK((phase == ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK &&
                     !path_absent(owner)) ||
                     (phase == ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC &&
                     path_absent(owner)),
-                    "发布两阶段故障留下预期 owner 状态");
+                    "发布收尾故障留下预期 owner 状态");
         }
 
         result = ISH_APPLE_ROOTFS_SEED_INSTALLED;
         CHECK(ish_apple_rootfs_seed_install(fixture.seed,
                 fixture.persistent, "root", &result) == 0,
                 "第二次调用必须从持久中间状态收敛");
-        CHECK(result == (phase <= ROOTFS_SEED_TEST_CLEANUP_OWNER_SYNC ?
+        CHECK(result == (phase <= ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC ?
                 ISH_APPLE_ROOTFS_SEED_INSTALLED :
                 ISH_APPLE_ROOTFS_SEED_ALREADY_PRESENT),
                 "收敛结果必须反映 final 是否已发布");
@@ -1600,7 +1844,9 @@ static int run_catalog_create_child(int argc, char **argv) {
     if (read_all(start_file, &token, 1) < 0)
         return 124;
     close(start_file);
-    struct catalog_child_report report = {0};
+    struct catalog_child_report report = {
+        .operation = CATALOG_CHILD_CREATE,
+    };
     report.error = ish_apple_root_catalog_create(
             argv[2], argv[3], report.name);
     int write_result = write_all(
@@ -1640,6 +1886,65 @@ static pid_t spawn_catalog_create_child(
     close(report_pipe[0]);
     execv(executable_path, arguments);
     _exit(126);
+}
+
+static int run_catalog_copy_child(int argc, char **argv) {
+    if (argc != 7)
+        return 127;
+    int start_file;
+    int report_file;
+    if (parse_file_descriptor(argv[5], &start_file) < 0 ||
+            parse_file_descriptor(argv[6], &report_file) < 0)
+        return 127;
+    unsigned char token;
+    if (read_all(start_file, &token, 1) < 0)
+        return 128;
+    close(start_file);
+    struct catalog_child_report report = {
+        .operation = CATALOG_CHILD_COPY,
+    };
+    report.error = ish_apple_root_catalog_copy(
+            argv[2], argv[3], argv[4], "aarch64-999", report.name);
+    int write_result = write_all(
+            report_file, &report, sizeof(report));
+    close(report_file);
+    return write_result == 0 ? 0 : 129;
+}
+
+static pid_t spawn_catalog_copy_child(
+        const struct fixture *fixture,
+        const char *source_name,
+        int start_pipe[2],
+        int report_pipe[2]) {
+    char start_file[32];
+    char report_file[32];
+    int start_length = snprintf(start_file, sizeof(start_file),
+            "%d", start_pipe[0]);
+    int report_length = snprintf(report_file, sizeof(report_file),
+            "%d", report_pipe[1]);
+    if (start_length < 0 || (size_t) start_length >= sizeof(start_file) ||
+            report_length < 0 ||
+            (size_t) report_length >= sizeof(report_file)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    char *const arguments[] = {
+        executable_path,
+        "--catalog-copy-child",
+        (char *) fixture->seed,
+        (char *) fixture->persistent,
+        (char *) source_name,
+        start_file,
+        report_file,
+        NULL,
+    };
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    close(start_pipe[1]);
+    close(report_pipe[0]);
+    execv(executable_path, arguments);
+    _exit(130);
 }
 
 static int test_concurrent_install(const char *workspace) {
@@ -1703,6 +2008,8 @@ static int test_root_catalog(const char *workspace) {
             "托管 root 名称边界");
     CHECK(ish_apple_root_catalog_is_private_name(
                     ".aarch64.install.lock") &&
+            ish_apple_root_catalog_is_private_name(
+                    ".aarch64.lifecycle.lock") &&
             ish_apple_root_catalog_is_private_name(
                     ".aarch64-2.installing.owner") &&
             ish_apple_root_catalog_is_private_name(
@@ -1801,6 +2108,479 @@ static int test_root_catalog(const char *workspace) {
     return 0;
 }
 
+static int test_root_catalog_copy(const char *workspace) {
+    struct fixture fixture;
+    CHECK(create_fixture(
+                    workspace, "root-catalog-copy", 2, &fixture) == 0,
+            "创建托管 root 复制夹具");
+    char source_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+    enum ish_apple_rootfs_seed_result result;
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent, NULL,
+                    source_name, &result) == 0 &&
+            strcmp(source_name, "aarch64") == 0,
+            "准备待复制的托管 root");
+    char active_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_create(
+                    fixture.seed, fixture.persistent, active_name) == 0 &&
+            strcmp(active_name, "aarch64-2") == 0,
+            "准备与复制源不同的活动 root");
+
+    char source_root[PATH_MAX];
+    char path[PATH_MAX];
+    static const char user_data[] = "guest-copy-state\n";
+    static const char top_data[] = "top-level-state\n";
+    static const char permission_data[] = "permission-state\n";
+    static const char sparse_head[] = "sparse-head";
+    static const char sparse_tail[] = "sparse-tail";
+    const off_t sparse_size = (off_t) 64 * 1024 * 1024;
+    CHECK(format_path(source_root, "%s/%s",
+                    fixture.persistent, source_name) == 0 &&
+            format_path(path, "%s/data/user-copy-state",
+                    source_root) == 0 &&
+            write_file(path, user_data, sizeof(user_data) - 1, 0600) == 0 &&
+            format_path(path, "%s/copy-state", source_root) == 0 &&
+            write_file(path, top_data, sizeof(top_data) - 1, 0600) == 0,
+            "写入复制源的 guest 与顶层状态");
+    char permission_directory[PATH_MAX];
+    CHECK(format_path(permission_directory, "%s/data/permission-probe",
+                    source_root) == 0 &&
+            mkdir(permission_directory, 0700) == 0 &&
+            format_path(path, "%s/value", permission_directory) == 0 &&
+            write_file(path, permission_data,
+                    sizeof(permission_data) - 1, 0600) == 0 &&
+            chmod(path, 0640) == 0 &&
+            chmod(permission_directory, 0751) == 0,
+            "设置非默认宿主访问权限");
+    char sparse_path[PATH_MAX];
+    CHECK(format_path(sparse_path, "%s/data/sparse-probe",
+                    source_root) == 0,
+            "构造稀疏文件路径");
+    int sparse = open(sparse_path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    CHECK(sparse >= 0 &&
+            write_all(sparse, sparse_head, sizeof(sparse_head) - 1) == 0 &&
+            lseek(sparse,
+                    sparse_size - (off_t) sizeof(sparse_tail) + 1,
+                    SEEK_SET) >= 0 &&
+            write_all(sparse, sparse_tail, sizeof(sparse_tail) - 1) == 0 &&
+            ftruncate(sparse, sparse_size) == 0 &&
+            fsync(sparse) == 0 &&
+            close(sparse) == 0,
+            "创建逻辑较大但物理占用很小的稀疏文件");
+    struct stat source_sparse_metadata;
+    CHECK(stat(sparse_path, &source_sparse_metadata) == 0 &&
+            source_sparse_metadata.st_size == sparse_size &&
+            (uintmax_t) source_sparse_metadata.st_blocks * 512 <
+                    (uintmax_t) sparse_size / 8,
+            "确认复制源夹具实际保持稀疏");
+    CHECK(leave_wal_crash_state(source_root) == 0,
+            "模拟已提交 WAL 与损坏 SHM 的崩溃现场");
+    CHECK(write_manifest(&fixture, "official", digest_b) == 0,
+            "更新 seed 以验证复制保留源收据");
+
+    char destination_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+    ish_apple_rootfs_seed_test_force_sparse_fallback = 1;
+    ish_apple_rootfs_seed_test_write_limit = 3;
+    ish_apple_rootfs_seed_test_sparse_fallback_count = 0;
+    ish_apple_rootfs_seed_test_limited_write_count = 0;
+    int copy_error = ish_apple_root_catalog_copy(
+            fixture.seed, fixture.persistent,
+            source_name, active_name, destination_name);
+    ish_apple_rootfs_seed_test_force_sparse_fallback = 0;
+    ish_apple_rootfs_seed_test_write_limit = 0;
+    CHECK(copy_error == 0 &&
+            strcmp(destination_name, "aarch64-3") == 0,
+            "复制非活动 root 并选择最低空闲名称");
+    CHECK(ish_apple_rootfs_seed_test_sparse_fallback_count > 0 &&
+            ish_apple_rootfs_seed_test_limited_write_count > 0,
+            "强制命中稀疏 fallback 与短写循环");
+    char destination_root[PATH_MAX];
+    CHECK(format_path(destination_root, "%s/%s",
+                    fixture.persistent, destination_name) == 0 &&
+            verify_receipt(destination_root, digest_a) &&
+            verify_database_inode(destination_root) &&
+            database_text_equals(destination_root,
+                    "select value from copy_probe", "wal-committed") &&
+            database_artifacts_absent(destination_root),
+            "复制后恢复已提交 WAL、重绑定 inode 并清除旧协调文件");
+    CHECK(format_path(path, "%s/data/user-copy-state",
+                    destination_root) == 0 &&
+            file_equals(path, user_data, sizeof(user_data) - 1) &&
+            format_path(path, "%s/copy-state", destination_root) == 0 &&
+            file_equals(path, top_data, sizeof(top_data) - 1),
+            "复制后保留完整 fakefs 与顶层状态");
+    struct stat permission_metadata;
+    CHECK(format_path(permission_directory,
+                    "%s/data/permission-probe", destination_root) == 0 &&
+            stat(permission_directory, &permission_metadata) == 0 &&
+            (permission_metadata.st_mode & 0777) == 0751 &&
+            format_path(path, "%s/value", permission_directory) == 0 &&
+            stat(path, &permission_metadata) == 0 &&
+            (permission_metadata.st_mode & 0777) == 0640 &&
+            file_equals(path, permission_data,
+                    sizeof(permission_data) - 1),
+            "复制后保留 fakefs 宿主 rwx 权限与文件内容");
+    struct stat destination_sparse_metadata;
+    static const unsigned char sparse_zero[] = {0, 0, 0, 0};
+    CHECK(format_path(sparse_path, "%s/data/sparse-probe",
+                    destination_root) == 0 &&
+            stat(sparse_path, &destination_sparse_metadata) == 0 &&
+            destination_sparse_metadata.st_size == sparse_size &&
+            (uintmax_t) destination_sparse_metadata.st_blocks * 512 <
+                    (uintmax_t) sparse_size / 8 &&
+            file_bytes_equal_at(sparse_path, 0,
+                    sparse_head, sizeof(sparse_head) - 1) &&
+            file_bytes_equal_at(sparse_path, sparse_size / 2,
+                    sparse_zero, sizeof(sparse_zero)) &&
+            file_bytes_equal_at(sparse_path,
+                    sparse_size - (off_t) sizeof(sparse_tail) + 1,
+                    sparse_tail, sizeof(sparse_tail) - 1),
+            "复制后保留稀疏文件内容、逻辑大小与低物理占用");
+    static const char *alpha_names[] = {
+        "alpha-alias", "alpha-middle", "alpha-source",
+    };
+    static const char *beta_names[] = {
+        "beta-alias", "beta-source",
+    };
+    CHECK(verify_hardlink_group(destination_root, alpha_names,
+                    sizeof(alpha_names) / sizeof(alpha_names[0])) &&
+            verify_hardlink_group(destination_root, beta_names,
+                    sizeof(beta_names) / sizeof(beta_names[0])),
+            "复制后保留 fakefs 数据硬链接拓扑");
+    CHECK(verify_no_catalog_staging(fixture.persistent),
+            "成功复制不留下 staging 或 owner");
+
+    CHECK(leave_rollback_journal_crash_state(destination_root) == 0,
+            "模拟含未提交页面的 hot journal 崩溃现场");
+    char recovered_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy(
+                    fixture.seed, fixture.persistent,
+                    destination_name, active_name, recovered_name) == 0 &&
+            strcmp(recovered_name, "aarch64-4") == 0,
+            "复制含 hot journal 的非活动 root");
+    char recovered_root[PATH_MAX];
+    CHECK(format_path(recovered_root, "%s/%s",
+                    fixture.persistent, recovered_name) == 0 &&
+            verify_database_inode(recovered_root) &&
+            database_text_equals(recovered_root,
+                    "select value from copy_probe", "wal-committed") &&
+            database_text_equals(recovered_root,
+                    "select value from rollback_probe", "rollback-base") &&
+            database_artifacts_absent(recovered_root),
+            "复制后回滚未提交页面且后续打开不会重放旧 journal");
+
+    int open_files = count_open_files();
+    CHECK(open_files >= 0, "记录生命周期 claim 前的文件描述符数量");
+    for (unsigned iteration = 0; iteration < 32; iteration++) {
+        int claim = -1;
+        CHECK(ish_apple_root_catalog_claim_active(
+                        fixture.persistent, recovered_name, &claim) == 0 &&
+                claim >= 0,
+                "活动 root 取得共享生命周期 claim");
+        char blocked_name[ISH_APPLE_ROOT_NAME_CAPACITY];
+        CHECK(ish_apple_root_catalog_copy(
+                        fixture.seed, fixture.persistent,
+                        recovered_name, active_name, blocked_name) == EBUSY &&
+                ish_apple_root_catalog_delete(
+                        fixture.persistent, recovered_name,
+                        active_name, active_name) == EBUSY,
+                "活动 claim 阻止复制与删除");
+        CHECK(ish_apple_root_catalog_release_active(claim) == 0,
+                "释放活动 root 生命周期 claim");
+    }
+    CHECK(count_open_files() == open_files,
+            "重复 claim、拒绝复制和删除不泄漏文件描述符");
+
+    int start_pipe[2];
+    int report_pipe[2];
+    CHECK(pipe(start_pipe) == 0 && pipe(report_pipe) == 0,
+            "创建源复制与删除竞争管道");
+    pid_t copy_child = fork();
+    CHECK(copy_child >= 0, "创建源复制竞争子进程");
+    if (copy_child == 0) {
+        close(start_pipe[1]);
+        close(report_pipe[0]);
+        unsigned char token;
+        struct catalog_child_report report = {
+            .operation = CATALOG_CHILD_COPY,
+        };
+        if (read_all(start_pipe[0], &token, 1) == 0) {
+            report.error = ish_apple_root_catalog_copy(
+                    fixture.seed, fixture.persistent,
+                    recovered_name, active_name, report.name);
+        } else {
+            report.error = EIO;
+        }
+        close(start_pipe[0]);
+        int write_result = write_all(
+                report_pipe[1], &report, sizeof(report));
+        close(report_pipe[1]);
+        _exit(write_result == 0 ? 0 : 131);
+    }
+    close(start_pipe[0]);
+    close(report_pipe[1]);
+    unsigned char token = 1;
+    CHECK(write_all(start_pipe[1], &token, 1) == 0,
+            "同时释放源复制与删除");
+    close(start_pipe[1]);
+    int delete_error = ish_apple_root_catalog_delete(
+            fixture.persistent, recovered_name,
+            active_name, active_name);
+    struct catalog_child_report copy_report;
+    CHECK(read_all(report_pipe[0],
+                    &copy_report, sizeof(copy_report)) == 0,
+            "读取源复制竞争结果");
+    close(report_pipe[0]);
+    int copy_status;
+    CHECK(waitpid(copy_child, &copy_status, 0) == copy_child &&
+            WIFEXITED(copy_status) && WEXITSTATUS(copy_status) == 0,
+            "源复制竞争子进程正常退出");
+    CHECK((delete_error == 0 || delete_error == EBUSY) &&
+            (copy_report.error == 0 ||
+                    copy_report.error == EBUSY ||
+                    copy_report.error == ENOENT) &&
+            (delete_error == 0 || copy_report.error == 0),
+            "源复制与删除按生命周期锁串行决胜");
+    if (copy_report.error == 0) {
+        char raced_root[PATH_MAX];
+        CHECK(format_path(raced_root, "%s/%s",
+                        fixture.persistent, copy_report.name) == 0 &&
+                verify_database_inode(raced_root) &&
+                database_text_equals(raced_root,
+                        "select value from copy_probe", "wal-committed") &&
+                format_path(path, "%s/data/user-copy-state",
+                        raced_root) == 0 &&
+                file_equals(path, user_data, sizeof(user_data) - 1),
+                "竞争中发布的副本仍是完整一致快照");
+    }
+
+    char rejected[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy(
+                    fixture.seed, fixture.persistent,
+                    active_name, active_name, rejected) == EBUSY,
+            "拒绝复制当前活动 root");
+    return 0;
+}
+
+static int test_root_catalog_copy_rejections(const char *workspace) {
+    struct fixture missing;
+    CHECK(create_fixture(
+                    workspace, "root-copy-missing", 0, &missing) == 0,
+            "创建源不存在夹具");
+    char destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy(
+                    missing.seed, missing.persistent,
+                    "aarch64", "aarch64-999", destination) == ENOENT &&
+            ish_apple_root_catalog_copy(
+                    missing.seed, missing.persistent,
+                    ".aarch64.installing.owner",
+                    "aarch64-999", destination) == EINVAL &&
+            ish_apple_root_catalog_copy(
+                    missing.seed, missing.persistent,
+                    "aarch64", NULL, destination) == EINVAL &&
+            verify_no_catalog_staging(missing.persistent),
+            "拒绝不存在、私有复制源或缺失活动名称且不留半成品");
+
+    struct fixture corrupted;
+    CHECK(create_fixture(
+                    workspace, "root-copy-corrupted", 0, &corrupted) == 0,
+            "创建损坏源夹具");
+    enum ish_apple_rootfs_seed_result result;
+    char source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_prepare(
+                    corrupted.seed, corrupted.persistent,
+                    NULL, source, &result) == 0,
+            "安装待损坏复制源");
+    char source_root[PATH_MAX];
+    char path[PATH_MAX];
+    CHECK(format_path(source_root, "%s/%s",
+                    corrupted.persistent, source) == 0 &&
+            format_path(path, "%s/rootfs-installation.txt",
+                    source_root) == 0 &&
+            write_file(path, "broken\n", 7, 0600) == 0,
+            "损坏复制源安装收据");
+    CHECK(ish_apple_root_catalog_copy(
+                    corrupted.seed, corrupted.persistent,
+                    source, "aarch64-999", destination) == EINVAL &&
+            format_path(path, "%s/aarch64-2",
+                    corrupted.persistent) == 0 &&
+            path_absent(path) &&
+            verify_no_catalog_staging(corrupted.persistent),
+            "损坏源不能发布目标或遗留事务目录");
+    CHECK(ish_apple_root_catalog_delete(
+                    corrupted.persistent, source,
+                    "aarch64-999", "aarch64-999") == 0 &&
+            path_absent(source_root),
+            "生命周期锁仍允许删除损坏的托管 root");
+
+    struct fixture symlink_source;
+    CHECK(create_fixture(
+                    workspace, "root-copy-symlink", 0,
+                    &symlink_source) == 0 &&
+            ish_apple_root_catalog_prepare(
+                    symlink_source.seed, symlink_source.persistent,
+                    NULL, source, &result) == 0,
+            "创建含符号链接的复制源");
+    char outside[PATH_MAX];
+    char sentinel[PATH_MAX];
+    CHECK(format_path(source_root, "%s/%s",
+                    symlink_source.persistent, source) == 0 &&
+            format_path(outside, "%s/outside",
+                    symlink_source.base) == 0 &&
+            mkdir(outside, 0700) == 0 &&
+            format_path(sentinel, "%s/sentinel", outside) == 0 &&
+            write_file(sentinel, "keep\n", 5, 0600) == 0 &&
+            format_path(path, "%s/data/host-link", source_root) == 0 &&
+            symlink(outside, path) == 0,
+            "在复制源中建立指向外部目录的符号链接");
+    CHECK(ish_apple_root_catalog_copy(
+                    symlink_source.seed, symlink_source.persistent,
+                    source, "aarch64-999", destination) == EINVAL &&
+            file_equals(sentinel, "keep\n", 5) &&
+            format_path(path, "%s/aarch64-2",
+                    symlink_source.persistent) == 0 &&
+            path_absent(path) &&
+            verify_no_catalog_staging(symlink_source.persistent),
+            "拒绝链接且失败清理不能触碰外部目标");
+
+    struct fixture fifo_source;
+    CHECK(create_fixture(
+                    workspace, "root-copy-fifo", 0, &fifo_source) == 0 &&
+            ish_apple_root_catalog_prepare(
+                    fifo_source.seed, fifo_source.persistent,
+                    NULL, source, &result) == 0,
+            "创建含非普通对象的复制源");
+    CHECK(format_path(source_root, "%s/%s",
+                    fifo_source.persistent, source) == 0 &&
+            format_path(path, "%s/data/guest-fifo",
+                    source_root) == 0 &&
+            mkfifo(path, 0600) == 0,
+            "在复制源中建立 FIFO");
+    CHECK(ish_apple_root_catalog_copy(
+                    fifo_source.seed, fifo_source.persistent,
+                    source, "aarch64-999", destination) == EINVAL &&
+            format_path(path, "%s/aarch64-2",
+                    fifo_source.persistent) == 0 &&
+            path_absent(path) &&
+            verify_no_catalog_staging(fifo_source.persistent),
+            "拒绝非普通结构且失败后没有半成品");
+    return 0;
+}
+
+static int test_root_catalog_copy_target_conflict(const char *workspace) {
+    struct fixture fixture;
+    CHECK(create_fixture(
+                    workspace, "root-copy-conflict", 0, &fixture) == 0,
+            "创建复制目标冲突夹具");
+    char source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    enum ish_apple_rootfs_seed_result result;
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent,
+                    NULL, source, &result) == 0,
+            "准备目标冲突复制源");
+    char conflict[PATH_MAX];
+    static const char foreign[] = "foreign-root\n";
+    CHECK(format_path(conflict, "%s/aarch64-2",
+                    fixture.persistent) == 0 &&
+            write_file(conflict, foreign, sizeof(foreign) - 1, 0600) == 0,
+            "占用最低候选目标名称");
+    char destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_copy(
+                    fixture.seed, fixture.persistent,
+                    source, "aarch64-999", destination) == 0 &&
+            strcmp(destination, "aarch64-3") == 0 &&
+            file_equals(conflict, foreign, sizeof(foreign) - 1),
+            "目标冲突时跳过占用项且不覆盖原对象");
+    return 0;
+}
+
+static int test_root_catalog_copy_publish_recovery(
+        const char *workspace) {
+    for (int phase = ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC;
+            phase <= ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC; phase++) {
+        char fixture_name[64];
+        int length = snprintf(fixture_name, sizeof(fixture_name),
+                "root-copy-publish-phase-%d", phase);
+        CHECK(length >= 0 && (size_t) length < sizeof(fixture_name),
+                "构造复制发布故障夹具名称");
+
+        struct fixture fixture;
+        CHECK(create_fixture(
+                        workspace, fixture_name, 1, &fixture) == 0,
+                "创建复制发布故障夹具");
+        char source[ISH_APPLE_ROOT_NAME_CAPACITY];
+        char active[ISH_APPLE_ROOT_NAME_CAPACITY];
+        enum ish_apple_rootfs_seed_result result;
+        CHECK(ish_apple_root_catalog_prepare(
+                        fixture.seed, fixture.persistent,
+                        NULL, source, &result) == 0 &&
+                ish_apple_root_catalog_create(
+                        fixture.seed, fixture.persistent, active) == 0,
+                "准备复制发布故障的源与活动 root");
+
+        ish_apple_rootfs_seed_test_fail_phase = phase;
+        char destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+        int first_error = ish_apple_root_catalog_copy(
+                fixture.seed, fixture.persistent,
+                source, active, destination);
+        bool root_sync_failure =
+                phase == ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC;
+        CHECK(((root_sync_failure && first_error == EIO) ||
+                    (!root_sync_failure && first_error == 0)) &&
+                strcmp(destination, "aarch64-3") == 0 &&
+                ish_apple_rootfs_seed_test_fail_phase ==
+                        ROOTFS_SEED_TEST_NONE,
+                "root 同步失败返回错误，owner 收尾故障保持成功");
+
+        char destination_root[PATH_MAX];
+        char duplicate_root[PATH_MAX];
+        char owner[PATH_MAX];
+        CHECK(format_path(destination_root, "%s/%s",
+                        fixture.persistent, destination) == 0 &&
+                format_path(duplicate_root, "%s/aarch64-4",
+                        fixture.persistent) == 0 &&
+                format_path(owner, "%s/.aarch64-3.installing.owner",
+                        fixture.persistent) == 0,
+                "构造复制发布恢复路径");
+        if (root_sync_failure) {
+            CHECK(path_absent(destination_root) &&
+                    path_absent(duplicate_root) &&
+                    !path_absent(owner),
+                    "root 同步失败会退回可重试 staging");
+            char retry_destination[ISH_APPLE_ROOT_NAME_CAPACITY];
+            CHECK(ish_apple_root_catalog_copy(
+                            fixture.seed, fixture.persistent,
+                            source, active, retry_destination) == 0 &&
+                    strcmp(retry_destination, destination) == 0 &&
+                    verify_database_inode(destination_root) &&
+                    path_absent(duplicate_root) &&
+                    path_absent(owner),
+                    "重试复用原目标且完整收敛回滚事务");
+        } else {
+            CHECK(verify_database_inode(destination_root) &&
+                    path_absent(duplicate_root) &&
+                    ((phase == ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK &&
+                            !path_absent(owner)) ||
+                     (phase == ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC &&
+                            path_absent(owner))),
+                    "owner 收尾故障保留已同步 final 与预期凭据");
+        }
+
+        struct ish_apple_root_entry entries[3];
+        size_t count = 3;
+        CHECK(ish_apple_root_catalog_list(
+                        fixture.seed, fixture.persistent,
+                        entries, 3, &count) == 0 &&
+                count == 3 &&
+                path_absent(duplicate_root) &&
+                path_absent(owner) &&
+                verify_no_catalog_staging(fixture.persistent),
+                "恢复后目录只有唯一副本且私有状态完整收敛");
+    }
+    return 0;
+}
+
 static int test_concurrent_catalog_create(const char *workspace) {
     struct fixture fixture;
     CHECK(create_fixture(
@@ -1845,12 +2625,96 @@ static int test_concurrent_catalog_create(const char *workspace) {
     return 0;
 }
 
+static int test_concurrent_catalog_copy_and_create(const char *workspace) {
+    struct fixture fixture;
+    CHECK(create_fixture(
+                    workspace, "concurrent-catalog-copy", 1,
+                    &fixture) == 0,
+            "创建复制与新建并发夹具");
+    char source[ISH_APPLE_ROOT_NAME_CAPACITY];
+    enum ish_apple_rootfs_seed_result result;
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent,
+                    NULL, source, &result) == 0 &&
+            strcmp(source, "aarch64") == 0,
+            "准备并发复制源");
+    char path[PATH_MAX];
+    static const char marker[] = "copy-only\n";
+    CHECK(format_path(path, "%s/%s/data/copy-only",
+                    fixture.persistent, source) == 0 &&
+            write_file(path, marker, sizeof(marker) - 1, 0600) == 0,
+            "标记并发复制源");
+
+    int start_pipe[2];
+    int report_pipe[2];
+    CHECK(pipe(start_pipe) == 0 && pipe(report_pipe) == 0,
+            "创建复制与新建并发同步管道");
+    pid_t copy = spawn_catalog_copy_child(
+            &fixture, source, start_pipe, report_pipe);
+    CHECK(copy > 0, "创建 catalog 复制子进程");
+    pid_t create = spawn_catalog_create_child(
+            &fixture, start_pipe, report_pipe);
+    CHECK(create > 0, "创建并发 catalog 新建子进程");
+    close(start_pipe[0]);
+    close(report_pipe[1]);
+    unsigned char tokens[2] = {1, 1};
+    CHECK(write_all(start_pipe[1], tokens, sizeof(tokens)) == 0,
+            "同时释放复制与新建子进程");
+    close(start_pipe[1]);
+    struct catalog_child_report reports[2];
+    CHECK(read_all(report_pipe[0], reports, sizeof(reports)) == 0,
+            "收集复制与新建并发结果");
+    close(report_pipe[0]);
+    int copy_status;
+    int create_status;
+    CHECK(waitpid(copy, &copy_status, 0) == copy &&
+            waitpid(create, &create_status, 0) == create &&
+            WIFEXITED(copy_status) && WEXITSTATUS(copy_status) == 0 &&
+            WIFEXITED(create_status) && WEXITSTATUS(create_status) == 0,
+            "复制与新建子进程正常退出");
+
+    const struct catalog_child_report *copy_report = NULL;
+    const struct catalog_child_report *create_report = NULL;
+    for (size_t index = 0; index < 2; index++) {
+        if (reports[index].operation == CATALOG_CHILD_COPY)
+            copy_report = &reports[index];
+        else if (reports[index].operation == CATALOG_CHILD_CREATE)
+            create_report = &reports[index];
+    }
+    CHECK(copy_report != NULL && create_report != NULL &&
+            copy_report->error == 0 && create_report->error == 0 &&
+            strcmp(copy_report->name, create_report->name) != 0,
+            "并发复制与新建必须各自发布不同目标");
+    CHECK(format_path(path, "%s/%s/data/copy-only",
+                    fixture.persistent, copy_report->name) == 0 &&
+            file_equals(path, marker, sizeof(marker) - 1),
+            "并发复制结果保留源数据");
+    CHECK(format_path(path, "%s/%s/data/copy-only",
+                    fixture.persistent, create_report->name) == 0 &&
+            path_absent(path),
+            "并发新建结果不能被复制覆盖");
+    size_t count = 0;
+    CHECK(ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    NULL, 0, &count) == ERANGE && count == 3 &&
+            verify_no_catalog_staging(fixture.persistent),
+            "并发完成后目录包含三个完整 root 且没有 staging");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "--wal-crash-child") == 0)
+        return run_wal_crash_child(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "--rollback-crash-child") == 0)
+        return run_rollback_crash_child(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "--install-child") == 0)
         return run_install_child(argc, argv);
     if (argc >= 2 &&
             strcmp(argv[1], "--catalog-create-child") == 0)
         return run_catalog_create_child(argc, argv);
+    if (argc >= 2 &&
+            strcmp(argv[1], "--catalog-copy-child") == 0)
+        return run_catalog_copy_child(argc, argv);
     uint32_t executable_capacity = (uint32_t) sizeof(executable_path);
     if (_NSGetExecutablePath(executable_path, &executable_capacity) != 0) {
         fprintf(stderr, "无法取得 Apple rootfs seed 测试程序路径\n");
@@ -1892,6 +2756,16 @@ int main(int argc, char **argv) {
         status = test_root_catalog(workspace);
     if (status == 0)
         status = test_concurrent_catalog_create(workspace);
+    if (status == 0)
+        status = test_root_catalog_copy(workspace);
+    if (status == 0)
+        status = test_root_catalog_copy_rejections(workspace);
+    if (status == 0)
+        status = test_root_catalog_copy_target_conflict(workspace);
+    if (status == 0)
+        status = test_root_catalog_copy_publish_recovery(workspace);
+    if (status == 0)
+        status = test_concurrent_catalog_copy_and_create(workspace);
     if (status != 0 && getenv("ISH_KEEP_ROOTFS_SEED_TEST_TEMP") != NULL) {
         fprintf(stderr, "保留失败现场：%s\n", workspace);
         return status;

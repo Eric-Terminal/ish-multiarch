@@ -61,6 +61,19 @@ struct relative_parent {
     char leaf[NAME_MAX + 1];
 };
 
+struct copied_hardlink {
+    dev_t device;
+    ino_t inode;
+    char *destination_path;
+};
+
+struct root_copy_context {
+    int destination_root;
+    struct copied_hardlink *hardlinks;
+    size_t hardlink_count;
+    size_t hardlink_capacity;
+};
+
 struct staging_owner {
     char staging_name[NAME_MAX + 1];
     uintmax_t staging_device;
@@ -80,11 +93,16 @@ enum ish_apple_rootfs_seed_test_phase {
     ISH_APPLE_ROOTFS_SEED_TEST_CLEANUP_STAGING_SYNC,
     ISH_APPLE_ROOTFS_SEED_TEST_CLEANUP_OWNER_SYNC,
     ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC,
+    ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK,
     ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC,
 };
 
 #ifdef ISH_APPLE_ROOTFS_SEED_TESTING
 int ish_apple_rootfs_seed_test_fail_phase;
+int ish_apple_rootfs_seed_test_force_sparse_fallback;
+size_t ish_apple_rootfs_seed_test_write_limit;
+unsigned ish_apple_rootfs_seed_test_sparse_fallback_count;
+unsigned ish_apple_rootfs_seed_test_limited_write_count;
 #endif
 
 static int errno_or_io(void) {
@@ -174,7 +192,15 @@ static int format_private_name(
 static int write_all(int file, const void *bytes, size_t length) {
     const unsigned char *cursor = bytes;
     while (length != 0) {
-        ssize_t written = write(file, cursor, length);
+        size_t request = length;
+#ifdef ISH_APPLE_ROOTFS_SEED_TESTING
+        if (ish_apple_rootfs_seed_test_write_limit != 0 &&
+                request > ish_apple_rootfs_seed_test_write_limit) {
+            request = ish_apple_rootfs_seed_test_write_limit;
+            ish_apple_rootfs_seed_test_limited_write_count++;
+        }
+#endif
+        ssize_t written = write(file, cursor, request);
         if (written < 0) {
             if (errno == EINTR)
                 continue;
@@ -186,6 +212,139 @@ static int write_all(int file, const void *bytes, size_t length) {
         length -= (size_t) written;
     }
     return 0;
+}
+
+static int seek_file(
+        int file, off_t offset, int operation, off_t *result_out) {
+    off_t result;
+    do {
+        result = lseek(file, offset, operation);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0)
+        return errno_or_io();
+    *result_out = result;
+    return 0;
+}
+
+static int copy_file_range(
+        int source, int destination, off_t length) {
+    unsigned char buffer[COPY_BUFFER_SIZE];
+    while (length > 0) {
+        size_t request = length < (off_t) sizeof(buffer) ?
+                (size_t) length : sizeof(buffer);
+        ssize_t count = read(source, buffer, request);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            return errno_or_io();
+        }
+        if (count == 0)
+            return EIO;
+        int error = write_all(destination, buffer, (size_t) count);
+        if (error != 0)
+            return error;
+        length -= count;
+    }
+    return 0;
+}
+
+static bool bytes_are_zero(const unsigned char *bytes, size_t length) {
+    for (size_t index = 0; index < length; index++) {
+        if (bytes[index] != 0)
+            return false;
+    }
+    return true;
+}
+
+static int copy_file_sparse_fallback(
+        int source, int destination, off_t logical_size) {
+#ifdef ISH_APPLE_ROOTFS_SEED_TESTING
+    ish_apple_rootfs_seed_test_sparse_fallback_count++;
+#endif
+    if (ftruncate(destination, 0) < 0)
+        return errno_or_io();
+    off_t position;
+    int error = seek_file(source, 0, SEEK_SET, &position);
+    if (error == 0)
+        error = seek_file(destination, 0, SEEK_SET, &position);
+
+    unsigned char buffer[COPY_BUFFER_SIZE];
+    off_t copied = 0;
+    while (error == 0 && copied < logical_size) {
+        off_t remaining = logical_size - copied;
+        size_t request = remaining < (off_t) sizeof(buffer) ?
+                (size_t) remaining : sizeof(buffer);
+        ssize_t count = read(source, buffer, request);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            error = errno_or_io();
+        } else if (count == 0) {
+            error = EIO;
+        } else if (bytes_are_zero(buffer, (size_t) count)) {
+            error = seek_file(
+                    destination, count, SEEK_CUR, &position);
+        } else {
+            error = write_all(destination, buffer, (size_t) count);
+        }
+        if (count > 0)
+            copied += count;
+    }
+    if (error == 0 && ftruncate(destination, logical_size) < 0)
+        error = errno_or_io();
+    return error;
+}
+
+static int copy_file_preserving_holes(
+        int source, int destination, off_t logical_size) {
+    if (logical_size < 0)
+        return EINVAL;
+#ifdef ISH_APPLE_ROOTFS_SEED_TESTING
+    if (ish_apple_rootfs_seed_test_force_sparse_fallback)
+        return copy_file_sparse_fallback(
+                source, destination, logical_size);
+#endif
+    off_t cursor = 0;
+    while (cursor < logical_size) {
+        off_t data;
+        int error = seek_file(source, cursor, SEEK_DATA, &data);
+        if (error == ENXIO)
+            break;
+        if (error == EINVAL || error == ENOTSUP)
+            return copy_file_sparse_fallback(
+                    source, destination, logical_size);
+        if (error != 0)
+            return error;
+        if (data >= logical_size)
+            break;
+
+        off_t hole;
+        error = seek_file(source, data, SEEK_HOLE, &hole);
+        if (error == EINVAL || error == ENOTSUP)
+            return copy_file_sparse_fallback(
+                    source, destination, logical_size);
+        if (error == ENXIO)
+            hole = logical_size;
+        else if (error != 0)
+            return error;
+        if (hole > logical_size)
+            hole = logical_size;
+        if (hole <= data)
+            return EIO;
+
+        off_t position;
+        error = seek_file(source, data, SEEK_SET, &position);
+        if (error == 0)
+            error = seek_file(destination, data, SEEK_SET, &position);
+        if (error == 0)
+            error = copy_file_range(
+                    source, destination, hole - data);
+        if (error != 0)
+            return error;
+        cursor = hole;
+    }
+    return ftruncate(destination, logical_size) < 0 ?
+            errno_or_io() : 0;
 }
 
 static int create_regular_at(
@@ -427,6 +586,225 @@ static int copy_directory_contents(
                     error = errno_or_io();
             }
         } else {
+            error = EINVAL;
+        }
+        if (error != 0)
+            break;
+        errno = 0;
+    }
+    if (entry == NULL && errno != 0 && error == 0)
+        error = errno_or_io();
+    if (closedir(iterator) < 0 && error == 0)
+        error = errno_or_io();
+    if (error == 0)
+        error = sync_directory(destination);
+    return error;
+}
+
+static void root_copy_context_destroy(struct root_copy_context *context) {
+    for (size_t index = 0; index < context->hardlink_count; index++)
+        free(context->hardlinks[index].destination_path);
+    free(context->hardlinks);
+    *context = (struct root_copy_context) {0};
+}
+
+static const char *copied_hardlink_path(
+        const struct root_copy_context *context,
+        const struct stat *metadata) {
+    for (size_t index = 0; index < context->hardlink_count; index++) {
+        const struct copied_hardlink *entry = &context->hardlinks[index];
+        if (entry->device == metadata->st_dev &&
+                entry->inode == metadata->st_ino)
+            return entry->destination_path;
+    }
+    return NULL;
+}
+
+static int remember_copied_hardlink(
+        struct root_copy_context *context,
+        const struct stat *metadata,
+        const char *destination_path) {
+    if (context->hardlink_count == context->hardlink_capacity) {
+        size_t next_capacity = context->hardlink_capacity == 0 ?
+                8 : context->hardlink_capacity * 2;
+        if (next_capacity < context->hardlink_capacity ||
+                next_capacity > SIZE_MAX / sizeof(*context->hardlinks))
+            return ENOMEM;
+        void *grown = realloc(context->hardlinks,
+                next_capacity * sizeof(*context->hardlinks));
+        if (grown == NULL)
+            return ENOMEM;
+        context->hardlinks = grown;
+        context->hardlink_capacity = next_capacity;
+    }
+    char *path = strdup(destination_path);
+    if (path == NULL)
+        return ENOMEM;
+    context->hardlinks[context->hardlink_count++] =
+            (struct copied_hardlink) {
+                .device = metadata->st_dev,
+                .inode = metadata->st_ino,
+                .destination_path = path,
+            };
+    return 0;
+}
+
+static int copy_regular_preserving_hardlinks(
+        int source_directory,
+        int destination_directory,
+        const char *name,
+        const char *destination_path,
+        struct root_copy_context *context) {
+    int source = openat(source_directory, name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source < 0)
+        return errno_or_io();
+    struct stat metadata;
+    int error = 0;
+    if (fstat(source, &metadata) < 0)
+        error = errno_or_io();
+    else if (!S_ISREG(metadata.st_mode))
+        error = EINVAL;
+
+    const char *existing_path = error == 0 && metadata.st_nlink > 1 ?
+            copied_hardlink_path(context, &metadata) : NULL;
+    if (existing_path != NULL) {
+        if (linkat(context->destination_root, existing_path,
+                destination_directory, name, 0) < 0)
+            error = errno_or_io();
+        if (close(source) < 0 && error == 0)
+            error = errno_or_io();
+        return error;
+    }
+
+    int destination = -1;
+    if (error == 0) {
+        destination = openat(destination_directory, name,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                0600);
+        if (destination < 0)
+            error = errno_or_io();
+    }
+    /*
+     * fakefs 的 guest 权限、属主和时间保存在 meta.db；宿主对象只承担内容
+     * 与进程访问控制，因此只复制 POSIX rwx 位，不传播 ACL、flags 或 xattr。
+     */
+    if (error == 0)
+        error = copy_file_preserving_holes(
+                source, destination, metadata.st_size);
+    if (destination >= 0 && error == 0 &&
+            fchmod(destination, metadata.st_mode & 0777) < 0)
+        error = errno_or_io();
+    if (destination >= 0 && error == 0 && fsync(destination) < 0)
+        error = errno_or_io();
+    if (destination >= 0 && close(destination) < 0 && error == 0)
+        error = errno_or_io();
+    if (close(source) < 0 && error == 0)
+        error = errno_or_io();
+    if (error == 0 && metadata.st_nlink > 1)
+        error = remember_copied_hardlink(
+                context, &metadata, destination_path);
+    if (error != 0 && destination >= 0)
+        unlinkat(destination_directory, name, 0);
+    return error;
+}
+
+static int format_copy_path(
+        char output[PATH_MAX],
+        const char *parent_path,
+        const char *name) {
+    int length = parent_path[0] == '\0' ?
+            snprintf(output, PATH_MAX, "%s", name) :
+            snprintf(output, PATH_MAX, "%s/%s", parent_path, name);
+    return length < 0 || length >= PATH_MAX ? ENAMETOOLONG : 0;
+}
+
+static int copy_managed_root_contents(
+        int source,
+        int destination,
+        const char *destination_path,
+        unsigned depth,
+        struct root_copy_context *context) {
+    if (depth > COPY_TREE_DEPTH_LIMIT)
+        return ELOOP;
+    int iterator_file = dup(source);
+    if (iterator_file < 0)
+        return errno_or_io();
+    DIR *iterator = fdopendir(iterator_file);
+    if (iterator == NULL) {
+        int error = errno_or_io();
+        close(iterator_file);
+        return error;
+    }
+
+    int error = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(iterator)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+            continue;
+        char child_path[PATH_MAX];
+        error = format_copy_path(
+                child_path, destination_path, entry->d_name);
+        if (error != 0)
+            break;
+
+        struct stat metadata;
+        if (fstatat(source, entry->d_name, &metadata,
+                AT_SYMLINK_NOFOLLOW) < 0) {
+            error = errno_or_io();
+            break;
+        }
+        if (S_ISREG(metadata.st_mode)) {
+            error = copy_regular_preserving_hardlinks(
+                    source, destination, entry->d_name,
+                    child_path, context);
+        } else if (S_ISDIR(metadata.st_mode)) {
+            if (depth >= COPY_TREE_DEPTH_LIMIT) {
+                error = ELOOP;
+                break;
+            }
+            if (mkdirat(destination, entry->d_name, 0700) < 0) {
+                error = errno_or_io();
+            } else {
+                int source_child = openat(source, entry->d_name,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                int destination_child = -1;
+                struct stat opened_metadata;
+                if (source_child < 0) {
+                    error = errno_or_io();
+                } else if (fstat(source_child, &opened_metadata) < 0) {
+                    error = errno_or_io();
+                } else if (opened_metadata.st_dev != metadata.st_dev ||
+                        opened_metadata.st_ino != metadata.st_ino) {
+                    error = EAGAIN;
+                } else {
+                    destination_child = openat(destination, entry->d_name,
+                            O_RDONLY | O_DIRECTORY |
+                            O_CLOEXEC | O_NOFOLLOW);
+                    if (destination_child < 0)
+                        error = errno_or_io();
+                    else
+                        error = copy_managed_root_contents(
+                                source_child, destination_child,
+                                child_path, depth + 1, context);
+                }
+                if (destination_child >= 0 && error == 0 &&
+                        fchmod(destination_child,
+                                metadata.st_mode & 0777) < 0)
+                    error = errno_or_io();
+                if (destination_child >= 0 && error == 0)
+                    error = sync_directory(destination_child);
+                if (source_child >= 0 &&
+                        close(source_child) < 0 && error == 0)
+                    error = errno_or_io();
+                if (destination_child >= 0 &&
+                        close(destination_child) < 0 && error == 0)
+                    error = errno_or_io();
+            }
+        } else {
+            // fakefs 的宿主存储只允许普通文件和目录；不跟随任何链接。
             error = EINVAL;
         }
         if (error != 0)
@@ -1489,10 +1867,43 @@ static int write_receipt_at(
             receipt, offset, true);
 }
 
-static int inspect_existing_root(
-        int parent, const char *root_name, bool *present) {
-    // 已运行 root 允许 guest 改写链接与 SQLite 状态，只验证安装凭据和必要顶层对象。
+static int validate_opened_root(int root) {
+    char *receipt = NULL;
+    size_t receipt_length = 0;
+    int error = read_regular_at(root, install_receipt_name,
+            MANIFEST_LIMIT, &receipt, &receipt_length);
+    if (error == 0 && !valid_receipt(receipt, receipt_length))
+        error = EEXIST;
+    free(receipt);
+
+    static const struct {
+        const char *name;
+        mode_t type;
+    } required[] = {
+        {"meta.db", S_IFREG},
+        {"data", S_IFDIR},
+    };
+    for (size_t i = 0;
+            error == 0 && i < sizeof(required) / sizeof(required[0]); i++) {
+        struct stat metadata;
+        if (fstatat(root, required[i].name, &metadata,
+                AT_SYMLINK_NOFOLLOW) < 0) {
+            error = errno_or_io();
+        } else if ((metadata.st_mode & S_IFMT) != required[i].type ||
+                metadata.st_uid != geteuid()) {
+            error = EEXIST;
+        }
+    }
+    return error;
+}
+
+static int open_existing_root(
+        int parent, const char *root_name,
+        bool *present, int *root_out) {
+    // 已运行 root 允许 guest 改写 SQLite 内容，只验证凭据与必要宿主对象。
     *present = false;
+    if (root_out != NULL)
+        *root_out = -1;
     struct stat root_metadata;
     if (fstatat(parent, root_name, &root_metadata,
             AT_SYMLINK_NOFOLLOW) < 0) {
@@ -1516,37 +1927,20 @@ static int inspect_existing_root(
     else if (opened_metadata.st_dev != root_metadata.st_dev ||
             opened_metadata.st_ino != root_metadata.st_ino)
         error = EAGAIN;
-
-    char *receipt = NULL;
-    size_t receipt_length = 0;
     if (error == 0)
-        error = read_regular_at(root, install_receipt_name,
-                MANIFEST_LIMIT, &receipt, &receipt_length);
-    if (error == 0 && !valid_receipt(receipt, receipt_length))
-        error = EEXIST;
-    free(receipt);
-
-    static const struct {
-        const char *name;
-        mode_t type;
-    } required[] = {
-        {"meta.db", S_IFREG},
-        {"data", S_IFDIR},
-    };
-    for (size_t i = 0;
-            error == 0 && i < sizeof(required) / sizeof(required[0]); i++) {
-        struct stat metadata;
-        if (fstatat(root, required[i].name, &metadata,
-                AT_SYMLINK_NOFOLLOW) < 0) {
+        error = validate_opened_root(root);
+    if (error != 0 || root_out == NULL) {
+        if (close(root) < 0 && error == 0)
             error = errno_or_io();
-        } else if ((metadata.st_mode & S_IFMT) != required[i].type ||
-                metadata.st_uid != geteuid()) {
-            error = EEXIST;
-        }
+    } else {
+        *root_out = root;
     }
-    if (close(root) < 0 && error == 0)
-        error = errno_or_io();
     return error;
+}
+
+static int inspect_existing_root(
+        int parent, const char *root_name, bool *present) {
+    return open_existing_root(parent, root_name, present, NULL);
 }
 
 static void generate_owner_token(char token[OWNER_TOKEN_HEX_LENGTH + 1]) {
@@ -1764,8 +2158,19 @@ static int unlink_owner_marker(
             (uintmax_t) marker.st_dev != owner->marker_device ||
             (uintmax_t) marker.st_ino != owner->marker_inode)
         return EAGAIN;
+#ifdef ISH_APPLE_ROOTFS_SEED_TESTING
+    if (sync_phase == ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC &&
+            ish_apple_rootfs_seed_test_fail_phase ==
+                    ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_UNLINK) {
+        ish_apple_rootfs_seed_test_fail_phase =
+                ISH_APPLE_ROOTFS_SEED_TEST_NONE;
+        return EIO;
+    }
+#endif
     if (unlinkat(parent, owner_name, 0) < 0)
         return errno_or_io();
+    if (sync_phase == ISH_APPLE_ROOTFS_SEED_TEST_NONE)
+        return sync_directory(parent);
     return sync_directory_phase(parent, sync_phase);
 }
 
@@ -1890,6 +2295,24 @@ static int create_staging(
     return 0;
 }
 
+static int rollback_unsynchronized_publish(
+        int parent, const char *root_name,
+        const struct staging_owner *owner) {
+    struct stat metadata;
+    if (fstatat(parent, root_name, &metadata,
+            AT_SYMLINK_NOFOLLOW) < 0)
+        return errno_or_io();
+    if (!S_ISDIR(metadata.st_mode) ||
+            metadata.st_uid != geteuid() ||
+            (uintmax_t) metadata.st_dev != owner->staging_device ||
+            (uintmax_t) metadata.st_ino != owner->staging_inode)
+        return EAGAIN;
+    if (renameatx_np(parent, root_name,
+            parent, owner->staging_name, RENAME_EXCL) < 0)
+        return errno_or_io();
+    return sync_directory(parent);
+}
+
 static int build_staging_root(int seed, int staging) {
     struct seed_manifest source_manifest = {0};
     int error = validate_seed_top(seed, &source_manifest);
@@ -1957,8 +2380,126 @@ static int build_staging_root(int seed, int staging) {
     return error;
 }
 
-static int lock_installation(
-        int parent, const char *lock_name, int *lock_out) {
+static int unlink_optional_regular_at(int directory, const char *name) {
+    struct stat metadata;
+    if (fstatat(directory, name, &metadata,
+            AT_SYMLINK_NOFOLLOW) < 0)
+        return errno == ENOENT ? 0 : errno_or_io();
+    if (!S_ISREG(metadata.st_mode))
+        return EINVAL;
+    return unlinkat(directory, name, 0) < 0 ? errno_or_io() : 0;
+}
+
+static int prepare_copied_database(int staging) {
+    // SHM 只保存进程间协调状态；复制后必须由新数据库重新建立。
+    int error = unlink_optional_regular_at(staging, "meta.db-shm");
+    int database_file = -1;
+    if (error == 0) {
+        database_file = openat(staging, "meta.db",
+                O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        if (database_file < 0)
+            error = errno_or_io();
+    }
+
+    struct stat metadata = {0};
+    if (error == 0 && fstat(database_file, &metadata) < 0)
+        error = errno_or_io();
+    if (error == 0 && (!S_ISREG(metadata.st_mode) ||
+            metadata.st_uid != geteuid() || metadata.st_nlink != 1))
+        error = EINVAL;
+    char database_path[PATH_MAX];
+    if (error == 0)
+        error = database_path_for_file(database_file, database_path);
+    if (error == 0)
+        error = verify_database_name_identity(
+                staging, database_path, &metadata);
+
+    sqlite3 *database = NULL;
+    int open_flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
+#ifdef SQLITE_OPEN_NOFOLLOW
+    if (sqlite3_libversion_number() >= 3031000)
+        open_flags |= SQLITE_OPEN_NOFOLLOW;
+#endif
+    int result = error == 0 ? sqlite3_open_v2(
+            database_path, &database, open_flags, NULL) : SQLITE_OK;
+    if (error == 0 && result != SQLITE_OK)
+        error = database == NULL ? EINVAL : sqlite_error(database);
+    if (error == 0) {
+        sqlite3_extended_result_codes(database, 1);
+        sqlite3_busy_timeout(database, 1000);
+        error = verify_sqlite_database_identity(
+                database, staging, database_path, &metadata);
+    }
+    if (error == 0)
+        error = sqlite_scalar_text(database, "pragma quick_check", "ok");
+    if (error == 0 && (uintmax_t) metadata.st_ino > INT64_MAX)
+        error = EOVERFLOW;
+    if (error == 0)
+        error = update_database_inode(
+                database, (sqlite3_int64) metadata.st_ino);
+    int log_frames = 0;
+    int checkpointed_frames = 0;
+    if (error == 0 && sqlite3_wal_checkpoint_v2(
+            database, NULL, SQLITE_CHECKPOINT_TRUNCATE,
+            &log_frames, &checkpointed_frames) != SQLITE_OK)
+        error = sqlite_error(database);
+    if (error == 0 && log_frames >= 0 &&
+            checkpointed_frames != log_frames)
+        error = EBUSY;
+    if (error == 0)
+        error = sqlite_scalar_text(
+                database, "pragma journal_mode=delete", "delete");
+    if (error == 0)
+        error = sqlite_scalar_text(database, "pragma quick_check", "ok");
+    sqlite3_int64 database_inode;
+    if (error == 0)
+        error = sqlite_scalar_int64(
+                database, "select db_inode from meta", &database_inode);
+    if (error == 0 &&
+            database_inode != (sqlite3_int64) metadata.st_ino)
+        error = EINVAL;
+    if (database != NULL &&
+            sqlite3_close_v2(database) != SQLITE_OK && error == 0)
+        error = EINVAL;
+    if (error == 0)
+        error = verify_database_name_identity(
+                staging, database_path, &metadata);
+    if (database_file >= 0 && error == 0 && fsync(database_file) < 0)
+        error = errno_or_io();
+    if (database_file >= 0 && close(database_file) < 0 && error == 0)
+        error = errno_or_io();
+    static const char *artifacts[] = {
+        "meta.db-wal", "meta.db-shm", "meta.db-journal",
+    };
+    for (size_t i = 0; error == 0 &&
+            i < sizeof(artifacts) / sizeof(artifacts[0]); i++)
+        error = unlink_optional_regular_at(staging, artifacts[i]);
+    if (error == 0)
+        error = sync_directory(staging);
+    return error;
+}
+
+static int build_copied_root(int source, int staging) {
+    struct root_copy_context context = {
+        .destination_root = staging,
+    };
+    int error = copy_managed_root_contents(
+            source, staging, "", 0, &context);
+    root_copy_context_destroy(&context);
+    if (error == 0)
+        error = validate_opened_root(staging);
+    if (error == 0)
+        error = prepare_copied_database(staging);
+    if (error == 0)
+        error = validate_opened_root(staging);
+    if (error == 0)
+        error = sync_directory(staging);
+    return error;
+}
+
+static int lock_file(
+        int parent, const char *lock_name,
+        int operation, int *lock_out) {
     // lock 文件长期保留，避免 unlink 后不同进程锁住不同 vnode。
     int lock = -1;
     for (unsigned attempt = 0; attempt < 16; attempt++) {
@@ -1991,14 +2532,73 @@ static int lock_installation(
     else if (!S_ISREG(metadata.st_mode) ||
             metadata.st_uid != geteuid() || metadata.st_nlink != 1)
         error = EEXIST;
-    while (error == 0 && flock(lock, LOCK_EX) < 0) {
+    while (error == 0 && flock(lock, operation) < 0) {
         if (errno != EINTR) {
-            error = errno_or_io();
+            error = errno == EWOULDBLOCK ? EBUSY : errno_or_io();
             break;
         }
     }
     if (error != 0) {
         close(lock);
+        return error;
+    }
+    *lock_out = lock;
+    return 0;
+}
+
+int ish_apple_rootfs_unlock_managed_root(int lock) {
+    if (lock < 0)
+        return EINVAL;
+    int error = 0;
+    while (flock(lock, LOCK_UN) < 0) {
+        if (errno == EINTR)
+            continue;
+        error = errno_or_io();
+        break;
+    }
+    if (close(lock) < 0 && error == 0)
+        error = errno_or_io();
+    return error;
+}
+
+int ish_apple_rootfs_lock_managed_root(
+        const char *persistent_parent,
+        const char *root_name,
+        bool exclusive,
+        bool require_valid_root,
+        int *lock_out) {
+    if (persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !valid_root_name(root_name) || lock_out == NULL)
+        return EINVAL;
+    *lock_out = -1;
+
+    char lock_name[NAME_MAX + 1];
+    int error = format_private_name(
+            lock_name, root_name, ".lifecycle.lock");
+    if (error != 0)
+        return error;
+    int parent = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0)
+        return errno_or_io();
+
+    int lock = -1;
+    int operation = exclusive ? LOCK_EX | LOCK_NB : LOCK_SH;
+    error = lock_file(parent, lock_name, operation, &lock);
+    bool present = false;
+    if (error == 0 && require_valid_root)
+        error = open_existing_root(parent, root_name, &present, NULL);
+    if (error == 0 && !require_valid_root) {
+        struct stat metadata;
+        error = entry_metadata(parent, root_name, &present, &metadata);
+    }
+    if (error == 0 && !present)
+        error = ENOENT;
+    if (close(parent) < 0 && error == 0)
+        error = errno_or_io();
+    if (error != 0) {
+        if (lock >= 0)
+            (void) ish_apple_rootfs_unlock_managed_root(lock);
         return error;
     }
     *lock_out = lock;
@@ -2062,15 +2662,105 @@ static int install_locked(
         return 0;
     }
 
-    // final 名字先成为持久提交点，owner 才能作为第二阶段被删除。
     error = sync_directory_phase(parent,
             ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC);
-    if (error == 0)
-        error = unlink_owner_marker(parent, owner_name, &owner,
-                ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC);
+    if (error != 0) {
+        int rollback_error = rollback_unsynchronized_publish(
+                parent, root_name, &owner);
+        return rollback_error == 0 ? error : rollback_error;
+    }
+    /*
+     * final 的父目录项已经持久化；owner 清理失败只会留下可识别的恢复凭据，
+     * 不能把已提交安装重新报告成失败。
+     */
+    *result = ISH_APPLE_ROOTFS_SEED_INSTALLED;
+    (void) unlink_owner_marker(parent, owner_name, &owner,
+            ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC);
+    return 0;
+}
+
+static int copy_managed_root_locked(
+        const char *seed_root,
+        int parent,
+        const char *source_name,
+        const char *destination_name,
+        const char *owner_name) {
+    bool source_present;
+    int source = -1;
+    int error = open_existing_root(
+            parent, source_name, &source_present, &source);
+    if (error == EEXIST)
+        return EINVAL;
     if (error != 0)
         return error;
-    *result = ISH_APPLE_ROOTFS_SEED_INSTALLED;
+    if (!source_present)
+        return ENOENT;
+
+    bool destination_present;
+    error = inspect_existing_root(
+            parent, destination_name, &destination_present);
+    if (error == 0 && destination_present) {
+        error = cleanup_staging_if_owned(
+                parent, owner_name, destination_name);
+        if (error == 0)
+            error = EEXIST;
+    }
+
+    int seed = -1;
+    if (error == 0) {
+        seed = open(seed_root,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (seed < 0)
+            error = errno_or_io();
+    }
+    struct seed_manifest manifest;
+    if (error == 0)
+        error = validate_seed_top(seed, &manifest);
+    if (seed >= 0 && close(seed) < 0 && error == 0)
+        error = errno_or_io();
+    if (error == 0)
+        error = recover_staging(
+                parent, owner_name, destination_name);
+
+    int staging = -1;
+    struct staging_owner owner = {0};
+    if (error == 0)
+        error = create_staging(parent, destination_name,
+                owner_name, &staging, &owner);
+    if (error == 0)
+        error = build_copied_root(source, staging);
+    if (close(source) < 0 && error == 0)
+        error = errno_or_io();
+    if (staging >= 0 && close(staging) < 0 && error == 0)
+        error = errno_or_io();
+    if (error != 0) {
+        if (owner.marker_inode != 0) {
+            int cleanup_error = remove_owned_staging(
+                    parent, owner_name, &owner);
+            if (cleanup_error != 0)
+                return cleanup_error;
+        }
+        return error;
+    }
+
+    // 与 seed 安装共用排他发布，目录目标无论何种类型都不会被覆盖。
+    if (renameatx_np(parent, owner.staging_name,
+            parent, destination_name, RENAME_EXCL) < 0) {
+        int rename_error = errno_or_io();
+        int cleanup_error = remove_owned_staging(
+                parent, owner_name, &owner);
+        return cleanup_error != 0 ? cleanup_error : rename_error;
+    }
+    error = sync_directory_phase(parent,
+            ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC);
+    if (error != 0) {
+        int rollback_error = rollback_unsynchronized_publish(
+                parent, destination_name, &owner);
+        return rollback_error == 0 ? error : rollback_error;
+    }
+    // final 已持久化；后续 catalog 操作可以安全收敛残留 owner。
+    (void) unlink_owner_marker(parent, owner_name, &owner,
+            ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC);
     return 0;
 }
 
@@ -2098,15 +2788,72 @@ int ish_apple_rootfs_seed_install(
     if (parent < 0)
         return errno_or_io();
     int lock = -1;
-    error = lock_installation(parent, lock_name, &lock);
+    error = lock_file(parent, lock_name, LOCK_EX, &lock);
     if (error == 0)
         error = install_locked(seed_root, parent, root_name,
                 owner_name, result);
+    bool completed = error == 0;
     if (lock >= 0) {
         while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}
         close(lock);
     }
     if (close(parent) < 0 && error == 0)
         error = errno_or_io();
-    return error;
+    return completed ? 0 : error;
+}
+
+int ish_apple_rootfs_copy_managed_root(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *source_name,
+        const char *destination_name) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            !valid_root_name(source_name) ||
+            !valid_root_name(destination_name) ||
+            strcmp(source_name, destination_name) == 0)
+        return EINVAL;
+
+    char lock_name[NAME_MAX + 1];
+    char owner_name[NAME_MAX + 1];
+    int error = format_private_name(
+            lock_name, destination_name, ".install.lock");
+    if (error == 0)
+        error = format_private_name(
+                owner_name, destination_name, ".installing.owner");
+    if (error != 0)
+        return error;
+
+    int source_lock = -1;
+    error = ish_apple_rootfs_lock_managed_root(
+            persistent_parent, source_name, true, true, &source_lock);
+    if (error == EEXIST)
+        error = EINVAL;
+    if (error != 0)
+        return error;
+
+    int parent = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0) {
+        error = errno_or_io();
+        (void) ish_apple_rootfs_unlock_managed_root(source_lock);
+        return error;
+    }
+    int lock = -1;
+    error = lock_file(parent, lock_name, LOCK_EX, &lock);
+    if (error == 0)
+        error = copy_managed_root_locked(seed_root, parent,
+                source_name, destination_name, owner_name);
+    bool completed = error == 0;
+    if (lock >= 0) {
+        while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}
+        close(lock);
+    }
+    if (close(parent) < 0 && error == 0)
+        error = errno_or_io();
+    int unlock_error =
+            ish_apple_rootfs_unlock_managed_root(source_lock);
+    if (error == 0)
+        error = unlock_error;
+    return completed ? 0 : error;
 }
