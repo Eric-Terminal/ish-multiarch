@@ -80,8 +80,24 @@ final class WatchRuntime: ObservableObject {
         enqueue(Array(pendingText.utf8) + [0x09])
     }
 
-    func sendEscape() {
-        enqueue([0x1b])
+    func sendEscape(after pendingText: String) {
+        enqueue(Array(pendingText.utf8) + [0x1b])
+    }
+
+    func sendArrowUp() {
+        sendCursorKey(0x41)
+    }
+
+    func sendArrowDown() {
+        sendCursorKey(0x42)
+    }
+
+    func sendArrowRight(after pendingText: String) {
+        sendCursorKey(0x43, after: pendingText)
+    }
+
+    func sendArrowLeft(after pendingText: String) {
+        sendCursorKey(0x44, after: pendingText)
     }
 
     private func startIfNeeded() {
@@ -258,6 +274,13 @@ final class WatchRuntime: ObservableObject {
         }
         pendingInput.append(contentsOf: bytes)
         flushPendingInput()
+    }
+
+    private func sendCursorKey(
+        _ finalByte: UInt8,
+        after pendingText: String = ""
+    ) {
+        enqueue(Array(pendingText.utf8) + [0x1b, 0x5b, finalByte])
     }
 
     private func flushPendingInput() {

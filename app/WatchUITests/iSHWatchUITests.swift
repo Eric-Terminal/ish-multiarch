@@ -35,7 +35,7 @@ final class iSHWatchUITests: XCTestCase {
             app.launch()
             didWarmSystemInput = false
 
-            let input = app.textFields["command-input"]
+            let input = commandInput(in: app)
             let inputExists = input.waitForExistence(timeout: 180)
             XCTAssertTrue(inputExists, "异常退出后无法重新打开命令输入框执行恢复")
             if inputExists {
@@ -51,7 +51,7 @@ final class iSHWatchUITests: XCTestCase {
                     "异常退出后命令输入框没有恢复可用")
 
                 let send = app.buttons["send-command"]
-                let terminal = app.staticTexts["terminal-output"]
+                let terminal = terminalTranscript(in: app)
                 let controlsExist =
                     send.waitForExistence(timeout: 10) &&
                     terminal.waitForExistence(timeout: 10)
@@ -76,6 +76,20 @@ final class iSHWatchUITests: XCTestCase {
         let app = XCUIApplication()
         recoveryApp = app
         app.launch()
+
+        // watchOS 26 会把 toolbar button 暴露成同标识的嵌套按钮节点。
+        let settings = app.buttons.matching(
+            identifier: "watch-settings-button").firstMatch
+        XCTAssertTrue(
+            settings.waitForExistence(timeout: 10),
+            "Watch 设置入口没有出现")
+        settings.tap()
+
+        let settingsView = app.descendants(
+            matching: .any)["watch-settings-view"]
+        XCTAssertTrue(
+            settingsView.waitForExistence(timeout: 10),
+            "Watch 设置页没有打开")
 
         let entry = app.buttons["third-party-notices-button"]
         XCTAssertTrue(
@@ -118,7 +132,18 @@ final class iSHWatchUITests: XCTestCase {
             for: NSPredicate(format: "exists == false"),
             evaluatedWith: content)
         wait(for: [dismissed], timeout: 10)
-        XCTAssertTrue(entry.exists, "关闭许可证与源码后没有返回终端")
+        XCTAssertTrue(entry.exists, "关闭许可证与源码后没有返回设置")
+
+        let closeSettings = app.buttons.matching(
+            identifier: "close-watch-settings").firstMatch
+        XCTAssertTrue(
+            closeSettings.waitForExistence(timeout: 10),
+            "Watch 设置页没有完成按钮")
+        closeSettings.tap()
+        let terminal = terminalTranscript(in: app)
+        XCTAssertTrue(
+            terminal.waitForExistence(timeout: 10),
+            "关闭设置后没有返回终端")
     }
 
     func testAArch64终端命令与快捷键() throws {
@@ -127,10 +152,10 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
-            "命令输入框没有在期限内出现")
+            "命令输入框没有在期限内出现：\n\(app.debugDescription)")
 
         let ready = expectation(
             for: NSPredicate(format: "enabled == true"),
@@ -161,14 +186,86 @@ final class iSHWatchUITests: XCTestCase {
         wait(for: [sendReady], timeout: 10)
         send.tap()
 
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
-        let architecture = expectation(
-            for: NSPredicate(format: "label CONTAINS %@", "aarch64"),
-            evaluatedWith: terminal)
-        wait(for: [architecture], timeout: 60)
+        let architectureOutput = waitForTerminalOutput(
+            containing: ["aarch64"],
+            timeout: 60,
+            terminal: terminal)
+        XCTAssertTrue(
+            architectureOutput.contains("aarch64"),
+            architectureOutput)
+
+        let historyToken = String(UUID().uuidString.prefix(8))
+        let firstHistoryLine = "ISH-HISTORY:\(historyToken):1"
+        let lastHistoryLine = "ISH-HISTORY:\(historyToken):40"
+        input.tap()
+        let historyInput = app.textViews.firstMatch
+        XCTAssertTrue(
+            historyInput.waitForExistence(timeout: 60),
+            "历史窗口命令的 watchOS 系统输入框没有出现")
+        historyInput.typeText(
+            "for i in $(seq 1 40); do echo " +
+            "ISH-HISTORY:\(historyToken):$i; done")
+        XCTAssertTrue(
+            done.waitForExistence(timeout: 10),
+            "历史窗口命令的 watchOS 系统输入界面没有完成按钮")
+        done.tap()
+        let historySendReady = expectation(
+            for: NSPredicate(format: "hittable == true"),
+            evaluatedWith: send)
+        wait(for: [historySendReady], timeout: 10)
+        send.tap()
+        let latestHistoryOutput = waitForTerminalOutput(
+            containing: [lastHistoryLine],
+            timeout: 60,
+            terminal: terminal)
+        XCTAssertTrue(
+            latestHistoryOutput.contains(lastHistoryLine),
+            latestHistoryOutput)
+
+        let loadEarlier = app.buttons.matching(
+            identifier: "load-earlier-lines").firstMatch
+        let earlierDragStart = terminal.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let earlierDragEnd = terminal.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        for _ in 0..<8 where !loadEarlier.exists {
+            earlierDragStart.press(
+                forDuration: 0.1,
+                thenDragTo: earlierDragEnd)
+        }
+        XCTAssertTrue(
+            loadEarlier.waitForExistence(timeout: 10),
+            "超过首屏行数后没有出现向上加载入口：\n" +
+            app.debugDescription)
+        XCTAssertTrue(loadEarlier.isHittable, "向上加载入口不可点击")
+        loadEarlier.tap()
+
+        var earlierHistoryOutput = terminalOutput(terminal)
+        for _ in 0..<8 where
+                !earlierHistoryOutput.contains(firstHistoryLine) {
+            earlierDragStart.press(
+                forDuration: 0.1,
+                thenDragTo: earlierDragEnd)
+            earlierHistoryOutput = terminalOutput(terminal)
+        }
+        XCTAssertTrue(
+            earlierHistoryOutput.contains(firstHistoryLine),
+            earlierHistoryOutput)
+
+        let laterDragStart = terminal.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let laterDragEnd = terminal.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+        for _ in 0..<12 where !input.isHittable {
+            laterDragStart.press(
+                forDuration: 0.1,
+                thenDragTo: laterDragEnd)
+        }
+        XCTAssertTrue(input.isHittable, "加载历史后无法返回命令输入胶囊")
 
         recoveryApp = app
         didWarmSystemInput = true
@@ -205,19 +302,16 @@ final class iSHWatchUITests: XCTestCase {
             evaluatedWith: send)
         wait(for: [clearSendReady], timeout: 10)
         send.tap()
-        let clearFinished = expectation(
-            for: NSPredicate(
-                format: "label CONTAINS %@ OR label CONTAINS %@",
-                clearPass,
-                clearFail),
-            evaluatedWith: terminal)
-        wait(for: [clearFinished], timeout: 60)
-        XCTAssertTrue(terminal.label.contains(clearPass), terminal.label)
+        let clearOutput = waitForTerminalOutput(
+            containing: [clearPass, clearFail],
+            timeout: 60,
+            terminal: terminal)
+        XCTAssertTrue(clearOutput.contains(clearPass), clearOutput)
 
         app.terminate()
         app.launch()
 
-        let restartedInput = app.textFields["command-input"]
+        let restartedInput = commandInput(in: app)
         XCTAssertTrue(
             restartedInput.waitForExistence(timeout: 180),
             "重启后命令输入框没有在期限内出现")
@@ -230,7 +324,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             restartedSend.waitForExistence(timeout: 10),
             "重启后发送按钮没有出现")
-        let restartedTerminal = app.staticTexts["terminal-output"]
+        let restartedTerminal = terminalTranscript(in: app)
         XCTAssertTrue(
             restartedTerminal.waitForExistence(timeout: 10),
             "重启后终端输出没有出现")
@@ -262,23 +356,22 @@ final class iSHWatchUITests: XCTestCase {
             evaluatedWith: restartedSend)
         wait(for: [resolverSendReady], timeout: 10)
         restartedSend.tap()
-        let resolverFinished = expectation(
-            for: NSPredicate(
-                format: "label CONTAINS %@ OR label CONTAINS %@",
-                resolverPass,
-                resolverFail),
-            evaluatedWith: restartedTerminal)
-        wait(for: [resolverFinished], timeout: 60)
-        let resolverRecovered =
-            restartedTerminal.label.contains(resolverPass)
-        XCTAssertTrue(resolverRecovered, restartedTerminal.label)
+        let resolverOutput = waitForTerminalOutput(
+            containing: [resolverPass, resolverFail],
+            timeout: 60,
+            terminal: restartedTerminal)
+        let resolverRecovered = resolverOutput.contains(resolverPass)
+        XCTAssertTrue(resolverRecovered, resolverOutput)
         if resolverRecovered {
             guestRecoveryRequired = false
         }
 
+        let inputRow = restartedInput
+        inputRow.swipeRight()
+
         let tab = app.buttons["send-tab"]
-        let escape = app.buttons["send-escape"]
-        let controlC = app.buttons["send-control-c"]
+        var escape = app.buttons["send-escape"]
+        var controlC = app.buttons["send-control-c"]
         XCTAssertTrue(tab.waitForExistence(timeout: 10), "Tab 按钮没有出现")
         XCTAssertTrue(escape.waitForExistence(timeout: 10), "Esc 按钮没有出现")
         XCTAssertTrue(controlC.waitForExistence(timeout: 10), "Ctrl-C 按钮没有出现")
@@ -286,6 +379,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(escape.isHittable, "Esc 按钮不可点击")
         XCTAssertTrue(controlC.isHittable, "Ctrl-C 按钮不可点击")
 
+        inputRow.swipeLeft()
         restartedInput.tap()
         let completionInput = app.textViews.firstMatch
         XCTAssertTrue(
@@ -296,16 +390,33 @@ final class iSHWatchUITests: XCTestCase {
             restartedDone.waitForExistence(timeout: 10),
             "补全命令的 watchOS 系统输入界面没有完成按钮")
         restartedDone.tap()
+        inputRow.swipeRight()
         let tabReady = expectation(
             for: NSPredicate(format: "hittable == true"),
             evaluatedWith: tab)
         wait(for: [tabReady], timeout: 10)
         tab.tap()
-        let completion = expectation(
-            for: NSPredicate(format: "label CONTAINS %@", "/root/"),
-            evaluatedWith: restartedTerminal)
-        wait(for: [completion], timeout: 30)
+
+        let completionOutput = waitForTerminalOutput(
+            containing: ["/root/"],
+            timeout: 30,
+            terminal: restartedTerminal)
+        XCTAssertTrue(
+            completionOutput.contains("/root/"),
+            completionOutput)
+
+        inputRow.swipeRight()
+        escape = app.buttons["send-escape"]
+        XCTAssertTrue(
+            escape.waitForExistence(timeout: 10),
+            "再次滑开后 Esc 按钮没有出现")
         escape.tap()
+
+        inputRow.swipeRight()
+        controlC = app.buttons["send-control-c"]
+        XCTAssertTrue(
+            controlC.waitForExistence(timeout: 10),
+            "再次滑开后 Ctrl-C 按钮没有出现")
         controlC.tap()
     }
 
@@ -315,7 +426,7 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
             "命令输入框没有在期限内出现")
@@ -328,7 +439,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             send.waitForExistence(timeout: 10),
             "发送按钮没有出现")
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
@@ -454,7 +565,7 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
             "命令输入框没有在期限内出现")
@@ -467,7 +578,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             send.waitForExistence(timeout: 10),
             "发送按钮没有出现")
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
@@ -519,7 +630,7 @@ final class iSHWatchUITests: XCTestCase {
         app.terminate()
         app.launch()
 
-        let restartedInput = app.textFields["command-input"]
+        let restartedInput = commandInput(in: app)
         XCTAssertTrue(
             restartedInput.waitForExistence(timeout: 180),
             "重启后命令输入框没有在期限内出现")
@@ -532,7 +643,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             restartedSend.waitForExistence(timeout: 10),
             "重启后发送按钮没有出现")
-        let restartedTerminal = app.staticTexts["terminal-output"]
+        let restartedTerminal = terminalTranscript(in: app)
         XCTAssertTrue(
             restartedTerminal.waitForExistence(timeout: 10),
             "重启后终端输出没有出现")
@@ -559,7 +670,7 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
             "命令输入框没有在期限内出现")
@@ -572,7 +683,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             send.waitForExistence(timeout: 10),
             "发送按钮没有出现")
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
@@ -678,7 +789,7 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
             "命令输入框没有在期限内出现")
@@ -691,7 +802,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             send.waitForExistence(timeout: 10),
             "发送按钮没有出现")
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
@@ -792,7 +903,7 @@ final class iSHWatchUITests: XCTestCase {
         guestRecoveryRequired = true
         app.launch()
 
-        let input = app.textFields["command-input"]
+        let input = commandInput(in: app)
         XCTAssertTrue(
             input.waitForExistence(timeout: 180),
             "命令输入框没有在期限内出现")
@@ -805,7 +916,7 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertTrue(
             send.waitForExistence(timeout: 10),
             "发送按钮没有出现")
-        let terminal = app.staticTexts["terminal-output"]
+        let terminal = terminalTranscript(in: app)
         XCTAssertTrue(
             terminal.waitForExistence(timeout: 10),
             "终端输出没有出现")
@@ -890,6 +1001,53 @@ final class iSHWatchUITests: XCTestCase {
             terminal: terminal)
     }
 
+    private func commandInput(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(
+            matching: .any
+        ).matching(
+            identifier: "command-input"
+        ).firstMatch
+    }
+
+    private func terminalTranscript(
+            in app: XCUIApplication) -> XCUIElement {
+        app.descendants(
+            matching: .any
+        ).matching(
+            identifier: "terminal-transcript"
+        ).firstMatch
+    }
+
+    private func terminalOutput(_ terminal: XCUIElement) -> String {
+        let blocks = terminal.descendants(
+            matching: .staticText
+        ).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "terminal-line-"))
+        return (0..<blocks.count).map {
+            blocks.element(boundBy: $0).label
+        }.joined(separator: "\n")
+    }
+
+    private func waitForTerminalOutput(
+        containing candidates: [String],
+        timeout: TimeInterval,
+        pollInterval: TimeInterval = 0.5,
+        terminal: XCUIElement
+    ) -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        var output = terminalOutput(terminal)
+        while !candidates.contains(where: output.contains) {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            Thread.sleep(
+                forTimeInterval: min(pollInterval, remaining))
+            output = terminalOutput(terminal)
+        }
+        return output
+    }
+
     private func commandUsingCDNIPv4(_ command: String) -> String {
         // 公网软件门禁仍使用原 hostname、SNI 与证书，只稳定选择 DNS 当前的 A 记录。
         let prefix =
@@ -964,14 +1122,11 @@ final class iSHWatchUITests: XCTestCase {
             pollInterval = 1
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        var output = terminal.label
-        while !output.contains(pass) && !output.contains(fail) {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { break }
-            Thread.sleep(forTimeInterval: min(pollInterval, remaining))
-            output = terminal.label
-        }
+        let output = waitForTerminalOutput(
+            containing: [pass, fail],
+            timeout: timeout,
+            pollInterval: pollInterval,
+            terminal: terminal)
 
         guard output.contains(pass) || output.contains(fail) else {
             return .timeout
@@ -1064,12 +1219,13 @@ final class iSHWatchUITests: XCTestCase {
         XCTAssertNotEqual(
             result,
             .timeout,
-            "guest 命令传输或执行未在期限内确认：\(terminal.label)")
+            "guest 命令传输或执行未在期限内确认：" +
+            terminalOutput(terminal))
         guard result != .timeout else { return false }
         XCTAssertEqual(
             result,
             .pass,
-            "guest 脚本传输失败：\(terminal.label)")
+            "guest 脚本传输失败：" + terminalOutput(terminal))
         return result == .pass
     }
 
@@ -1176,7 +1332,7 @@ final class iSHWatchUITests: XCTestCase {
                 if result == .timeout {
                     XCTFail(
                         "guest 脚本分片状态不确定，禁止盲目重试：" +
-                        terminal.label)
+                        terminalOutput(terminal))
                     return false
                 }
                 if result == .retryableFail {
@@ -1186,7 +1342,7 @@ final class iSHWatchUITests: XCTestCase {
                 if result == .fail {
                     XCTFail(
                         "guest 脚本分片清理状态不安全，禁止重试：" +
-                        terminal.label)
+                        terminalOutput(terminal))
                     return false
                 }
                 start = end
@@ -1224,7 +1380,8 @@ final class iSHWatchUITests: XCTestCase {
         }
 
         XCTFail(
-            "guest 脚本分片在一次安全重试后仍传输失败：\(terminal.label)")
+            "guest 脚本分片在一次安全重试后仍传输失败：" +
+            terminalOutput(terminal))
         return false
     }
 
@@ -1282,15 +1439,12 @@ final class iSHWatchUITests: XCTestCase {
             guestRecoveryRequired = false
         }
 
-        let finished = expectation(
-            for: NSPredicate(
-                format: "label CONTAINS %@ OR label CONTAINS %@",
-                pass,
-                fail),
-            evaluatedWith: terminal)
-        wait(for: [finished], timeout: 30)
-        let didPass = terminal.label.contains(pass)
-        XCTAssertTrue(didPass, terminal.label)
+        let output = waitForTerminalOutput(
+            containing: [pass, fail],
+            timeout: 30,
+            terminal: terminal)
+        let didPass = output.contains(pass)
+        XCTAssertTrue(didPass, output)
         if didPass && usesIPv4Scope {
             guestRecoveryRequired = false
         }
