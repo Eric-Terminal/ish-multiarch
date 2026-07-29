@@ -1,6 +1,8 @@
 #ifndef KERNEL_INIT_H
 #define KERNEL_INIT_H
 
+#include <stdbool.h>
+
 #include "fs/tty.h"
 
 struct task;
@@ -10,6 +12,23 @@ int mount_root(const struct fs_ops *fs, const char *source);
 void set_console_device(int major, int minor);
 int become_first_process(void);
 int become_new_init_child(void);
+/*
+ * 宿主入口可在 begin 与 commit/cancel 之间完成 stdio 和 exec。
+ * 成功 begin 后 current 指向尚未发布的 task；子进程事务还会阻止 PID 1
+ * 在事务期间开始退出。
+ * 调用方必须在同一 host 线程恰好调用一次 commit 或 cancel。
+ */
+int begin_first_process(void);
+int begin_new_init_child(void);
+void cancel_prepared_process(void);
+// commit 失败时事务仍保持，调用方必须 cancel。
+int commit_prepared_process(void);
+// 子进程专用入口额外校验当前事务类型。
+void cancel_new_init_child(void);
+int commit_new_init_child(void);
+// do_exit 用这对入口把 PID 1 的 exiting 发布与上述事务串行。
+bool init_child_lifecycle_begin_exit(struct task *task);
+void init_child_lifecycle_end_exit(bool held);
 void create_some_device_nodes(void);
 int create_stdio(const char *file, int major, int minor);
 /*

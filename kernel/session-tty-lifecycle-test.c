@@ -499,6 +499,57 @@ static bool test_signal_target_is_input_snapshot(
     return true;
 }
 
+static void detach_group_tty(struct tgroup *group) {
+    lock(&group->lock);
+    struct tty *tty = group->tty;
+    group->tty = NULL;
+    unlock(&group->lock);
+    if (tty != NULL) {
+        lock(&ttys_lock);
+        tty_release(tty);
+        unlock(&ttys_lock);
+    }
+}
+
+static bool test_kill_controlling_tty(struct task *parent) {
+    struct task *first = make_process(parent,
+            parent->group->sid, parent->group->pgid);
+    struct task *second = make_process(parent,
+            parent->group->sid, parent->group->pgid);
+    struct task *unrelated = make_process(parent,
+            parent->group->sid, parent->group->pgid);
+    CHECK(first != NULL && second != NULL && unrelated != NULL,
+            "创建 controlling tty 精确终止测试进程");
+
+    struct tty *target_tty = attach_new_tty(first->group);
+    CHECK(target_tty != NULL,
+            "创建 controlling tty 精确终止目标");
+    share_tty(second->group, target_tty);
+    struct tty *other_tty = attach_new_tty(unrelated->group);
+    CHECK(other_tty != NULL && other_tty != target_tty,
+            "创建不会被终止的独立 controlling tty");
+
+    task_thread_store(first, pthread_self());
+    task_thread_store(second, pthread_self());
+    task_thread_store(unrelated, pthread_self());
+    CHECK(task_kill_controlling_tty(target_tty) == 2,
+            "按 tty 引用恰好终止两个绑定进程组");
+    CHECK(task_group_fatal_signal(first) == SIGKILL_ &&
+            task_group_fatal_signal(second) == SIGKILL_,
+            "同一 tty 的每个进程组都收到 SIGKILL");
+    CHECK(task_group_fatal_signal(unrelated) == 0,
+            "不同 tty 即使处于同一 Linux session 也不受影响");
+
+    detach_group_tty(first->group);
+    detach_group_tty(second->group);
+    detach_group_tty(unrelated->group);
+    destroy_live_group(parent, first, NULL);
+    destroy_live_group(parent, second, NULL);
+    destroy_live_group(parent, unrelated, NULL);
+    current = parent;
+    return true;
+}
+
 static bool test_wait_reap_cleanup(struct task *parent) {
     struct task *child = make_process(parent,
             parent->group->sid, parent->group->pgid);
@@ -854,6 +905,7 @@ static int run_lifecycle_scenarios(void) {
     parent->blocked = sig_mask(SIGCHLD_);
 
     if (!test_aarch64_session_syscalls(parent) ||
+            !test_kill_controlling_tty(parent) ||
             !test_wait_reap_cleanup(parent) ||
             !test_reaped_leader_and_thread_setsid(parent) ||
             !test_setsid_rejects_occupied_pgid(parent) ||

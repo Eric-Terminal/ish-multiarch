@@ -5,6 +5,7 @@
 #include "kernel/calls.h"
 #include "kernel/mm.h"
 #include "kernel/futex.h"
+#include "kernel/init.h"
 #include "kernel/ptrace.h"
 #include "fs/fd.h"
 #include "fs/tty.h"
@@ -61,6 +62,8 @@ static struct task *find_new_parent(struct task *task) {
 }
 
 noreturn void do_exit(int status) {
+    bool init_lifecycle_held =
+            init_child_lifecycle_begin_exit(current);
     // has to happen before mm_release
     if (task_has_aarch64_process(current)) {
         struct aarch64_linux_process *process =
@@ -87,6 +90,7 @@ noreturn void do_exit(int status) {
     }
     unlock(&current->sighand->lock);
     unlock(&pids_lock);
+    init_child_lifecycle_end_exit(init_lifecycle_held);
     if (all_exiting)
         tgroup_timers_destroy(current->group);
 

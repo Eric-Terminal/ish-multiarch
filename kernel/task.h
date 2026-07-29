@@ -14,6 +14,7 @@
 #include "util/sync.h"
 
 struct aarch64_linux_process;
+struct tty;
 
 struct task_credentials {
     uid_t_ uid, gid;
@@ -287,6 +288,12 @@ struct task *pid_get_task(dword_t pid);
 struct task *pid_get_task_zombie(dword_t id); // don't return null if the task exists as a zombie
 struct task *task_process_representative_locked(struct task *task);
 struct task *pid_get_process_task(dword_t id);
+/*
+ * 以调用方持有的 tty 引用作为不可复用身份，向所有仍绑定该 controlling tty
+ * 的进程发送 SIGKILL。locked 版本要求已持有 pids_lock。
+ */
+size_t task_kill_controlling_tty_locked(struct tty *tty);
+size_t task_kill_controlling_tty(struct tty *tty);
 
 #define MAX_PID (1 << 15) // oughta be enough
 

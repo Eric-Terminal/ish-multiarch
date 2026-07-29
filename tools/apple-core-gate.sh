@@ -397,7 +397,13 @@ build_slice() {
             ish_watch_runtime_last_error \
             ish_watch_runtime_read_output \
             ish_watch_runtime_send_input \
-            ish_watch_runtime_set_window_size; do
+            ish_watch_runtime_set_window_size \
+            ish_watch_session_create \
+            ish_watch_session_status \
+            ish_watch_session_read_output \
+            ish_watch_session_send_input \
+            ish_watch_session_set_window_size \
+            ish_watch_session_close; do
         if ! grep -Eq \
                 "[[:space:]]T[[:space:]]+_${runtime_symbol}$" \
                 <<< "$runtime_symbols"; then
@@ -405,12 +411,20 @@ build_slice() {
             exit 1
         fi
     done
-    if grep -Eq \
-            '[[:space:]]T[[:space:]]+_ish_watch_runtime_test_append_output$' \
-            <<< "$runtime_symbols"; then
-        echo "错误：${name} 的生产 Watch runtime 泄漏了测试钩子。" >&2
-        exit 1
-    fi
+    local test_runtime_symbol
+    for test_runtime_symbol in \
+            ish_watch_runtime_test_append_output \
+            ish_watch_runtime_test_add_session \
+            ish_watch_runtime_test_append_session_output \
+            ish_watch_runtime_test_mark_session_exited \
+            ish_watch_runtime_test_recycled_transport; do
+        if grep -Eq \
+                "[[:space:]]T[[:space:]]+_${test_runtime_symbol}$" \
+                <<< "$runtime_symbols"; then
+            echo "错误：${name} 的生产 Watch runtime 泄漏了 ${test_runtime_symbol}。" >&2
+            exit 1
+        fi
+    done
 
     local executable
     local build_info

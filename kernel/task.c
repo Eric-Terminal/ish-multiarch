@@ -14,6 +14,7 @@
 #include "kernel/futex.h"
 #include "kernel/task.h"
 #include "kernel/memory.h"
+#include "fs/tty.h"
 #include "emu/tlb.h"
 
 __thread struct task *current;
@@ -381,6 +382,43 @@ struct task *task_process_representative_locked(struct task *task) {
             return member;
     }
     return NULL;
+}
+
+size_t task_kill_controlling_tty_locked(struct tty *tty) {
+    assert(lock_owned_by_current(&pids_lock));
+    if (tty == NULL)
+        return 0;
+
+    size_t killed = 0;
+    for (dword_t pid = 1; pid <= MAX_PID; pid++) {
+        struct task *leader = pid_get_task_zombie(pid);
+        if (leader == NULL || !task_is_leader(leader))
+            continue;
+
+        lock(&leader->group->lock);
+        bool matches = leader->group->tty == tty;
+        unlock(&leader->group->lock);
+        if (!matches)
+            continue;
+
+        struct task *representative =
+                task_process_representative_locked(leader);
+        if (representative != NULL) {
+            send_process_signal(
+                    representative, SIGKILL_, SIGINFO_NIL);
+            killed++;
+        }
+    }
+    return killed;
+}
+
+size_t task_kill_controlling_tty(struct tty *tty) {
+    if (tty == NULL)
+        return 0;
+    lock(&pids_lock);
+    size_t killed = task_kill_controlling_tty_locked(tty);
+    unlock(&pids_lock);
+    return killed;
 }
 
 struct task *pid_get_process_task(dword_t id) {

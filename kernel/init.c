@@ -52,7 +52,29 @@ static struct rlimit_ init_rlimits[16] = {
     [RLIMIT_RTTIME_]     = {RLIM_INFINITY_, RLIM_INFINITY_},
 };
 
-static struct task *construct_task(struct task *parent) {
+static lock_t init_child_lifecycle_lock = LOCK_INITIALIZER;
+
+enum prepared_process_kind {
+    PREPARED_PROCESS_NONE,
+    PREPARED_PROCESS_FIRST,
+    PREPARED_PROCESS_INIT_CHILD,
+};
+
+static _Thread_local enum prepared_process_kind prepared_process;
+
+// 调用方持有 pids_lock；PID 1 的 leader 与组退出状态必须来自同一快照。
+static struct task *live_init_for_child_locked(void) {
+    struct task *init = pid_get_task(1);
+    if (init == NULL)
+        return NULL;
+    lock(&init->group->lock);
+    bool exiting = init->group->doing_group_exit ||
+            task_group_fatal_signal(init) != 0;
+    unlock(&init->group->lock);
+    return exiting ? NULL : init;
+}
+
+static struct task *construct_task(struct task *parent, bool publish) {
     struct task *task = task_create_(parent);
     if (task == NULL)
         return ERR_PTR(_ENOMEM);
@@ -112,7 +134,8 @@ static struct task *construct_task(struct task *parent) {
     task->fs->root = root;
     task->fs->pwd = fd_retain(task->fs->root);
 
-    task_publish(task);
+    if (publish)
+        task_publish(task);
     return task;
 
 fail_fs:
@@ -135,7 +158,7 @@ int become_first_process(void) {
     // now seems like a nice time
     establish_signal_handlers();
 
-    struct task *task = construct_task(NULL);
+    struct task *task = construct_task(NULL, true);
     if (IS_ERR(task))
         return PTR_ERR(task);
 
@@ -144,11 +167,17 @@ int become_first_process(void) {
 }
 
 int become_new_init_child(void) {
-    // locking? who needs locking?!
-    struct task *init = pid_get_task(1);
-    assert(init != NULL);
+    lock(&init_child_lifecycle_lock);
+    lock(&pids_lock);
+    struct task *init = live_init_for_child_locked();
+    unlock(&pids_lock);
+    if (init == NULL) {
+        unlock(&init_child_lifecycle_lock);
+        return _ESHUTDOWN;
+    }
 
-    struct task *task = construct_task(init);
+    struct task *task = construct_task(init, true);
+    unlock(&init_child_lifecycle_lock);
     if (IS_ERR(task))
         return PTR_ERR(task);
 
@@ -156,6 +185,139 @@ int become_new_init_child(void) {
 
     current = task;
     return 0;
+}
+
+static void destroy_prepared_process(struct task *task) {
+    assert(task != NULL && task->group != NULL);
+    assert(list_empty(&task->group->threads));
+
+    task_discard_aarch64_exec(task);
+    task_release_aarch64_process(task);
+    fs_info_release(task->fs);
+    fdtable_release(task->files);
+    sighand_release(task->sighand);
+    mm_release(task->mm);
+
+    lock(&task->group->lock);
+    struct tty *tty = task->group->tty;
+    task->group->tty = NULL;
+    unlock(&task->group->lock);
+    cond_destroy(&task->group->child_exit);
+    cond_destroy(&task->group->stopped_cond);
+    free(task->group);
+    task->group = NULL;
+    task_abort_create(task);
+    current = NULL;
+
+    if (tty != NULL) {
+        lock(&ttys_lock);
+        tty_release(tty);
+        unlock(&ttys_lock);
+    }
+}
+
+int begin_first_process(void) {
+    if (prepared_process != PREPARED_PROCESS_NONE || current != NULL)
+        return _EBUSY;
+
+    establish_signal_handlers();
+    struct task *task = construct_task(NULL, false);
+    if (IS_ERR(task))
+        return (int) PTR_ERR(task);
+    if (task->pid != 1) {
+        destroy_prepared_process(task);
+        return _EBUSY;
+    }
+
+    current = task;
+    prepared_process = PREPARED_PROCESS_FIRST;
+    return 0;
+}
+
+int begin_new_init_child(void) {
+    if (prepared_process != PREPARED_PROCESS_NONE || current != NULL)
+        return _EBUSY;
+
+    lock(&init_child_lifecycle_lock);
+    lock(&pids_lock);
+    struct task *init = live_init_for_child_locked();
+    unlock(&pids_lock);
+    if (init == NULL) {
+        unlock(&init_child_lifecycle_lock);
+        return _ESHUTDOWN;
+    }
+
+    struct task *task = construct_task(init, false);
+    if (IS_ERR(task)) {
+        unlock(&init_child_lifecycle_lock);
+        return (int) PTR_ERR(task);
+    }
+    current = task;
+    prepared_process = PREPARED_PROCESS_INIT_CHILD;
+    return 0;
+}
+
+void cancel_prepared_process(void) {
+    assert(prepared_process != PREPARED_PROCESS_NONE && current != NULL);
+    enum prepared_process_kind kind = prepared_process;
+    struct task *task = current;
+    prepared_process = PREPARED_PROCESS_NONE;
+    destroy_prepared_process(task);
+    if (kind == PREPARED_PROCESS_INIT_CHILD)
+        unlock(&init_child_lifecycle_lock);
+}
+
+int commit_prepared_process(void) {
+    assert(prepared_process != PREPARED_PROCESS_NONE && current != NULL);
+    enum prepared_process_kind kind = prepared_process;
+    struct task *task = current;
+
+    // 发布与建立 host 线程共用进程表临界区，避免信号命中尚无执行线程的 PID。
+    lock(&pids_lock);
+    if (kind == PREPARED_PROCESS_INIT_CHILD) {
+        struct task *init = live_init_for_child_locked();
+        if (init == NULL || task->parent != init) {
+            unlock(&pids_lock);
+            return _ESHUTDOWN;
+        }
+    } else if (task->parent != NULL || task->pid != 1) {
+        unlock(&pids_lock);
+        return _EBUSY;
+    }
+    lock(&task->group->lock);
+    task_publish_locked(task);
+    unlock(&task->group->lock);
+    task_start_suspended(task);
+    unlock(&pids_lock);
+
+    current = NULL;
+    prepared_process = PREPARED_PROCESS_NONE;
+    task_release_start(task);
+    if (kind == PREPARED_PROCESS_INIT_CHILD)
+        unlock(&init_child_lifecycle_lock);
+    return 0;
+}
+
+void cancel_new_init_child(void) {
+    assert(prepared_process == PREPARED_PROCESS_INIT_CHILD);
+    cancel_prepared_process();
+}
+
+int commit_new_init_child(void) {
+    assert(prepared_process == PREPARED_PROCESS_INIT_CHILD);
+    return commit_prepared_process();
+}
+
+bool init_child_lifecycle_begin_exit(struct task *task) {
+    if (task == NULL || task->group == NULL || task->tgid != 1)
+        return false;
+    lock(&init_child_lifecycle_lock);
+    return true;
+}
+
+void init_child_lifecycle_end_exit(bool held) {
+    if (held)
+        unlock(&init_child_lifecycle_lock);
 }
 
 extern int console_major;
