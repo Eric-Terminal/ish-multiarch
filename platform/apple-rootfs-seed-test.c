@@ -1,3 +1,4 @@
+#include "platform/apple-root-catalog.h"
 #include "platform/apple-rootfs-seed.h"
 
 #include <dirent.h>
@@ -1632,6 +1633,77 @@ static int test_concurrent_install(const char *workspace) {
     return 0;
 }
 
+static int test_root_catalog(const char *workspace) {
+    CHECK(ish_apple_root_catalog_is_managed_name("aarch64") &&
+            ish_apple_root_catalog_is_managed_name("aarch64-2") &&
+            ish_apple_root_catalog_is_managed_name("aarch64-18446744073709551615") &&
+            !ish_apple_root_catalog_is_managed_name("aarch64-0") &&
+            !ish_apple_root_catalog_is_managed_name("aarch64-01") &&
+            !ish_apple_root_catalog_is_managed_name("aarch64-") &&
+            !ish_apple_root_catalog_is_managed_name("../aarch64"),
+            "托管 root 名称边界");
+    CHECK(ish_apple_root_catalog_is_private_name(
+                    ".aarch64.install.lock") &&
+            ish_apple_root_catalog_is_private_name(
+                    ".aarch64-2.installing.owner") &&
+            ish_apple_root_catalog_is_private_name(
+                    ".aarch64.installing.0123456789abcdef0123456789abcdef") &&
+            !ish_apple_root_catalog_is_private_name(
+                    ".aarch64.installing.not-a-token"),
+            "安装事务私有名称边界");
+
+    struct fixture fixture;
+    CHECK(create_fixture(workspace, "root-catalog", 0, &fixture) == 0,
+            "创建 root catalog 夹具");
+    char active[ISH_APPLE_ROOT_NAME_CAPACITY];
+    enum ish_apple_rootfs_seed_result result;
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent, NULL,
+                    active, &result) == 0 &&
+            strcmp(active, "aarch64") == 0 &&
+            result == ISH_APPLE_ROOTFS_SEED_INSTALLED,
+            "catalog 首次准备最低名称");
+
+    char created[ISH_APPLE_ROOT_NAME_CAPACITY];
+    CHECK(ish_apple_root_catalog_create(
+                    fixture.seed, fixture.persistent, created) == 0 &&
+            strcmp(created, "aarch64-2") == 0,
+            "catalog 创建第二个托管 root");
+
+    size_t count = 0;
+    CHECK(ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    NULL, 0, &count) == ERANGE &&
+            count == 2,
+            "catalog 两阶段枚举报告容量");
+    struct ish_apple_root_entry entries[2];
+    CHECK(ish_apple_root_catalog_list(
+                    fixture.seed, fixture.persistent,
+                    entries, 2, &count) == 0 &&
+            count == 2 &&
+            strcmp(entries[0].name, "aarch64") == 0 &&
+            strcmp(entries[1].name, "aarch64-2") == 0,
+            "catalog 按编号自然排序");
+
+    CHECK(ish_apple_root_catalog_prepare(
+                    fixture.seed, fixture.persistent, "aarch64-2",
+                    active, &result) == 0 &&
+            strcmp(active, "aarch64-2") == 0 &&
+            result == ISH_APPLE_ROOTFS_SEED_ALREADY_PRESENT,
+            "catalog 优先复用选中 root");
+
+    char data_path[PATH_MAX];
+    char expected_path[PATH_MAX];
+    CHECK(ish_apple_root_catalog_data_path(
+                    fixture.persistent, active,
+                    data_path, sizeof(data_path)) == 0 &&
+            format_path(expected_path, "%s/aarch64-2/data",
+                    fixture.persistent) == 0 &&
+            strcmp(data_path, expected_path) == 0,
+            "catalog 生成选中 root 数据路径");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--install-child") == 0)
         return run_install_child(argc, argv);
@@ -1672,6 +1744,8 @@ int main(int argc, char **argv) {
         status = test_existing_root_rejections(workspace);
     if (status == 0)
         status = test_concurrent_install(workspace);
+    if (status == 0)
+        status = test_root_catalog(workspace);
     if (status != 0 && getenv("ISH_KEEP_ROOTFS_SEED_TEST_TEMP") != NULL) {
         fprintf(stderr, "保留失败现场：%s\n", workspace);
         return status;

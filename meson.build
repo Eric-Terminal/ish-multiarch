@@ -160,7 +160,10 @@ libish_emu = library('ish_emu', emu_src, include_directories: includes)
 
 fakefs_src = ['fs/fake-db.c', 'fs/fake-migrate.c', 'fs/fake-rebuild.c']
 if host_machine.system() == 'darwin'
-    fakefs_src += 'platform/apple-rootfs-seed.c'
+    fakefs_src += [
+        'platform/apple-root-catalog.c',
+        'platform/apple-rootfs-seed.c',
+    ]
 endif
 
 libfakefs = library('fakefs',
@@ -172,6 +175,7 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
     apple_rootfs_seed_test = executable(
         'apple_rootfs_seed_test',
         ['platform/apple-rootfs-seed-test.c',
+         'platform/apple-root-catalog.c',
          'platform/apple-rootfs-seed.c'],
         include_directories: includes,
         dependencies: sqlite3,
