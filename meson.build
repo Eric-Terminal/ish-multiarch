@@ -291,6 +291,8 @@ if get_option('kernel') == 'ish'
     ]
     if host_machine.system() == 'darwin'
         src += [
+            'platform/apple-command-session.c',
+            'platform/apple-public-runtime.c',
             'platform/apple-watch-guest-files.c',
             'platform/apple-resolver.c',
             'platform/apple-watch-runtime.c',
@@ -361,6 +363,32 @@ if get_option('kernel') == 'ish'
             test('apple_watch_guest_files_runtime',
                 apple_watch_guest_files_runtime_test, timeout: 30)
 
+            apple_command_session_test = executable(
+                'apple_command_session_test',
+                [
+                    'platform/apple-command-session-test.c',
+                    'platform/apple-command-session-unit-support.c',
+                    'platform/apple-command-session.c',
+                ],
+                include_directories: includes,
+                c_args: '-DISH_APPLE_COMMAND_SESSION_TESTING=1',
+                dependencies: threads)
+            test('apple_command_session',
+                apple_command_session_test, timeout: 30)
+
+            apple_command_session_guest_test = executable(
+                'apple_command_session_guest_test',
+                'platform/apple-command-session-guest-test.c',
+                dependencies: ish)
+            test('apple_command_session_guest',
+                apple_command_session_guest_test, timeout: 30)
+
+            apple_public_runtime_test = executable(
+                'apple_public_runtime_test',
+                'platform/apple-public-runtime-test.c',
+                dependencies: ish)
+            test('apple_public_runtime',
+                apple_public_runtime_test, timeout: 30)
         endif
     endif
 
