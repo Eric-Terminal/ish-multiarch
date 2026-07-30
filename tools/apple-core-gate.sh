@@ -227,7 +227,7 @@ build_slice() {
     fi
     verify_backend_config "${name} core" "$core_build_dir" \
         "$expected_backend_value"
-    "$NINJA" -C "$core_build_dir" \
+    "$NINJA" -j2 -C "$core_build_dir" \
         libish_aarch64_core.a aarch64_core_link_smoke
     verify_backend_archive "${name} core 归档" \
         "$core_build_dir/libish_aarch64_core.a"
@@ -263,7 +263,7 @@ build_slice() {
     fi
     verify_backend_config "${name} 完整构建" "$full_build_dir" \
         "$expected_backend_value"
-    "$NINJA" -C "$full_build_dir" \
+    "$NINJA" -j2 -C "$full_build_dir" \
         libish.a libish_emu.a libfakefs.a \
         darwin_platform_link_smoke apple_runtime_link_smoke \
         apple_watch_runtime_link_smoke \
@@ -319,6 +319,20 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-watch-guest-files.c" \
         -o "$watch_guest_files_object"
 
+    local command_session_object="$full_build_dir/apple-command-session-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-command-session.c" \
+        -o "$command_session_object"
+
+    local public_runtime_object="$full_build_dir/apple-public-runtime-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-public-runtime.c" \
+        -o "$public_runtime_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -331,7 +345,9 @@ build_slice() {
         "$abi_probe" "$backend_probe" "$rootfs_seed_object" \
         "$resolver_object" \
         "$watch_runtime_object" \
-        "$watch_guest_files_object"
+        "$watch_guest_files_object" \
+        "$command_session_object" \
+        "$public_runtime_object"
 
     local fakefs_members
     local fakefs_symbols
@@ -360,6 +376,27 @@ build_slice() {
         echo "错误：${name} 的普通 runtime consumer 未抽取 rootfs 安装器。" >&2
         exit 1
     fi
+    local public_runtime_symbol
+    for public_runtime_symbol in \
+            ish_apple_runtime_start \
+            ish_apple_runtime_current_phase \
+            ish_apple_runtime_last_error \
+            ish_apple_rootfs_install_seed \
+            ish_apple_command_session_start \
+            ish_apple_command_session_retain \
+            ish_apple_command_session_release \
+            ish_apple_command_session_write_stdin \
+            ish_apple_command_session_close_stdin \
+            ish_apple_command_session_interrupt \
+            ish_apple_command_session_cancel \
+            ish_apple_command_session_wait; do
+        if ! grep -Eq \
+                "[[:space:]]T[[:space:]]+_${public_runtime_symbol}$" \
+                <<< "$generic_runtime_symbols"; then
+            echo "错误：${name} 的公共 consumer 未抽取 ${public_runtime_symbol}。" >&2
+            exit 1
+        fi
+    done
     if ! grep -Eq \
             '[[:space:]]T[[:space:]]+_ish_apple_guest_configure_dns_pid$' \
             <<< "$runtime_symbols"; then
@@ -377,6 +414,8 @@ build_slice() {
     local required_member
     for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o \
             platform_apple-resolver.c.o \
+            platform_apple-command-session.c.o \
+            platform_apple-public-runtime.c.o \
             platform_apple-watch-guest-files.c.o \
             platform_apple-watch-runtime.c.o; do
         if ! grep -Fqx "$required_member" <<< "$archive_members"; then
@@ -553,6 +592,10 @@ build_slice() {
 if [[ "${APPLE_SKIP_IOS:-0}" != 1 ]]; then
     build_slice iphoneos-arm64 iphoneos arm64 \
         arm64-apple-ios15.0 IOS 8 15.0 threaded
+    build_slice iphonesimulator-arm64 iphonesimulator arm64 \
+        arm64-apple-ios15.0-simulator IOSSIMULATOR 8 15.0 threaded
+    build_slice iphonesimulator-x86_64 iphonesimulator x86_64 \
+        x86_64-apple-ios15.0-simulator IOSSIMULATOR 8 15.0 c
 fi
 build_slice watchos-arm64_32 watchos arm64_32 \
     arm64_32-apple-watchos10.0 WATCHOS 4 10.0 threaded
@@ -628,6 +671,7 @@ if [[ "${APPLE_SKIP_IOS:-0}" != 1 ]]; then
         xcrun lipo "$BUILD_ROOT/full/iphoneos-arm64/$library" \
             -verify_arch arm64
     done
+    "$ROOT/tools/apple-public-sdk-package.sh" "$BUILD_ROOT"
 fi
 
 echo "==> Apple core、完整消费者与 XCFramework 验证完成"

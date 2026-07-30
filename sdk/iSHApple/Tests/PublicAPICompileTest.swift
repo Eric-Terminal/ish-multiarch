@@ -1,0 +1,38 @@
+import iSHAppleSwift
+
+@available(iOS 15.0, watchOS 10.0, *)
+func compilePublicAPI(runtime: Runtime) async throws {
+  let _: RootFSInstallDisposition = try RootFS.installSeed(
+    seedRoot: "/bundle/rootfs",
+    persistentParent: "/app/data",
+    rootName: "default"
+  )
+
+  let request = CommandRequest(
+    requestID: 42,
+    executable: "/bin/cat",
+    argv: ["/bin/cat"],
+    environment: ["PATH=/usr/bin:/bin"],
+    workingDirectory: "/",
+    timeoutMilliseconds: 10_000,
+    outputLimitBytes: 65_536
+  )
+  let session = try CommandSession.start(
+    request,
+    eventBufferByteCapacity: 32_768
+  )
+
+  async let consume: Void = consumeEvents(session.output)
+  try await session.send(Array("hello\n".utf8))
+  try session.finishInput()
+  _ = try await session.result()
+  try await consume
+}
+
+@available(iOS 15.0, watchOS 10.0, *)
+private func consumeEvents(_ events: CommandOutputEvents) async throws {
+  for try await event in events {
+    let _: CommandStream = event.stream
+    let _: [UInt8] = event.bytes
+  }
+}
