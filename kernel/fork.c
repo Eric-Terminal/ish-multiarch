@@ -38,6 +38,8 @@
 static void tgroup_init_copy(
         struct tgroup *group, struct tgroup *old_group) {
     *group = *old_group;
+    // 宿主作业身份跨 fork 保持，guest 的会话和进程组变化不会触及它。
+    group->host_job_id = old_group->host_job_id;
     list_init(&group->threads);
     list_init(&group->pgroup);
     list_init(&group->session);

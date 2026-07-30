@@ -384,6 +384,57 @@ struct task *task_process_representative_locked(struct task *task) {
     return NULL;
 }
 
+bool task_set_host_job_id(
+        struct task *task, uint64_t host_job_id) {
+    if (task == NULL || task->group == NULL)
+        return false;
+
+    lock(&pids_lock);
+    struct pid *pid = pid_slot(task->pid);
+    bool unpublished_initial_process =
+            pid != NULL && pid->reserved && pid->task == NULL &&
+            task->group->leader == task &&
+            list_empty(&task->group->threads);
+    if (unpublished_initial_process)
+        task->group->host_job_id = host_job_id;
+    unlock(&pids_lock);
+    return unpublished_initial_process;
+}
+
+size_t task_signal_host_job_locked(
+        uint64_t host_job_id, int signal) {
+    assert(lock_owned_by_current(&pids_lock));
+    assert(signal > 0 && signal <= NUM_SIGS);
+    if (host_job_id == 0)
+        return 0;
+
+    size_t signaled = 0;
+    for (dword_t pid = 1; pid <= MAX_PID; pid++) {
+        struct task *leader = pid_get_task_zombie(pid);
+        if (leader == NULL || !task_is_leader(leader) ||
+                leader->group->host_job_id != host_job_id)
+            continue;
+
+        struct task *representative =
+                task_process_representative_locked(leader);
+        if (representative != NULL) {
+            send_process_signal(representative, signal, SIGINFO_NIL);
+            signaled++;
+        }
+    }
+    return signaled;
+}
+
+size_t task_signal_host_job(uint64_t host_job_id, int signal) {
+    if (host_job_id == 0)
+        return 0;
+    lock(&pids_lock);
+    size_t signaled =
+            task_signal_host_job_locked(host_job_id, signal);
+    unlock(&pids_lock);
+    return signaled;
+}
+
 size_t task_kill_controlling_tty_locked(struct tty *tty) {
     assert(lock_owned_by_current(&pids_lock));
     if (tty == NULL)

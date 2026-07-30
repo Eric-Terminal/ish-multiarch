@@ -32,6 +32,86 @@ static bool exit_tgroup(struct task *task) {
 
 void (*exit_hook)(struct task *task, int code) = NULL;
 
+#define TASK_EXIT_OBSERVER_LIMIT 8
+
+struct task_exit_observer_entry {
+    task_exit_observer_fn observer;
+    void *context;
+};
+
+static struct task_exit_observer_entry
+        task_exit_observers[TASK_EXIT_OBSERVER_LIMIT];
+static _Thread_local bool task_exit_observer_notifying;
+
+int task_exit_observer_register(
+        task_exit_observer_fn observer, void *context) {
+    if (observer == NULL)
+        return _EINVAL;
+    if (task_exit_observer_notifying)
+        return _EDEADLK;
+
+    lock(&pids_lock);
+    size_t free_index = TASK_EXIT_OBSERVER_LIMIT;
+    for (size_t index = 0; index < TASK_EXIT_OBSERVER_LIMIT; index++) {
+        struct task_exit_observer_entry *entry =
+                &task_exit_observers[index];
+        if (entry->observer == observer && entry->context == context) {
+            unlock(&pids_lock);
+            return _EEXIST;
+        }
+        if (entry->observer == NULL &&
+                free_index == TASK_EXIT_OBSERVER_LIMIT)
+            free_index = index;
+    }
+    if (free_index == TASK_EXIT_OBSERVER_LIMIT) {
+        unlock(&pids_lock);
+        return _ENOSPC;
+    }
+    task_exit_observers[free_index] =
+            (struct task_exit_observer_entry) {
+                .observer = observer,
+                .context = context,
+            };
+    unlock(&pids_lock);
+    return 0;
+}
+
+int task_exit_observer_unregister(
+        task_exit_observer_fn observer, void *context) {
+    if (observer == NULL)
+        return _EINVAL;
+    if (task_exit_observer_notifying)
+        return _EDEADLK;
+
+    lock(&pids_lock);
+    for (size_t index = 0; index < TASK_EXIT_OBSERVER_LIMIT; index++) {
+        struct task_exit_observer_entry *entry =
+                &task_exit_observers[index];
+        if (entry->observer == observer && entry->context == context) {
+            *entry = (struct task_exit_observer_entry) {};
+            unlock(&pids_lock);
+            return 0;
+        }
+    }
+    unlock(&pids_lock);
+    return _ENOENT;
+}
+
+void task_notify_exit_locked(struct task *task, int code) {
+    assert(lock_owned_by_current(&pids_lock));
+    assert(!task_exit_observer_notifying);
+    task_exit_observer_notifying = true;
+    if (exit_hook != NULL)
+        exit_hook(task, code);
+    for (size_t index = 0; index < TASK_EXIT_OBSERVER_LIMIT; index++) {
+        struct task_exit_observer_entry entry =
+                task_exit_observers[index];
+        if (entry.observer != NULL)
+            entry.observer(task, code, entry.context);
+    }
+    task_exit_observer_notifying = false;
+}
+
 // 调用方持有 pids_lock；返回的 tty 引用必须在退出进程表临界区后释放。
 static struct tty *release_reaped_task_locked(struct task *task) {
     cond_destroy(&task->group->child_exit);
@@ -163,8 +243,7 @@ noreturn void do_exit(int status) {
                 send_process_signal(parent, leader->exit_signal, info);
         }
 
-        if (exit_hook != NULL)
-            exit_hook(current, status);
+        task_notify_exit_locked(current, status);
     }
 
     vfork_notify(current);

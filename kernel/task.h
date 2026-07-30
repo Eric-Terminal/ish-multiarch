@@ -217,6 +217,11 @@ struct tgroup {
     struct task *leader;
     // 非空时禁止发布新线程，并让被清理线程只退出自身。
     struct task *exec_task; // locked by pids_lock
+    /*
+     * 宿主作业身份只允许在初始进程发布前设置。guest 不可修改，fork
+     * 建立的新线程组继承该值；0 表示不属于宿主作业。
+     */
+    uint64_t host_job_id;
     // 已生成的未阻塞默认致死信号；内部 exec zap 不写入。
     atomic_int external_fatal_signal;
     // 进程定向 pending 属于线程组，不随单个 peer 退出丢失。
@@ -288,6 +293,12 @@ struct task *pid_get_task(dword_t pid);
 struct task *pid_get_task_zombie(dword_t id); // don't return null if the task exists as a zombie
 struct task *task_process_representative_locked(struct task *task);
 struct task *pid_get_process_task(dword_t id);
+// 仅允许给尚未发布的初始进程设置宿主作业身份。
+bool task_set_host_job_id(
+        struct task *task, uint64_t host_job_id);
+// 向同一宿主作业内的每个存活线程组发送一次信号；0 不匹配任何作业。
+size_t task_signal_host_job_locked(uint64_t host_job_id, int signal);
+size_t task_signal_host_job(uint64_t host_job_id, int signal);
 /*
  * 以调用方持有的 tty 引用作为不可复用身份，向所有仍绑定该 controlling tty
  * 的进程发送 SIGKILL。locked 版本要求已持有 pids_lock。
@@ -306,6 +317,21 @@ void task_start(struct task *task);
 void task_run_current(void);
 
 extern void (*exit_hook)(struct task *task, int code);
+
+/*
+ * 内部退出观察者与旧 exit_hook 一样在 pids_lock 下调用；观察者只能记录
+ * 状态并唤醒自己的工作线程，不能执行宿主回调或注册/注销观察者。
+ * 注册和注销与退出通知串行；注销返回后不会再有该观察者正在执行。
+ * 旧 exit_hook 或观察者内部尝试注册、注销会返回 _EDEADLK。
+ */
+typedef void (*task_exit_observer_fn)(
+        struct task *task, int code, void *context);
+int task_exit_observer_register(
+        task_exit_observer_fn observer, void *context);
+int task_exit_observer_unregister(
+        task_exit_observer_fn observer, void *context);
+// 调用方持有 pids_lock；旧 exit_hook 始终先于新增观察者调用。
+void task_notify_exit_locked(struct task *task, int code);
 
 #define superuser() (current != NULL && current->euid == 0)
 

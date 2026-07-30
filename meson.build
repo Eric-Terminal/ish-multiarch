@@ -394,6 +394,18 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('host_stdio', host_stdio_test)
 
+        exit_observer_test = executable(
+            'exit_observer_test',
+            'kernel/exit-observer-test.c',
+            dependencies: ish)
+        test('exit_observer', exit_observer_test, timeout: 30)
+
+        host_job_identity_test = executable(
+            'host_job_identity_test',
+            'kernel/host-job-identity-test.c',
+            dependencies: ish)
+        test('host_job_identity', host_job_identity_test, timeout: 30)
+
         pty_lifecycle_test = executable(
             'pty_lifecycle_test',
             'fs/pty-lifecycle-test.c',
