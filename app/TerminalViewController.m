@@ -669,8 +669,9 @@ static const NSUInteger MaximumTerminalSessions = 8;
             self.isViewLoaded && self.termView.markedTextRange != nil)
         [self.termView unmarkText];
     self.activeSessionIndex = index;
-    self.terminal = self.sessionTerminals[index];
+    // 关闭会话后，样式刷新前必须先让标签视图数量与会话模型同步。
     [self reloadTerminalTabs];
+    self.terminal = self.sessionTerminals[index];
     if (self.isViewLoaded)
         [self.termView becomeFirstResponder];
 }
@@ -733,8 +734,8 @@ static const NSUInteger MaximumTerminalSessions = 8;
     self.activeSessionIndex = newActiveIndex;
 
     if (self.sessionTerminals.count == 0) {
-        self.terminal = nil;
         [self reloadTerminalTabs];
+        self.terminal = nil;
         [self startNewSession];
     } else if (removedActiveSession || self.terminal == terminal) {
         [self activateSessionAtIndex:newActiveIndex];

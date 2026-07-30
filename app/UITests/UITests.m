@@ -385,6 +385,145 @@ typedef NS_ENUM(NSUInteger, ISHGuestTransportResult) {
     [self waitForPromptWithTimeout:300];
 }
 
+- (void)test多终端标签隔离切换与关闭 {
+    XCUIElement *firstTab = self.app.buttons[@"Shell 1"];
+    XCTAssertTrue([firstTab waitForExistenceWithTimeout:30],
+                  @"冷启动后没有创建首个终端标签");
+    NSString *firstTabIdentifier = firstTab.identifier;
+    XCTAssertTrue([firstTabIdentifier hasPrefix:@"terminal-tab-"],
+                  @"首个终端标签没有稳定会话标识");
+
+    NSString *token = [NSUUID.UUID.UUIDString substringToIndex:8];
+    NSString *firstToken = [NSString
+            stringWithFormat:@"ISH-TAB:%@:FIRST", token];
+    NSString *firstFail = [NSString
+            stringWithFormat:@"ISH-TAB-FAIL:%@:FIRST", token];
+    NSString *firstLine = [NSString stringWithFormat:
+            @"printf 'ISH-TAB:%@:'; printf 'FIRST\\n'", token];
+    XCTAssertTrue([self submitGuestLine:firstLine
+                                   pass:firstToken
+                                   fail:firstFail
+                                timeout:30],
+                  @"首个终端没有执行唯一标记命令");
+
+    XCUIElement *newShell = self.app.buttons[@"new-terminal-tab"];
+    XCTAssertTrue([newShell waitForExistenceWithTimeout:30],
+                  @"终端标签栏没有提供新建 shell 按钮");
+    [newShell tap];
+
+    XCUIElement *secondTab = self.app.buttons[@"Shell 2"];
+    XCTAssertTrue([secondTab waitForExistenceWithTimeout:30],
+                  @"点击新建后没有出现第二个终端标签");
+    [self waitForPromptWithTimeout:180];
+
+    NSString *secondToken = [NSString
+            stringWithFormat:@"ISH-TAB:%@:SECOND", token];
+    NSString *secondFail = [NSString
+            stringWithFormat:@"ISH-TAB-FAIL:%@:SECOND", token];
+    NSString *secondLine = [NSString stringWithFormat:
+            @"printf 'ISH-TAB:%@:'; printf 'SECOND\\n'", token];
+    XCTAssertTrue([self submitGuestLine:secondLine
+                                   pass:secondToken
+                                   fail:secondFail
+                                timeout:30],
+                  @"第二个终端没有执行唯一标记命令");
+
+    [firstTab tap];
+    NSPredicate *firstTokenPredicate =
+            [NSPredicate predicateWithFormat:@"label CONTAINS %@", firstToken];
+    XCUIElement *firstTokenOutput = [self.app.webViews.staticTexts
+            matchingPredicate:firstTokenPredicate].firstMatch;
+    XCTAssertTrue([firstTokenOutput waitForExistenceWithTimeout:30],
+                  @"切回首标签后没有恢复它自己的输出：\n%@",
+                  self.terminalTail);
+    NSPredicate *secondTokenPredicate =
+            [NSPredicate predicateWithFormat:@"label CONTAINS %@", secondToken];
+    XCTAssertFalse([self.app.webViews.staticTexts
+            matchingPredicate:secondTokenPredicate].firstMatch.exists,
+                   @"首标签错误显示了第二个 shell 的输出：\n%@",
+                   self.terminalTail);
+
+    [secondTab tap];
+    XCUIElement *secondTokenOutput = [self.app.webViews.staticTexts
+            matchingPredicate:secondTokenPredicate].firstMatch;
+    XCTAssertTrue([secondTokenOutput waitForExistenceWithTimeout:30],
+                  @"切回第二个标签后没有恢复它自己的输出：\n%@",
+                  self.terminalTail);
+    XCTAssertFalse([self.app.webViews.staticTexts
+            matchingPredicate:firstTokenPredicate].firstMatch.exists,
+                   @"第二个标签错误显示了首个 shell 的输出：\n%@",
+                   self.terminalTail);
+
+    XCUIElement *closeSecond = self.app.buttons[@"Close Shell 2"];
+    XCTAssertTrue([closeSecond waitForExistenceWithTimeout:30],
+                  @"第二个标签没有提供关闭按钮");
+    [closeSecond tap];
+
+    XCUIElement *confirmation = self.app.alerts[@"Close Shell?"];
+    XCTAssertTrue([confirmation waitForExistenceWithTimeout:30],
+                  @"关闭运行中的 shell 时没有显示确认框");
+    [confirmation.buttons[@"Close"] tap];
+    XCTAssertTrue([secondTab waitForNonExistenceWithTimeout:30],
+                  @"确认关闭后第二个终端标签仍然存在");
+    XCUIElement *remainingFirstTab =
+            self.app.buttons[firstTabIdentifier];
+    XCTAssertTrue([remainingFirstTab waitForExistenceWithTimeout:30],
+                  @"关闭第二个标签时误删或替换了剩余标签");
+    XCTAssertTrue([firstTokenOutput waitForExistenceWithTimeout:30],
+                  @"关闭相邻标签后没有保留首个 shell 的滚屏内容");
+
+    NSString *remainingToken = [NSString
+            stringWithFormat:@"ISH-TAB:%@:REMAINING", token];
+    NSString *remainingFail = [NSString
+            stringWithFormat:@"ISH-TAB-FAIL:%@:REMAINING", token];
+    NSString *remainingLine = [NSString stringWithFormat:
+            @"printf 'ISH-TAB:%@:'; printf 'REMAINING\\n'", token];
+    XCTAssertTrue([self submitGuestLine:remainingLine
+                                   pass:remainingToken
+                                   fail:remainingFail
+                                timeout:30],
+                  @"关闭相邻标签后，剩余 shell 无法继续执行命令");
+
+    NSString *firstCloseIdentifier = [firstTabIdentifier
+            stringByReplacingOccurrencesOfString:@"terminal-tab-"
+                                      withString:@"close-terminal-tab-"];
+    XCUIElement *closeFirst = self.app.buttons[firstCloseIdentifier];
+    XCTAssertTrue([closeFirst waitForExistenceWithTimeout:30],
+                  @"剩余标签没有提供稳定标识的关闭按钮");
+    [closeFirst tap];
+    confirmation = self.app.alerts[@"Close Shell?"];
+    XCTAssertTrue([confirmation waitForExistenceWithTimeout:30],
+                  @"关闭唯一运行中的 shell 时没有显示确认框");
+    [confirmation.buttons[@"Close"] tap];
+    XCTAssertTrue([remainingFirstTab waitForNonExistenceWithTimeout:30],
+                  @"关闭唯一标签后仍保留旧会话");
+
+    XCUIElement *replacementFirstTab = self.app.buttons[@"Shell 1"];
+    XCTAssertTrue([replacementFirstTab waitForExistenceWithTimeout:30],
+                  @"关闭唯一标签后没有自动创建替代 shell");
+    NSString *replacementIdentifier = replacementFirstTab.identifier;
+    XCTAssertTrue([replacementIdentifier hasPrefix:@"terminal-tab-"],
+                  @"替代 shell 没有稳定会话标识");
+    XCTAssertNotEqualObjects(replacementIdentifier, firstTabIdentifier,
+                             @"关闭唯一标签后错误复用了旧会话");
+    [self waitForPromptWithTimeout:180];
+
+    NSString *replacementToken = [NSString
+            stringWithFormat:@"ISH-TAB:%@:REPLACEMENT", token];
+    NSString *replacementFail = [NSString
+            stringWithFormat:@"ISH-TAB-FAIL:%@:REPLACEMENT", token];
+    NSString *replacementLine = [NSString stringWithFormat:
+            @"printf 'ISH-TAB:%@:'; printf 'REPLACEMENT\\n'", token];
+    XCTAssertTrue([self submitGuestLine:replacementLine
+                                   pass:replacementToken
+                                   fail:replacementFail
+                                timeout:30],
+                  @"关闭唯一标签后，替代 shell 无法执行命令");
+
+    // XCUIApplication 的强制终止会连同内核、PTY 和 Terminal 注册表一起退出，
+    // 无法验证只发生 Scene 断开/重连时的内存会话恢复；该路径留给多窗口人工门禁。
+}
+
 - (void)testAArch64基础网络与软件源 {
     [self runGuestStage:@"ARCH"
                 command:@"uname -m >\"$l\" 2>&1 && grep -qx aarch64 \"$l\""
