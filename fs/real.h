@@ -7,6 +7,13 @@ extern const struct fd_ops realfs_fdops;
 extern const struct fs_ops realfs;
 
 qword_t realfs_inode_device(dev_t device);
+// 调用方须持有 mounts_lock；realfs 复制 root_fd，不接管调用方引用。
+int realfs_mount_from_fd_locked(
+        int root_fd,
+        const char *source,
+        const char *point,
+        const char *info,
+        int flags);
 struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mode);
 
 ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize);

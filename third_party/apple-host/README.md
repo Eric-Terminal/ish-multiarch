@@ -18,6 +18,8 @@
   1 起始闭区间、字节数和 SHA-256 约束原始字节。
 - `APPLE-HOST-NOTICES.txt` 是确定性生成物，正文带锁定组件版本、全部来源
   路径和原始文本摘要；相同字节只保留一份，来源不会随去重丢失。
+- `WATCH-LIBARCHIVE-NOTICES.txt` 只覆盖 Watch 最终 Mach-O 实际拉入的
+  libarchive 传递对象闭包，并作为独立资源逐字进入 `iSHWatch`。
 
 路径集合摘要统一按仓库根目录相对 POSIX 路径排序，每项追加一个 LF，再对
 完整 UTF-8 字节串计算 SHA-256。`libarchive` 集合来自其 Xcode target 的
@@ -37,8 +39,10 @@ aggregate、LinkSmoke 和测试 target 不作为独立候选产品。输入锁�
   交付由 `deps/libapps` 生成的 `hterm_all.js`。静态库本身不会复制进
   App bundle，只有链接器实际选取的对象进入最终 Mach-O；hterm 资源同时
   包含 hterm、libdot、intl-segmenter 与 wcwidth。
-- `iSHWatch` 不链接 libarchive，也不携带 hterm；其显式外部链接项均来自
-  Apple SDK。`arm64_32` 不会因此获得另一套宿主第三方来源。
+- `iSHWatch` 链接独立的 `libarchive-watchOS.a`，但不携带 hterm。fakefs
+  直接调用 tar 读取、gzip 读写与 pax 写入入口；静态链接还会拉入这些入口
+  所需的完整传递对象闭包，不能把最终产品表述为只包含 tar 和 gzip 对象。
+  device 与 Simulator 都使用同一份固定闭包和独立 Watch 声明正文。
 - `iSHFileProvider` 只链接本项目生成的核心库，没有单独的 vendored
   子模块输入，也不是顶层候选产品。
 - `iSH+Linux` 还从锁定的 `deps/linux` 构建 `liblinux.a`，但是否公开分发
@@ -185,9 +189,10 @@ Frameworks、Resources、Sources 与 Copy Files phase 中的直接输入。
 不启动 Simulator。
 
 `APPLE-HOST-NOTICES.txt` 只应进入两个互斥 iPhone target 的资源。
-`iSHWatch` 没有 libarchive/hterm 宿主输入，因此不显示本文件；其共享许可页
-显示独立的项目许可与 Alpine seed 声明。`iSHFileProvider`、测试 target 与
-LinkSmoke 不应获得本文件。
+`iSHWatch` 没有 hterm，也不显示这份包含 hterm 的公共宿主正文；它改为携带
+只覆盖最终 libarchive 对象闭包的 `WATCH-LIBARCHIVE-NOTICES.txt`，共享许可页
+同时显示独立的项目许可与 Alpine seed 声明。`iSHFileProvider`、测试 target
+与 LinkSmoke 不应获得这些声明资源。
 
 ## 不在本锁内闭合的事项与未来重审边界
 
@@ -197,11 +202,12 @@ LinkSmoke 不应获得本文件。
   release revision、gitlink 和对应源码资产。
 - BusyBox 静态输入的 LGPL 版本依据和最终发行方案仍须单独决定。
 - `iSH+Linux` 现有在线 root 下载、产品声明和 Linux 对应源码交付仍未闭合。
-- BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一；libarchive 的
-  BLAKE2 编译对象当前只进入未单独交付的 `libarchive.a` 中间产物，普通
-  iSH 与 iSH+Linux 的最终 Mach-O 均由 LinkMap 和符号门禁证明没有拉入
-  对应对象，Watch 不链接 libarchive。未来启用 RAR5/format-all、改变
-  强制加载或单独交付该静态库时，必须重新评估并明确许可分支。
+- BLAKE2 源码给出 CC0、OpenSSL 或 Apache 2.0 三选一；对应编译对象当前只
+  存在于未单独交付的 `libarchive.a` 与 `libarchive-watchOS.a` 中间产物。
+  普通 iSH、iSH+Linux 与 Watch 的最终 Mach-O 均由 LinkMap 和符号门禁证明
+  没有拉入 BLAKE2、RAR5 或 format-all 对象；Watch 的 tar/gzip/pax 入口所需
+  完整传递对象集合也由同一门禁逐项固定。未来改变归档入口、强制加载或单独
+  交付静态库时，必须重新评估并明确许可分支。
 - Material 图标、wcwidth UCD、libarchive Unicode 与 lib_colors 的来源
   证据闭合不表示其他未知边界或法律审查已经完成。
 - 精确二进制 revision、公共 Release、真机安装运行与从公开位置回读项目及

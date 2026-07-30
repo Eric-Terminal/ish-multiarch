@@ -18,9 +18,9 @@ SWIFT_OBJC_BRIDGING_HEADER = $(SRCROOT)/app/Watch/iSHWatch-Bridging-Header.h
 SWIFT_STRICT_CONCURRENCY = complete
 SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
 
-HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)
+HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT) $(SRCROOT)/deps/libarchive/libarchive
 LIBRARY_SEARCH_PATHS = $(inherited) $(ISH_WATCH_LIBRARY_DIR)
-OTHER_LDFLAGS = $(inherited) -Wl,-fatal_warnings -lish -lish_emu -lfakefs -lm -ldl -lsqlite3 -lresolv
+OTHER_LDFLAGS = $(inherited) -Wl,-fatal_warnings -lish -lish_emu -lfakefs -lm -ldl -lsqlite3 -lresolv -liconv
 LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks
 
 ONLY_ACTIVE_ARCH = NO

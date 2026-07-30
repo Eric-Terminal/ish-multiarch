@@ -13,6 +13,7 @@ struct ThirdPartyNoticesView: View {
     private static let resourceNames = [
         "PROJECT-LICENSES",
         "THIRD-PARTY-NOTICES",
+        "WATCH-LIBARCHIVE-NOTICES",
     ]
     private static let sourceURL = URL(
         string: "https://github.com/Eric-Terminal/ish-multiarch")!

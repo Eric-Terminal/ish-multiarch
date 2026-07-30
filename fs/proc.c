@@ -91,6 +91,14 @@ static int proc_fstat(struct fd *fd, struct statbuf *stat) {
     return proc_entry_stat(&fd->proc.entry, stat);
 }
 
+static int proc_fsetattr(struct fd *fd, struct attr attr) {
+    mode_t_ mode = proc_entry_mode(&fd->proc.entry);
+    if (attr.type == attr_size && attr.size == 0 &&
+            S_ISREG(mode) && fd->proc.entry.meta->update != NULL)
+        return 0;
+    return _EPERM;
+}
+
 static int proc_refresh_data(struct fd *fd) {
     mode_t_ mode = proc_entry_mode(&fd->proc.entry);
     if (S_ISDIR(mode))
@@ -191,7 +199,10 @@ static ssize_t proc_pwrite(struct fd *fd, const void *buf, size_t bufsize, off_t
     }
     
     struct proc_data data = {(char *)buf, bufsize, bufsize};
-    fd->proc.entry.meta->update(&fd->proc.entry, &data);
+    int err = fd->proc.entry.meta->update(
+            &fd->proc.entry, &data);
+    if (err < 0)
+        return err;
     
     return bufsize;
 }
@@ -279,6 +290,7 @@ const struct fs_ops procfs = {
     .getpath = proc_getpath,
     .stat = proc_stat,
     .fstat = proc_fstat,
+    .fsetattr = proc_fsetattr,
     .readlink = proc_readlink,
     .unlink = proc_unlink,
 };

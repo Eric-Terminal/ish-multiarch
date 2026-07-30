@@ -22,6 +22,8 @@
 #include "fs/tty.h"
 #include "util/fchdir.h"
 
+static _Thread_local int realfs_preopened_root_fd = -1;
+
 static int getpath(int fd, char *buf) {
 #if defined(__linux__)
     char proc_fd[20];
@@ -572,6 +574,25 @@ int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {
 }
 
 int realfs_mount(struct mount *mount) {
+    if (realfs_preopened_root_fd >= 0) {
+        struct stat status;
+        if (fstat(realfs_preopened_root_fd, &status) < 0)
+            return errno_map();
+        if (!S_ISDIR(status.st_mode))
+            return _ENOTDIR;
+
+        int root_fd = dup(realfs_preopened_root_fd);
+        if (root_fd < 0)
+            return errno_map();
+        if (fcntl(root_fd, F_SETFD, FD_CLOEXEC) < 0) {
+            int error = errno_map();
+            close(root_fd);
+            return error;
+        }
+        mount->root_fd = root_fd;
+        return 0;
+    }
+
     char *source_realpath = realpath(mount->source, NULL);
     if (source_realpath == NULL)
         return errno_map();
@@ -582,6 +603,23 @@ int realfs_mount(struct mount *mount) {
     if (mount->root_fd < 0)
         return errno_map();
     return 0;
+}
+
+int realfs_mount_from_fd_locked(
+        int root_fd,
+        const char *source,
+        const char *point,
+        const char *info,
+        int flags) {
+    if (root_fd < 0 || source == NULL || point == NULL || info == NULL)
+        return _EINVAL;
+    if (realfs_preopened_root_fd >= 0)
+        return _EBUSY;
+
+    realfs_preopened_root_fd = root_fd;
+    int error = do_mount(&realfs, source, point, info, flags);
+    realfs_preopened_root_fd = -1;
+    return error;
 }
 
 int realfs_fsync(struct fd *fd) {

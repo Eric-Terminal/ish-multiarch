@@ -188,6 +188,10 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
         args: files('tools/apple-watch-terminal-decoder-test.sh'))
     test('apple_watch_preferences', apple_watch_decoder_test_shell,
         args: files('tools/apple-watch-preferences-test.sh'))
+    test('apple_watch_platform_bridge', apple_watch_decoder_test_shell,
+        args: files('tools/apple-watch-platform-bridge-test.sh'))
+    test('apple_watch_shared_files', apple_watch_decoder_test_shell,
+        args: files('tools/apple-watch-shared-files-test.sh'))
 endif
 
 subdir('deps')
@@ -287,6 +291,7 @@ if get_option('kernel') == 'ish'
     ]
     if host_machine.system() == 'darwin'
         src += [
+            'platform/apple-watch-guest-files.c',
             'platform/apple-resolver.c',
             'platform/apple-watch-runtime.c',
         ]
@@ -337,6 +342,25 @@ if get_option('kernel') == 'ish'
                 c_args: '-DISH_APPLE_WATCH_RUNTIME_TESTING',
                 dependencies: ish)
             test('apple_watch_runtime', apple_watch_runtime_test)
+
+            apple_watch_guest_files_test = executable(
+                'apple_watch_guest_files_test',
+                [
+                    'platform/apple-watch-guest-files-test.c',
+                    'platform/apple-watch-guest-files.c',
+                ],
+                c_args: '-DISH_APPLE_WATCH_GUEST_FILES_TESTING',
+                dependencies: ish)
+            test('apple_watch_guest_files',
+                apple_watch_guest_files_test, timeout: 30)
+
+            apple_watch_guest_files_runtime_test = executable(
+                'apple_watch_guest_files_runtime_test',
+                'platform/apple-watch-guest-files-runtime-test.c',
+                dependencies: ish)
+            test('apple_watch_guest_files_runtime',
+                apple_watch_guest_files_runtime_test, timeout: 30)
+
         endif
     endif
 
@@ -525,6 +549,10 @@ if get_option('kernel') == 'ish'
         proc_pid_test = executable(
             'proc_pid_test', 'fs/proc-pid-test.c', dependencies: ish)
         test('proc_pid', proc_pid_test)
+
+        proc_update_test = executable(
+            'proc_update_test', 'fs/proc-update-test.c', dependencies: ish)
+        test('proc_update', proc_update_test)
 
         poll_oneshot_test = executable(
             'poll_oneshot_test', 'fs/poll-oneshot-test.c', dependencies: ish)

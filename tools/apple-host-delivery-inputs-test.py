@@ -96,7 +96,7 @@ def production_input_paths():
     dependencies = LOCKS.parse_dependencies(ROOT)
     licenses = LOCKS.parse_license_inputs(ROOT, dependencies)
     gitlinks = LOCKS.verify_gitlinks(ROOT, dependencies)
-    libarchive_sources, _product_id = LOCKS.verify_libarchive(
+    libarchive_sources, _product_ids = LOCKS.verify_libarchive(
         ROOT, dependencies, gitlinks
     )
     hterm_inputs = LOCKS.verify_hterm(ROOT, dependencies, gitlinks)
@@ -247,6 +247,20 @@ def case_target_contract_mismatch(root):
     )
 
 
+def case_watch_delivery_alias_drift(root):
+    replace_once(
+        root / "third_party/apple-host/target-inputs.tsv",
+        (
+            "iSHWatch\tproduct\tvendored\tlibarchive\t"
+            "static-library\tlibarchive-watchOS.a\n"
+        ),
+        (
+            "iSHWatch\tproduct\tvendored\tlibarchive\t"
+            "static-library\tlibarchive.a\n"
+        ),
+    )
+
+
 def append_sorted_target_row(root, row):
     path = root / "third_party/apple-host/target-inputs.tsv"
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -329,8 +343,14 @@ def case_libarchive_product_drift(root):
 def case_libarchive_target_isa_drift(root):
     replace_once(
         root / "deps/libarchive.xcodeproj/project.pbxproj",
-        "\t\t\tisa = PBXNativeTarget;\n",
-        "\t\t\tisa = PBXAggregateTarget;\n",
+        (
+            "\t\tBB10E0D5248DA67B009C7A74 /* libarchive */ = {\n"
+            "\t\t\tisa = PBXNativeTarget;\n"
+        ),
+        (
+            "\t\tBB10E0D5248DA67B009C7A74 /* libarchive */ = {\n"
+            "\t\t\tisa = PBXAggregateTarget;\n"
+        ),
     )
 
 
@@ -345,6 +365,91 @@ def case_libarchive_proxy_drift(root):
             "\t\t\tremoteRef = BB10E5CA248DBAB7009C7A74 "
             "/* PBXContainerItemProxy */;\n"
         ),
+    )
+
+
+def case_watch_libarchive_target_missing(root):
+    replace_once(
+        root / "deps/libarchive.xcodeproj/project.pbxproj",
+        '\t\t\tname = "libarchive-watchOS";\n',
+        '\t\t\tname = "libarchive-watchOS-renamed";\n',
+    )
+
+
+def case_watch_libarchive_source_drift(root):
+    replace_once(
+        root / "deps/libarchive.xcodeproj/project.pbxproj",
+        (
+            "\t\t\t\t070ACF47301B018200D5A795 "
+            "/* archive_entry.c in Sources */,\n"
+        ),
+        "",
+    )
+
+
+def case_watch_libarchive_shared_phase(root):
+    replace_once(
+        root / "deps/libarchive.xcodeproj/project.pbxproj",
+        (
+            "\t\t070ACF44301B018200D5A795 /* libarchive-watchOS */ = {\n"
+            "\t\t\tisa = PBXNativeTarget;\n"
+            "\t\t\tbuildConfigurationList = 070ACFC8301B018200D5A795 "
+            "/* Build configuration list for PBXNativeTarget "
+            '"libarchive-watchOS" */;\n'
+            "\t\t\tbuildPhases = (\n"
+            "\t\t\t\t070ACF45301B018200D5A795 /* Sources */,\n"
+        ),
+        (
+            "\t\t070ACF44301B018200D5A795 /* libarchive-watchOS */ = {\n"
+            "\t\t\tisa = PBXNativeTarget;\n"
+            "\t\t\tbuildConfigurationList = 070ACFC8301B018200D5A795 "
+            "/* Build configuration list for PBXNativeTarget "
+            '"libarchive-watchOS" */;\n'
+            "\t\t\tbuildPhases = (\n"
+            "\t\t\t\tBB10E0D2248DA67B009C7A74 /* Sources */,\n"
+        ),
+    )
+
+
+def case_watch_libarchive_shared_build_file(root):
+    replace_once(
+        root / "deps/libarchive.xcodeproj/project.pbxproj",
+        (
+            "\t\t\t\t070ACF47301B018200D5A795 "
+            "/* archive_entry.c in Sources */,\n"
+        ),
+        (
+            "\t\t\t\tBB10E57E248DA6F4009C7A74 "
+            "/* archive_entry.c in Sources */,\n"
+        ),
+    )
+
+
+def case_watch_libarchive_platform_drift(root):
+    path = root / "deps/libarchive.xcodeproj/project.pbxproj"
+    text = path.read_text(encoding="utf-8")
+    setting = "\t\t\t\tSDKROOT = watchos;\n"
+    if text.count(setting) != 2:
+        fail("合成工程没有两份 Watch SDKROOT 配置")
+    write_utf8(path, text.replace(setting, "\t\t\t\tSDKROOT = iphoneos;\n", 1))
+
+
+def case_watch_libarchive_exclusion_drift(root):
+    path = root / "deps/libarchive.xcodeproj/project.pbxproj"
+    text = path.read_text(encoding="utf-8")
+    setting = (
+        "\t\t\t\tEXCLUDED_SOURCE_FILE_NAMES = filter_fork_posix.c;\n"
+    )
+    if text.count(setting) != 2:
+        fail("合成工程没有两份 Watch 源码排除配置")
+    write_utf8(path, text.replace(setting, "", 1))
+
+
+def case_watch_libarchive_proxy_drift(root):
+    replace_once(
+        root / "iSH.xcodeproj/project.pbxproj",
+        "\t\t\tremoteGlobalIDString = 070ACFCB301B018200D5A795;\n",
+        "\t\t\tremoteGlobalIDString = BB10E0D6248DA67B009C7A74;\n",
     )
 
 
@@ -534,25 +639,16 @@ def case_iphone_loses_libarchive(root):
     write_utf8(project, text.replace(line, "", 1))
 
 
-def case_watch_gains_libarchive(root):
+def case_watch_loses_libarchive(root):
     project = root / "iSH.xcodeproj/project.pbxproj"
     text = project.read_text(encoding="utf-8")
-    marker = (
-        "\t\tA1D000000000000000000004 /* Frameworks */ = {\n"
+    line = (
+        "\t\t\t\tA8D000000000000000000001 "
+        "/* libarchive-watchOS.a in Frameworks */,\n"
     )
-    start = text.find(marker)
-    if start < 0:
-        fail("无法定位 Watch Frameworks phase")
-    files = text.find("\t\t\tfiles = (\n", start)
-    end = text.find("\t\t\t);\n", files)
-    if files < 0 or end < 0:
-        fail("Watch Frameworks phase 结构非法")
-    insertion = (
-        "\t\t\t\tBB10E5C9248DBAAC009C7A74 "
-        "/* libarchive.a in Frameworks */,\n"
-    )
-    text = text[: end] + insertion + text[end:]
-    write_utf8(project, text)
+    if text.count(line) != 1:
+        fail("无法在合成工程中唯一移除 Watch libarchive")
+    write_utf8(project, text.replace(line, "", 1))
 
 
 def case_hterm_nested_input_drift(root):
@@ -681,6 +777,10 @@ def main():
                 case_target_contract_mismatch,
                 "iSH 的 vendored 输入合同漂移",
             ),
+            "watch-delivery-alias-drift": (
+                case_watch_delivery_alias_drift,
+                "iSHWatch 的 vendored 输入合同漂移",
+            ),
             "iphone-platform-flag": (
                 case_iphone_platform_flag,
                 "App 平台输入必须是 PBX 路径",
@@ -718,7 +818,7 @@ def main():
                 "iSH 的 vendored 链接路由漂移",
             ),
             "watch-vendored-drift": (
-                case_watch_gains_libarchive,
+                case_watch_loses_libarchive,
                 "iSHWatch 的 vendored 链接路由漂移",
             ),
             "watch-target-missing": (
@@ -747,7 +847,35 @@ def main():
             ),
             "libarchive-proxy-drift": (
                 case_libarchive_proxy_drift,
-                "主工程没有把 libarchive 产品代理绑定到锁定子工程",
+                "主工程没有把 libarchive.a 绑定到锁定子工程产品",
+            ),
+            "watch-libarchive-target-missing": (
+                case_watch_libarchive_target_missing,
+                "libarchive Xcode 工程必须恰有手机与 Watch 两个独立 target",
+            ),
+            "watch-libarchive-source-drift": (
+                case_watch_libarchive_source_drift,
+                "libarchive-watchOS 编译源路径集合漂移",
+            ),
+            "watch-libarchive-shared-phase": (
+                case_watch_libarchive_shared_phase,
+                "build phase ID 必须完全独立",
+            ),
+            "watch-libarchive-shared-build-file": (
+                case_watch_libarchive_shared_build_file,
+                "PBXBuildFile 必须相互独立",
+            ),
+            "watch-libarchive-platform-drift": (
+                case_watch_libarchive_platform_drift,
+                "libarchive-watchOS 的平台与源码排除配置漂移",
+            ),
+            "watch-libarchive-exclusion-drift": (
+                case_watch_libarchive_exclusion_drift,
+                "libarchive-watchOS 的平台与源码排除配置漂移",
+            ),
+            "watch-libarchive-proxy-drift": (
+                case_watch_libarchive_proxy_drift,
+                "主工程没有把 libarchive-watchOS.a 绑定到锁定子工程产品",
             ),
             "weak-libarchive-link": (
                 case_weak_libarchive_link,

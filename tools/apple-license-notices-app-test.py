@@ -30,6 +30,9 @@ ALPINE_NOTICES_RELATIVE = PurePosixPath(
 HOST_NOTICES_RELATIVE = PurePosixPath(
     "third_party/apple-host/APPLE-HOST-NOTICES.txt"
 )
+WATCH_LIBARCHIVE_NOTICES_RELATIVE = PurePosixPath(
+    "third_party/apple-host/WATCH-LIBARCHIVE-NOTICES.txt"
+)
 PROJECT_NOTICES_RELATIVE = PurePosixPath(
     "distribution/apple/project-license/PROJECT-LICENSES.txt"
 )
@@ -64,6 +67,17 @@ RESOURCE_CONTRACTS = {
         "owners": {"iSH", "iSH+Linux"},
         "excluded": {
             "iSHWatch",
+            "iSHFileProvider",
+            "iSHUITests",
+            "iSHWatchUITests",
+            "iSHWatchLinkSmoke",
+        },
+    },
+    WATCH_LIBARCHIVE_NOTICES_RELATIVE: {
+        "owners": {"iSHWatch"},
+        "excluded": {
+            "iSH",
+            "iSH+Linux",
             "iSHFileProvider",
             "iSHUITests",
             "iSHWatchUITests",
@@ -546,7 +560,7 @@ def verify_iphone_contract(project, build_files, resolved):
 
 
 def verify_watch_contract(project, build_files, resolved):
-    content_view = read_text("app/Watch/ContentView.swift")
+    settings_view = read_text("app/Watch/WatchSettingsView.swift")
     notices_view = read_text("app/Watch/ThirdPartyNoticesView.swift")
     ui_test = read_text("app/WatchUITests/iSHWatchUITests.swift")
     watch_sources = sorted((ROOT / "app/Watch").glob("*"))
@@ -557,14 +571,53 @@ def verify_watch_contract(project, build_files, resolved):
         content = read_text(relative)
         if HOST_NOTICES_RELATIVE.name in content:
             fail(f"Watch 源码不得引用 Apple 宿主声明：{relative}")
+    watch_notice = read_text(str(WATCH_LIBARCHIVE_NOTICES_RELATIVE))
+    lowered_watch_notice = watch_notice.lower()
+    if "libarchive" not in lowered_watch_notice:
+        fail("Watch libarchive 声明缺少组件身份")
+    for forbidden in ("hterm", "libdot"):
+        if forbidden in lowered_watch_notice:
+            fail(f"Watch libarchive 声明不得包含未链接组件：{forbidden}")
+    config = read_text("deps/config.h")
+    versions = re.findall(
+        r'^#define LIBARCHIVE_VERSION_STRING "([^"]+)"$',
+        config,
+        re.MULTILINE,
+    )
+    if len(versions) != 1 or (
+            f"libarchive {versions[0]}." not in watch_notice):
+        fail("Watch libarchive 声明版本与锁定 Apple 配置不一致")
+    upstream_copying = read_text("deps/libarchive/COPYING")
+    if watch_notice.count(upstream_copying) != 1:
+        fail("Watch libarchive 声明必须逐字包含一份上游 COPYING")
+    archive_entry_lines = read_text(
+        "deps/libarchive/libarchive/archive_entry.c"
+    ).splitlines(keepends=True)
+    archive_entry_license = "".join(archive_entry_lines[1617:1650])
+    if watch_notice.count(archive_entry_license) != 1:
+        fail(
+            "Watch libarchive 声明必须逐字包含一份 "
+            "archive_entry UC Regents 条款"
+        )
+    unicode_license = (
+        (ROOT / "third_party/apple-host/unicodetools/"
+         "a87ae283358bf1858e7cbf6520c6bba0d3b58710/LICENSE")
+        .read_bytes()
+    )
+    if not unicode_license.startswith(b"\xef\xbb\xbf"):
+        fail("锁定 Unicode 许可缺少 UTF-8 BOM")
+    unicode_text = unicode_license[3:].decode("utf-8")
+    if watch_notice.count(unicode_text) != 1:
+        fail("Watch libarchive 声明必须包含 Unicode 生成表许可")
     require_pattern(
         normalized(notices_view),
         r'resourceNames\s*=\s*\[\s*"PROJECT-LICENSES",\s*'
-        r'"THIRD-PARTY-NOTICES",\s*\].*?'
+        r'"THIRD-PARTY-NOTICES",\s*'
+        r'"WATCH-LIBARCHIVE-NOTICES",\s*\].*?'
         r"for\s+resourceName\s+in\s+resourceNames.*?"
         r"Bundle\.main\.url\(\s*forResource:\s*resourceName,\s*"
         r'withExtension:\s*"txt"\s*\)',
-        "Watch 查看器必须按项目许可、Alpine 的固定顺序加载资源",
+        "Watch 查看器必须按项目许可、Alpine、libarchive 的固定顺序加载资源",
     )
     require_pattern(
         notices_view,
@@ -588,11 +641,11 @@ def verify_watch_contract(project, build_files, resolved):
     for identifier in required_view_identifiers:
         if notices_view.count(f'"{identifier}"') != 1:
             fail(f"Watch 查看器 identifier 漂移：{identifier}")
-    if content_view.count('"third-party-notices-button"') != 1:
+    if settings_view.count('"third-party-notices-button"') != 1:
         fail("Watch 声明入口 identifier 漂移")
-    if "ThirdPartyNoticesView()" not in content_view:
+    if "ThirdPartyNoticesView()" not in settings_view:
         fail("Watch 声明入口没有展示固定查看器")
-    if 'accessibilityLabel("许可证与源码")' not in content_view:
+    if 'Label("许可证与源码", systemImage: "doc.text")' not in settings_view:
         fail("Watch 入口没有使用许可证与源码标题")
     source_url = "https://github.com/Eric-Terminal/ish-multiarch"
     if notices_view.count(source_url) != 1:

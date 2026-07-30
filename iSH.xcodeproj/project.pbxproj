@@ -35,13 +35,34 @@
 		A1C00000000000000000000E /* apple-runtime-link-smoke.c in Sources */ = {isa = PBXBuildFile; fileRef = A1C00000000000000000000D /* apple-runtime-link-smoke.c */; };
 		A1D000000000000000000014 /* iSHWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000000F /* iSHWatchApp.swift */; };
 		A1D000000000000000000015 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000010 /* ContentView.swift */; };
-		A1D000000000000000000016 /* TerminalDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000011 /* TerminalDecoder.swift */; };
 		A1D000000000000000000017 /* WatchRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000012 /* WatchRuntime.swift */; };
 		A1D000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB792B5C1F96D90D00FFB7A4 /* Assets.xcassets */; };
 		A1D00000000000000000001B /* WatchSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001A /* WatchSettingsView.swift */; };
 		A1D00000000000000000001D /* WatchRootStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001C /* WatchRootStore.swift */; };
 		A1D00000000000000000001F /* WatchPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000001E /* WatchPreferences.swift */; };
-		A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000000F /* iSHWatchUITests.swift */; };
+		A1D000000000000000000021 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000020 /* TerminalScreen.swift */; };
+		A1D000000000000000000023 /* VTParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000022 /* VTParser.swift */; };
+		A1D000000000000000000025 /* WatchTerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000024 /* WatchTerminalSession.swift */; };
+		A1D000000000000000000027 /* WatchTerminalAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000026 /* WatchTerminalAppearance.swift */; };
+		A1D000000000000000000029 /* WatchTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D000000000000000000028 /* WatchTerminalView.swift */; };
+		A2D000000000000000000002 /* WatchControlInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D000000000000000000001 /* WatchControlInput.swift */; };
+		A2D000000000000000000004 /* WatchControlInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D000000000000000000003 /* WatchControlInputView.swift */; };
+		A3D000000000000000000002 /* WatchTerminalThemes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3D000000000000000000001 /* WatchTerminalThemes.swift */; };
+		A3D000000000000000000004 /* WatchTerminalThemeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3D000000000000000000003 /* WatchTerminalThemeSettingsView.swift */; };
+		A4D000000000000000000002 /* WatchRootMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D000000000000000000001 /* WatchRootMetadata.swift */; };
+			A5D000000000000000000002 /* WatchAPKRepositoryMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D000000000000000000001 /* WatchAPKRepositoryMigration.swift */; };
+			A5D000000000000000000004 /* aarch64-repositories.txt in Resources */ = {isa = PBXBuildFile; fileRef = A5D000000000000000000003 /* aarch64-repositories.txt */; };
+			A6D000000000000000000002 /* WatchPlatformBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6D000000000000000000001 /* WatchPlatformBridge.swift */; };
+			A6D000000000000000000004 /* WatchSharedFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6D000000000000000000003 /* WatchSharedFiles.swift */; };
+		A6D000000000000000000006 /* WatchSharedFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6D000000000000000000005 /* WatchSharedFilesView.swift */; };
+		A8D000000000000000000001 /* libarchive-watchOS.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A8E000000000000000000102 /* libarchive-watchOS.a */; };
+		A8D000000000000000000011 /* WatchHostRootArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D000000000000000000010 /* WatchHostRootArchive.swift */; };
+		A8D000000000000000000013 /* WatchRootArchiveImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D000000000000000000012 /* WatchRootArchiveImportView.swift */; };
+		A8D000000000000000000021 /* WATCH-LIBARCHIVE-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A8D000000000000000000020 /* WATCH-LIBARCHIVE-NOTICES.txt */; };
+		A8D000000000000000000030 /* fakefs.c in Sources */ = {isa = PBXBuildFile; fileRef = BB10E5C2248DBA7B009C7A74 /* fakefs.c */; };
+		A8D000000000000000000031 /* apple-watch-root-archive.c in Sources */ = {isa = PBXBuildFile; fileRef = A8D000000000000000000032 /* apple-watch-root-archive.c */; };
+			A7D000000000000000000002 /* WatchTerminalThemeImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D000000000000000000001 /* WatchTerminalThemeImportView.swift */; };
+			A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000000F /* iSHWatchUITests.swift */; };
 		A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
 		A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
 		A1F000000000000000000006 /* ThirdPartyNoticesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */; };
@@ -332,6 +353,20 @@
 			remoteGlobalIDString = BB21A1662689041500BD19B4;
 			remoteInfo = libfakefs;
 		};
+		A8D000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB10E0C1248DA5B0009C7A74 /* libarchive.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 070ACF44301B018200D5A795;
+			remoteInfo = "libarchive-watchOS";
+		};
+		A8E000000000000000000101 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB10E0C1248DA5B0009C7A74 /* libarchive.xcodeproj */;
+			proxyType = 2;
+			remoteGlobalIDString = 070ACFCB301B018200D5A795;
+			remoteInfo = "libarchive-watchOS";
+		};
 		497F6D5A254E609000C82F46 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = BB792B461F96D8E000FFB7A4 /* Project object */;
@@ -498,13 +533,30 @@
 		A1D00000000000000000000D /* WatchApp.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchApp.xcconfig; sourceTree = "<group>"; };
 		A1D00000000000000000000F /* iSHWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iSHWatchApp.swift; sourceTree = "<group>"; };
 		A1D000000000000000000010 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		A1D000000000000000000011 /* TerminalDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDecoder.swift; sourceTree = "<group>"; };
 		A1D000000000000000000012 /* WatchRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntime.swift; sourceTree = "<group>"; };
 		A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "iSHWatch-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1D00000000000000000001A /* WatchSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSettingsView.swift; sourceTree = "<group>"; };
 		A1D00000000000000000001C /* WatchRootStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootStore.swift; sourceTree = "<group>"; };
 		A1D00000000000000000001E /* WatchPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPreferences.swift; sourceTree = "<group>"; };
-		A1E000000000000000000002 /* iSHWatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iSHWatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1D000000000000000000020 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
+		A1D000000000000000000022 /* VTParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VTParser.swift; sourceTree = "<group>"; };
+		A1D000000000000000000024 /* WatchTerminalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalSession.swift; sourceTree = "<group>"; };
+		A1D000000000000000000026 /* WatchTerminalAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalAppearance.swift; sourceTree = "<group>"; };
+		A1D000000000000000000028 /* WatchTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalView.swift; sourceTree = "<group>"; };
+		A2D000000000000000000001 /* WatchControlInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchControlInput.swift; sourceTree = "<group>"; };
+		A2D000000000000000000003 /* WatchControlInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchControlInputView.swift; sourceTree = "<group>"; };
+		A3D000000000000000000001 /* WatchTerminalThemes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalThemes.swift; sourceTree = "<group>"; };
+		A3D000000000000000000003 /* WatchTerminalThemeSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalThemeSettingsView.swift; sourceTree = "<group>"; };
+		A4D000000000000000000001 /* WatchRootMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootMetadata.swift; sourceTree = "<group>"; };
+			A5D000000000000000000001 /* WatchAPKRepositoryMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAPKRepositoryMigration.swift; sourceTree = "<group>"; };
+			A5D000000000000000000003 /* aarch64-repositories.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "aarch64-repositories.txt"; sourceTree = "<group>"; };
+			A6D000000000000000000001 /* WatchPlatformBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlatformBridge.swift; sourceTree = "<group>"; };
+			A6D000000000000000000003 /* WatchSharedFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSharedFiles.swift; sourceTree = "<group>"; };
+			A6D000000000000000000005 /* WatchSharedFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSharedFilesView.swift; sourceTree = "<group>"; };
+			A7D000000000000000000001 /* WatchTerminalThemeImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalThemeImportView.swift; sourceTree = "<group>"; };
+		A8D000000000000000000010 /* WatchHostRootArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchHostRootArchive.swift; sourceTree = "<group>"; };
+		A8D000000000000000000012 /* WatchRootArchiveImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootArchiveImportView.swift; sourceTree = "<group>"; };
+			A1E000000000000000000002 /* iSHWatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iSHWatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1E00000000000000000000E /* WatchUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchUITests.xcconfig; sourceTree = "<group>"; };
 		A1E00000000000000000000F /* iSHWatchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iSHWatchUITests.swift; sourceTree = "<group>"; };
 		A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "THIRD-PARTY-NOTICES.txt"; path = "third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
@@ -514,6 +566,8 @@
 		A1F000000000000000000009 /* ThirdPartyNoticesUITests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesUITests.m; sourceTree = "<group>"; };
 		A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "APPLE-HOST-NOTICES.txt"; path = "third_party/apple-host/APPLE-HOST-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
 		A1F100000000000000000001 /* PROJECT-LICENSES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "PROJECT-LICENSES.txt"; path = "distribution/apple/project-license/PROJECT-LICENSES.txt"; sourceTree = SOURCE_ROOT; };
+		A8D000000000000000000020 /* WATCH-LIBARCHIVE-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "WATCH-LIBARCHIVE-NOTICES.txt"; path = "third_party/apple-host/WATCH-LIBARCHIVE-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
+		A8D000000000000000000032 /* apple-watch-root-archive.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = "apple-watch-root-archive.c"; path = "platform/apple-watch-root-archive.c"; sourceTree = SOURCE_ROOT; };
 		0FC2383B2991FB82004C09EC /* mmx.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mmx.c; sourceTree = "<group>"; };
 		408A2639236440F8008A4E81 /* iOSFS.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = iOSFS.m; sourceTree = "<group>"; };
 		408A263B23644102008A4E81 /* iOSFS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = iOSFS.h; sourceTree = "<group>"; };
@@ -855,6 +909,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A8D000000000000000000001 /* libarchive-watchOS.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -935,11 +990,29 @@
 				A1D00000000000000000000F /* iSHWatchApp.swift */,
 				A1D000000000000000000010 /* ContentView.swift */,
 				A1F000000000000000000007 /* ThirdPartyNoticesView.swift */,
-				A1D000000000000000000011 /* TerminalDecoder.swift */,
+				A1D000000000000000000022 /* VTParser.swift */,
+				A1D000000000000000000020 /* TerminalScreen.swift */,
+				A1D000000000000000000024 /* WatchTerminalSession.swift */,
+				A1D000000000000000000026 /* WatchTerminalAppearance.swift */,
+				A1D000000000000000000028 /* WatchTerminalView.swift */,
+				A2D000000000000000000001 /* WatchControlInput.swift */,
+				A2D000000000000000000003 /* WatchControlInputView.swift */,
+				A3D000000000000000000001 /* WatchTerminalThemes.swift */,
+				A3D000000000000000000003 /* WatchTerminalThemeSettingsView.swift */,
 				A1D000000000000000000012 /* WatchRuntime.swift */,
+				A4D000000000000000000001 /* WatchRootMetadata.swift */,
+				A5D000000000000000000001 /* WatchAPKRepositoryMigration.swift */,
+				A6D000000000000000000001 /* WatchPlatformBridge.swift */,
+				A6D000000000000000000003 /* WatchSharedFiles.swift */,
+				A6D000000000000000000005 /* WatchSharedFilesView.swift */,
+				A7D000000000000000000001 /* WatchTerminalThemeImportView.swift */,
+				A8D000000000000000000010 /* WatchHostRootArchive.swift */,
+				A8D000000000000000000012 /* WatchRootArchiveImportView.swift */,
+				A8D000000000000000000032 /* apple-watch-root-archive.c */,
 				A1D00000000000000000001C /* WatchRootStore.swift */,
 				A1D00000000000000000001E /* WatchPreferences.swift */,
 				A1D00000000000000000001A /* WatchSettingsView.swift */,
+				A5D000000000000000000003 /* aarch64-repositories.txt */,
 				A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */,
 			);
 			path = Watch;
@@ -1045,6 +1118,7 @@
 			isa = PBXGroup;
 			children = (
 				BB10E5C8248DBAA1009C7A74 /* libarchive.a */,
+				A8E000000000000000000102 /* libarchive-watchOS.a */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -1162,6 +1236,7 @@
 				A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */,
 				A1F00000000000000000000B /* APPLE-HOST-NOTICES.txt */,
 				A1F100000000000000000001 /* PROJECT-LICENSES.txt */,
+				A8D000000000000000000020 /* WATCH-LIBARCHIVE-NOTICES.txt */,
 				BB9C7B88240A343400F5D4F0 /* iSH.xcconfig */,
 				BB4A53931FAA393B00A72ACE /* most of the code */,
 				BB18B27F1F97F2590059FCD8 /* Scripts */,
@@ -1562,6 +1637,7 @@
 			);
 			dependencies = (
 				A1D00000000000000000000C /* PBXTargetDependency */,
+				A8D000000000000000000003 /* PBXTargetDependency */,
 			);
 			name = iSHWatch;
 			productName = iSHWatch;
@@ -1968,6 +2044,13 @@
 			remoteRef = BB10E5C7248DBAA1009C7A74 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
+		A8E000000000000000000102 /* libarchive-watchOS.a */ = {
+			isa = PBXReferenceProxy;
+			fileType = archive.ar;
+			path = "libarchive-watchOS.a";
+			remoteRef = A8E000000000000000000101 /* PBXContainerItemProxy */;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
 /* End PBXReferenceProxy section */
 
 /* Begin PBXResourcesBuildPhase section */
@@ -1978,6 +2061,8 @@
 				A1D000000000000000000018 /* Assets.xcassets in Resources */,
 				A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */,
 				A1F100000000000000000002 /* PROJECT-LICENSES.txt in Resources */,
+				A8D000000000000000000021 /* WATCH-LIBARCHIVE-NOTICES.txt in Resources */,
+				A5D000000000000000000004 /* aarch64-repositories.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2401,8 +2486,26 @@
 				A1D000000000000000000014 /* iSHWatchApp.swift in Sources */,
 				A1D000000000000000000015 /* ContentView.swift in Sources */,
 				A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */,
-				A1D000000000000000000016 /* TerminalDecoder.swift in Sources */,
+				A1D000000000000000000023 /* VTParser.swift in Sources */,
+				A1D000000000000000000021 /* TerminalScreen.swift in Sources */,
+				A1D000000000000000000025 /* WatchTerminalSession.swift in Sources */,
+				A1D000000000000000000027 /* WatchTerminalAppearance.swift in Sources */,
+				A1D000000000000000000029 /* WatchTerminalView.swift in Sources */,
+				A2D000000000000000000002 /* WatchControlInput.swift in Sources */,
+				A2D000000000000000000004 /* WatchControlInputView.swift in Sources */,
+				A3D000000000000000000002 /* WatchTerminalThemes.swift in Sources */,
+				A3D000000000000000000004 /* WatchTerminalThemeSettingsView.swift in Sources */,
 				A1D000000000000000000017 /* WatchRuntime.swift in Sources */,
+				A4D000000000000000000002 /* WatchRootMetadata.swift in Sources */,
+				A5D000000000000000000002 /* WatchAPKRepositoryMigration.swift in Sources */,
+				A6D000000000000000000002 /* WatchPlatformBridge.swift in Sources */,
+				A6D000000000000000000004 /* WatchSharedFiles.swift in Sources */,
+				A6D000000000000000000006 /* WatchSharedFilesView.swift in Sources */,
+				A7D000000000000000000002 /* WatchTerminalThemeImportView.swift in Sources */,
+				A8D000000000000000000011 /* WatchHostRootArchive.swift in Sources */,
+				A8D000000000000000000013 /* WatchRootArchiveImportView.swift in Sources */,
+				A8D000000000000000000030 /* fakefs.c in Sources */,
+				A8D000000000000000000031 /* apple-watch-root-archive.c in Sources */,
 				A1D00000000000000000001D /* WatchRootStore.swift in Sources */,
 				A1D00000000000000000001F /* WatchPreferences.swift in Sources */,
 				A1D00000000000000000001B /* WatchSettingsView.swift in Sources */,
@@ -2630,6 +2733,11 @@
 			isa = PBXTargetDependency;
 			target = A1C000000000000000000001 /* iSHCore-watchOS */;
 			targetProxy = A1D00000000000000000000B /* PBXContainerItemProxy */;
+		};
+		A8D000000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "libarchive-watchOS";
+			targetProxy = A8D000000000000000000002 /* PBXContainerItemProxy */;
 		};
 		A1E00000000000000000000C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;

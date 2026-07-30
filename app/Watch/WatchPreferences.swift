@@ -2,8 +2,10 @@ import Foundation
 
 enum WatchPreferenceKeys {
     static let colorScheme = "watchColorScheme"
+    static let terminalFontSize = "watchTerminalFontSize"
     static let customHostnameEnabled = "watchCustomHostnameEnabled"
     static let customHostname = "watchCustomHostname"
+    static let bootCommand = "watchBootCommand"
     static let launchCommand = "watchLaunchCommand"
 }
 
@@ -14,7 +16,9 @@ enum WatchPreferences {
         case controlCharacter
     }
 
+    static let defaultBootCommand = "exec /sbin/init"
     static let defaultLaunchCommand = "exec /bin/login -f root"
+    static let terminalFontSizeRange = 7...24
     static let maximumHostnameBytes = 64
     static let maximumLaunchCommandBytes = 4095
 
@@ -37,6 +41,16 @@ enum WatchPreferences {
             in: .whitespacesAndNewlines)
         guard launchCommandValidationIssue(command) == nil else {
             return defaultLaunchCommand
+        }
+        return command
+    }
+
+    static func bootCommand(_ value: String?) -> String {
+        guard let value else { return defaultBootCommand }
+        let command = value.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard launchCommandValidationIssue(command) == nil else {
+            return defaultBootCommand
         }
         return command
     }

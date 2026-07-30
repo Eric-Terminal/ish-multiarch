@@ -47,6 +47,9 @@ EXPECTED_DELIVERY_CONTRACTS = {
     "linux": ("linux-kernel", "static-library", "liblinux.a"),
     "wcwidth": ("hterm-bundle", "generated-resource", "hterm_all.js"),
 }
+TARGET_DELIVERY_ALIASES = {
+    ("iSHWatch", "libarchive"): "libarchive-watchOS.a",
+}
 MATERIAL_ICON_REVISION = "3d4a32b327272c458e12586437c3ca0696b28a69"
 MATERIAL_ICON_SNAPSHOT_BASE = (
     "third_party/apple-host/material-design-icons/"
@@ -733,7 +736,15 @@ def parse_targets(root, dependencies):
             if target.delivery_kind == "generated-resource":
                 validate_relative(delivery_name, "生成资源交付路径")
                 delivery_name = PurePosixPath(delivery_name).name
-            if contract != (target.delivery_kind, delivery_name):
+            expected_name = TARGET_DELIVERY_ALIASES.get(
+                (target.target, target.component),
+                contract[1] if contract is not None else None,
+            )
+            if (
+                contract is None
+                or contract[0] != target.delivery_kind
+                or delivery_name != expected_name
+            ):
                 fail(f"{target.target} 的 vendored 输入合同漂移")
         elif (
             target.component,
@@ -767,9 +778,26 @@ def parse_targets(root, dependencies):
     if any(
         target.input_scope == "vendored"
         for target in targets
-        if target.target in {"iSHWatch", "iSHFileProvider"}
+        if target.target == "iSHFileProvider"
     ):
-        fail("Watch 或 FileProvider 不能声明宿主 vendored 输入")
+        fail("FileProvider 不能声明宿主 vendored 输入")
+    watch_vendored = [
+        target
+        for target in targets
+        if target.target == "iSHWatch" and
+        target.input_scope == "vendored"
+    ]
+    if watch_vendored != [
+        TargetInput(
+            "iSHWatch",
+            "product",
+            "vendored",
+            "libarchive",
+            "static-library",
+            "libarchive-watchOS.a",
+        )
+    ]:
+        fail("Watch 必须只声明 libarchive vendored 输入")
     return targets
 
 

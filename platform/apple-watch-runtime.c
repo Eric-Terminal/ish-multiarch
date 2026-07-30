@@ -1,17 +1,22 @@
 #include "platform/apple-watch-runtime.h"
 
+#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <unistd.h>
 
 #include "debug.h"
 #include "fs/devices.h"
 #include "fs/fd.h"
 #include "fs/path.h"
+#include "fs/proc/ish.h"
+#include "fs/real.h"
 #include "fs/sock.h"
 #include "fs/tty.h"
 #include "kernel/calls.h"
@@ -20,6 +25,7 @@
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "platform/apple-resolver.h"
+#include "platform/apple-watch-runtime-private.h"
 
 #define WATCH_OUTPUT_CAPACITY (64 * 1024)
 #define WATCH_CONSOLE_NUMBER 1
@@ -27,6 +33,28 @@
 #define WATCH_DEFAULT_ROWS 18
 #define WATCH_COMMAND_LIMIT 4096
 #define WATCH_NO_TTY (-1)
+#define WATCH_SHARED_PARENT "/mnt"
+#define WATCH_SHARED_MOUNT_POINT "/mnt/shared"
+
+enum watch_directory_event {
+    WATCH_DIRECTORY_AFTER_LSTAT = 1,
+    WATCH_DIRECTORY_AFTER_VALIDATION = 2,
+    WATCH_DIRECTORY_AFTER_RELEASE = 3,
+};
+#ifdef ISH_APPLE_WATCH_RUNTIME_TESTING
+_Static_assert(
+        (int) WATCH_DIRECTORY_AFTER_LSTAT ==
+                ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_LSTAT,
+        "测试目录事件值必须保持一致");
+_Static_assert(
+        (int) WATCH_DIRECTORY_AFTER_VALIDATION ==
+                ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_VALIDATION,
+        "测试目录事件值必须保持一致");
+_Static_assert(
+        (int) WATCH_DIRECTORY_AFTER_RELEASE ==
+                ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_RELEASE,
+        "测试目录事件值必须保持一致");
+#endif
 
 enum watch_session_internal_phase {
     WATCH_SESSION_FREE = 0,
@@ -58,6 +86,10 @@ struct watch_session_transport {
 static _Atomic int runtime_phase = ISH_WATCH_RUNTIME_IDLE;
 static _Atomic int runtime_error;
 static _Atomic bool runtime_accepts_sessions;
+static const char *runtime_documents_directory;
+#ifdef ISH_APPLE_WATCH_RUNTIME_TESTING
+static ish_watch_runtime_test_directory_hook runtime_test_directory_hook;
+#endif
 
 static struct watch_output_ring console_output;
 static lock_t output_lock = LOCK_INITIALIZER;
@@ -65,7 +97,7 @@ static lock_t output_lock = LOCK_INITIALIZER;
 static struct watch_session sessions[ISH_WATCH_SESSION_LIMIT];
 static ish_watch_session_id next_session_id = 1;
 static lock_t sessions_lock = LOCK_INITIALIZER;
-static lock_t session_create_lock = LOCK_INITIALIZER;
+lock_t ish_watch_prepared_task_lock = LOCK_INITIALIZER;
 static _Thread_local struct watch_session *opening_session;
 
 static void output_note_dropped(
@@ -195,6 +227,19 @@ static void session_mark_exited_locked(
     session->phase = ISH_WATCH_SESSION_EXITED;
     session->wait_status = wait_status;
     session_release_if_finished_locked(session);
+}
+
+static bool session_mark_group_exited_locked(
+        struct tgroup *group, int32_t wait_status) {
+    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
+        struct watch_session *session = &sessions[index];
+        if (session->phase != WATCH_SESSION_FREE &&
+                session->leader_group == group) {
+            session_mark_exited_locked(session, wait_status);
+            return true;
+        }
+    }
+    return false;
 }
 
 static int session_reserve_locked(
@@ -492,6 +537,11 @@ int ish_watch_session_close(ish_watch_session_id session_id) {
 }
 
 #ifdef ISH_APPLE_WATCH_RUNTIME_TESTING
+void ish_watch_runtime_test_set_directory_hook(
+        ish_watch_runtime_test_directory_hook hook) {
+    runtime_test_directory_hook = hook;
+}
+
 int ish_watch_runtime_test_add_session(
         int32_t phase, ish_watch_session_id *session_id) {
     if (session_id == NULL ||
@@ -564,6 +614,39 @@ int ish_watch_runtime_test_recycled_transport(void) {
     session_reset_locked(replacement);
     unlock(&sessions_lock);
     return rejected ? 0 : _EIO;
+}
+
+int ish_watch_runtime_test_exit_ownership(void) {
+    struct tgroup session_group = {};
+    struct tgroup child_group = {};
+
+    lock(&sessions_lock);
+    struct watch_session *session;
+    int error = session_reserve_locked(
+            ISH_WATCH_SESSION_RUNNING, &session);
+    if (error < 0) {
+        unlock(&sessions_lock);
+        return error;
+    }
+    session->leader_group = &session_group;
+
+    bool child_owns_session = session_mark_group_exited_locked(
+            &child_group, 7 << 8);
+    bool child_preserved_session =
+            session->phase == ISH_WATCH_SESSION_RUNNING &&
+            session->leader_group == &session_group;
+    bool leader_owns_session = session_mark_group_exited_locked(
+            &session_group, 9 << 8);
+    bool leader_finished_session =
+            session->phase == ISH_WATCH_SESSION_EXITED &&
+            session->wait_status == (9 << 8) &&
+            session->leader_group == NULL;
+    session_reset_locked(session);
+    unlock(&sessions_lock);
+
+    return !child_owns_session && child_preserved_session &&
+            leader_owns_session && leader_finished_session ?
+            0 : _EIO;
 }
 #endif
 
@@ -675,6 +758,165 @@ static int runtime_fail_after_task(int error) {
     return runtime_fail(error);
 }
 
+static void watch_test_directory_event(
+        int32_t stage, const char *path, int directory_fd) {
+#ifdef ISH_APPLE_WATCH_RUNTIME_TESTING
+    if (runtime_test_directory_hook != NULL)
+        runtime_test_directory_hook(stage, path, directory_fd);
+#else
+    (void) stage;
+    (void) path;
+    (void) directory_fd;
+#endif
+}
+
+static void watch_release_host_directory(
+        int *directory_fd, const char *path) {
+    if (*directory_fd < 0)
+        return;
+    int released_fd = *directory_fd;
+    *directory_fd = -1;
+    (void) close(released_fd);
+    watch_test_directory_event(
+            WATCH_DIRECTORY_AFTER_RELEASE, path, released_fd);
+}
+
+static bool watch_same_host_file(
+        const struct stat *left, const struct stat *right) {
+    return left->st_dev == right->st_dev &&
+            left->st_ino == right->st_ino;
+}
+
+static int watch_open_host_directory(
+        const char *path,
+        int *directory_fd,
+        char **canonical_source) {
+    *directory_fd = -1;
+    *canonical_source = NULL;
+
+    struct stat original_status;
+    if (lstat(path, &original_status) < 0)
+        return errno_map();
+    if (S_ISLNK(original_status.st_mode))
+        return _ELOOP;
+    if (!S_ISDIR(original_status.st_mode))
+        return _ENOTDIR;
+
+    watch_test_directory_event(
+            WATCH_DIRECTORY_AFTER_LSTAT, path, -1);
+
+    int directory = open(
+            path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0)
+        return errno_map();
+
+    int error;
+    struct stat opened_status;
+    if (fstat(directory, &opened_status) < 0) {
+        error = errno_map();
+        goto failed;
+    }
+    if (!S_ISDIR(opened_status.st_mode)) {
+        error = _ENOTDIR;
+        goto failed;
+    }
+
+    struct stat current_status;
+    if (lstat(path, &current_status) < 0) {
+        error = errno_map();
+        goto failed;
+    }
+    if (S_ISLNK(current_status.st_mode)) {
+        error = _ELOOP;
+        goto failed;
+    }
+    if (!S_ISDIR(current_status.st_mode)) {
+        error = _ENOTDIR;
+        goto failed;
+    }
+    if (!watch_same_host_file(&original_status, &opened_status) ||
+            !watch_same_host_file(&opened_status, &current_status)) {
+        error = _ESTALE;
+        goto failed;
+    }
+
+    char *canonical = realpath(path, NULL);
+    if (canonical == NULL) {
+        error = errno_map();
+        goto failed;
+    }
+    struct stat canonical_status;
+    if (stat(canonical, &canonical_status) < 0) {
+        error = errno_map();
+        free(canonical);
+        goto failed;
+    }
+    if (!watch_same_host_file(&opened_status, &canonical_status)) {
+        free(canonical);
+        error = _ESTALE;
+        goto failed;
+    }
+
+    *directory_fd = directory;
+    *canonical_source = canonical;
+    return 0;
+
+failed:
+    watch_release_host_directory(&directory, path);
+    return error;
+}
+
+static char *watch_get_documents_directory(void) {
+    return strdup(runtime_documents_directory);
+}
+
+static int watch_ensure_guest_directory(const char *path) {
+    struct fd *directory = generic_open(
+            path, O_RDONLY_ | O_DIRECTORY_ | O_NOFOLLOW_, 0);
+    if (!IS_ERR(directory))
+        return fd_close(directory);
+    if (PTR_ERR(directory) != _ENOENT)
+        return (int) PTR_ERR(directory);
+
+    int error = generic_mkdirat(AT_PWD, path, 0755);
+    if (error < 0 && error != _EEXIST)
+        return error;
+
+    directory = generic_open(
+            path, O_RDONLY_ | O_DIRECTORY_ | O_NOFOLLOW_, 0);
+    if (IS_ERR(directory))
+        return (int) PTR_ERR(directory);
+    return fd_close(directory);
+}
+
+static int watch_mount_shared_directory(
+        int host_directory_fd, const char *host_directory_source) {
+    int error = watch_ensure_guest_directory(WATCH_SHARED_PARENT);
+    if (error < 0)
+        return error;
+    error = watch_ensure_guest_directory(WATCH_SHARED_MOUNT_POINT);
+    if (error < 0)
+        return error;
+
+    char mount_point[] = WATCH_SHARED_MOUNT_POINT;
+    struct mount *existing = mount_find(mount_point);
+    bool already_mounted =
+            strcmp(existing->point, WATCH_SHARED_MOUNT_POINT) == 0;
+    mount_release(existing);
+    if (already_mounted)
+        return _EBUSY;
+
+    lock(&mounts_lock);
+    error = realfs_mount_from_fd_locked(
+            host_directory_fd,
+            host_directory_source,
+            WATCH_SHARED_MOUNT_POINT,
+            "",
+            0);
+    unlock(&mounts_lock);
+    return error;
+}
+
 static int session_cancel_after_task(
         struct watch_session *session, int error) {
     lock(&sessions_lock);
@@ -708,19 +950,13 @@ static void watch_handle_exit(struct task *task, int UNUSED(code)) {
     unlock(&leader->group->lock);
 
     lock(&sessions_lock);
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
-        struct watch_session *session = &sessions[index];
-        if (session->phase != WATCH_SESSION_FREE &&
-                session->leader_group == leader->group) {
-            session_mark_exited_locked(
-                    session, (int32_t) wait_status);
-            break;
-        }
-    }
+    bool owns_session = session_mark_group_exited_locked(
+            leader->group, (int32_t) wait_status);
     unlock(&sessions_lock);
 
     // shell 退出即结束整个 PTY 会话，不能留下持有 tty 的后台进程耗尽槽位。
-    (void) task_kill_controlling_tty_locked(controlling_tty);
+    if (owns_session)
+        (void) task_kill_controlling_tty_locked(controlling_tty);
 }
 
 static void watch_handle_die(const char *UNUSED(message)) {
@@ -762,7 +998,7 @@ static int exec_shell_command(
     return error;
 }
 
-static int session_runtime_availability(void) {
+int ish_watch_runtime_operation_availability(void) {
     int phase = atomic_load_explicit(
             &runtime_phase, memory_order_acquire);
     if (phase == ISH_WATCH_RUNTIME_RUNNING)
@@ -788,14 +1024,14 @@ int ish_watch_session_create(
         return _E2BIG;
     *session_id = 0;
 
-    int error = session_runtime_availability();
+    int error = ish_watch_runtime_operation_availability();
     if (error < 0)
         return error;
 
-    lock(&session_create_lock);
-    error = session_runtime_availability();
+    lock(&ish_watch_prepared_task_lock);
+    error = ish_watch_runtime_operation_availability();
     if (error < 0) {
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
@@ -805,7 +1041,7 @@ int ish_watch_session_create(
             ISH_WATCH_SESSION_STARTING, &session);
     unlock(&sessions_lock);
     if (error < 0) {
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
@@ -814,7 +1050,7 @@ int ish_watch_session_create(
         lock(&sessions_lock);
         session_reset_locked(session);
         unlock(&sessions_lock);
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
@@ -829,7 +1065,7 @@ int ish_watch_session_create(
     if (IS_ERR(tty)) {
         error = (int) PTR_ERR(tty);
         error = session_cancel_after_task(session, error);
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
@@ -854,14 +1090,14 @@ int ish_watch_session_create(
     unlock(&ttys_lock);
     if (error < 0) {
         error = session_cancel_after_task(session, error);
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
     error = exec_shell_command(command, command_length);
     if (error < 0) {
         error = session_cancel_after_task(session, error);
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
 
@@ -873,20 +1109,23 @@ int ish_watch_session_create(
     error = commit_prepared_process();
     if (error < 0) {
         error = session_cancel_after_task(session, error);
-        unlock(&session_create_lock);
+        unlock(&ish_watch_prepared_task_lock);
         return error;
     }
     *session_id = created_id;
-    unlock(&session_create_lock);
+    unlock(&ish_watch_prepared_task_lock);
     return 0;
 }
 
 int ish_watch_runtime_start(
         const char *root_data,
+        const char *documents_directory,
         const char *socket_prefix,
         const char *hostname,
         const char *boot_command) {
     if (root_data == NULL || root_data[0] == '\0' ||
+            documents_directory == NULL ||
+            documents_directory[0] == '\0' ||
             socket_prefix == NULL || socket_prefix[0] == '\0' ||
             hostname == NULL || hostname[0] == '\0' ||
             boot_command == NULL || boot_command[0] == '\0')
@@ -897,25 +1136,62 @@ int ish_watch_runtime_start(
     if (command_length >= WATCH_COMMAND_LIMIT)
         return _E2BIG;
 
+    int shared_directory_fd;
+    char *canonical_documents_source;
+    int error = watch_open_host_directory(
+            documents_directory,
+            &shared_directory_fd,
+            &canonical_documents_source);
+    if (error < 0)
+        return error;
+    watch_test_directory_event(
+            WATCH_DIRECTORY_AFTER_VALIDATION,
+            documents_directory,
+            shared_directory_fd);
+
     int expected = ISH_WATCH_RUNTIME_IDLE;
     if (!atomic_compare_exchange_strong_explicit(
             &runtime_phase, &expected, ISH_WATCH_RUNTIME_PREPARING,
-            memory_order_acq_rel, memory_order_acquire))
+            memory_order_acq_rel, memory_order_acquire)) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
         return _EALREADY;
+    }
     atomic_store_explicit(
             &runtime_accepts_sessions, false, memory_order_release);
 
     char *owned_socket_prefix = strdup(socket_prefix);
-    if (owned_socket_prefix == NULL)
+    if (owned_socket_prefix == NULL) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
         return runtime_fail(_ENOMEM);
+    }
     char *owned_hostname = strdup(hostname);
     if (owned_hostname == NULL) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
+        free(owned_socket_prefix);
+        return runtime_fail(_ENOMEM);
+    }
+    char *owned_documents_directory = strdup(documents_directory);
+    if (owned_documents_directory == NULL) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
+        free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail(_ENOMEM);
     }
 
-    int error = mount_root(&fakefs, root_data);
+    error = mount_root(&fakefs, root_data);
     if (error < 0) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail(error);
@@ -923,6 +1199,10 @@ int ish_watch_runtime_start(
 
     error = begin_first_process();
     if (error < 0) {
+        watch_release_host_directory(
+                &shared_directory_fd, documents_directory);
+        free(canonical_documents_source);
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail(error);
@@ -935,14 +1215,27 @@ int ish_watch_runtime_start(
                 .mode = 0755,
             }, false);
 
+    error = watch_mount_shared_directory(
+            shared_directory_fd, canonical_documents_source);
+    watch_release_host_directory(
+            &shared_directory_fd, documents_directory);
+    free(canonical_documents_source);
+    if (error < 0) {
+        free(owned_documents_directory);
+        free(owned_hostname);
+        free(owned_socket_prefix);
+        return runtime_fail_after_task(error);
+    }
     error = do_mount(&procfs, "proc", "/proc", "", 0);
     if (error < 0) {
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
     }
     error = do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     if (error < 0) {
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
@@ -955,6 +1248,7 @@ int ish_watch_runtime_start(
     error = create_stdio(
             "/dev/console", TTY_CONSOLE_MAJOR, WATCH_CONSOLE_NUMBER);
     if (error < 0) {
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
@@ -962,6 +1256,7 @@ int ish_watch_runtime_start(
 
     error = exec_shell_command(boot_command, command_length);
     if (error < 0) {
+        free(owned_documents_directory);
         free(owned_hostname);
         free(owned_socket_prefix);
         return runtime_fail_after_task(error);
@@ -970,6 +1265,8 @@ int ish_watch_runtime_start(
     extern const char *uname_hostname_override;
     uname_hostname_override = owned_hostname;
     sock_tmp_prefix = owned_socket_prefix;
+    runtime_documents_directory = owned_documents_directory;
+    get_documents_directory = watch_get_documents_directory;
     expected = ISH_WATCH_RUNTIME_PREPARING;
     if (!atomic_compare_exchange_strong_explicit(
             &runtime_phase, &expected, ISH_WATCH_RUNTIME_RUNNING,

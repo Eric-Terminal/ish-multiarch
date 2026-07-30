@@ -30,22 +30,30 @@ struct WatchPreferencesTest {
             WatchPreferences.normalizedHostname("watch\nname") == nil,
             "主机名应拒绝控制字符")
         expect(
+            WatchPreferences.bootCommand(nil) ==
+                WatchPreferences.defaultBootCommand,
+            "缺失系统启动命令应使用默认 init")
+        expect(
+            WatchPreferences.bootCommand("  exec /custom/init  ") ==
+                "exec /custom/init",
+            "系统启动命令应去掉首尾空白")
+        expect(
             WatchPreferences.launchCommand(nil) ==
                 WatchPreferences.defaultLaunchCommand,
-            "缺失启动命令应使用默认值")
+            "缺失终端启动命令应使用默认值")
         expect(
             WatchPreferences.launchCommand("  echo ready  ") ==
                 "echo ready",
-            "启动命令应去掉首尾空白")
+            "终端启动命令应去掉首尾空白")
         expect(
             WatchPreferences.launchCommand(
                 String(repeating: "x", count: 4096)) ==
                 WatchPreferences.defaultLaunchCommand,
-            "过长启动命令应回落默认值")
+            "过长终端启动命令应回落默认值")
         expect(
             WatchPreferences.launchCommand("echo\u{0}hidden") ==
                 WatchPreferences.defaultLaunchCommand,
-            "启动命令应拒绝会被 C 字符串截断的 NUL")
+            "终端启动命令应拒绝会被 C 字符串截断的 NUL")
         expect(
             WatchPreferences.hostnameValidationIssue("") == .empty &&
                 WatchPreferences.hostnameValidationIssue(

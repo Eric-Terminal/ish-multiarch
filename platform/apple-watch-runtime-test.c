@@ -1,5 +1,7 @@
 #include "platform/apple-watch-runtime.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdint.h>
@@ -7,8 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include "fs/real.h"
 #include "kernel/errno.h"
 #include "kernel/task.h"
 
@@ -22,6 +26,103 @@ static int failures;
         failures++; \
     } \
 } while (0)
+
+enum directory_hook_mode {
+    DIRECTORY_HOOK_OBSERVE,
+    DIRECTORY_HOOK_REPLACE_AFTER_LSTAT,
+    DIRECTORY_HOOK_REPLACE_AFTER_VALIDATION,
+};
+
+static struct {
+    enum directory_hook_mode mode;
+    char displaced_path[PATH_MAX];
+    bool mutation_succeeded;
+    unsigned lstat_count;
+    unsigned validation_count;
+    unsigned release_count;
+    bool released_fd_was_closed;
+} directory_hook_state;
+
+static bool write_host_marker(const char *directory, const char *name) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", directory, name) >=
+            (int) sizeof(path))
+        return false;
+    FILE *file = fopen(path, "wb");
+    if (file == NULL)
+        return false;
+    static const char contents[] = "marker\n";
+    bool wrote = fwrite(
+            contents, 1, sizeof(contents) - 1, file) ==
+            sizeof(contents) - 1;
+    return fclose(file) == 0 && wrote;
+}
+
+static bool replace_test_directory(const char *path) {
+    if (rename(path, directory_hook_state.displaced_path) < 0)
+        return false;
+    if (mkdir(path, 0700) < 0) {
+        (void) rename(directory_hook_state.displaced_path, path);
+        return false;
+    }
+    return write_host_marker(path, "replacement-only");
+}
+
+static void directory_test_hook(
+        int32_t stage, const char *path, int directory_fd) {
+    if (stage == ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_LSTAT) {
+        directory_hook_state.lstat_count++;
+        if (directory_hook_state.mode ==
+                DIRECTORY_HOOK_REPLACE_AFTER_LSTAT)
+            directory_hook_state.mutation_succeeded =
+                    replace_test_directory(path);
+        return;
+    }
+    if (stage == ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_VALIDATION) {
+        directory_hook_state.validation_count++;
+        if (directory_hook_state.mode ==
+                DIRECTORY_HOOK_REPLACE_AFTER_VALIDATION)
+            directory_hook_state.mutation_succeeded =
+                    replace_test_directory(path);
+        return;
+    }
+    if (stage == ISH_WATCH_RUNTIME_TEST_DIRECTORY_AFTER_RELEASE) {
+        directory_hook_state.release_count++;
+        errno = 0;
+        directory_hook_state.released_fd_was_closed =
+                fcntl(directory_fd, F_GETFD) < 0 && errno == EBADF;
+    }
+}
+
+static void reset_directory_hook(
+        enum directory_hook_mode mode, const char *displaced_path) {
+    memset(&directory_hook_state, 0, sizeof(directory_hook_state));
+    directory_hook_state.mode = mode;
+    if (displaced_path != NULL)
+        CHECK(snprintf(
+                directory_hook_state.displaced_path,
+                sizeof(directory_hook_state.displaced_path),
+                "%s",
+                displaced_path) <
+                (int) sizeof(directory_hook_state.displaced_path),
+                "记录目录替换 fixture 路径");
+    ish_watch_runtime_test_set_directory_hook(directory_test_hook);
+}
+
+static void disable_directory_hook(void) {
+    ish_watch_runtime_test_set_directory_hook(NULL);
+}
+
+static int count_open_file_descriptors(void) {
+    int count = 0;
+    int limit = getdtablesize();
+    for (int descriptor = 0; descriptor < limit; descriptor++) {
+        errno = 0;
+        if (fcntl(descriptor, F_GETFD) >= 0 || errno != EBADF)
+            count++;
+    }
+    return count;
+}
 
 static bool insert_fakefs_entry(
         sqlite3 *database, sqlite3_int64 inode,
@@ -62,11 +163,19 @@ static bool insert_fakefs_entry(
 }
 
 static bool create_boot_failure_root(
-        char root[PATH_MAX], char data[PATH_MAX]) {
+        char root[PATH_MAX],
+        char data[PATH_MAX],
+        char documents[PATH_MAX]) {
     strcpy(root, "/tmp/ish-watch-boot-failure-XXXXXX");
     if (mkdtemp(root) == NULL ||
             snprintf(data, PATH_MAX, "%s/data", root) >= PATH_MAX ||
-            mkdir(data, 0700) < 0)
+            snprintf(
+                    documents,
+                    PATH_MAX,
+                    "%s/documents",
+                    root) >= PATH_MAX ||
+            mkdir(data, 0700) < 0 ||
+            mkdir(documents, 0700) < 0)
         return false;
 
     char path[PATH_MAX];
@@ -134,8 +243,110 @@ static bool create_boot_failure_root(
     return created;
 }
 
+enum shared_mountpoint_fixture {
+    SHARED_MOUNTPOINT_MNT_FILE,
+    SHARED_MOUNTPOINT_SHARED_SYMLINK,
+};
+
+static bool configure_shared_mountpoint_fixture(
+        const char *root,
+        const char *data,
+        enum shared_mountpoint_fixture fixture) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/mnt", data) >=
+            (int) sizeof(path))
+        return false;
+
+    if (fixture == SHARED_MOUNTPOINT_MNT_FILE) {
+        FILE *file = fopen(path, "wb");
+        if (file == NULL || fclose(file) != 0)
+            return false;
+    } else {
+        if (mkdir(path, 0700) < 0)
+            return false;
+        if (snprintf(path, sizeof(path), "%s/mnt/shared", data) >=
+                (int) sizeof(path) ||
+                symlink(".", path) < 0)
+            return false;
+    }
+
+    char database_path[PATH_MAX];
+    if (snprintf(
+            database_path,
+            sizeof(database_path),
+            "%s/meta.db",
+            root) >= (int) sizeof(database_path))
+        return false;
+    sqlite3 *database = NULL;
+    if (sqlite3_open_v2(
+            database_path,
+            &database,
+            SQLITE_OPEN_READWRITE,
+            NULL) != SQLITE_OK) {
+        sqlite3_close(database);
+        return false;
+    }
+
+    bool configured;
+    if (fixture == SHARED_MOUNTPOINT_MNT_FILE) {
+        configured = insert_fakefs_entry(
+                database, 100, "/mnt", 0100644);
+    } else {
+        configured =
+                insert_fakefs_entry(
+                        database, 100, "/mnt", 0040755) &&
+                insert_fakefs_entry(
+                        database, 101, "/mnt/shared", 0120777);
+    }
+    if (sqlite3_close(database) != SQLITE_OK)
+        configured = false;
+    return configured;
+}
+
+static bool shared_mountpoint_start_fails_without_pid_one(
+        const char *data,
+        const char *documents,
+        int expected_error,
+        int alternate_error) {
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        reset_directory_hook(DIRECTORY_HOOK_OBSERVE, NULL);
+        int error = ish_watch_runtime_start(
+                data,
+                documents,
+                "/tmp/ish-watch-mountpoint-test-",
+                "Watch",
+                "exec /sbin/init");
+        lock(&pids_lock);
+        bool pid_one_unpublished = pid_get_task_zombie(1) == NULL;
+        unlock(&pids_lock);
+        bool passed =
+                (error == expected_error ||
+                        error == alternate_error) &&
+                ish_watch_runtime_current_phase() ==
+                        ISH_WATCH_RUNTIME_FAILED &&
+                ish_watch_runtime_last_error() == error &&
+                directory_hook_state.validation_count == 1 &&
+                directory_hook_state.release_count == 1 &&
+                directory_hook_state.released_fd_was_closed &&
+                current == NULL &&
+                pid_one_unpublished;
+        disable_directory_hook();
+        _exit(passed ? 0 : 1);
+    }
+
+    int status;
+    return waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0;
+}
+
 static void remove_boot_failure_root(
-        const char *root, const char *data) {
+        const char *root,
+        const char *data,
+        const char *documents) {
     char path[PATH_MAX];
     static const char *const device_entries[] = {
         "tty1", "tty2", "tty3", "tty4", "tty5", "tty6", "tty7",
@@ -152,8 +363,14 @@ static void remove_boot_failure_root(
     if (snprintf(path, sizeof(path), "%s/bin/sh", data) <
             (int) sizeof(path))
         (void) unlink(path);
+    if (snprintf(path, sizeof(path), "%s/mnt/shared", data) <
+            (int) sizeof(path))
+        (void) unlink(path);
+    if (snprintf(path, sizeof(path), "%s/mnt", data) <
+            (int) sizeof(path))
+        (void) unlink(path);
     static const char *const directories[] = {
-        "dev/pts", "dev", "proc", "bin",
+        "dev/pts", "dev", "proc", "bin", "mnt/shared", "mnt",
     };
     for (size_t index = 0;
             index < sizeof(directories) / sizeof(directories[0]);
@@ -163,6 +380,7 @@ static void remove_boot_failure_root(
             (void) rmdir(path);
     }
     (void) rmdir(data);
+    (void) rmdir(documents);
     static const char *const database_suffixes[] = {
         "meta.db", "meta.db-wal", "meta.db-shm", "meta.db-journal",
     };
@@ -175,6 +393,202 @@ static void remove_boot_failure_root(
             (void) unlink(path);
     }
     (void) rmdir(root);
+}
+
+static bool test_shared_mountpoint_failure(
+        enum shared_mountpoint_fixture fixture,
+        int expected_error,
+        int alternate_error) {
+    char root[PATH_MAX];
+    char data[PATH_MAX];
+    char documents[PATH_MAX];
+    bool created = create_boot_failure_root(
+            root, data, documents);
+    if (!created)
+        return false;
+
+    bool passed =
+            configure_shared_mountpoint_fixture(
+                    root, data, fixture) &&
+            shared_mountpoint_start_fails_without_pid_one(
+                    data,
+                    documents,
+                    expected_error,
+                    alternate_error);
+    remove_boot_failure_root(root, data, documents);
+    return passed;
+}
+
+static void remove_directory_marker(
+        const char *directory, const char *name) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", directory, name) <
+            (int) sizeof(path))
+        (void) unlink(path);
+}
+
+static bool test_directory_replacement_during_validation(void) {
+    char root[] = "/tmp/ish-watch-directory-validation-XXXXXX";
+    if (mkdtemp(root) == NULL)
+        return false;
+
+    char documents[PATH_MAX];
+    char displaced[PATH_MAX];
+    bool paths_fit =
+            snprintf(
+                    documents,
+                    sizeof(documents),
+                    "%s/shared",
+                    root) < (int) sizeof(documents) &&
+            snprintf(
+                    displaced,
+                    sizeof(displaced),
+                    "%s/shared-original",
+                    root) < (int) sizeof(displaced);
+    if (!paths_fit || mkdir(documents, 0700) < 0) {
+        (void) rmdir(root);
+        return false;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        reset_directory_hook(
+                DIRECTORY_HOOK_REPLACE_AFTER_LSTAT, displaced);
+        int descriptors_before = count_open_file_descriptors();
+        int error = ish_watch_runtime_start(
+                "/tmp",
+                documents,
+                "/tmp/ish-watch-validation-test-",
+                "Watch",
+                "exec /sbin/init");
+        int descriptors_after = count_open_file_descriptors();
+        bool passed =
+                error == _ESTALE &&
+                ish_watch_runtime_current_phase() ==
+                        ISH_WATCH_RUNTIME_IDLE &&
+                ish_watch_runtime_last_error() == 0 &&
+                directory_hook_state.mutation_succeeded &&
+                directory_hook_state.lstat_count == 1 &&
+                directory_hook_state.validation_count == 0 &&
+                directory_hook_state.release_count == 1 &&
+                directory_hook_state.released_fd_was_closed &&
+                descriptors_after == descriptors_before;
+        disable_directory_hook();
+        _exit(passed ? 0 : 1);
+    }
+
+    int status = 0;
+    bool passed =
+            child > 0 &&
+            waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0;
+    remove_directory_marker(documents, "replacement-only");
+    (void) rmdir(documents);
+    (void) rmdir(displaced);
+    (void) rmdir(root);
+    return passed;
+}
+
+static bool test_validated_replacement_mounts_open_directory(void) {
+    char root[PATH_MAX];
+    char data[PATH_MAX];
+    char documents[PATH_MAX];
+    if (!create_boot_failure_root(root, data, documents))
+        return false;
+
+    char displaced[PATH_MAX];
+    bool fixture_ready =
+            snprintf(
+                    displaced,
+                    sizeof(displaced),
+                    "%s-original",
+                    documents) < (int) sizeof(displaced) &&
+            write_host_marker(documents, "original-only");
+    if (!fixture_ready) {
+        remove_directory_marker(documents, "original-only");
+        remove_boot_failure_root(root, data, documents);
+        return false;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        char expected_source[PATH_MAX];
+        bool source_resolved =
+                realpath(documents, expected_source) != NULL;
+        reset_directory_hook(
+                DIRECTORY_HOOK_REPLACE_AFTER_VALIDATION, displaced);
+        int error = ish_watch_runtime_start(
+                data,
+                documents,
+                "/tmp/ish-watch-stable-directory-test-",
+                "Watch",
+                "exec /sbin/init");
+
+        bool mounted_original = false;
+        if (error == _ENOEXEC) {
+            char mount_point[] = "/mnt/shared";
+            struct mount *mount = mount_find(mount_point);
+            struct stat mounted_status;
+            struct stat original_status;
+            struct stat replacement_status;
+            int original_marker = openat(
+                    mount->root_fd, "original-only", O_RDONLY);
+            int replacement_marker = openat(
+                    mount->root_fd, "replacement-only", O_RDONLY);
+            mounted_original =
+                    source_resolved &&
+                    strcmp(mount->point, "/mnt/shared") == 0 &&
+                    mount->fs == &realfs &&
+                    strcmp(mount->source, expected_source) == 0 &&
+                    fstat(mount->root_fd, &mounted_status) == 0 &&
+                    lstat(displaced, &original_status) == 0 &&
+                    lstat(documents, &replacement_status) == 0 &&
+                    mounted_status.st_dev == original_status.st_dev &&
+                    mounted_status.st_ino == original_status.st_ino &&
+                    (mounted_status.st_dev != replacement_status.st_dev ||
+                            mounted_status.st_ino !=
+                                    replacement_status.st_ino) &&
+                    original_marker >= 0 &&
+                    replacement_marker < 0;
+            if (original_marker >= 0)
+                (void) close(original_marker);
+            if (replacement_marker >= 0)
+                (void) close(replacement_marker);
+            mount_release(mount);
+        }
+
+        lock(&pids_lock);
+        bool pid_one_unpublished = pid_get_task_zombie(1) == NULL;
+        unlock(&pids_lock);
+        bool passed =
+                error == _ENOEXEC &&
+                ish_watch_runtime_current_phase() ==
+                        ISH_WATCH_RUNTIME_FAILED &&
+                ish_watch_runtime_last_error() == error &&
+                directory_hook_state.mutation_succeeded &&
+                directory_hook_state.validation_count == 1 &&
+                directory_hook_state.release_count == 1 &&
+                directory_hook_state.released_fd_was_closed &&
+                mounted_original &&
+                current == NULL &&
+                pid_one_unpublished;
+        disable_directory_hook();
+        _exit(passed ? 0 : 1);
+    }
+
+    int status = 0;
+    bool passed =
+            child > 0 &&
+            waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0;
+    remove_directory_marker(documents, "replacement-only");
+    (void) rmdir(documents);
+    remove_directory_marker(displaced, "original-only");
+    (void) rmdir(displaced);
+    remove_boot_failure_root(root, data, documents);
+    return passed;
 }
 
 static void check_idle(const char *message) {
@@ -472,43 +886,112 @@ int main(void) {
     test_session_boundaries();
     test_session_lifecycle();
     test_session_limit();
+    CHECK(ish_watch_runtime_test_exit_ownership() == 0,
+            "普通前台程序退出不得结束所属 shell 会话");
+    CHECK(test_directory_replacement_during_validation(),
+            "目录在 lstat 与 open 间被替换时返回 ESTALE、关闭 fd 且保持 IDLE");
 
     CHECK(ish_watch_runtime_start(
-            NULL, "/tmp/ishsock", "Watch",
+            NULL, "/tmp", "/tmp/ishsock", "Watch",
             "exec /sbin/init") == _EINVAL,
             "拒绝缺失 root data 路径");
     check_idle("缺失 root data 路径不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "", "/tmp/ishsock", "Watch",
+            "", "/tmp", "/tmp/ishsock", "Watch",
             "exec /sbin/init") == _EINVAL,
             "拒绝空 root data 路径");
     check_idle("空 root data 路径不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", NULL, "Watch",
+            "/tmp", NULL, "/tmp/ishsock", "Watch",
+            "exec /sbin/init") == _EINVAL,
+            "拒绝缺失 Documents/Shared 路径");
+    check_idle("缺失 Documents/Shared 路径不消耗一次性启动机会");
+    CHECK(ish_watch_runtime_start(
+            "/tmp", "", "/tmp/ishsock", "Watch",
+            "exec /sbin/init") == _EINVAL,
+            "拒绝空 Documents/Shared 路径");
+    check_idle("空 Documents/Shared 路径不消耗一次性启动机会");
+
+    char missing_documents[PATH_MAX];
+    CHECK(snprintf(
+            missing_documents,
+            sizeof(missing_documents),
+            "/tmp/ish-watch-missing-documents-%ld",
+            (long) getpid()) < (int) sizeof(missing_documents),
+            "生成不存在的 Documents/Shared 路径");
+    (void) unlink(missing_documents);
+    (void) rmdir(missing_documents);
+    CHECK(ish_watch_runtime_start(
+            "/tmp", missing_documents, "/tmp/ishsock", "Watch",
+            "exec /sbin/init") == _ENOENT,
+            "拒绝不存在的 Documents/Shared 路径");
+    check_idle("不存在的 Documents/Shared 路径不消耗一次性启动机会");
+
+    char regular_documents[] = "/tmp/ish-watch-documents-file-XXXXXX";
+    int regular_documents_fd = mkstemp(regular_documents);
+    CHECK(regular_documents_fd >= 0,
+            "创建非目录 Documents/Shared fixture");
+    if (regular_documents_fd >= 0) {
+        CHECK(ish_watch_runtime_start(
+                "/tmp", regular_documents, "/tmp/ishsock", "Watch",
+                "exec /sbin/init") == _ENOTDIR,
+                "拒绝非目录 Documents/Shared 路径");
+        check_idle("非目录 Documents/Shared 路径不消耗一次性启动机会");
+        (void) close(regular_documents_fd);
+        (void) unlink(regular_documents);
+    }
+
+    char link_fixture[] = "/tmp/ish-watch-documents-link-XXXXXX";
+    char *link_directory = mkdtemp(link_fixture);
+    CHECK(link_directory != NULL,
+            "创建符号链接 Documents/Shared fixture");
+    if (link_directory != NULL) {
+        char link_path[PATH_MAX];
+        CHECK(snprintf(
+                link_path,
+                sizeof(link_path),
+                "%s/shared",
+                link_directory) < (int) sizeof(link_path),
+                "生成符号链接 Documents/Shared 路径");
+        if (symlink("/tmp", link_path) == 0) {
+            CHECK(ish_watch_runtime_start(
+                    "/tmp", link_path, "/tmp/ishsock", "Watch",
+                    "exec /sbin/init") == _ELOOP,
+                    "拒绝符号链接 Documents/Shared 路径");
+            check_idle(
+                    "符号链接 Documents/Shared 路径不消耗一次性启动机会");
+            (void) unlink(link_path);
+        } else {
+            CHECK(false, "创建符号链接 Documents/Shared 路径");
+        }
+        (void) rmdir(link_directory);
+    }
+    CHECK(ish_watch_runtime_start(
+            "/tmp", "/tmp", NULL, "Watch",
             "exec /sbin/init") == _EINVAL,
             "拒绝缺失 socket 前缀");
     check_idle("缺失 socket 前缀不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "", "Watch",
+            "/tmp", "/tmp", "", "Watch",
             "exec /sbin/init") == _EINVAL,
             "拒绝空 socket 前缀");
     check_idle("空 socket 前缀不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", NULL,
+            "/tmp", "/tmp", "/tmp/ishsock", NULL,
             "exec /sbin/init") == _EINVAL,
             "拒绝缺失 hostname");
     check_idle("缺失 hostname 不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", "",
+            "/tmp", "/tmp", "/tmp/ishsock", "",
             "exec /sbin/init") == _EINVAL,
             "拒绝空 hostname");
     check_idle("空 hostname 不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", "Watch", NULL) == _EINVAL,
+            "/tmp", "/tmp", "/tmp/ishsock", "Watch", NULL) == _EINVAL,
             "拒绝缺失启动命令");
     check_idle("缺失启动命令不消耗一次性启动机会");
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", "Watch", "") == _EINVAL,
+            "/tmp", "/tmp", "/tmp/ishsock", "Watch", "") == _EINVAL,
             "拒绝空启动命令");
     check_idle("空启动命令不消耗一次性启动机会");
 
@@ -516,7 +999,7 @@ int main(void) {
     memset(long_socket_prefix, 's', sizeof(long_socket_prefix) - 1);
     long_socket_prefix[sizeof(long_socket_prefix) - 1] = '\0';
     CHECK(ish_watch_runtime_start(
-            "/tmp", long_socket_prefix, "Watch",
+            "/tmp", "/tmp", long_socket_prefix, "Watch",
             "exec /sbin/init") ==
             _ENAMETOOLONG,
             "拒绝无法放入 sockaddr_un 的 socket 前缀");
@@ -526,21 +1009,38 @@ int main(void) {
     memset(long_command, 'x', sizeof(long_command) - 1);
     long_command[sizeof(long_command) - 1] = '\0';
     CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", "Watch", long_command) == _E2BIG,
+            "/tmp", "/tmp", "/tmp/ishsock", "Watch",
+            long_command) == _E2BIG,
             "拒绝过长启动命令");
     check_idle("过长启动命令不消耗一次性启动机会");
 
     test_output_overflow();
 
+    CHECK(test_shared_mountpoint_failure(
+            SHARED_MOUNTPOINT_MNT_FILE,
+            _ENOTDIR,
+            _ENOTDIR),
+            "guest /mnt 非目录时拒绝挂载且不发布 PID 1");
+    CHECK(test_shared_mountpoint_failure(
+            SHARED_MOUNTPOINT_SHARED_SYMLINK,
+            _ELOOP,
+            _ENOTDIR),
+            "guest /mnt/shared 为符号链接时拒绝挂载且不发布 PID 1");
+    CHECK(test_validated_replacement_mounts_open_directory(),
+            "验证后替换宿主路径仍以稳定 fd 挂载原目录并释放验证 fd");
+    check_idle("子进程挂载点失败不消耗父进程启动机会");
+
     char root[PATH_MAX];
     char data[PATH_MAX];
-    bool created_root = create_boot_failure_root(root, data);
+    char documents[PATH_MAX];
+    bool created_root = create_boot_failure_root(
+            root, data, documents);
     CHECK(created_root,
             "创建启动 exec 失败的最小 fakefs");
     if (!created_root)
         return 1;
     int start_error = ish_watch_runtime_start(
-            data, "/tmp/ishsock", "Watch",
+            data, documents, "/tmp/ishsock", "Watch",
             "exec /sbin/init");
     CHECK(start_error == _ENOEXEC,
             "无效 /bin/sh 应在 boot exec 阶段返回 ENOEXEC");
@@ -553,11 +1053,21 @@ int main(void) {
     unlock(&pids_lock);
     CHECK(current == NULL && pid_one_unpublished,
             "boot exec 失败后不得保留 current 或已发布 PID 1");
-    CHECK(ish_watch_runtime_start(
-            "/tmp", "/tmp/ishsock", "Watch",
-            "exec /sbin/init") == _EALREADY,
+    reset_directory_hook(DIRECTORY_HOOK_OBSERVE, NULL);
+    int descriptors_before_repeat = count_open_file_descriptors();
+    int repeated_start_error = ish_watch_runtime_start(
+            "/tmp", documents, "/tmp/ishsock", "Watch",
+            "exec /sbin/init");
+    int descriptors_after_repeat = count_open_file_descriptors();
+    disable_directory_hook();
+    CHECK(repeated_start_error == _EALREADY,
             "失败后拒绝第二次启动全局 guest");
-    remove_boot_failure_root(root, data);
+    CHECK(directory_hook_state.validation_count == 1 &&
+            directory_hook_state.release_count == 1 &&
+            directory_hook_state.released_fd_was_closed &&
+            descriptors_after_repeat == descriptors_before_repeat,
+            "CAS 拒绝重复启动时只关闭一次已验证目录 fd");
+    remove_boot_failure_root(root, data, documents);
 
     if (failures == 0)
         puts("Watch runtime 公共边界回归通过");

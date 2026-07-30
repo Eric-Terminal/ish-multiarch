@@ -1,54 +1,131 @@
 import Foundation
+
+enum WatchRuntimeRecovery: Equatable, Sendable {
+    case retryPreparation
+    case reopenApplication
+
+    var allowsPreparationRetry: Bool {
+        self == .retryPreparation
+    }
+
+    var emptyStateInstruction: String {
+        switch self {
+        case .retryPreparation:
+            return "Linux 内核尚未启动。请检查文件系统后重新准备；启动设置更改需重新打开 App。"
+        case .reopenApplication:
+            return "请检查文件系统和启动命令，在 App 切换器中结束 iSH 后重新打开。"
+        }
+    }
+
+    var settingsInstruction: String {
+        switch self {
+        case .retryPreparation:
+            return "这次失败发生在 Linux 内核启动前，可以安全重新准备。若修改了系统启动命令，请在 App 切换器中结束 iSH 后重新打开，修改才会生效。"
+        case .reopenApplication:
+            return "本次 App 进程中的 Linux 内核不能原地重启。请先检查文件系统和启动命令，再在 App 切换器中结束 iSH，并从 App 列表重新打开。"
+        }
+    }
+
+    func status(appendingTo detail: String) -> String {
+        "\(detail)\n\(emptyStateInstruction)"
+    }
+}
+
+struct WatchRuntimeActivityState: Equatable, Sendable {
+    private(set) var isForegroundActive = true
+
+    var allowsStartingHeavyWork: Bool {
+        isForegroundActive
+    }
+
+    mutating func update(isForegroundActive: Bool) {
+        self.isForegroundActive = isForegroundActive
+    }
+}
+
+#if os(watchOS)
 import Combine
 import WatchKit
 
 @MainActor
 final class WatchRuntime: ObservableObject {
+    static let maximumSessionCount = WatchTerminalSessions.limit
+
     let automaticHostname: String
     let hostname: String
-    let launchCommand: String
+    let bootCommand: String
     let rootStore: WatchRootStore
-    @Published private(set) var output = ""
-    @Published private(set) var outputLines: [TerminalLine] = []
+
+    @Published private(set) var launchCommand: String
+    @Published private(set) var sessionSnapshots:
+        [WatchTerminalSessionSnapshot] = []
+    @Published private(set) var selectedSessionID: UUID?
+    @Published private(set) var activeSession:
+        WatchTerminalSessionSnapshot?
+    @Published private(set) var renderedLines: [TerminalRenderLine] = []
+    @Published private(set) var cursor = TerminalCursor(
+        row: 0, column: 0, isVisible: true)
+    @Published private(set) var modes = TerminalModes()
+    @Published private(set) var canCreateSession = false
+    @Published private(set) var canRetryPreparation = false
+    @Published private(set) var hasRuntimeFailure = false
+    @Published private(set) var recovery: WatchRuntimeRecovery?
+    @Published private(set) var activityState =
+        WatchRuntimeActivityState()
+    @Published private(set) var apkRepositoryMigration =
+        WatchAPKRepositoryMigrationCoordinator()
+
     @Published private(set) var status = "准备中"
     @Published private(set) var acceptsInput = false
+    @Published private(set) var canReopenSession = false
     @Published private(set) var revision = 0
-
-    private enum GuestPhase: Int32 {
-        case idle = 0
-        case preparing = 1
-        case running = 2
-        case stopped = 3
-        case failed = 4
-    }
 
     private struct RuntimePaths: Sendable {
         let rootData: String
+        let documentsDirectory: String
         let socketPrefix: String
         let hostname: String
+        let bootCommand: String
         let launchCommand: String
+        let columns: UInt16
+        let rows: UInt16
     }
 
-    private enum SetupError: LocalizedError {
-        case socketPrefixTooLong
-
-        var errorDescription: String? {
-            switch self {
-            case .socketPrefixTooLong:
-                return "应用临时目录过长，无法创建本地 socket"
-            }
-        }
+    private struct StartResult: Sendable {
+        let runtime: Int32
+        let session: Int32
+        let sessionID: UInt64
     }
 
-    private var decoder = TerminalDecoder()
-    private var pendingInput: [UInt8] = []
+    private struct APKRepositoryInspectionResult: Sendable {
+        let status: WatchAPKRepositoryMigrationStatus?
+        let errorMessage: String?
+    }
+
+    private enum APKRepositoryOperationResult: Sendable {
+        case success(WatchAPKRepositoryMigrationOutcome)
+        case failure(String)
+    }
+
+    private var terminalSessions = WatchTerminalSessions()
     private var startTask: Task<Void, Never>?
+    private var sessionTasks: [UUID: Task<Void, Never>] = [:]
+    private var apkRepositoryTask: Task<Void, Never>?
+    private var apkRepositoryTaskToken: UUID?
+    private var pendingClose: Set<UUID> = []
     private var started = false
-    private var sawOutput = false
+    private var guestPhase = WatchGuestRuntimePhase.idle
+    private var globalStatusOverride: String? = "准备中"
+    private var pollTick: UInt64 = 0
+    private var inactivePollIndex = 0
+    private var readBuffer = [UInt8](repeating: 0, count: 4096)
     private var setupFailure: String?
-    private var inputFailure: String?
 
-    init(rootStore: WatchRootStore = WatchRootStore()) {
+    convenience init() {
+        self.init(rootStore: WatchRootStore())
+    }
+
+    init(rootStore: WatchRootStore) {
         self.rootStore = rootStore
         let defaults = UserDefaults.standard
         let deviceName = WKInterfaceDevice.current().name
@@ -62,84 +139,627 @@ final class WatchRuntime: ObservableObject {
                 forKey: WatchPreferenceKeys.customHostnameEnabled),
             customHostname: defaults.string(
                 forKey: WatchPreferenceKeys.customHostname) ?? "")
+        bootCommand = WatchPreferences.bootCommand(
+            defaults.string(forKey: WatchPreferenceKeys.bootCommand))
         launchCommand = WatchPreferences.launchCommand(
             defaults.string(forKey: WatchPreferenceKeys.launchCommand))
+        WatchPlatformBridge.install(
+            automaticHostname: automaticHostname)
+        refreshPublishedState()
     }
 
     func run() async {
         startIfNeeded()
         while !Task.isCancelled {
+            if setupFailure != nil {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
             guard poll() else { return }
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
     }
 
-    func submit(_ command: String) {
-        enqueue(Array(command.utf8) + [0x0a])
+    func setForegroundActive(_ isActive: Bool) {
+        var nextState = activityState
+        nextState.update(isForegroundActive: isActive)
+        if nextState != activityState {
+            activityState = nextState
+        }
     }
 
-    func sendControlC() {
-        enqueue([0x03])
+    func retryPreparation() {
+        guard canRetryPreparation,
+              guestPhase == .failed,
+              startTask == nil else {
+            return
+        }
+        started = false
+        guestPhase = .idle
+        setupFailure = nil
+        canRetryPreparation = false
+        recovery = nil
+        globalStatusOverride = "准备中"
+        updateAPKRepositoryMigration {
+            $0.beginChecking()
+        }
+        refreshPublishedState()
+        startIfNeeded()
     }
 
-    func sendTab(after pendingText: String) {
-        enqueue(Array(pendingText.utf8) + [0x09])
+    @discardableResult
+    func updateLaunchCommand(_ command: String) -> Bool {
+        guard WatchPreferences.launchCommandValidationIssue(command) ==
+                nil else {
+            return false
+        }
+        launchCommand = command
+        return true
     }
 
-    func sendEscape(after pendingText: String) {
-        enqueue(Array(pendingText.utf8) + [0x1b])
+    @discardableResult
+    func createSession(
+        title: String? = nil,
+        command: String? = nil
+    ) -> UUID? {
+        createSession(
+            title: title,
+            command: command,
+            purpose: .interactive)
     }
 
-    func sendArrowUp() {
-        sendCursorKey(0x41)
+    @discardableResult
+    func createSharedFilesSession() -> UUID? {
+        createSession(
+            title: "共享文件",
+            command: WatchSharedFiles.terminalCommand,
+            purpose: .interactive)
     }
 
-    func sendArrowDown() {
-        sendCursorKey(0x42)
+    @discardableResult
+    func createRootArchiveSession(rootName: String) -> UUID? {
+        guard rootStore.activeName == rootName else { return nil }
+        let request = WatchRootArchiveRequest(rootName: rootName)
+        return createSession(
+            title: "导出 \(rootStore.displayName(for: rootName))",
+            command: request.command,
+            purpose: .interactive)
     }
 
-    func sendArrowRight(after pendingText: String) {
+    @discardableResult
+    func createMaintenanceSession(
+        title: String,
+        operation: WatchSoftwareMaintenanceOperation,
+        body: String
+    ) -> UUID? {
+        guard canStartSoftwareMaintenance else { return nil }
+        return createApprovedMaintenanceSession(
+            title: title,
+            operation: operation,
+            body: body)
+    }
+
+    var canStartSoftwareMaintenance: Bool {
+        canCreateSession &&
+            activityState.allowsStartingHeavyWork &&
+            apkRepositoryTask == nil &&
+            !apkRepositoryMigration.isBusy &&
+            !terminalSessions.hasExecutingSoftwareMaintenance
+    }
+
+    var canStartPackageUpgrade: Bool {
+        canStartSoftwareMaintenance &&
+            apkRepositoryMigration.canStartPackageUpgrade
+    }
+
+    @discardableResult
+    func startPackageUpgrade(
+        title: String,
+        body: String
+    ) -> Bool {
+        guard canStartPackageUpgrade else { return false }
+        var migration = apkRepositoryMigration
+        guard migration.beginUpgradePreparation() else {
+            return false
+        }
+        apkRepositoryMigration = migration
+
+        let token = UUID()
+        apkRepositoryTaskToken = token
+        apkRepositoryTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.prepareAPKRepositoriesForUpgrade()
+            }.value
+            guard let self,
+                  self.apkRepositoryTaskToken == token else {
+                return
+            }
+            self.apkRepositoryTask = nil
+            self.apkRepositoryTaskToken = nil
+
+            switch result {
+            case let .failure(message):
+                self.updateAPKRepositoryMigration {
+                    $0.recordFailure(message)
+                }
+            case let .success(outcome):
+                guard self.activityState.allowsStartingHeavyWork else {
+                    self.updateAPKRepositoryMigration {
+                        $0.recordPreparedUpgradeFailure(
+                            outcome: outcome,
+                            message:
+                                "App 已进入后台，未启动软件升级；" +
+                                "请回到前台后重试")
+                    }
+                    return
+                }
+                guard self.canCreateSession,
+                      !self.terminalSessions
+                        .hasExecutingSoftwareMaintenance,
+                      let sessionID =
+                        self.createApprovedMaintenanceSession(
+                        title: title,
+                        operation: .upgradePackages,
+                        body: body) else {
+                    self.updateAPKRepositoryMigration {
+                        $0.recordPreparedUpgradeFailure(
+                            outcome: outcome,
+                            message:
+                                "无法创建升级终端；" +
+                                "请关闭一个终端后重试")
+                    }
+                    return
+                }
+                self.updateAPKRepositoryMigration {
+                    $0.recordPreparedUpgrade(
+                        sessionID: sessionID,
+                        outcome: outcome)
+                }
+            }
+        }
+        return true
+    }
+
+    private func createApprovedMaintenanceSession(
+        title: String,
+        operation: WatchSoftwareMaintenanceOperation,
+        body: String
+    ) -> UUID? {
+        guard WatchPreferences.launchCommandValidationIssue(body) ==
+                nil else {
+            return nil
+        }
+        let completionToken =
+            WatchSoftwareMaintenanceCompletionProtocol.makeToken()
+        let command =
+            WatchSoftwareMaintenanceCompletionProtocol.shellCommand(
+                body: body,
+                operation: operation,
+                token: completionToken)
+        return createSession(
+            title: title,
+            command: command,
+            purpose: .softwareMaintenance(operation),
+            maintenanceCompletionToken: completionToken)
+    }
+
+    private func createSession(
+        title: String?,
+        command: String?,
+        purpose: WatchTerminalSessionPurpose,
+        maintenanceCompletionToken: String? = nil
+    ) -> UUID? {
+        if command == nil {
+            refreshLaunchCommandFromDefaults()
+        }
+        let sessionCommand = command ?? launchCommand
+        guard guestPhase == .running,
+              WatchPreferences.launchCommandValidationIssue(
+                sessionCommand) == nil,
+              let id = terminalSessions.add(
+                title: title,
+                lifecycle: .opening,
+                purpose: purpose,
+                maintenanceCompletionToken:
+                    maintenanceCompletionToken),
+              let session = terminalSessions.session(id: id) else {
+            return nil
+        }
+        globalStatusOverride = nil
+        refreshPublishedState()
+        let request = WatchTerminalSessionLaunchRequest(
+            defaultCommand: launchCommand,
+            command: sessionCommand,
+            columns: session.screen.columns,
+            rows: session.screen.rows)
+        scheduleSessionCreation(
+            id: id,
+            request: request)
+        return id
+    }
+
+    @discardableResult
+    func selectSession(_ id: UUID) -> Bool {
+        guard terminalSessions.select(id) else { return false }
+        refreshPublishedState()
+        if guestPhase == .running {
+            _ = pollSession(id: id, maximumReads: 4)
+            refreshPublishedState()
+        }
+        return true
+    }
+
+    @discardableResult
+    func renameSession(_ id: UUID, title: String) -> Bool {
+        guard terminalSessions.rename(id, title: title) else {
+            return false
+        }
+        refreshPublishedState()
+        return true
+    }
+
+    @discardableResult
+    func clearScrollback(for id: UUID) -> Int? {
+        guard let removedLineCount =
+                terminalSessions.clearScrollback(id) else {
+            return nil
+        }
+        refreshPublishedState()
+        return removedLineCount
+    }
+
+    @discardableResult
+    func closeSession(_ id: UUID) -> Bool {
+        guard let session = terminalSessions.session(id: id) else {
+            return false
+        }
+        recordAPKUpgradeSessionClosed(id)
+        if sessionTasks[id] != nil {
+            if session.lifecycle == .closing {
+                return true
+            }
+            pendingClose.insert(id)
+            terminalSessions.update(id) { $0.lifecycle = .closing }
+            refreshPublishedState()
+            return true
+        }
+        guard session.sessionID != 0 else {
+            terminalSessions.remove(id)
+            refreshPublishedState()
+            return true
+        }
+        scheduleSessionClose(id: id, sessionID: session.sessionID)
+        return true
+    }
+
+    @discardableResult
+    func closeActiveSession() -> Bool {
+        guard let id = terminalSessions.selectedSessionID else {
+            return false
+        }
+        return closeSession(id)
+    }
+
+    func reopenSession() {
+        guard let id = terminalSessions.selectedSessionID,
+              let session = terminalSessions.session(id: id),
+              session.canReopenSession,
+              sessionTasks[id] == nil else {
+            return
+        }
+        recordAPKUpgradeSessionClosed(id)
+
+        _ = drainOutput(id: id, maximumReads: 4)
+        guard let refreshedSession =
+                terminalSessions.session(id: id) else {
+            return
+        }
+        let previousSessionID = refreshedSession.sessionID
+        let columns = refreshedSession.screen.columns
+        let rows = refreshedSession.screen.rows
+        let separatesOutput = refreshedSession.sawOutput
+        refreshLaunchCommandFromDefaults()
+        let command = launchCommand
+        var generation: UInt64 = 0
+        terminalSessions.update(id) {
+            generation = $0.beginOperation()
+            $0.beginOpening(purpose: .interactive)
+        }
+        refreshPublishedState()
+
+        sessionTasks[id] = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                let closeResult = previousSessionID == 0 ?
+                    0 : ish_watch_session_close(previousSessionID)
+                guard closeResult == 0 else {
+                    return (
+                        result: closeResult,
+                        id: UInt64(0),
+                        previousClosed: false)
+                }
+                let created = Self.createCSession(
+                    command: command,
+                    columns: columns,
+                    rows: rows)
+                return (
+                    result: created.result,
+                    id: created.id,
+                    previousClosed: true)
+            }.value
+            guard let self else {
+                if result.result >= 0 {
+                    _ = await Task.detached {
+                        ish_watch_session_close(result.id)
+                    }.value
+                }
+                return
+            }
+            self.sessionTasks[id] = nil
+            guard let current =
+                    self.terminalSessions.session(id: id),
+                  current.matchesOperation(
+                    generation: generation) else {
+                self.pendingClose.remove(id)
+                if result.result >= 0 {
+                    _ = await Task.detached {
+                        ish_watch_session_close(result.id)
+                    }.value
+                }
+                return
+            }
+
+            if self.pendingClose.remove(id) != nil {
+                self.finishPendingClose(
+                    id: id,
+                    createdResult: result.result,
+                    createdSessionID: result.id,
+                    previousSessionID: previousSessionID,
+                    previousClosed: result.previousClosed)
+                return
+            }
+
+            if result.result < 0 {
+                let retainedID = result.previousClosed ?
+                    UInt64(0) : previousSessionID
+                self.terminalSessions.update(id) {
+                    $0.markFailed(
+                        WatchTerminalStatusText.errorMessage(
+                            prefix: "重新打开失败",
+                            code: result.result),
+                        sessionID: retainedID)
+                }
+            } else {
+                self.terminalSessions.update(id) {
+                    $0.finishOpening(
+                        sessionID: result.id,
+                        createdColumns: columns,
+                        createdRows: rows,
+                        separatesPreviousOutput: separatesOutput)
+                }
+            }
+            self.refreshPublishedState()
+        }
+    }
+
+    func resize(columns: Int, rows: Int) {
+        guard let id = terminalSessions.selectedSessionID else { return }
+        resizeSession(id, columns: columns, rows: rows)
+    }
+
+    func resizeSession(_ id: UUID, columns: Int, rows: Int) {
+        var resized = false
+        terminalSessions.update(id) {
+            resized = $0.resize(columns: columns, rows: rows)
+        }
+        guard resized else { return }
+        if guestPhase == .running {
+            _ = applyWindowSize(id: id)
+        }
+        refreshPublishedState()
+    }
+
+    @discardableResult
+    func sendInput(_ bytes: [UInt8]) -> Bool {
+        enqueue(bytes)
+    }
+
+    @discardableResult
+    func sendText(_ text: String) -> Bool {
+        enqueue(WatchTerminalInput.text(text))
+    }
+
+    @discardableResult
+    func sendReturn(after pendingText: String = "") -> Bool {
+        enqueue(WatchTerminalInput.enter(after: pendingText))
+    }
+
+    @discardableResult
+    func sendDelete(after pendingText: String = "") -> Bool {
+        enqueue(WatchTerminalInput.delete(after: pendingText))
+    }
+
+    @discardableResult
+    func sendMeta(
+        _ text: String,
+        after pendingText: String = ""
+    ) -> Bool {
+        guard let bytes = WatchTerminalInput.meta(
+            text,
+            after: pendingText
+        ) else {
+            return false
+        }
+        return enqueue(bytes)
+    }
+
+    @discardableResult
+    func sendControlC() -> Bool {
+        sendControl("C")
+    }
+
+    @discardableResult
+    func sendControl(
+        _ character: Character,
+        after pendingText: String = ""
+    ) -> Bool {
+        guard let byte = WatchControlInput.byte(
+            for: character) else {
+            return false
+        }
+        return enqueue(
+            WatchTerminalInput.sequence([byte], after: pendingText))
+    }
+
+    @discardableResult
+    func sendTab(after pendingText: String) -> Bool {
+        enqueue(WatchTerminalInput.sequence([0x09], after: pendingText))
+    }
+
+    @discardableResult
+    func sendEscape(after pendingText: String) -> Bool {
+        enqueue(WatchTerminalInput.sequence(
+            [WatchTerminalInput.escape],
+            after: pendingText))
+    }
+
+    @discardableResult
+    func sendArrowUp(after pendingText: String = "") -> Bool {
+        sendCursorKey(0x41, after: pendingText)
+    }
+
+    @discardableResult
+    func sendArrowDown(after pendingText: String = "") -> Bool {
+        sendCursorKey(0x42, after: pendingText)
+    }
+
+    @discardableResult
+    func sendArrowRight(after pendingText: String) -> Bool {
         sendCursorKey(0x43, after: pendingText)
     }
 
-    func sendArrowLeft(after pendingText: String) {
+    @discardableResult
+    func sendArrowLeft(after pendingText: String) -> Bool {
         sendCursorKey(0x44, after: pendingText)
     }
 
     private func startIfNeeded() {
         guard !started else { return }
         started = true
-        status = "准备 Linux"
+        canRetryPreparation = false
+        recovery = nil
+        globalStatusOverride = "准备 Linux"
+        refreshPublishedState()
 
+        let initialID = terminalSessions.selectedSessionID
+        var initialGeneration: UInt64 = 0
+        if let initialID {
+            terminalSessions.update(initialID) {
+                initialGeneration = $0.beginOperation()
+            }
+        }
         startTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.startTask = nil
+            }
             do {
                 let root = try await self.rootStore.prepareForLaunch()
-                let paths = try self.preparePaths(rootData: root.dataPath)
-                let result = await Task.detached(priority: .userInitiated) {
-                    Self.startRuntime(paths)
+                let initialSession = initialID.flatMap {
+                    self.terminalSessions.session(id: $0)
+                } ?? WatchTerminalSession(
+                    title: "终端",
+                    columns: 40,
+                    rows: 18)
+                let sharedDirectory =
+                    try WatchSharedFiles.ensureSystemDirectory()
+                _ = try await Task.detached(priority: .utility) {
+                    try WatchSharedFiles
+                        .cleanupInterruptedRootArchivePartials(
+                            in: sharedDirectory)
                 }.value
-                if result < 0 {
-                    self.publish(
-                        status: Self.errorMessage(
-                            prefix: "启动失败", code: result),
-                        acceptsInput: false)
+                let paths = try self.preparePaths(
+                    rootData: root.dataPath,
+                    documentsDirectory: sharedDirectory.path,
+                    columns: initialSession.screen.columns,
+                    rows: initialSession.screen.rows)
+                let result = await Task.detached(
+                    priority: .userInitiated
+                ) {
+                    Self.startRuntimeAndSession(paths)
+                }.value
+
+                if result.runtime < 0 {
+                    self.guestPhase = .failed
+                    self.recordAPKRepositoryRuntimeUnavailable()
+                    self.reportRecovery(
+                        detail: WatchTerminalStatusText.errorMessage(
+                            prefix: "启动失败", code: result.runtime),
+                        recovery: .reopenApplication)
                 } else {
+                    self.guestPhase = .running
+                    self.recovery = nil
+                    self.globalStatusOverride = nil
                     self.rootStore.activate(root.name)
-                    self.status = "等待终端"
-                    _ = self.poll()
+                    self.scheduleAPKRepositoryInspection()
+                    let initialSessionMatches: Bool
+                    if let initialID {
+                        initialSessionMatches =
+                            self.terminalSessions.session(id: initialID)?
+                                .matchesOperation(
+                                    generation: initialGeneration) == true
+                    } else {
+                        initialSessionMatches = false
+                    }
+                    if result.session < 0 {
+                        if let initialID, initialSessionMatches {
+                            self.terminalSessions.update(initialID) {
+                                $0.markFailed(
+                                    WatchTerminalStatusText.errorMessage(
+                                    prefix: "终端启动失败",
+                                    code: result.session))
+                            }
+                        }
+                    } else if !initialSessionMatches {
+                        _ = await Task.detached {
+                            ish_watch_session_close(result.sessionID)
+                        }.value
+                    } else if let initialID {
+                        self.terminalSessions.update(initialID) {
+                            $0.finishOpening(
+                                sessionID: result.sessionID,
+                                createdColumns: Int(paths.columns),
+                                createdRows: Int(paths.rows),
+                                separatesPreviousOutput: false)
+                        }
+                    }
+                }
+                self.refreshPublishedState()
+                if self.guestPhase == .running {
+                    _ = self.pollSessions()
+                    self.refreshPublishedState()
                 }
             } catch {
+                self.guestPhase = .failed
                 self.setupFailure = error.localizedDescription
-                self.publish(
-                    status: self.setupFailure ?? "准备 Linux 失败",
-                    acceptsInput: false)
+                self.canRetryPreparation = true
+                self.recordAPKRepositoryRuntimeUnavailable()
+                // C runtime 尚未被调用，只有这个边界允许复用当前 App 进程。
+                self.reportRecovery(
+                    detail: self.setupFailure ?? "准备 Linux 失败",
+                    recovery: .retryPreparation)
+                self.refreshPublishedState()
             }
         }
     }
 
-    private func preparePaths(rootData: String) throws -> RuntimePaths {
-        // 真机去掉等价的 /private 前缀，使容器内绝对路径落入 Darwin sun_path 上限。
+    private func preparePaths(
+        rootData: String,
+        documentsDirectory: String,
+        columns: Int,
+        rows: Int
+    ) throws -> RuntimePaths {
+        refreshLaunchCommandFromDefaults()
+        // 真机去掉等价的 /private 前缀，使绝对路径满足 Darwin sun_path 上限。
         let socketPrefix: String
 #if targetEnvironment(simulator)
         socketPrefix = "/tmp/ishsock"
@@ -152,157 +772,787 @@ final class WatchRuntime: ObservableObject {
             .appendingPathComponent("s")
 #endif
         guard socketPrefix.utf8.count <= 82 else {
-            throw SetupError.socketPrefixTooLong
+            throw WatchRuntimeSetupError.socketPrefixTooLong
         }
         return RuntimePaths(
             rootData: rootData,
+            documentsDirectory: documentsDirectory,
             socketPrefix: socketPrefix,
             hostname: hostname,
-            launchCommand: launchCommand)
+            bootCommand: bootCommand,
+            launchCommand: launchCommand,
+            columns: UInt16(columns),
+            rows: UInt16(rows))
     }
 
-    nonisolated private static func startRuntime(
-            _ paths: RuntimePaths) -> Int32 {
-        paths.rootData.withCString { rootData in
-            paths.socketPrefix.withCString { socketPrefix in
-                paths.hostname.withCString { hostname in
-                    paths.launchCommand.withCString { launchCommand in
-                        ish_watch_runtime_start(
-                            rootData,
-                            socketPrefix,
-                            hostname,
-                            launchCommand)
+    private func refreshLaunchCommandFromDefaults() {
+        let command = WatchPreferences.launchCommand(
+            UserDefaults.standard.string(
+                forKey: WatchPreferenceKeys.launchCommand))
+        if launchCommand != command {
+            launchCommand = command
+        }
+    }
+
+    nonisolated private static func startRuntimeAndSession(
+        _ paths: RuntimePaths
+    ) -> StartResult {
+        let runtimeResult = paths.rootData.withCString { rootData in
+            paths.documentsDirectory.withCString { documentsDirectory in
+                paths.socketPrefix.withCString { socketPrefix in
+                    paths.hostname.withCString { hostname in
+                        paths.bootCommand.withCString { bootCommand in
+                            ish_watch_runtime_start(
+                                rootData,
+                                documentsDirectory,
+                                socketPrefix,
+                                hostname,
+                                bootCommand)
+                        }
                     }
+                }
+            }
+        }
+        guard runtimeResult == 0 else {
+            return StartResult(
+                runtime: runtimeResult,
+                session: 0,
+                sessionID: 0)
+        }
+        let sessionResult = createCSession(
+            command: paths.launchCommand,
+            columns: Int(paths.columns),
+            rows: Int(paths.rows))
+        return StartResult(
+            runtime: runtimeResult,
+            session: sessionResult.result,
+            sessionID: sessionResult.id)
+    }
+
+    nonisolated private static func createCSession(
+        command: String,
+        columns: Int,
+        rows: Int
+    ) -> (result: Int32, id: UInt64) {
+        var id: UInt64 = 0
+        let result = command.withCString {
+            ish_watch_session_create(
+                $0, UInt16(columns), UInt16(rows), &id)
+        }
+        return (result, id)
+    }
+
+    private func scheduleAPKRepositoryInspection() {
+        guard apkRepositoryTask == nil else { return }
+        updateAPKRepositoryMigration {
+            $0.beginChecking()
+        }
+        let token = UUID()
+        apkRepositoryTaskToken = token
+        apkRepositoryTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Self.inspectAPKRepositories()
+            }.value
+            guard let self,
+                  self.apkRepositoryTaskToken == token else {
+                return
+            }
+            self.apkRepositoryTask = nil
+            self.apkRepositoryTaskToken = nil
+            if let status = result.status {
+                self.updateAPKRepositoryMigration {
+                    $0.recordInspection(status)
+                }
+            }
+            if let errorMessage = result.errorMessage {
+                self.updateAPKRepositoryMigration {
+                    $0.recordFailure(
+                        errorMessage,
+                        preserving: result.status)
                 }
             }
         }
     }
 
-    private func poll() -> Bool {
-        if let setupFailure {
-            publish(status: setupFailure, acceptsInput: false)
-            return false
+    nonisolated private static func inspectAPKRepositories()
+        -> APKRepositoryInspectionResult
+    {
+        let service = WatchAPKRepositoryMigrationService(
+            guestFiles: WatchAPKRepositoryGuestFileStore())
+        let status: WatchAPKRepositoryMigrationStatus
+        do {
+            status = try service.status()
+        } catch {
+            return APKRepositoryInspectionResult(
+                status: nil,
+                errorMessage: error.localizedDescription)
         }
-        drainOutput()
-        flushPendingInput()
 
-        switch GuestPhase(rawValue: ish_watch_runtime_current_phase()) {
+        guard case .current = status else {
+            return APKRepositoryInspectionResult(
+                status: status,
+                errorMessage: nil)
+        }
+        do {
+            let template =
+                try WatchAPKRepositoriesTemplate.bundled()
+            _ = try service.prepareRepositories(template: template)
+            return APKRepositoryInspectionResult(
+                status: status,
+                errorMessage: nil)
+        } catch {
+            return APKRepositoryInspectionResult(
+                status: status,
+                errorMessage: error.localizedDescription)
+        }
+    }
+
+    nonisolated private static func prepareAPKRepositoriesForUpgrade()
+        -> APKRepositoryOperationResult
+    {
+        do {
+            let service = WatchAPKRepositoryMigrationService(
+                guestFiles: WatchAPKRepositoryGuestFileStore())
+            let status = try service.status()
+            if case .newerThanApp = status {
+                return .success(.skipped(status))
+            }
+            let template =
+                try WatchAPKRepositoriesTemplate.bundled()
+            return .success(
+                try service.prepareRepositories(template: template))
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    nonisolated private static func finishAPKRepositoryMigration()
+        -> APKRepositoryOperationResult
+    {
+        do {
+            let service = WatchAPKRepositoryMigrationService(
+                guestFiles: WatchAPKRepositoryGuestFileStore())
+            let status = try service.status()
+            if case .newerThanApp = status {
+                return .success(.skipped(status))
+            }
+            let template =
+                try WatchAPKRepositoriesTemplate.bundled()
+            return .success(
+                try service.finishMigration(template: template))
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    private func observeAPKUpgradeSession(_ id: UUID) {
+        guard let session = terminalSessions.session(id: id),
+              session.purpose ==
+                .softwareMaintenance(.upgradePackages),
+              let phase = session.maintenancePhase else {
+            return
+        }
+        let upgradePhase:
+            WatchAPKRepositoryMigrationCoordinator.UpgradePhase
+        switch phase {
+        case .executing:
+            upgradePhase = .executing
+        case .completed:
+            upgradePhase = .completed
+        case let .failed(status):
+            upgradePhase = .failed(status)
+        case .interrupted:
+            upgradePhase = .interrupted
+        }
+
+        var migration = apkRepositoryMigration
+        let shouldFinish = migration.observeMaintenance(
+            sessionID: id,
+            phase: upgradePhase)
+        if migration != apkRepositoryMigration {
+            apkRepositoryMigration = migration
+        }
+        if shouldFinish {
+            scheduleAPKRepositoryMigrationFinish(sessionID: id)
+        }
+    }
+
+    private func recordAPKUpgradeSessionClosed(_ id: UUID) {
+        updateAPKRepositoryMigration {
+            $0.recordSessionClosed(id)
+        }
+    }
+
+    private func scheduleAPKRepositoryMigrationFinish(
+        sessionID: UUID
+    ) {
+        guard apkRepositoryTask == nil else {
+            updateAPKRepositoryMigration {
+                $0.recordMigrationFinishFailure(
+                    sessionID: sessionID,
+                    message: "迁移收尾任务冲突，请稍后重试软件升级")
+            }
+            return
+        }
+        let token = UUID()
+        apkRepositoryTaskToken = token
+        apkRepositoryTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.finishAPKRepositoryMigration()
+            }.value
+            guard let self,
+                  self.apkRepositoryTaskToken == token else {
+                return
+            }
+            self.apkRepositoryTask = nil
+            self.apkRepositoryTaskToken = nil
+            switch result {
+            case let .success(outcome):
+                self.updateAPKRepositoryMigration {
+                    $0.recordMigrationFinished(
+                        sessionID: sessionID,
+                        outcome: outcome)
+                }
+            case let .failure(message):
+                self.updateAPKRepositoryMigration {
+                    $0.recordMigrationFinishFailure(
+                        sessionID: sessionID,
+                        message: "记录软件仓库迁移状态失败：\(message)")
+                }
+            }
+        }
+    }
+
+    private func updateAPKRepositoryMigration(
+        _ update: (inout WatchAPKRepositoryMigrationCoordinator) -> Void
+    ) {
+        var migration = apkRepositoryMigration
+        update(&migration)
+        if migration != apkRepositoryMigration {
+            apkRepositoryMigration = migration
+        }
+    }
+
+    private func recordAPKRepositoryRuntimeUnavailable() {
+        updateAPKRepositoryMigration {
+            $0.recordRuntimeUnavailable(
+                "Linux 未运行，无法检查")
+        }
+    }
+
+    private func scheduleSessionCreation(
+        id: UUID,
+        request: WatchTerminalSessionLaunchRequest
+    ) {
+        var generation: UInt64 = 0
+        terminalSessions.update(id) {
+            generation = $0.beginOperation()
+        }
+        sessionTasks[id] = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.createCSession(
+                    command: request.command,
+                    columns: request.columns,
+                    rows: request.rows)
+            }.value
+            guard let self else {
+                if result.result >= 0 {
+                    _ = await Task.detached {
+                        ish_watch_session_close(result.id)
+                    }.value
+                }
+                return
+            }
+            self.sessionTasks[id] = nil
+            guard let current =
+                    self.terminalSessions.session(id: id),
+                  current.matchesOperation(
+                    generation: generation) else {
+                self.pendingClose.remove(id)
+                if result.result >= 0 {
+                    _ = await Task.detached {
+                        ish_watch_session_close(result.id)
+                    }.value
+                }
+                return
+            }
+
+            if self.pendingClose.remove(id) != nil {
+                if result.result < 0 {
+                    self.terminalSessions.remove(id)
+                    self.refreshPublishedState()
+                } else {
+                    self.terminalSessions.update(id) {
+                        $0.finishOpening(
+                            sessionID: result.id,
+                            createdColumns: request.columns,
+                            createdRows: request.rows,
+                            separatesPreviousOutput: false)
+                        $0.lifecycle = .closing
+                    }
+                    self.scheduleSessionClose(
+                        id: id, sessionID: result.id)
+                }
+                return
+            }
+
+            if result.result < 0 {
+                self.terminalSessions.update(id) {
+                    $0.markFailed(
+                        WatchTerminalStatusText.errorMessage(
+                        prefix: "终端启动失败",
+                            code: result.result))
+                }
+                self.observeAPKUpgradeSession(id)
+            } else {
+                self.terminalSessions.update(id) {
+                    $0.finishOpening(
+                        sessionID: result.id,
+                        createdColumns: request.columns,
+                        createdRows: request.rows,
+                        separatesPreviousOutput: false)
+                }
+            }
+            self.refreshPublishedState()
+        }
+    }
+
+    private func scheduleSessionClose(id: UUID, sessionID: UInt64) {
+        var generation: UInt64 = 0
+        terminalSessions.update(id) {
+            generation = $0.beginOperation()
+            $0.lifecycle = .closing
+        }
+        refreshPublishedState()
+        sessionTasks[id] = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                ish_watch_session_close(sessionID)
+            }.value
+            guard let self else { return }
+            self.sessionTasks[id] = nil
+            guard let current =
+                    self.terminalSessions.session(id: id),
+                  current.matchesOperation(
+                    generation: generation,
+                    sessionID: sessionID) else {
+                self.pendingClose.remove(id)
+                return
+            }
+            if result == 0 {
+                self.terminalSessions.remove(id)
+            } else {
+                self.terminalSessions.update(id) {
+                    $0.markFailed(
+                        WatchTerminalStatusText.errorMessage(
+                            prefix: "关闭终端失败", code: result),
+                        sessionID: sessionID)
+                }
+            }
+            self.refreshPublishedState()
+        }
+    }
+
+    private func finishPendingClose(
+        id: UUID,
+        createdResult: Int32,
+        createdSessionID: UInt64,
+        previousSessionID: UInt64,
+        previousClosed: Bool
+    ) {
+        if createdResult >= 0 {
+            terminalSessions.update(id) {
+                $0.sessionID = createdSessionID
+                $0.lifecycle = .closing
+            }
+            scheduleSessionClose(
+                id: id, sessionID: createdSessionID)
+        } else if !previousClosed && previousSessionID != 0 {
+            terminalSessions.update(id) {
+                $0.sessionID = previousSessionID
+                $0.lifecycle = .closing
+            }
+            scheduleSessionClose(
+                id: id, sessionID: previousSessionID)
+        } else {
+            terminalSessions.remove(id)
+            refreshPublishedState()
+        }
+    }
+
+    private func poll() -> Bool {
+        let phase = WatchGuestRuntimePhase(
+            rawValue: ish_watch_runtime_current_phase())
+        switch phase {
         case .idle:
-            publish(status: "准备中", acceptsInput: false)
+            guestPhase = .idle
+            recovery = nil
+            globalStatusOverride = "准备中"
+            refreshPublishedState()
             return true
         case .preparing:
-            publish(status: "准备 Linux", acceptsInput: false)
+            guestPhase = .preparing
+            recovery = nil
+            globalStatusOverride = "准备 Linux"
+            refreshPublishedState()
             return true
         case .running:
-            if let inputFailure {
-                publish(status: inputFailure, acceptsInput: false)
+            guestPhase = .running
+            recovery = nil
+            globalStatusOverride = nil
+            let changed = pollSessions()
+            if changed {
+                refreshPublishedState()
             } else {
-                publish(
-                    status: sawOutput ? "运行中" : "等待终端",
-                    acceptsInput: sawOutput)
+                refreshRuntimeAvailability()
             }
             return true
         case .stopped:
-            publish(status: "已停止", acceptsInput: false)
+            guestPhase = .stopped
+            recordAPKRepositoryRuntimeUnavailable()
+            reportRecovery(
+                detail: "Linux 已停止",
+                recovery: .reopenApplication)
+            refreshPublishedState()
             return false
         case .failed:
-            publish(
-                status: Self.errorMessage(
+            guestPhase = .failed
+            recordAPKRepositoryRuntimeUnavailable()
+            reportRecovery(
+                detail: WatchTerminalStatusText.errorMessage(
                     prefix: "运行失败",
                     code: ish_watch_runtime_last_error()),
-                acceptsInput: false)
+                recovery: .reopenApplication)
+            refreshPublishedState()
             return false
         case .none:
-            publish(status: "未知运行状态", acceptsInput: false)
+            guestPhase = .failed
+            recordAPKRepositoryRuntimeUnavailable()
+            reportRecovery(
+                detail: "未知运行状态",
+                recovery: .reopenApplication)
+            refreshPublishedState()
             return false
         }
     }
 
-    private func publish(status newStatus: String, acceptsInput newValue: Bool) {
-        if status != newStatus {
-            status = newStatus
+    private func pollSessions() -> Bool {
+        pollTick &+= 1
+        var changed = false
+        if let activeID = terminalSessions.selectedSessionID {
+            changed = pollSession(
+                id: activeID, maximumReads: 4) || changed
         }
-        if acceptsInput != newValue {
-            acceptsInput = newValue
+
+        // 非活动会话每秒左右轮询一个，避免多个空闲 PTY 常驻占用 Watch CPU。
+        if pollTick % 5 == 0 {
+            let activeID = terminalSessions.selectedSessionID
+            let inactiveIDs = terminalSessions.sessions.compactMap {
+                $0.id == activeID || $0.sessionID == 0 ? nil : $0.id
+            }
+            if !inactiveIDs.isEmpty {
+                let id = inactiveIDs[
+                    inactivePollIndex % inactiveIDs.count]
+                inactivePollIndex =
+                    (inactivePollIndex + 1) % inactiveIDs.count
+                changed = pollSession(
+                    id: id, maximumReads: 1) || changed
+            }
         }
+        return changed
     }
 
-    private func drainOutput() {
-        var buffer = [UInt8](repeating: 0, count: 4096)
+    private func pollSession(
+        id: UUID,
+        maximumReads: Int
+    ) -> Bool {
+        guard let session = terminalSessions.session(id: id),
+              session.sessionID != 0,
+              session.lifecycle != .closing else {
+            return false
+        }
+        if case .failed = session.lifecycle {
+            return false
+        }
+        defer {
+            observeAPKUpgradeSession(id)
+        }
+        let sessionID = session.sessionID
+        var changed = drainOutput(
+            id: id, maximumReads: maximumReads)
+        if case .failed =
+                terminalSessions.session(id: id)?.lifecycle {
+            return true
+        }
+
+        var rawStatus = ish_watch_session_status()
+        let statusResult = ish_watch_session_status(
+            sessionID, &rawStatus)
+        guard statusResult >= 0 else {
+            terminalSessions.update(id) {
+                $0.markFailed(
+                    WatchTerminalStatusText.errorMessage(
+                    prefix: "读取终端状态失败",
+                    code: statusResult))
+            }
+            return true
+        }
+
+        switch WatchCSessionPhase(rawValue: rawStatus.phase) {
+        case .starting:
+            if terminalSessions.session(id: id)?.lifecycle != .opening {
+                terminalSessions.update(id) { $0.lifecycle = .opening }
+                changed = true
+            }
+        case .running:
+            if terminalSessions.session(id: id)?.lifecycle != .running {
+                terminalSessions.update(id) { $0.markRunning() }
+                changed = true
+            }
+            changed = applyWindowSize(id: id) || changed
+            changed = flushPendingInput(id: id) || changed
+        case .exited:
+            let description = WatchTerminalStatusText.exitDescription(
+                rawStatus.wait_status)
+            if terminalSessions.session(id: id)?.status != description {
+                terminalSessions.update(id) {
+                    $0.markExited(description)
+                }
+                changed = true
+            }
+        case .none:
+            terminalSessions.update(id) {
+                $0.markFailed("未知终端状态")
+            }
+            changed = true
+        }
+        return changed
+    }
+
+    private func drainOutput(
+        id: UUID,
+        maximumReads: Int
+    ) -> Bool {
+        guard let sessionID =
+                terminalSessions.session(id: id)?.sessionID,
+              sessionID != 0 else {
+            return false
+        }
         var changed = false
-        for _ in 0..<16 {
+        for _ in 0..<maximumReads {
             var dropped: UInt64 = 0
-            let count = buffer.withUnsafeMutableBytes { rawBuffer in
-                ish_watch_runtime_read_output(
-                    rawBuffer.baseAddress, rawBuffer.count, &dropped)
+            let count = readBuffer.withUnsafeMutableBytes { rawBuffer in
+                ish_watch_session_read_output(
+                    sessionID,
+                    rawBuffer.baseAddress,
+                    rawBuffer.count,
+                    &dropped)
+            }
+            if count < 0 {
+                terminalSessions.update(id) {
+                    $0.markFailed(
+                        WatchTerminalStatusText.errorMessage(
+                        prefix: "读取终端失败", code: count))
+                }
+                return true
             }
             if dropped != 0 {
-                decoder.reportDroppedBytes(dropped)
+                terminalSessions.update(id) {
+                    $0.reportDroppedBytes(dropped)
+                }
                 changed = true
             }
             if count != 0 {
-                decoder.append(Array(buffer.prefix(count)))
-                sawOutput = true
+                let bytes = Array(readBuffer.prefix(count))
+                terminalSessions.update(id) {
+                    $0.appendOutput(bytes)
+                }
                 changed = true
             }
-            if count < buffer.count {
+            if count < readBuffer.count {
                 break
             }
         }
-        if changed {
-            output = decoder.text
-            outputLines = decoder.lines
+        return changed
+    }
+
+    @discardableResult
+    private func enqueue(_ bytes: [UInt8]) -> Bool {
+        guard guestPhase == .running,
+              let id = terminalSessions.selectedSessionID else {
+            return false
+        }
+        var accepted = false
+        terminalSessions.update(id) {
+            accepted = $0.enqueue(bytes)
+        }
+        if accepted {
+            _ = flushPendingInput(id: id)
+        }
+        refreshPublishedState()
+        return accepted
+    }
+
+    @discardableResult
+    private func sendCursorKey(
+        _ finalByte: UInt8,
+        after pendingText: String = ""
+    ) -> Bool {
+        guard let session = terminalSessions.activeSession else {
+            return false
+        }
+        return enqueue(WatchTerminalInput.sequence(
+            session.cursorKey(finalByte),
+            after: pendingText))
+    }
+
+    private func flushPendingInput(id: UUID) -> Bool {
+        guard guestPhase == .running,
+              let session = terminalSessions.session(id: id),
+              session.acceptsInput else {
+            return false
+        }
+        let sessionID = session.sessionID
+        var changed = false
+        // 限制部分写入次数，避免单一会话长时间占住 Watch 主线程。
+        for _ in 0..<4 {
+            guard let pending =
+                    terminalSessions.session(id: id)?.pendingInput,
+                  !pending.isEmpty else {
+                break
+            }
+            let result = pending.withUnsafeBytes { rawBuffer in
+                ish_watch_session_send_input(
+                    sessionID,
+                    rawBuffer.baseAddress,
+                    rawBuffer.count)
+            }
+            if result > 0 {
+                terminalSessions.update(id) {
+                    $0.consumePendingInput(result)
+                }
+                changed = true
+            } else if result == -11 || result == 0 {
+                break
+            } else {
+                terminalSessions.update(id) {
+                    $0.markFailed(
+                        WatchTerminalStatusText.errorMessage(
+                        prefix: "输入失败", code: result))
+                }
+                changed = true
+                break
+            }
+        }
+        return changed
+    }
+
+    private func applyWindowSize(id: UUID) -> Bool {
+        guard let session = terminalSessions.session(id: id),
+              session.windowSizeNeedsUpdate,
+              session.sessionID != 0 else {
+            return false
+        }
+        let result = ish_watch_session_set_window_size(
+            session.sessionID,
+            UInt16(session.screen.columns),
+            UInt16(session.screen.rows))
+        if result == 0 {
+            terminalSessions.update(id) {
+                $0.windowSizeNeedsUpdate = false
+            }
+            return true
+        }
+        if result == -11 {
+            return false
+        }
+        terminalSessions.update(id) {
+            $0.markFailed(
+                WatchTerminalStatusText.errorMessage(
+                prefix: "调整终端尺寸失败", code: result))
+        }
+        return true
+    }
+
+    private func refreshRuntimeAvailability() {
+        let nextCanCreate =
+            globalStatusOverride == nil &&
+            guestPhase == .running &&
+            terminalSessions.sessions.count <
+                WatchTerminalSessions.limit
+        if canCreateSession != nextCanCreate {
+            canCreateSession = nextCanCreate
+        }
+    }
+
+    private func reportRecovery(
+        detail: String,
+        recovery: WatchRuntimeRecovery
+    ) {
+        self.recovery = recovery
+        globalStatusOverride = recovery.status(appendingTo: detail)
+    }
+
+    private func refreshPublishedState() {
+        let snapshots = terminalSessions.snapshots
+        let selection = terminalSessions.selectedSessionID
+        let nextActive = snapshots.first { $0.id == selection }
+        let nextRendered = nextActive?.renderedLines ?? []
+        let nextCursor = nextActive?.cursor ??
+            TerminalCursor(row: 0, column: 0, isVisible: true)
+        let nextModes = nextActive?.modes ?? TerminalModes()
+        let visualChanged =
+            selectedSessionID != selection ||
+            activeSession?.hasOutput != nextActive?.hasOutput ||
+            renderedLines != nextRendered ||
+            cursor != nextCursor ||
+            modes != nextModes
+
+        if sessionSnapshots != snapshots {
+            sessionSnapshots = snapshots
+        }
+        if selectedSessionID != selection {
+            selectedSessionID = selection
+        }
+        if activeSession != nextActive {
+            activeSession = nextActive
+        }
+        if renderedLines != nextRendered {
+            renderedLines = nextRendered
+        }
+        if cursor != nextCursor {
+            cursor = nextCursor
+        }
+        if modes != nextModes {
+            modes = nextModes
+        }
+
+        let hasRuntime = globalStatusOverride == nil &&
+            guestPhase == .running
+        let nextStatus = globalStatusOverride ??
+            nextActive?.status ?? "没有终端"
+        let nextAcceptsInput =
+            hasRuntime && (nextActive?.acceptsInput ?? false)
+        let nextCanReopen =
+            hasRuntime && (nextActive?.canReopenSession ?? false)
+        let nextHasRuntimeFailure = recovery != nil
+        if status != nextStatus {
+            status = nextStatus
+        }
+        if acceptsInput != nextAcceptsInput {
+            acceptsInput = nextAcceptsInput
+        }
+        if canReopenSession != nextCanReopen {
+            canReopenSession = nextCanReopen
+        }
+        if hasRuntimeFailure != nextHasRuntimeFailure {
+            hasRuntimeFailure = nextHasRuntimeFailure
+        }
+        refreshRuntimeAvailability()
+
+        if visualChanged {
             revision &+= 1
         }
     }
 
-    private func enqueue(_ bytes: [UInt8]) {
-        guard acceptsInput else { return }
-        guard pendingInput.count + bytes.count <= 16 * 1024 else {
-            status = "输入队列已满"
-            return
-        }
-        pendingInput.append(contentsOf: bytes)
-        flushPendingInput()
-    }
-
-    private func sendCursorKey(
-        _ finalByte: UInt8,
-        after pendingText: String = ""
-    ) {
-        enqueue(Array(pendingText.utf8) + [0x1b, 0x5b, finalByte])
-    }
-
-    private func flushPendingInput() {
-        guard inputFailure == nil else { return }
-        guard GuestPhase(rawValue: ish_watch_runtime_current_phase()) ==
-                .running else { return }
-        // 每轮限制调用次数，避免极小的部分写入长时间占住 Watch 主线程。
-        for _ in 0..<16 where !pendingInput.isEmpty {
-            let result = pendingInput.withUnsafeBytes { rawBuffer in
-                ish_watch_runtime_send_input(
-                    rawBuffer.baseAddress, rawBuffer.count)
-            }
-            if result > 0 {
-                pendingInput.removeFirst(result)
-            } else if result == -11 || result == 0 {
-                return
-            } else {
-                inputFailure = Self.errorMessage(
-                    prefix: "输入失败", code: result)
-                pendingInput.removeAll(keepingCapacity: false)
-                return
-            }
-        }
-    }
-
-    nonisolated private static func errorMessage(
-            prefix: String, code: Int32) -> String {
-        "\(prefix)（Linux errno \(-code)）"
-    }
-
-    nonisolated private static func errorMessage(
-            prefix: String, code: Int) -> String {
-        "\(prefix)（Linux errno \(-code)）"
-    }
 }
+#endif

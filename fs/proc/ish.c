@@ -16,6 +16,23 @@ bool (*set_user_default)(const char *name, char *buffer, size_t size);
 bool (*remove_user_default)(const char *name);
 char *(*get_documents_directory)(void);
 
+void ish_install_user_defaults_callbacks(
+        char **(*all_keys)(void),
+        char *(*friendly_name)(const char *name),
+        char *(*underlying_name)(const char *name),
+        bool (*read_value)(
+                const char *name, char **buffer, size_t *size),
+        bool (*write_value)(
+                const char *name, char *buffer, size_t size),
+        bool (*remove_value)(const char *name)) {
+    get_all_defaults_keys = all_keys;
+    get_friendly_name = friendly_name;
+    get_underlying_name = underlying_name;
+    get_user_default = read_value;
+    set_user_default = write_value;
+    remove_user_default = remove_value;
+}
+
 static int proc_ish_show_colors(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
     proc_printf(buf,
                 "\x1B[30m" "iSH" "\x1B[39m "

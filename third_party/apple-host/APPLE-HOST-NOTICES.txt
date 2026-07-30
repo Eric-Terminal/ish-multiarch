@@ -6,7 +6,7 @@ Apple 宿主第三方声明
 交付与重审边界：
 - Linux kernel、在线 rootfs 及其许可与对应源码不在本文件内；本文件不能代表 iSH+Linux 的完整发行义务已经闭合。
 - Alpine guest seed、项目自身许可、LGPL 与对应源码交付继续由各自的发行门禁处理。
-- libarchive 的 BLAKE2 编译对象当前只进入未单独交付的 libarchive.a 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 不拉入对应对象，Watch 不链接 libarchive。未来启用 RAR5/format-all、改变强制加载或单独交付 libarchive.a 时，必须重新评估并明确许可分支。
+- libarchive 的 BLAKE2 编译对象当前只进入未单独交付的 libarchive.a 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 不拉入对应对象；Watch 使用独立 libarchive-watchOS.a，其 tar 读取、gzip 读写与 pax 写入入口产生的完整传递对象闭包由 LinkMap 固定，并使用独立的 WATCH-LIBARCHIVE-NOTICES.txt。未来启用 RAR5/format-all、改变强制加载或单独交付静态库时，必须重新评估并明确许可分支。
 - 三个已交付 Material 图标的来源、格式化关系与适用许可证据见后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与许可路径也已闭合；lib_colors 的 W3C HSL 算法、X11 颜色表、改编关系与适用许可证据同样已闭合。
 - 来源与许可边界是工程审计记录，不是法律结论。
 - public-domain 字样仅转述锁定上游源码，不是本工具作出的法律判断；libarchive/COPYING 也只是上游汇总，具体源码文本仍有控制力。

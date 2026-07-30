@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 from apple_pbx import (
-    OBJECT_ID, normalized_reference_paths, objects, phase_owners,
+    OBJECT_ID, list_ids, normalized_reference_paths, objects, phase_owners,
     property_value, target_phase_items,
 )
 from apple_host_manifest import (
@@ -263,50 +263,176 @@ def verify_libarchive(root, dependencies, gitlinks):
     project = read_utf8(root, relative, "libarchive Xcode 工程")
     ensure_tracked_file(root, relative, gitlinks)
     targets = objects(project, "PBXNativeTarget")
-    matches = [
-        body
-        for body in targets.values()
-        if property_value(body, "name") == "libarchive"
-    ]
-    if len(matches) != 1:
-        fail("libarchive Xcode 工程必须有唯一 libarchive target")
-    target = matches[0]
-    if property_value(target, "productType") != "com.apple.product-type.library.static":
-        fail("libarchive target 必须生成静态库")
-    product_reference = property_value(target, "productReference") or ""
-    product_ids = OBJECT_ID.findall(product_reference)
+    target_by_name = {}
+    for target_id, body in targets.items():
+        name = property_value(body, "name")
+        if name is None or name in target_by_name:
+            fail("libarchive Xcode 工程的 target 名称缺失或重复")
+        target_by_name[name] = (target_id, body)
+    expected_names = {"libarchive", "libarchive-watchOS"}
+    if set(target_by_name) != expected_names:
+        fail("libarchive Xcode 工程必须恰有手机与 Watch 两个独立 target")
+
     file_references = objects(project, "PBXFileReference")
     reference_paths = target_phase_items(project, "PBXSourcesBuildPhase")
-    source_items = reference_paths.get("libarchive")
-    if source_items is None:
-        fail("libarchive target 缺少 Sources phase")
-    source_paths = []
-    for path, _build_id, _reference, build_body in source_items:
-        if BUILD_FILE_POLICY.search(build_body):
-            fail("libarchive 编译源不能携带单文件条件或 flags")
-        full_path = f"deps/{path}"
-        if not full_path.endswith(".c"):
-            fail(f"libarchive Sources 含非 C 输入：{full_path}")
-        path_from_root(root, full_path, "libarchive 编译源")
-        ensure_tracked_file(root, full_path, gitlinks)
-        source_paths.append(full_path)
-    if len(source_paths) != len(set(source_paths)):
-        fail("libarchive Sources 含重复输入")
     dependency = dependencies["libarchive"]
-    if (
-        len(source_paths) != dependency.input_count
-        or digest_paths(source_paths) != dependency.input_sha256
+    source_phase_objects = objects(project, "PBXSourcesBuildPhase")
+    all_phase_ids = {}
+    all_build_ids = {}
+    sources_by_target = {}
+    product_ids = {}
+    expected_products = {
+        "libarchive": ("archive", "libarchive.a"),
+        "libarchive-watchOS": ("archive-watchOS", "libarchive-watchOS.a"),
+    }
+    phase_objects = {}
+    for section_name in (
+        "PBXSourcesBuildPhase",
+        "PBXFrameworksBuildPhase",
+        "PBXHeadersBuildPhase",
+        "PBXResourcesBuildPhase",
+        "PBXCopyFilesBuildPhase",
+        "PBXShellScriptBuildPhase",
     ):
-        fail("libarchive 编译源路径集合漂移")
-    product = file_references.get(product_ids[0]) if len(product_ids) == 1 else None
+        if f"/* Begin {section_name} section */" in project:
+            phase_objects.update(objects(project, section_name))
+
+    for name in sorted(expected_names):
+        _target_id, target = target_by_name[name]
+        if (
+            property_value(target, "productType")
+            != "com.apple.product-type.library.static"
+        ):
+            fail(f"{name} target 必须生成静态库")
+
+        target_phase_ids = list_ids(target, "buildPhases")
+        if (
+            not target_phase_ids
+            or len(target_phase_ids) != len(set(target_phase_ids))
+            or any(phase_id not in phase_objects for phase_id in target_phase_ids)
+        ):
+            fail(f"{name} target 的 build phase 关系漂移")
+        target_build_ids = []
+        for phase_id in target_phase_ids:
+            target_build_ids.extend(list_ids(phase_objects[phase_id], "files"))
+        if len(target_build_ids) != len(set(target_build_ids)):
+            fail(f"{name} target 的 PBXBuildFile 输入重复")
+        all_phase_ids[name] = set(target_phase_ids)
+        all_build_ids[name] = set(target_build_ids)
+
+        phase_ids = [
+            phase_id
+            for phase_id in target_phase_ids
+            if phase_id in source_phase_objects
+        ]
+        if len(phase_ids) != 1:
+            fail(f"{name} target 必须恰有一个 Sources phase")
+
+        source_items = reference_paths.get(name)
+        if source_items is None:
+            fail(f"{name} target 缺少 Sources phase")
+        source_paths = []
+        build_ids = set()
+        for path, build_id, _reference, build_body in source_items:
+            if BUILD_FILE_POLICY.search(build_body):
+                fail(f"{name} 编译源不能携带单文件条件或 flags")
+            full_path = f"deps/{path}"
+            if not full_path.endswith(".c"):
+                fail(f"{name} Sources 含非 C 输入：{full_path}")
+            path_from_root(root, full_path, f"{name} 编译源")
+            ensure_tracked_file(root, full_path, gitlinks)
+            source_paths.append(full_path)
+            build_ids.add(build_id)
+        if (
+            len(source_paths) != len(set(source_paths))
+            or len(build_ids) != len(source_paths)
+        ):
+            fail(f"{name} Sources 含重复输入")
+        if (
+            len(source_paths) != dependency.input_count
+            or digest_paths(source_paths) != dependency.input_sha256
+        ):
+            fail(f"{name} 编译源路径集合漂移")
+        sources_by_target[name] = set(source_paths)
+
+        product_reference = property_value(target, "productReference") or ""
+        target_product_ids = OBJECT_ID.findall(product_reference)
+        product = (
+            file_references.get(target_product_ids[0])
+            if len(target_product_ids) == 1
+            else None
+        )
+        product_name, product_path = expected_products[name]
+        if (
+            property_value(target, "productName") != product_name
+            or product is None
+            or property_value(product, "path") != product_path
+            or property_value(product, "sourceTree") != "BUILT_PRODUCTS_DIR"
+            or property_value(product, "explicitFileType") != "archive.ar"
+        ):
+            fail(f"{name} target 的静态库产品关系漂移")
+        product_ids[name] = target_product_ids[0]
+
+    if all_phase_ids["libarchive"] & all_phase_ids["libarchive-watchOS"]:
+        fail("手机与 Watch libarchive 的 build phase ID 必须完全独立")
+    if all_build_ids["libarchive"] & all_build_ids["libarchive-watchOS"]:
+        fail("手机与 Watch libarchive 的 PBXBuildFile 必须相互独立")
+    if product_ids["libarchive"] == product_ids["libarchive-watchOS"]:
+        fail("手机与 Watch libarchive 必须生成独立产品")
+    if sources_by_target["libarchive"] != sources_by_target["libarchive-watchOS"]:
+        fail("手机与 Watch libarchive 的编译源路径集合不一致")
+
+    configuration_lists = objects(project, "XCConfigurationList")
+    configurations = objects(project, "XCBuildConfiguration")
+    watch_target = target_by_name["libarchive-watchOS"][1]
+    list_ids_from_target = OBJECT_ID.findall(
+        property_value(watch_target, "buildConfigurationList") or ""
+    )
+    configuration_list = (
+        configuration_lists.get(list_ids_from_target[0])
+        if len(list_ids_from_target) == 1
+        else None
+    )
+    configuration_ids = (
+        list_ids(configuration_list, "buildConfigurations")
+        if configuration_list is not None
+        else []
+    )
+    watch_configurations = [
+        configurations.get(identifier) for identifier in configuration_ids
+    ]
+    configuration_names = [
+        property_value(configuration, "name")
+        for configuration in watch_configurations
+        if configuration is not None
+    ]
     if (
-        product is None
-        or property_value(product, "path") != "libarchive.a"
-        or property_value(product, "sourceTree") != "BUILT_PRODUCTS_DIR"
-        or property_value(product, "explicitFileType") != "archive.ar"
+        any(configuration is None for configuration in watch_configurations)
+        or len(configuration_ids) != len(set(configuration_ids))
+        or set(configuration_names) != {"Debug", "Release"}
+        or len(configuration_names) != 2
     ):
-        fail("libarchive target 的静态库产品关系漂移")
-    return set(source_paths), product_ids[0]
+        fail("libarchive-watchOS 必须恰有 Debug 与 Release 配置")
+    for configuration in watch_configurations:
+        supported = (
+            property_value(configuration, "SUPPORTED_PLATFORMS") or ""
+        ).split()
+        excluded = (
+            property_value(configuration, "EXCLUDED_SOURCE_FILE_NAMES") or ""
+        ).split()
+        if (
+            property_value(configuration, "PRODUCT_NAME") != "archive-watchOS"
+            or property_value(configuration, "SDKROOT") != "watchos"
+            or len(supported) != 2
+            or set(supported) != {"watchos", "watchsimulator"}
+            or property_value(configuration, "TARGETED_DEVICE_FAMILY") != "4"
+            or property_value(configuration, "WATCHOS_DEPLOYMENT_TARGET")
+            != "10.0"
+            or "filter_fork_posix.c" not in excluded
+        ):
+            fail("libarchive-watchOS 的平台与源码排除配置漂移")
+
+    return sources_by_target["libarchive"], product_ids
 
 
 def logical_concat_lines(text, relative):
@@ -486,7 +612,7 @@ def target_routes(targets, target, kinds):
 
 
 def verify_main_project(
-    root, targets, dependencies, gitlinks, libarchive_product_id
+    root, targets, dependencies, gitlinks, libarchive_product_ids
 ):
     relative = "iSH.xcodeproj/project.pbxproj"
     project = read_utf8(root, relative, "主 Xcode 工程")
@@ -521,7 +647,7 @@ def verify_main_project(
     ]
     vendored_names = {
         dependency.delivery_name for dependency in dependencies.values()
-    }
+    } | {item.delivery_name for item in vendored_routes}
     gitlink_prefixes = tuple(f"{path}/" for path in sorted(gitlinks))
 
     def verify_vendored_phase(items, kinds, description):
@@ -549,51 +675,75 @@ def verify_main_project(
     verify_vendored_phase(source_items, set(), "编译源")
     verify_vendored_phase(copy_items, set(), "复制")
 
+    archive_products = {
+        "iSH": ("libarchive.a", "libarchive"),
+        "iSH+Linux": ("libarchive.a", "libarchive"),
+        "iSHWatch": ("libarchive-watchOS.a", "libarchive-watchOS"),
+    }
     archive_items = {
         target: [
             item
             for item in framework_items.get(target, [])
-            if item[0] == "libarchive.a"
+            if item[0] == product_path
         ]
-        for target in ("iSH", "iSH+Linux")
+        for target, (product_path, _remote_info) in archive_products.items()
     }
     if any(len(items) != 1 for items in archive_items.values()):
-        fail("libarchive.a 必须唯一链接到两个宿主 App target")
-    archive_references = {items[0][2] for items in archive_items.values()}
+        fail("三个 Apple App target 必须唯一链接各自的 libarchive 产品")
+    original_references = {
+        archive_items[target][0][2] for target in ("iSH", "iSH+Linux")
+    }
+    watch_reference = archive_items["iSHWatch"][0][2]
+    if len(original_references) != 1 or watch_reference in original_references:
+        fail("手机与 Watch App 必须引用各自独立的 libarchive 产品代理")
+
     reference_proxies = objects(project, "PBXReferenceProxy")
-    archive_proxy = (
-        reference_proxies.get(next(iter(archive_references)))
-        if len(archive_references) == 1
-        else None
-    )
-    if (
-        archive_proxy is None
-        or property_value(archive_proxy, "path") != "libarchive.a"
-        or property_value(archive_proxy, "sourceTree") != "BUILT_PRODUCTS_DIR"
-        or property_value(archive_proxy, "fileType") != "archive.ar"
-    ):
-        fail("主工程的 libarchive 产品代理漂移")
-    remote_ids = OBJECT_ID.findall(property_value(archive_proxy, "remoteRef") or "")
     container_proxies = objects(project, "PBXContainerItemProxy")
-    remote_proxy = (
-        container_proxies.get(remote_ids[0]) if len(remote_ids) == 1 else None
-    )
-    portal_ids = (
-        OBJECT_ID.findall(property_value(remote_proxy, "containerPortal") or "")
-        if remote_proxy is not None
-        else []
-    )
     reference_paths = normalized_reference_paths(project)
-    if (
-        remote_proxy is None
-        or property_value(remote_proxy, "proxyType") != "2"
-        or property_value(remote_proxy, "remoteGlobalIDString")
-        != libarchive_product_id
-        or property_value(remote_proxy, "remoteInfo") != "libarchive"
-        or len(portal_ids) != 1
-        or reference_paths.get(portal_ids[0]) != "deps/libarchive.xcodeproj"
-    ):
-        fail("主工程没有把 libarchive 产品代理绑定到锁定子工程")
+
+    def verify_archive_proxy(reference_id, product_path, remote_info):
+        archive_proxy = reference_proxies.get(reference_id)
+        if (
+            archive_proxy is None
+            or property_value(archive_proxy, "path") != product_path
+            or property_value(archive_proxy, "sourceTree")
+            != "BUILT_PRODUCTS_DIR"
+            or property_value(archive_proxy, "fileType") != "archive.ar"
+        ):
+            fail(f"主工程的 {product_path} 产品代理漂移")
+        remote_ids = OBJECT_ID.findall(
+            property_value(archive_proxy, "remoteRef") or ""
+        )
+        remote_proxy = (
+            container_proxies.get(remote_ids[0])
+            if len(remote_ids) == 1
+            else None
+        )
+        portal_ids = (
+            OBJECT_ID.findall(
+                property_value(remote_proxy, "containerPortal") or ""
+            )
+            if remote_proxy is not None
+            else []
+        )
+        if (
+            remote_proxy is None
+            or property_value(remote_proxy, "proxyType") != "2"
+            or property_value(remote_proxy, "remoteGlobalIDString")
+            != libarchive_product_ids[remote_info]
+            or property_value(remote_proxy, "remoteInfo") != remote_info
+            or len(portal_ids) != 1
+            or reference_paths.get(portal_ids[0])
+            != "deps/libarchive.xcodeproj"
+        ):
+            fail(f"主工程没有把 {product_path} 绑定到锁定子工程产品")
+
+    verify_archive_proxy(
+        next(iter(original_references)), "libarchive.a", "libarchive"
+    )
+    verify_archive_proxy(
+        watch_reference, "libarchive-watchOS.a", "libarchive-watchOS"
+    )
 
     linux_targets = [
         body
@@ -732,6 +882,15 @@ def verify_main_project(
     }
     if actual_watch_flags != expected_watch_flags:
         fail("Watch App 的第一方库或 Apple SDK 链接边界漂移")
+    header_search_paths = re.findall(
+        r"^HEADER_SEARCH_PATHS\s*=\s*(.+)$", watch, re.MULTILINE
+    )
+    if len(header_search_paths) != 1 or header_search_paths[0].split() != [
+        "$(inherited)",
+        "$(SRCROOT)",
+        "$(SRCROOT)/deps/libarchive/libarchive",
+    ]:
+        fail("Watch fakefs 的 libarchive 头文件搜索边界漂移")
 
     linux = read_utf8(root, "app/Linux.xcconfig", "Linux 产品配置")
     ensure_tracked_file(root, "app/Linux.xcconfig", gitlinks)
@@ -858,13 +1017,13 @@ def check_locks(root):
     fragments = parse_notice_fragments(root, inputs)
     gitlinks = verify_gitlinks(root, dependencies)
     verify_versions(root, dependencies, gitlinks)
-    libarchive_sources, libarchive_product_id = verify_libarchive(
+    libarchive_sources, libarchive_product_ids = verify_libarchive(
         root, dependencies, gitlinks
     )
     hterm_inputs = verify_hterm(root, dependencies, gitlinks)
     verify_linux_contract(dependencies)
     verify_main_project(
-        root, targets, dependencies, gitlinks, libarchive_product_id
+        root, targets, dependencies, gitlinks, libarchive_product_ids
     )
     verify_fakefs_archive_surface(root, gitlinks)
     verify_license_inputs(

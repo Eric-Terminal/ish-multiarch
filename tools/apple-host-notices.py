@@ -77,6 +77,9 @@ VALIDATOR_PATH = ROOT / "tools/apple-host-delivery-inputs.py"
 OUTPUT_RELATIVE = PurePosixPath(
     "third_party/apple-host/APPLE-HOST-NOTICES.txt"
 )
+WATCH_OUTPUT_RELATIVE = PurePosixPath(
+    "third_party/apple-host/WATCH-LIBARCHIVE-NOTICES.txt"
+)
 FULL_LICENSE_COMPONENTS = {
     "hterm",
     "intl-segmenter",
@@ -1456,9 +1459,11 @@ def overview():
         "各自的发行门禁处理。\n"
         "- libarchive 的 BLAKE2 编译对象当前只进入未单独交付的 "
         "libarchive.a 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O "
-        "不拉入对应对象，Watch 不链接 libarchive。未来启用 RAR5/"
-        "format-all、改变强制加载或单独交付 libarchive.a 时，必须重新"
-        "评估并明确许可分支。\n"
+        "不拉入对应对象；Watch 使用独立 libarchive-watchOS.a，其 tar "
+        "读取、gzip 读写与 pax 写入入口产生的完整传递对象闭包由 LinkMap "
+        "固定，并使用独立的 WATCH-LIBARCHIVE-NOTICES.txt。未来启用 "
+        "RAR5/format-all、改变强制加载或单独交付静态库时，必须重新评估"
+        "并明确许可分支。\n"
         "- 三个已交付 Material 图标的来源、格式化关系与适用许可证据见"
         "后续专节；wcwidth Unicode 13.0.0 的数据、重放关系与许可也已"
         "闭合；libarchive Unicode 6.0.0 的产品表、生成关系、规范版本与"
@@ -2009,9 +2014,63 @@ def build_notice(root):
     return render_groups(groups, audit_boundaries(inputs_by_path))
 
 
-def output_path(root):
+def build_watch_notice(root):
+    validator = load_validator()
+    state = validator.check_locks(root)
+    version = state.dependencies["libarchive"].version
+    copying = read_regular(root, "deps/libarchive/COPYING",
+            "libarchive 完整许可文本")
+    archive_entry_fragments = [
+        fragment
+        for fragment in state.notice_fragments
+        if (
+            fragment.path
+            == "deps/libarchive/libarchive/archive_entry.c"
+            and fragment.start_line == 1618
+            and fragment.end_line == 1650
+        )
+    ]
+    if len(archive_entry_fragments) != 1:
+        fail("Watch libarchive 缺少唯一 archive_entry UC Regents 许可锁")
+    archive_entry_license = extract_fragment(
+        root, archive_entry_fragments[0])
+    unicode_license = unicode_license_text(read_regular(
+            root, LIBARCHIVE_UCD_LICENSE_PATH,
+            "libarchive Unicode Data Files 许可"))
+    header = (
+        "Watch libarchive notices\n"
+        "========================\n\n"
+        "This Watch app links the complete fixed object closure required "
+        "by its tar read, gzip read/write, and pax write entry points from "
+        f"libarchive {version}.\n"
+        "The following text is reproduced from the upstream libarchive "
+        "COPYING file.\n\n"
+    ).encode("utf-8")
+    archive_entry_header = (
+        "\n\narchive_entry UC Regents notice\n"
+        "================================\n\n"
+        "The linked archive_entry object contains code governed by the "
+        "following source-level notice.\n\n"
+    ).encode("utf-8")
+    unicode_header = (
+        "\n\nUnicode Character Database 6.0.0 notice\n"
+        "=======================================\n\n"
+        "libarchive's archive_string composition table is generated from "
+        "Unicode 6.0.0 data. The applicable locked Unicode notice follows.\n\n"
+    ).encode("utf-8")
+    return (
+        header
+        + copying
+        + archive_entry_header
+        + archive_entry_license
+        + unicode_header
+        + unicode_license
+    )
+
+
+def output_path(root, relative=OUTPUT_RELATIVE):
     parent = root
-    for part in OUTPUT_RELATIVE.parent.parts:
+    for part in relative.parent.parts:
         parent = parent / part
         try:
             metadata = parent.lstat()
@@ -2019,7 +2078,7 @@ def output_path(root):
             fail(f"宿主声明输出目录不存在：{parent}（{error}）")
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             fail(f"宿主声明输出目录必须是非符号链接目录：{parent}")
-    path = root / OUTPUT_RELATIVE
+    path = root / relative
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -2086,13 +2145,18 @@ def main(argv=None):
     arguments = parser.parse_args(argv)
     root = arguments.root.resolve()
     content = build_notice(root)
+    watch_content = build_watch_notice(root)
     path = output_path(root)
+    watch_path = output_path(root, WATCH_OUTPUT_RELATIVE)
     if arguments.command == "check-locks":
         check_output(path, content)
+        check_output(watch_path, watch_content)
         print("Apple 宿主第三方声明校验通过")
     elif arguments.command == "render":
         atomic_replace(path, content)
+        atomic_replace(watch_path, watch_content)
         print(f"已生成 Apple 宿主第三方声明：{path}")
+        print(f"已生成 Watch libarchive 声明：{watch_path}")
     else:
         fail("未知命令")
     return 0

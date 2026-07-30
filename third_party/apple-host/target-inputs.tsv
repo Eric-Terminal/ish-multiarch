@@ -16,6 +16,8 @@ iSH+Linux	undecided	vendored	libarchive	static-library	libarchive.a
 iSH+Linux	undecided	vendored	linux-kernel	static-library	liblinux.a
 iSHFileProvider	embedded	boundary	project	no-vendored	-
 iSHWatch	product	platform	apple-sdk	platform-link	-ldl
+iSHWatch	product	platform	apple-sdk	platform-link	-liconv
 iSHWatch	product	platform	apple-sdk	platform-link	-lm
 iSHWatch	product	platform	apple-sdk	platform-link	-lresolv
 iSHWatch	product	platform	apple-sdk	platform-link	-lsqlite3
+iSHWatch	product	vendored	libarchive	static-library	libarchive-watchOS.a
