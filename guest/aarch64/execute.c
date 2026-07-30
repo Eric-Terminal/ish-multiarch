@@ -700,6 +700,27 @@ static void execute_advsimd_add_sub(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_uqsub_scalar(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t element_size =
+            instruction->operands.advsimd_three_same.element_size;
+    qword_t left = read_vector_element(&cpu->v[rn], element_size, 0);
+    qword_t right = read_vector_element(&cpu->v[rm], element_size, 0);
+    bool saturated = left < right;
+    union aarch64_vector_reg result = {0};
+
+    if (saturated)
+        cpu->fpsr |= AARCH64_FPSR_QC;
+    write_vector_element(&result, element_size, 0,
+            saturated ? 0 : left - right);
+    // 标量 AdvSIMD 写回清空其余 lane；QC 只置位，不清除既有状态。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_addv(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_across_lanes.rd;
@@ -2315,6 +2336,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_ADD:
         case AARCH64_OP_ADVSIMD_SUB:
             execute_advsimd_add_sub(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_UQSUB_SCALAR:
+            execute_advsimd_uqsub_scalar(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_ADDV:
             execute_advsimd_addv(cpu, instruction);

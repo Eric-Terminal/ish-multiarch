@@ -181,6 +181,9 @@
 #define INSTRUCTION_ADD_D31_D31_D30 UINT32_C(0x5efe87ff)
 /* GCC cc1 实际触发过的两 lane 64 位整数减法指令。 */
 #define INSTRUCTION_SUB_V30_2D_V31_2D_V30_2D UINT32_C(0x6efe87fe)
+/* BusyBox gzip 窗口滑动路径实际触发的无符号饱和减法。 */
+#define INSTRUCTION_UQSUB_H30_H30_H31 UINT32_C(0x7e7f2fde)
+#define INSTRUCTION_UQSUB_H28_H28_H29 UINT32_C(0x7e7d2f9c)
 /* GCC cc1 实际触发过的标量 64 位有符号非负比较指令。 */
 #define INSTRUCTION_CMGE_D31_D31_ZERO UINT32_C(0x7ee08bff)
 /* GCC cc1 实际触发过的两 lane 64 位有符号正数比较指令。 */
@@ -13231,6 +13234,82 @@ static void test_integer_to_fp_fixed_fallback(void) {
     assert_stats(&threaded_runner, 1, 1, 0, 2);
 }
 
+static void test_scalar_uqsub_c_fallback(void) {
+    struct test_fixture c_fixture;
+    struct test_fixture threaded_fixture;
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE, INSTRUCTION_UQSUB_H30_H30_H31);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE + 4, INSTRUCTION_UQSUB_H28_H28_H29);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE, INSTRUCTION_UQSUB_H30_H30_H31);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE + 4, INSTRUCTION_UQSUB_H28_H28_H29);
+
+    struct aarch64_runner c_runner;
+    struct aarch64_runner threaded_runner;
+    assert(aarch64_runner_init_backend(
+            &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
+    assert(aarch64_runner_init_backend(&threaded_runner,
+            &threaded_fixture.tlb, AARCH64_BACKEND_THREADED));
+
+    struct cpu_state initial;
+    init_differential_cpu(&initial);
+    initial.v[30] = (union aarch64_vector_reg) {
+        .d = {UINT64_MAX, UINT64_MAX},
+    };
+    initial.v[30].h[0] = UINT16_C(0x7fff);
+    initial.v[31].h[0] = UINT16_C(0x8000);
+    initial.v[28] = (union aarch64_vector_reg) {
+        .d = {
+            UINT64_C(0xaaaaaaaaaaaaaaaa),
+            UINT64_C(0xbbbbbbbbbbbbbbbb),
+        },
+    };
+    initial.v[28].h[0] = UINT16_C(0x9001);
+    initial.v[29] = (union aarch64_vector_reg) {
+        .d = {
+            UINT64_C(0xcccccccccccccccc),
+            UINT64_C(0xdddddddddddddddd),
+        },
+    };
+    initial.v[29].h[0] = UINT16_C(0x8000);
+
+    struct cpu_state c_cpu = initial;
+    struct cpu_state threaded_cpu = initial;
+    struct aarch64_step_result c_result =
+            aarch64_run_one(&c_runner, &c_cpu);
+    struct aarch64_step_result threaded_result =
+            aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert(c_result.instruction == INSTRUCTION_UQSUB_H30_H30_H31);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[30].q == 0);
+    assert(c_cpu.fpsr == (AARCH64_FPSR_IXC | AARCH64_FPSR_QC));
+    assert(memcmp(&c_cpu.v[31], &initial.v[31],
+            sizeof(c_cpu.v[31])) == 0);
+    assert_stats(&threaded_runner, 0, 1, 0, 1);
+
+    c_result = aarch64_run_one(&c_runner, &c_cpu);
+    threaded_result = aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert(c_result.instruction == INSTRUCTION_UQSUB_H28_H28_H29);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[28].h[0] == UINT16_C(0x1001));
+    for (unsigned byte = 2; byte < sizeof(c_cpu.v[28].b); byte++)
+        assert(c_cpu.v[28].b[byte] == 0);
+    assert(c_cpu.fpsr == (AARCH64_FPSR_IXC | AARCH64_FPSR_QC));
+    assert(memcmp(&c_cpu.v[29], &initial.v[29],
+            sizeof(c_cpu.v[29])) == 0);
+    assert_stats(&threaded_runner, 0, 2, 0, 2);
+}
+
 static void test_c_and_threaded_differential(void) {
     struct test_fixture c_fixture;
     struct test_fixture threaded_fixture;
@@ -13884,6 +13963,7 @@ int main(void) {
     test_fast_dispatch_structure();
     test_product_c_fallback();
     test_integer_to_fp_fixed_fallback();
+    test_scalar_uqsub_c_fallback();
     test_c_and_threaded_differential();
     test_cache_keys_and_collision();
     test_rwx_self_modifying_code();
