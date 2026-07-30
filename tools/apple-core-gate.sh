@@ -312,6 +312,13 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-watch-runtime.c" \
         -o "$watch_runtime_object"
 
+    local watch_guest_files_object="$full_build_dir/apple-watch-guest-files-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-watch-guest-files.c" \
+        -o "$watch_guest_files_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -323,7 +330,8 @@ build_slice() {
         "$full_build_dir/apple_runtime_force_link_smoke" \
         "$abi_probe" "$backend_probe" "$rootfs_seed_object" \
         "$resolver_object" \
-        "$watch_runtime_object"
+        "$watch_runtime_object" \
+        "$watch_guest_files_object"
 
     local fakefs_members
     local fakefs_symbols
@@ -369,6 +377,7 @@ build_slice() {
     local required_member
     for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o \
             platform_apple-resolver.c.o \
+            platform_apple-watch-guest-files.c.o \
             platform_apple-watch-runtime.c.o; do
         if ! grep -Fqx "$required_member" <<< "$archive_members"; then
             echo "错误：${name} 的 libish.a 缺少 ${required_member}。" >&2
@@ -398,6 +407,8 @@ build_slice() {
             ish_watch_runtime_read_output \
             ish_watch_runtime_send_input \
             ish_watch_runtime_set_window_size \
+            ish_watch_guest_file_read \
+            ish_watch_guest_file_replace \
             ish_watch_session_create \
             ish_watch_session_status \
             ish_watch_session_read_output \
@@ -417,7 +428,8 @@ build_slice() {
             ish_watch_runtime_test_add_session \
             ish_watch_runtime_test_append_session_output \
             ish_watch_runtime_test_mark_session_exited \
-            ish_watch_runtime_test_recycled_transport; do
+            ish_watch_runtime_test_recycled_transport \
+            ish_watch_runtime_test_exit_ownership; do
         if grep -Eq \
                 "[[:space:]]T[[:space:]]+_${test_runtime_symbol}$" \
                 <<< "$runtime_symbols"; then
@@ -425,6 +437,12 @@ build_slice() {
             exit 1
         fi
     done
+    if grep -Eq \
+            '[[:space:]]T[[:space:]]+_ish_watch_guest_file_test_' \
+            <<< "$runtime_symbols"; then
+        echo "错误：${name} 的生产 Watch runtime 泄漏了 guest 文件测试符号。" >&2
+        exit 1
+    fi
 
     local executable
     local build_info

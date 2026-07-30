@@ -81,12 +81,33 @@ jobs:
             apple_meson_project_options \
             apple_watch_package_prebuilt \
             apple_rootfs_seed apple_resolver \
+            apple_watch_runtime \
+            apple_watch_guest_files \
+            apple_watch_guest_files_runtime \
+            apple_watch_root_archive_roundtrip \
             pty_lifecycle \
             pty_read_lifecycle tty_real_lifecycle \
             session_tty_lifecycle tty_open_lifecycle \
             tty_echo_lifecycle fork_tty_lock_lifecycle \
             pty_handoff_lifecycle ioctl_lifecycle \
             --print-errorlogs
+      - name: 验证新增 Watch 独立逻辑回归
+        if: matrix.kernel == 'ish'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(
+            tools/apple-watch-control-input-test.sh
+            tools/apple-watch-terminal-session-test.sh
+            tools/apple-watch-terminal-appearance-test.sh
+            tools/apple-watch-root-metadata-test.sh
+            tools/apple-watch-apk-repository-migration-test.sh
+            tools/apple-watch-host-root-archive-test.sh
+            tools/apple-watch-root-archive-test.sh
+          )
+          for test_script in "${tests[@]}"; do
+            "$test_script"
+          done
       - name: Build
         if: matrix.kernel == 'ish'
         shell: bash
@@ -94,6 +115,7 @@ jobs:
           set -euo pipefail
           derived="$RUNNER_TEMP/ish-ios-derived"
           xcodebuild \
+            -jobs 2 \
             -project iSH.xcodeproj \
             -scheme iSH \
             -configuration Release \
@@ -102,41 +124,81 @@ jobs:
             -derivedDataPath "$derived" \
             ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
             LD_GENERATE_MAP_FILE=YES \
-            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-link-\$(CURRENT_ARCH).map" \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-\$(PLATFORM_NAME)-link-\$(CURRENT_ARCH).map" \
             CODE_SIGNING_ALLOWED=NO
-          app="$derived/Build/Products/Release-iphoneos/iSH.app"
-          link_map="$RUNNER_TEMP/iSH-link-arm64.map"
-          test -x "$app/iSH"
-          python3 -B tools/apple-host-link-closure.py "$app/iSH" "$link_map"
-          cmp -s \
-            third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
-            "$app/THIRD-PARTY-NOTICES.txt"
-          cmp -s \
-            third_party/apple-host/APPLE-HOST-NOTICES.txt \
-            "$app/APPLE-HOST-NOTICES.txt"
-          cmp -s \
-            distribution/apple/project-license/PROJECT-LICENSES.txt \
-            "$app/PROJECT-LICENSES.txt"
-          test -z "$(
-            find "$app" -path '*/PlugIns/*.appex/*' \
-              -name APPLE-HOST-NOTICES.txt -print -quit
-          )"
-          test -z "$(
-            find "$app" -path '*/PlugIns/*.appex/*' \
-              -name THIRD-PARTY-NOTICES.txt -print -quit
-          )"
-          test -z "$(
-            find "$app" -path '*/PlugIns/*.appex/*' \
-              -name PROJECT-LICENSES.txt -print -quit
-          )"
-          test -z "$(
-            find "$app" \
-              \( -name LICENSE.md -o -name LICENSE.IOS \
-                 -o -name inputs.tsv -o -name GPL-2.0.txt \
-                 -o -name GPL-3.0.txt \) \
-              -print -quit
-          )"
-          python3 -B tools/apple-license-notices-app-test.py "$app"
+
+          xcodebuild \
+            -jobs 2 \
+            -project iSH.xcodeproj \
+            -scheme iSH \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$derived" \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
+            ISH_AARCH64_ROOTFS_OFFLINE=1 \
+            LD_GENERATE_MAP_FILE=YES \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-\$(PLATFORM_NAME)-link-\$(CURRENT_ARCH).map" \
+            CODE_SIGNING_ALLOWED=NO
+
+          iphone_app="$derived/Build/Products/Release-iphoneos/iSH.app"
+          simulator_app="$derived/Build/Products/Release-iphonesimulator/iSH.app"
+          test -x "$iphone_app/iSH"
+          test -x "$simulator_app/iSH"
+          xcrun lipo "$iphone_app/iSH" -verify_arch arm64
+          xcrun lipo "$simulator_app/iSH" -verify_arch arm64 x86_64
+          python3 -B tools/apple-host-link-closure.py \
+            "$iphone_app/iSH" "$RUNNER_TEMP/iSH-iphoneos-link-arm64.map"
+          for arch in arm64 x86_64; do
+            python3 -B tools/apple-host-link-closure.py \
+              --arch "$arch" \
+              "$simulator_app/iSH" \
+              "$RUNNER_TEMP/iSH-iphonesimulator-link-$arch.map"
+            metadata=$(xcrun vtool -arch "$arch" -show-build \
+              "$simulator_app/iSH")
+            if [[ "$arch" == arm64 ]]; then
+              grep -q "platform IOSSIMULATOR" <<< "$metadata"
+              grep -q "minos 14.0" <<< "$metadata"
+            else
+              grep -q "cmd LC_VERSION_MIN_IPHONEOS" <<< "$metadata"
+              grep -q "version 11.0" <<< "$metadata"
+            fi
+          done
+
+          for app in "$iphone_app" "$simulator_app"; do
+            cmp -s \
+              third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
+              "$app/THIRD-PARTY-NOTICES.txt"
+            cmp -s \
+              third_party/apple-host/APPLE-HOST-NOTICES.txt \
+              "$app/APPLE-HOST-NOTICES.txt"
+            cmp -s \
+              distribution/apple/project-license/PROJECT-LICENSES.txt \
+              "$app/PROJECT-LICENSES.txt"
+            test -z "$(
+              find "$app" -path '*/PlugIns/*.appex/*' \
+                -name APPLE-HOST-NOTICES.txt -print -quit
+            )"
+            test -z "$(
+              find "$app" -path '*/PlugIns/*.appex/*' \
+                -name THIRD-PARTY-NOTICES.txt -print -quit
+            )"
+            test -z "$(
+              find "$app" -path '*/PlugIns/*.appex/*' \
+                -name PROJECT-LICENSES.txt -print -quit
+            )"
+            test -z "$(
+              find "$app" \
+                \( -name LICENSE.md -o -name LICENSE.IOS \
+                   -o -name inputs.tsv -o -name GPL-2.0.txt \
+                   -o -name GPL-3.0.txt \) \
+                -print -quit
+            )"
+          done
+          python3 -B tools/apple-license-notices-app-test.py \
+            "$iphone_app" "$simulator_app"
       - name: 验证 Apple 五切片后端选择门禁
         if: matrix.kernel == 'ish'
         run: tools/apple-core-gate.sh
@@ -148,6 +210,7 @@ jobs:
           artifacts="$PWD/build-apple-core"
           products="$RUNNER_TEMP/ish-watch-products"
           common=(
+            -jobs 2
             -project iSH.xcodeproj
             -scheme iSHWatchLinkSmoke
             -configuration Release
@@ -204,6 +267,27 @@ jobs:
           # iPhone Release 已填充并校验同一缓存，Watch 不应再次联网。
           app_products="$RUNNER_TEMP/ish-watch-app-products"
           xcodebuild \
+            -jobs 2 \
+            -project iSH.xcodeproj \
+            -scheme iSHWatch \
+            -configuration Release \
+            -sdk watchos \
+            -destination 'generic/platform=watchOS' \
+            ARCHS="arm64_32 arm64" \
+            WATCHOS_DEPLOYMENT_TARGET=10.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+            ISH_WATCH_PACKAGE_MODE=prebuilt \
+            ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
+            ISH_AARCH64_ROOTFS_OFFLINE=1 \
+            LD_GENERATE_MAP_FILE=YES \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-\$(PLATFORM_NAME)-link-\$(CURRENT_ARCH).map" \
+            SYMROOT="$app_products" \
+            build
+
+          xcodebuild \
+            -jobs 2 \
             -project iSH.xcodeproj \
             -scheme iSHWatch \
             -configuration Release \
@@ -216,31 +300,65 @@ jobs:
             ISH_WATCH_PACKAGE_MODE=prebuilt \
             ISH_AARCH64_ROOTFS_CACHE="$RUNNER_TEMP/ish-aarch64-rootfs-cache" \
             ISH_AARCH64_ROOTFS_OFFLINE=1 \
+            LD_GENERATE_MAP_FILE=YES \
+            LD_MAP_FILE_PATH="$RUNNER_TEMP/\$(TARGET_NAME)-\$(PLATFORM_NAME)-link-\$(CURRENT_ARCH).map" \
             SYMROOT="$app_products" \
             build
 
-          watch_app="$app_products/Release-watchsimulator/iSHWatch.app"
-          test -x "$watch_app/iSHWatch"
-          cmp -s \
-            third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
-            "$watch_app/THIRD-PARTY-NOTICES.txt"
-          cmp -s \
-            distribution/apple/project-license/PROJECT-LICENSES.txt \
-            "$watch_app/PROJECT-LICENSES.txt"
-          test -z "$(
-            find "$watch_app" -name APPLE-HOST-NOTICES.txt -print -quit
-          )"
-          test -z "$(
-            find "$watch_app" \
-              \( -name LICENSE.md -o -name LICENSE.IOS \
-                 -o -name inputs.tsv -o -name GPL-2.0.txt \
-                 -o -name GPL-3.0.txt \) \
-              -print -quit
-          )"
+          watch_device_app="$app_products/Release-watchos/iSHWatch.app"
+          watch_simulator_app="$app_products/Release-watchsimulator/iSHWatch.app"
+          watch_device_binary="$watch_device_app/iSHWatch"
+          watch_simulator_binary="$watch_simulator_app/iSHWatch"
+          test -x "$watch_device_binary"
+          test -x "$watch_simulator_binary"
+          xcrun lipo "$watch_device_binary" -verify_arch arm64_32 arm64
+          xcrun lipo "$watch_simulator_binary" -verify_arch arm64
+
+          for arch in arm64_32 arm64; do
+            python3 -B tools/apple-host-link-closure.py \
+              --arch "$arch" \
+              "$watch_device_binary" \
+              "$RUNNER_TEMP/iSHWatch-watchos-link-$arch.map"
+            metadata=$(xcrun vtool -arch "$arch" -show-build \
+              "$watch_device_binary")
+            grep -q "platform WATCHOS" <<< "$metadata"
+            if [[ "$arch" == arm64_32 ]]; then
+              grep -q "minos 10.0" <<< "$metadata"
+            else
+              grep -q "minos 26.0" <<< "$metadata"
+            fi
+          done
+
+          python3 -B tools/apple-host-link-closure.py \
+            "$watch_simulator_binary" \
+            "$RUNNER_TEMP/iSHWatch-watchsimulator-link-arm64.map"
+
+          for watch_app in "$watch_device_app" "$watch_simulator_app"; do
+            cmp -s \
+              third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt \
+              "$watch_app/THIRD-PARTY-NOTICES.txt"
+            cmp -s \
+              third_party/apple-host/WATCH-LIBARCHIVE-NOTICES.txt \
+              "$watch_app/WATCH-LIBARCHIVE-NOTICES.txt"
+            cmp -s \
+              distribution/apple/project-license/PROJECT-LICENSES.txt \
+              "$watch_app/PROJECT-LICENSES.txt"
+            test -z "$(
+              find "$watch_app" -name APPLE-HOST-NOTICES.txt -print -quit
+            )"
+            test -z "$(
+              find "$watch_app" \
+                \( -name LICENSE.md -o -name LICENSE.IOS \
+                   -o -name inputs.tsv -o -name GPL-2.0.txt \
+                   -o -name GPL-3.0.txt \) \
+                -print -quit
+            )"
+          done
           python3 -B tools/apple-license-notices-app-test.py \
             "$products/Release-watchos/iSHWatchLinkSmoke.app" \
             "$products/Release-watchsimulator/iSHWatchLinkSmoke.app" \
-            "$watch_app"
+            "$watch_device_app" \
+            "$watch_simulator_app"
       - name: Build
         if: matrix.kernel == 'linux'
         shell: bash
@@ -248,6 +366,7 @@ jobs:
           set -euo pipefail
           derived="$RUNNER_TEMP/ish-linux-derived"
           xcodebuild \
+            -jobs 2 \
             -project iSH.xcodeproj \
             -scheme iSH+Linux \
             -configuration ReleaseLinux \

@@ -345,14 +345,19 @@ Terms of Use；本工程记录的许可依据来自 Unicode 官方 2020 固定 G
 HTML 也不冒充 2019 年网页原件。子模块中的 libarchive 测试源码、压缩夹具及其
 `NormalizationTest.txt` 来源未进入 Apple App 编译、include 或资源闭包。
 
-这份宿主正文进入普通 `iSH` 与 `iSH+Linux`，共享 iPhone 查看器按 bundle
-中实际存在的资源显示：普通 iSH 依次显示项目许可、Alpine seed 与宿主正文，
-iSH+Linux 显示项目许可与公共宿主正文。Watch 显示项目许可与 Alpine seed，
-但不携带宿主正文；FileProvider 和测试产品也不携带宿主正文。该接线仍不是
-最终法律结论。libarchive 的 BLAKE2 编译对象当前只进入未单独交付的
-`libarchive.a` 中间产物；普通 iSH 与 iSH+Linux 的最终 Mach-O 均由
-LinkMap 和符号门禁证明没有拉入对应对象，Watch 不链接 libarchive。未来
-启用 RAR5/format-all、改变强制加载或单独交付该静态库时，必须重新评估并
+这份公共宿主正文进入普通 `iSH` 与 `iSH+Linux`，共享 iPhone 查看器按
+bundle 中实际存在的资源显示：普通 iSH 依次显示项目许可、Alpine seed 与
+宿主正文，iSH+Linux 显示项目许可与公共宿主正文。Watch 显示项目许可、
+Alpine seed 与独立的 `WATCH-LIBARCHIVE-NOTICES.txt`，不携带包含 hterm 的
+公共宿主正文；FileProvider 和测试产品也不携带这些声明资源。该接线仍不是
+最终法律结论。
+
+`iSHWatch` 通过独立的 `libarchive-watchOS.a` 支持 rootfs 归档。fakefs
+直接使用 tar 读取、gzip 读写与 pax 写入入口；这些入口在最终 Mach-O 中
+产生的完整传递对象闭包由 LinkMap 与符号门禁固定，不能简写成只包含 tar
+和 gzip 对象。普通 iSH、iSH+Linux 与 Watch 的最终 Mach-O 均不得拉入
+BLAKE2、RAR5 或 format-all 对象；这些对象只可存在于未单独交付的静态库
+中间产物。未来改变归档入口、强制加载或单独交付静态库时，必须重新评估并
 明确许可分支。LGPL 方案，以及 `iSH+Linux` 的 Linux GPLv2、在线 rootfs
 和对应源码交付仍保持未决；这些缺口继续阻断公共发行。
 
@@ -593,8 +598,8 @@ Watch 侧提供三个相关共享 Scheme：
 构建验收时，应按上节显式选择组合，并只运行一次核心门禁，再让后续
 LinkSmoke 和完整 App 以 `prebuilt` 模式复用同一个产物根，避免每个 Xcode 命令
 重建四个核心切片。下面依次覆盖 Apple 五切片 core、Watch 四切片 LinkSmoke 和
-Watch Simulator `arm64` 完整 App；只验 Watch core 四切片时，可在门禁命令前增加
-`APPLE_SKIP_IOS=1`：
+Watch device `arm64_32`/`arm64` 与 Simulator `arm64` 完整 App；只验 Watch
+core 四切片时，可在门禁命令前增加 `APPLE_SKIP_IOS=1`：
 
 ```sh
 artifacts="$PWD/build-apple-core"
@@ -659,6 +664,21 @@ xcodebuild \
     -project iSH.xcodeproj \
     -scheme iSHWatch \
     -configuration Release \
+    -sdk watchos \
+    ARCHS="arm64_32 arm64" \
+    WATCHOS_DEPLOYMENT_TARGET=10.0 \
+    ONLY_ACTIVE_ARCH=NO \
+    ISH_WATCH_ARTIFACT_ROOT="$artifacts" \
+    ISH_WATCH_PACKAGE_MODE=prebuilt \
+    ISH_AARCH64_ROOTFS_CACHE="$rootfs_cache" \
+    SYMROOT="$products" \
+    CODE_SIGNING_ALLOWED=NO \
+    build
+
+xcodebuild \
+    -project iSH.xcodeproj \
+    -scheme iSHWatch \
+    -configuration Release \
     -sdk watchsimulator \
     ARCHS=arm64 \
     WATCHOS_DEPLOYMENT_TARGET=10.0 \
@@ -672,12 +692,12 @@ xcodebuild \
 ```
 
 两次 LinkSmoke 命令只使用 SDK 编译和链接；完整 App 的 rootfs phase 会在
-缓存无效时下载并核验固定归档，同时构建并运行宿主 `fakefsify`。缓存已经通过
-摘要校验时，可为完整 App 命令再增加 `ISH_AARCH64_ROOTFS_OFFLINE=1`，保证不会
-联网。上述命令都不要求安装或启动 Simulator runtime。完整验收把核心产物固定在
-`build-apple-core/`，把 Xcode 产品固定在 `build-apple-products/`。普通 Xcode
-构建未显式指定时，交叉构建中间产物位于 `ISH_WATCH_ARTIFACT_ROOT`，默认展开为
-DerivedData 下的：
+缓存无效时下载并核验固定归档，同时构建并运行宿主 `fakefsify`。首个完整 App
+构建填充缓存后，可为另一个完整 App 命令增加
+`ISH_AARCH64_ROOTFS_OFFLINE=1`，保证不会再次联网。上述命令都不要求安装或
+启动 Simulator runtime。完整验收把核心产物固定在 `build-apple-core/`，
+把 Xcode 产品固定在 `build-apple-products/`。普通 Xcode 构建未显式指定时，
+交叉构建中间产物位于 `ISH_WATCH_ARTIFACT_ROOT`，默认展开为 DerivedData 下的：
 
 ```text
 Build/Intermediates.noindex/iSH.build/iSHWatchArtifacts/<配置><平台后缀>/
@@ -733,7 +753,7 @@ tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
 - iOS device `arm64`，watchOS device `arm64_32`/`arm64` 与 Simulator `arm64`/`x86_64` 的 core、完整静态库、普通消费者、全归档消费者、ABI 和二进制元数据门禁通过，并成功生成包含 device/Simulator 变体的三份 XCFramework。
 - 命令行 Alpine 冒烟的动态 `/bin/sh`、文件操作、子进程等待、信号终止、数字地址 HTTP、musl `getent`、BusyBox `nslookup` 与主机名 HTTP 获取通过；查询日志证明三条工作负载都实际经过本地 UDP DNS responder。
 - 专用 iPhone 与 Watch Simulator 的完整产品分别通过启动/交互、真实 resolver、HTTP/HTTPS、`apk update`、SQLite WAL 与复启持久化、Python、guest GCC/pthread、本地 Git 操作和离线 SSH 客户端/密钥/配置固定矩阵。此类长时 UI 门禁是发布候选实证，不在每次公开 CI 中重放，也不能替代实体设备验证。
-- 公开 CI 会构建 iPhone device `arm64` Release、Apple 五切片 core、Watch 四切片 LinkSmoke 和 Watch Simulator `arm64` 完整 App；它逐字比较 iPhone 的项目/Alpine/宿主正文、Watch 的项目/Alpine 正文和 ReleaseLinux 的项目/公共宿主正文，并验证每个产品都排除不属于自身范围的声明资源。CI 同时构建两个 iPhone 变体只是兼容性证据，不表示它们属于同一个候选组合。
+- 公开 CI 会构建 iPhone device `arm64` Release、Apple 五切片 core、Watch 四切片 LinkSmoke，以及 Watch device `arm64_32`/`arm64` 和 Simulator `arm64` 完整 App；它逐字比较 iPhone 的项目/Alpine/宿主正文、Watch 的项目/Alpine 正文和 ReleaseLinux 的项目/公共宿主正文，并验证每个产品都排除不属于自身范围的声明资源。CI 同时构建两个 iPhone 变体只是兼容性证据，不表示它们属于同一个候选组合。
 
 ## 来源、许可与独立实现边界
 
