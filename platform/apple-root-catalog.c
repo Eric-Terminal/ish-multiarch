@@ -424,6 +424,39 @@ int ish_apple_root_catalog_create(
             seed_root, persistent_parent, name, &result);
 }
 
+int ish_apple_root_catalog_import_fakefs(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *imported_root,
+        char name[ISH_APPLE_ROOT_NAME_CAPACITY],
+        struct progress progress) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            imported_root == NULL || imported_root[0] == '\0' ||
+            name == NULL)
+        return EINVAL;
+
+    cleanup_deletions(persistent_parent);
+    for (uint64_t index = 1; ; index++) {
+        int error = copy_candidate_name(index, name);
+        if (error != 0)
+            return error;
+        bool exists;
+        error = candidate_exists(persistent_parent, name, &exists);
+        if (error != 0)
+            return error;
+        if (!exists) {
+            error = ish_apple_rootfs_publish_imported_root(
+                    seed_root, persistent_parent,
+                    imported_root, name, progress);
+            if (error != EEXIST)
+                return error;
+        }
+        if (index == UINT64_MAX)
+            return ENOSPC;
+    }
+}
+
 int ish_apple_root_catalog_claim_active(
         const char *persistent_parent,
         const char *name,

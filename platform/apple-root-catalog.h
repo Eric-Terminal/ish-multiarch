@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "platform/apple-rootfs-seed.h"
+#include "tools/fakefs.h"
 
 #define ISH_APPLE_ROOT_NAME_CAPACITY 64
 #define ISH_APPLE_ROOT_PATH_CAPACITY 1024
@@ -57,6 +58,14 @@ int ish_apple_root_catalog_create(
         const char *seed_root,
         const char *persistent_parent,
         char name[ISH_APPLE_ROOT_NAME_CAPACITY]);
+
+// 将已在私有目录解包完成的 fakefs 原子发布为最低空闲托管 root。
+int ish_apple_root_catalog_import_fakefs(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *imported_root,
+        char name[ISH_APPLE_ROOT_NAME_CAPACITY],
+        struct progress progress);
 
 /*
  * 复制一个非活动的托管 root，并选择最低空闲名称原子发布。

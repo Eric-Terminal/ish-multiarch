@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "tools/fakefs.h"
+
 // 仅供 Apple rootfs 安装器与目录管理器共享，不属于对外 API。
 int ish_apple_rootfs_sync_directory(int directory);
 int ish_apple_rootfs_remove_entry_at(int parent, const char *name);
@@ -36,6 +38,17 @@ int ish_apple_rootfs_copy_managed_root(
         const char *persistent_parent,
         const char *source_name,
         const char *destination_name);
+
+/*
+ * 将 fakefs_import 产生的私有临时目录复制到托管 staging，并原子发布。
+ * imported_root 必须是调用方独占、且只含 fakefs 数据库及 data 的普通目录。
+ */
+int ish_apple_rootfs_publish_imported_root(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *imported_root,
+        const char *destination_name,
+        struct progress progress);
 
 /*
  * 在调用方持有复制目录锁及 source_name 排他生命周期锁时执行幂等复制。

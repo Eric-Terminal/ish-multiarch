@@ -19,6 +19,7 @@
 
 #include "fs/fake-db.h"
 #include "platform/apple-rootfs-storage-private.h"
+#include "util/fchdir.h"
 
 #ifndef __APPLE__
 #error "Apple rootfs seed 安装器只能构建到 Apple 平台"
@@ -78,6 +79,10 @@ struct root_copy_context {
     struct copied_hardlink *hardlinks;
     size_t hardlink_count;
     size_t hardlink_capacity;
+    struct progress progress;
+    uintmax_t total_bytes;
+    uintmax_t copied_bytes;
+    double progress_span;
 };
 
 struct staging_owner {
@@ -263,8 +268,45 @@ static int seek_file(
     return 0;
 }
 
+static int report_root_copy_progress(
+        struct root_copy_context *context,
+        uintmax_t copied,
+        const char *path) {
+    if (UINTMAX_MAX - context->copied_bytes < copied)
+        context->copied_bytes = UINTMAX_MAX;
+    else
+        context->copied_bytes += copied;
+    if (context->progress.callback == NULL)
+        return 0;
+    double fraction = context->total_bytes == 0 ? 1 :
+            (double) context->copied_bytes /
+            (double) context->total_bytes;
+    if (fraction > 1)
+        fraction = 1;
+    if (context->progress_span > 0)
+        fraction *= context->progress_span;
+    bool cancelled = false;
+    context->progress.callback(
+            context->progress.cookie, fraction, path, &cancelled);
+    return cancelled ? ECANCELED : 0;
+}
+
+static int report_copy_stage(
+        struct progress progress,
+        double fraction,
+        const char *message) {
+    if (progress.callback == NULL)
+        return 0;
+    bool cancelled = false;
+    progress.callback(
+            progress.cookie, fraction, message, &cancelled);
+    return cancelled ? ECANCELED : 0;
+}
+
 static int copy_file_range(
-        int source, int destination, off_t length) {
+        int source, int destination, off_t length,
+        const char *path,
+        struct root_copy_context *context) {
     unsigned char buffer[COPY_BUFFER_SIZE];
     while (length > 0) {
         size_t request = length < (off_t) sizeof(buffer) ?
@@ -278,6 +320,10 @@ static int copy_file_range(
         if (count == 0)
             return EIO;
         int error = write_all(destination, buffer, (size_t) count);
+        if (error != 0)
+            return error;
+        error = report_root_copy_progress(
+                context, (uintmax_t) count, path);
         if (error != 0)
             return error;
         length -= count;
@@ -294,7 +340,9 @@ static bool bytes_are_zero(const unsigned char *bytes, size_t length) {
 }
 
 static int copy_file_sparse_fallback(
-        int source, int destination, off_t logical_size) {
+        int source, int destination, off_t logical_size,
+        const char *path,
+        struct root_copy_context *context) {
 #ifdef ISH_APPLE_ROOTFS_SEED_TESTING
     ish_apple_rootfs_seed_test_sparse_fallback_count++;
 #endif
@@ -326,6 +374,9 @@ static int copy_file_sparse_fallback(
         }
         if (count > 0)
             copied += count;
+        if (error == 0 && count > 0)
+            error = report_root_copy_progress(
+                    context, (uintmax_t) count, path);
     }
     if (error == 0 && ftruncate(destination, logical_size) < 0)
         error = errno_or_io();
@@ -333,13 +384,15 @@ static int copy_file_sparse_fallback(
 }
 
 static int copy_file_preserving_holes(
-        int source, int destination, off_t logical_size) {
+        int source, int destination, off_t logical_size,
+        const char *path,
+        struct root_copy_context *context) {
     if (logical_size < 0)
         return EINVAL;
 #ifdef ISH_APPLE_ROOTFS_SEED_TESTING
     if (ish_apple_rootfs_seed_test_force_sparse_fallback)
         return copy_file_sparse_fallback(
-                source, destination, logical_size);
+                source, destination, logical_size, path, context);
 #endif
     off_t cursor = 0;
     while (cursor < logical_size) {
@@ -349,7 +402,7 @@ static int copy_file_preserving_holes(
             break;
         if (error == EINVAL || error == ENOTSUP)
             return copy_file_sparse_fallback(
-                    source, destination, logical_size);
+                    source, destination, logical_size, path, context);
         if (error != 0)
             return error;
         if (data >= logical_size)
@@ -359,7 +412,7 @@ static int copy_file_preserving_holes(
         error = seek_file(source, data, SEEK_HOLE, &hole);
         if (error == EINVAL || error == ENOTSUP)
             return copy_file_sparse_fallback(
-                    source, destination, logical_size);
+                    source, destination, logical_size, path, context);
         if (error == ENXIO)
             hole = logical_size;
         else if (error != 0)
@@ -375,7 +428,8 @@ static int copy_file_preserving_holes(
             error = seek_file(destination, data, SEEK_SET, &position);
         if (error == 0)
             error = copy_file_range(
-                    source, destination, hole - data);
+                    source, destination, hole - data,
+                    path, context);
         if (error != 0)
             return error;
         cursor = hole;
@@ -686,6 +740,24 @@ static int remember_copied_hardlink(
     return 0;
 }
 
+static void stat_times(
+        const struct stat *metadata,
+        struct timespec times[2]) {
+    times[0] = metadata->st_atimespec;
+    times[1] = metadata->st_mtimespec;
+}
+
+static int restore_times_at(
+        int directory,
+        const char *name,
+        const struct stat *metadata) {
+    struct timespec times[2];
+    stat_times(metadata, times);
+    return utimensat(
+            directory, name, times, AT_SYMLINK_NOFOLLOW) < 0 ?
+            errno_or_io() : 0;
+}
+
 static int copy_regular_preserving_hardlinks(
         int source_directory,
         int destination_directory,
@@ -709,6 +781,10 @@ static int copy_regular_preserving_hardlinks(
         if (linkat(context->destination_root, existing_path,
                 destination_directory, name, 0) < 0)
             error = errno_or_io();
+        if (error == 0)
+            error = report_root_copy_progress(
+                    context, (uintmax_t) metadata.st_size,
+                    destination_path);
         if (close(source) < 0 && error == 0)
             error = errno_or_io();
         return error;
@@ -726,12 +802,28 @@ static int copy_regular_preserving_hardlinks(
      * fakefs 的 guest 权限、属主和时间保存在 meta.db；宿主对象只承担内容
      * 与进程访问控制，因此只复制 POSIX rwx 位，不传播 ACL、flags 或 xattr。
      */
+    uintmax_t copied_before = context->copied_bytes;
     if (error == 0)
         error = copy_file_preserving_holes(
-                source, destination, metadata.st_size);
+                source, destination, metadata.st_size,
+                destination_path, context);
+    uintmax_t copied_for_file =
+            context->copied_bytes - copied_before;
+    if (error == 0 &&
+            copied_for_file < (uintmax_t) metadata.st_size)
+        error = report_root_copy_progress(
+                context,
+                (uintmax_t) metadata.st_size - copied_for_file,
+                destination_path);
     if (destination >= 0 && error == 0 &&
             fchmod(destination, metadata.st_mode & 0777) < 0)
         error = errno_or_io();
+    if (destination >= 0 && error == 0) {
+        struct timespec times[2];
+        stat_times(&metadata, times);
+        if (futimens(destination, times) < 0)
+            error = errno_or_io();
+    }
     if (destination >= 0 && error == 0 && fsync(destination) < 0)
         error = errno_or_io();
     if (destination >= 0 && close(destination) < 0 && error == 0)
@@ -742,6 +834,42 @@ static int copy_regular_preserving_hardlinks(
         error = remember_copied_hardlink(
                 context, &metadata, destination_path);
     if (error != 0 && destination >= 0)
+        unlinkat(destination_directory, name, 0);
+    return error;
+}
+
+static int copy_fifo_preserving_hardlinks(
+        int destination_directory,
+        const char *name,
+        const char *destination_path,
+        const struct stat *metadata,
+        struct root_copy_context *context) {
+    const char *existing_path = metadata->st_nlink > 1 ?
+            copied_hardlink_path(context, metadata) : NULL;
+    int error = 0;
+    if (existing_path != NULL) {
+        if (linkat(context->destination_root, existing_path,
+                destination_directory, name, 0) < 0)
+            error = errno_or_io();
+        if (error == 0)
+            error = restore_times_at(
+                    destination_directory, name, metadata);
+        return error;
+    }
+    lock_fchdir(destination_directory);
+    int result = mkfifo(name, metadata->st_mode & 0777);
+    int saved_errno = errno;
+    unlock_fchdir();
+    errno = saved_errno;
+    if (result < 0)
+        return errno_or_io();
+    if (metadata->st_nlink > 1)
+        error = remember_copied_hardlink(
+                context, metadata, destination_path);
+    if (error == 0)
+        error = restore_times_at(
+                destination_directory, name, metadata);
+    if (error != 0)
         unlinkat(destination_directory, name, 0);
     return error;
 }
@@ -764,7 +892,8 @@ static int copy_managed_root_contents(
         struct root_copy_context *context) {
     if (depth > COPY_TREE_DEPTH_LIMIT)
         return ELOOP;
-    int iterator_file = dup(source);
+    int iterator_file = openat(source, ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (iterator_file < 0)
         return errno_or_io();
     DIR *iterator = fdopendir(iterator_file);
@@ -791,6 +920,10 @@ static int copy_managed_root_contents(
                 child_path, destination_path, entry->d_name);
         if (error != 0)
             break;
+        error = report_root_copy_progress(
+                context, 0, child_path);
+        if (error != 0)
+            break;
 
         struct stat metadata;
         if (fstatat(source, entry->d_name, &metadata,
@@ -802,6 +935,10 @@ static int copy_managed_root_contents(
             error = copy_regular_preserving_hardlinks(
                     source, destination, entry->d_name,
                     child_path, context);
+        } else if (S_ISFIFO(metadata.st_mode)) {
+            error = copy_fifo_preserving_hardlinks(
+                    destination, entry->d_name,
+                    child_path, &metadata, context);
         } else if (S_ISDIR(metadata.st_mode)) {
             if (depth >= COPY_TREE_DEPTH_LIMIT) {
                 error = ELOOP;
@@ -836,6 +973,12 @@ static int copy_managed_root_contents(
                         fchmod(destination_child,
                                 metadata.st_mode & 0777) < 0)
                     error = errno_or_io();
+                if (destination_child >= 0 && error == 0) {
+                    struct timespec times[2];
+                    stat_times(&metadata, times);
+                    if (futimens(destination_child, times) < 0)
+                        error = errno_or_io();
+                }
                 if (destination_child >= 0 && error == 0)
                     error = sync_directory(destination_child);
                 if (source_child >= 0 &&
@@ -846,7 +989,7 @@ static int copy_managed_root_contents(
                     error = errno_or_io();
             }
         } else {
-            // fakefs 的宿主存储只允许普通文件和目录；不跟随任何链接。
+            // fakefs 仅用宿主 FIFO 表示 guest FIFO；其他 guest 特殊对象是普通占位文件。
             error = EINVAL;
         }
         if (error != 0)
@@ -2698,6 +2841,189 @@ static int build_copied_root(
     return error;
 }
 
+static int validate_imported_root_top(int root) {
+    unsigned found = 0;
+    int iterator_file = dup(root);
+    if (iterator_file < 0)
+        return errno_or_io();
+    DIR *iterator = fdopendir(iterator_file);
+    if (iterator == NULL) {
+        int error = errno_or_io();
+        close(iterator_file);
+        return error;
+    }
+
+    int error = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(iterator)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+            continue;
+        mode_t expected_type;
+        unsigned bit = 0;
+        if (strcmp(entry->d_name, "meta.db") == 0) {
+            expected_type = S_IFREG;
+            bit = 1u << 0;
+        } else if (strcmp(entry->d_name, "data") == 0) {
+            expected_type = S_IFDIR;
+            bit = 1u << 1;
+        } else if (strcmp(entry->d_name, "meta.db-wal") == 0 ||
+                strcmp(entry->d_name, "meta.db-shm") == 0 ||
+                strcmp(entry->d_name, "meta.db-journal") == 0) {
+            expected_type = S_IFREG;
+        } else {
+            error = EINVAL;
+            break;
+        }
+        struct stat metadata;
+        if (fstatat(root, entry->d_name, &metadata,
+                AT_SYMLINK_NOFOLLOW) < 0) {
+            error = errno_or_io();
+            break;
+        }
+        if ((metadata.st_mode & S_IFMT) != expected_type ||
+                metadata.st_uid != geteuid() ||
+                (bit != 0 && (found & bit) != 0)) {
+            error = EINVAL;
+            break;
+        }
+        found |= bit;
+        errno = 0;
+    }
+    if (entry == NULL && errno != 0 && error == 0)
+        error = errno_or_io();
+    if (closedir(iterator) < 0 && error == 0)
+        error = errno_or_io();
+    if (error == 0 && found != 0x03)
+        error = EINVAL;
+    return error;
+}
+
+static int count_imported_regular_bytes(
+        int directory, unsigned depth, uintmax_t *total,
+        struct progress progress) {
+    if (depth > COPY_TREE_DEPTH_LIMIT)
+        return ELOOP;
+    struct stat directory_metadata;
+    if (fstat(directory, &directory_metadata) < 0)
+        return errno_or_io();
+    int iterator_file = openat(directory, ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (iterator_file < 0)
+        return errno_or_io();
+    DIR *iterator = fdopendir(iterator_file);
+    if (iterator == NULL) {
+        int error = errno_or_io();
+        close(iterator_file);
+        return error;
+    }
+    int error = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(iterator)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+            continue;
+        error = report_copy_stage(
+                progress, 0, "正在检查文件系统内容");
+        if (error != 0)
+            break;
+        struct stat metadata;
+        if (fstatat(directory, entry->d_name, &metadata,
+                AT_SYMLINK_NOFOLLOW) < 0) {
+            error = errno_or_io();
+            break;
+        }
+        if (S_ISREG(metadata.st_mode)) {
+            if (metadata.st_size < 0 ||
+                    UINTMAX_MAX - *total <
+                    (uintmax_t) metadata.st_size) {
+                error = EFBIG;
+                break;
+            }
+            *total += (uintmax_t) metadata.st_size;
+        } else if (S_ISFIFO(metadata.st_mode)) {
+            // FIFO 没有内容字节，但仍在复制循环中轮询取消。
+        } else if (S_ISDIR(metadata.st_mode)) {
+            int child = openat(directory, entry->d_name,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (child < 0) {
+                error = errno_or_io();
+            } else {
+                error = count_imported_regular_bytes(
+                        child, depth + 1, total, progress);
+                if (close(child) < 0 && error == 0)
+                    error = errno_or_io();
+            }
+            if (error != 0)
+                break;
+        } else {
+            error = EINVAL;
+            break;
+        }
+        errno = 0;
+    }
+    if (entry == NULL && errno != 0 && error == 0)
+        error = errno_or_io();
+    if (closedir(iterator) < 0 && error == 0)
+        error = errno_or_io();
+    struct timespec directory_times[2];
+    stat_times(&directory_metadata, directory_times);
+    if (futimens(directory, directory_times) < 0 && error == 0)
+        error = errno_or_io();
+    return error;
+}
+
+static int build_imported_root(
+        int seed, int imported, int staging,
+        struct progress progress) {
+    struct seed_manifest manifest = {0};
+    int error = validate_seed_top(seed, &manifest);
+    if (error == 0)
+        error = validate_imported_root_top(imported);
+
+    struct root_copy_context context = {
+        .destination_root = staging,
+        .progress = progress,
+        .progress_span = 0.85,
+    };
+    if (error == 0)
+        error = count_imported_regular_bytes(
+                imported, 0, &context.total_bytes, progress);
+    if (error == 0)
+        error = report_root_copy_progress(
+                &context, 0, "正在复制文件系统内容");
+    if (error == 0)
+        error = copy_managed_root_contents(
+                imported, staging, "", 0, &context);
+    root_copy_context_destroy(&context);
+    if (error == 0)
+        error = report_copy_stage(
+                progress, 0.86, "正在准备文件系统数据库");
+    if (error == 0)
+        error = prepare_copied_database(staging);
+    if (error == 0)
+        error = report_copy_stage(
+                progress, 0.92, "正在写入文件系统收据");
+    if (error == 0)
+        error = write_receipt_at(staging, &manifest);
+    if (error == 0)
+        error = report_copy_stage(
+                progress, 0.96, "正在验证文件系统");
+    if (error == 0)
+        error = validate_opened_root(staging);
+    if (error == 0)
+        error = report_copy_stage(
+                progress, 0.99, "正在同步文件系统");
+    if (error == 0)
+        error = sync_directory(staging);
+    if (error == 0)
+        error = report_copy_stage(
+                progress, 1, "文件系统发布准备完成");
+    return error;
+}
+
 static int lock_file(
         int parent, const char *lock_name,
         int operation, int *lock_out) {
@@ -3048,6 +3374,113 @@ int ish_apple_rootfs_seed_install(
     if (error == 0)
         error = install_locked(seed_root, parent, root_name,
                 owner_name, result);
+    bool completed = error == 0;
+    if (lock >= 0) {
+        while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}
+        close(lock);
+    }
+    if (close(parent) < 0 && error == 0)
+        error = errno_or_io();
+    return completed ? 0 : error;
+}
+
+int ish_apple_rootfs_publish_imported_root(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *imported_root,
+        const char *destination_name,
+        struct progress progress) {
+    if (seed_root == NULL || seed_root[0] == '\0' ||
+            persistent_parent == NULL || persistent_parent[0] == '\0' ||
+            imported_root == NULL || imported_root[0] == '\0' ||
+            !valid_root_name(destination_name))
+        return EINVAL;
+
+    char lock_name[NAME_MAX + 1];
+    char owner_name[NAME_MAX + 1];
+    int error = format_private_name(
+            lock_name, destination_name, ".install.lock");
+    if (error == 0)
+        error = format_private_name(
+                owner_name, destination_name, ".installing.owner");
+    if (error != 0)
+        return error;
+
+    int parent = open(persistent_parent,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0)
+        return errno_or_io();
+    int lock = -1;
+    error = lock_file(parent, lock_name, LOCK_EX, &lock);
+
+    bool destination_present = false;
+    if (error == 0)
+        error = inspect_existing_root(
+                parent, destination_name, &destination_present);
+    if (error == 0 && destination_present)
+        error = EEXIST;
+    if (error == 0)
+        error = recover_staging(
+                parent, owner_name, destination_name);
+
+    int seed = -1;
+    int imported = -1;
+    if (error == 0) {
+        seed = open(seed_root,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (seed < 0)
+            error = errno_or_io();
+    }
+    if (error == 0) {
+        imported = open(imported_root,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (imported < 0)
+            error = errno_or_io();
+    }
+
+    int staging = -1;
+    struct staging_owner owner = {0};
+    if (error == 0)
+        error = create_staging(parent, destination_name,
+                owner_name, &staging, &owner);
+    if (error == 0)
+        error = build_imported_root(
+                seed, imported, staging, progress);
+    if (seed >= 0 && close(seed) < 0 && error == 0)
+        error = errno_or_io();
+    if (imported >= 0 && close(imported) < 0 && error == 0)
+        error = errno_or_io();
+    if (staging >= 0 && close(staging) < 0 && error == 0)
+        error = errno_or_io();
+    if (error != 0 && owner.marker_inode != 0) {
+        int cleanup_error = remove_owned_staging(
+                parent, owner_name, &owner);
+        if (cleanup_error != 0)
+            error = cleanup_error;
+    }
+
+    if (error == 0 && renameatx_np(parent, owner.staging_name,
+            parent, destination_name, RENAME_EXCL) < 0) {
+        error = errno_or_io();
+        int cleanup_error = remove_owned_staging(
+                parent, owner_name, &owner);
+        if (cleanup_error != 0)
+            error = cleanup_error;
+    }
+    if (error == 0) {
+        error = sync_directory_phase(parent,
+                ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_ROOT_SYNC);
+        if (error != 0) {
+            int rollback_error = rollback_unsynchronized_publish(
+                    parent, destination_name, &owner);
+            if (rollback_error != 0)
+                error = rollback_error;
+        }
+    }
+    if (error == 0)
+        (void) unlink_owner_marker(parent, owner_name, &owner,
+                ISH_APPLE_ROOTFS_SEED_TEST_PUBLISH_OWNER_SYNC);
+
     bool completed = error == 0;
     if (lock >= 0) {
         while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}

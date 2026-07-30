@@ -176,7 +176,8 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
         'apple_rootfs_seed_test',
         ['platform/apple-rootfs-seed-test.c',
          'platform/apple-root-catalog.c',
-         'platform/apple-rootfs-seed.c'],
+         'platform/apple-rootfs-seed.c',
+         'util/fchdir.c'],
         include_directories: includes,
         dependencies: sqlite3,
         c_args: '-DISH_APPLE_ROOTFS_SEED_TESTING')

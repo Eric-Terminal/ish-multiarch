@@ -1,5 +1,6 @@
 #include "platform/apple-root-catalog.h"
 #include "platform/apple-rootfs-seed.h"
+#include "platform/apple-rootfs-storage-private.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -2513,21 +2514,168 @@ static int test_root_catalog_copy_rejections(const char *workspace) {
             ish_apple_root_catalog_prepare(
                     fifo_source.seed, fifo_source.persistent,
                     NULL, source, &result) == 0,
-            "创建含非普通对象的复制源");
+            "创建含 FIFO 的导入源");
     CHECK(format_path(source_root, "%s/%s",
                     fifo_source.persistent, source) == 0 &&
             format_path(path, "%s/data/guest-fifo",
                     source_root) == 0 &&
             mkfifo(path, 0600) == 0,
-            "在复制源中建立 FIFO");
-    CHECK(ish_apple_root_catalog_copy(
-                    fifo_source.seed, fifo_source.persistent,
-                    source, "aarch64-999", destination) == EINVAL &&
+            "在导入源中建立 FIFO");
+    char fifo_alias[PATH_MAX];
+    CHECK(format_path(fifo_alias, "%s/data/guest-fifo-alias",
+                    source_root) == 0 &&
+            link(path, fifo_alias) == 0,
+            "在导入源中建立 FIFO 硬链接");
+    char regular_hardlink[PATH_MAX];
+    char regular_hardlink_alias[PATH_MAX];
+    CHECK(format_path(regular_hardlink,
+                    "%s/data/regular-hardlink", source_root) == 0 &&
+            write_file(regular_hardlink, "hard\n", 5, 0600) == 0 &&
+            format_path(regular_hardlink_alias,
+                    "%s/data/regular-hardlink-alias",
+                    source_root) == 0 &&
+            link(regular_hardlink, regular_hardlink_alias) == 0,
+            "在导入源中建立普通文件硬链接");
+    sqlite3 *fifo_database = NULL;
+    CHECK(format_path(path, "%s/meta.db", source_root) == 0 &&
+            sqlite3_open_v2(path, &fifo_database,
+                    SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK &&
+            insert_stat(
+                    fifo_database, 1000, UINT32_C(0010600)) == 0 &&
+            insert_path(fifo_database, "/guest-fifo", 1000) == 0 &&
+            insert_path(
+                    fifo_database, "/guest-fifo-alias", 1000) == 0 &&
+            insert_stat(
+                    fifo_database, 1001, UINT32_C(0100600)) == 0 &&
+            insert_path(
+                    fifo_database, "/regular-hardlink", 1001) == 0 &&
+            insert_path(fifo_database,
+                    "/regular-hardlink-alias", 1001) == 0 &&
+            sqlite3_close(fifo_database) == SQLITE_OK,
+            "在 fakefs 数据库中登记 guest FIFO 与普通文件硬链接");
+    static const char *import_only_files[] = {
+        "rootfs-installation.txt",
+        "rootfs-manifest.txt",
+        "rootfs-hardlinks.tsv",
+    };
+    for (size_t index = 0;
+            index < sizeof(import_only_files) /
+                    sizeof(import_only_files[0]);
+            index++) {
+        CHECK(format_path(path, "%s/%s",
+                        source_root, import_only_files[index]) == 0 &&
+                unlink(path) == 0,
+                "移除导入 fakefs 不包含的安装元数据");
+    }
+    const struct timespec fifo_times[2] = {
+        {.tv_sec = 946684700, .tv_nsec = 0},
+        {.tv_sec = 946684800, .tv_nsec = 123456789},
+    };
+    const struct timespec regular_times[2] = {
+        {.tv_sec = 946684701, .tv_nsec = 0},
+        {.tv_sec = 946684801, .tv_nsec = 234567890},
+    };
+    const struct timespec hardlink_times[2] = {
+        {.tv_sec = 946684703, .tv_nsec = 456789012},
+        {.tv_sec = 946684803, .tv_nsec = 567890123},
+    };
+    const struct timespec directory_times[2] = {
+        {.tv_sec = 946684702, .tv_nsec = 0},
+        {.tv_sec = 946684802, .tv_nsec = 345678901},
+    };
+    CHECK(format_path(path, "%s/data/guest-fifo",
+                    source_root) == 0 &&
+            utimensat(AT_FDCWD, path, fifo_times, 0) == 0 &&
+            format_path(path, "%s/data/bin/busybox",
+                    source_root) == 0 &&
+            utimensat(AT_FDCWD, path, regular_times, 0) == 0 &&
+            utimensat(AT_FDCWD,
+                    regular_hardlink, hardlink_times, 0) == 0 &&
+            format_path(path, "%s/data", source_root) == 0 &&
+            utimensat(AT_FDCWD, path, directory_times, 0) == 0,
+            "设置导入 fakefs 的 FIFO、普通文件与目录时间");
+    struct stat fifo_metadata;
+    struct stat fifo_alias_metadata;
+    struct stat regular_metadata;
+    struct stat hardlink_metadata;
+    struct stat hardlink_alias_metadata;
+    struct stat directory_metadata;
+    int publish_error = ish_apple_rootfs_publish_imported_root(
+            fifo_source.seed, fifo_source.persistent,
+            source_root, "aarch64-2",
+            (struct progress) {0});
+    CHECK(publish_error == 0,
+            "导入发布含 FIFO 的 fakefs");
+    CHECK(
+            format_path(path, "%s/aarch64-2/data/guest-fifo",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &fifo_metadata) == 0 &&
+            S_ISFIFO(fifo_metadata.st_mode) &&
+            (fifo_metadata.st_mode & 0777) == 0600 &&
+            format_path(path,
+                    "%s/aarch64-2/data/guest-fifo-alias",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &fifo_alias_metadata) == 0 &&
+            S_ISFIFO(fifo_alias_metadata.st_mode) &&
+            fifo_alias_metadata.st_dev == fifo_metadata.st_dev &&
+            fifo_alias_metadata.st_ino == fifo_metadata.st_ino &&
+            fifo_alias_metadata.st_nlink == 2 &&
+            fifo_metadata.st_atimespec.tv_sec ==
+                    fifo_times[0].tv_sec &&
+            fifo_metadata.st_atimespec.tv_nsec ==
+                    fifo_times[0].tv_nsec &&
+            fifo_metadata.st_mtimespec.tv_sec ==
+                    fifo_times[1].tv_sec &&
+            fifo_metadata.st_mtimespec.tv_nsec ==
+                    fifo_times[1].tv_nsec &&
+            format_path(path, "%s/aarch64-2/data/bin/busybox",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &regular_metadata) == 0 &&
+            regular_metadata.st_atimespec.tv_sec ==
+                    regular_times[0].tv_sec &&
+            regular_metadata.st_atimespec.tv_nsec ==
+                    regular_times[0].tv_nsec &&
+            regular_metadata.st_mtimespec.tv_sec ==
+                    regular_times[1].tv_sec &&
+            regular_metadata.st_mtimespec.tv_nsec ==
+                    regular_times[1].tv_nsec &&
+            format_path(path,
+                    "%s/aarch64-2/data/regular-hardlink",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &hardlink_metadata) == 0 &&
+            format_path(path,
+                    "%s/aarch64-2/data/regular-hardlink-alias",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &hardlink_alias_metadata) == 0 &&
+            hardlink_alias_metadata.st_dev ==
+                    hardlink_metadata.st_dev &&
+            hardlink_alias_metadata.st_ino ==
+                    hardlink_metadata.st_ino &&
+            hardlink_metadata.st_nlink == 2 &&
+            hardlink_metadata.st_atimespec.tv_sec ==
+                    hardlink_times[0].tv_sec &&
+            hardlink_metadata.st_atimespec.tv_nsec ==
+                    hardlink_times[0].tv_nsec &&
+            hardlink_metadata.st_mtimespec.tv_sec ==
+                    hardlink_times[1].tv_sec &&
+            hardlink_metadata.st_mtimespec.tv_nsec ==
+                    hardlink_times[1].tv_nsec &&
+            format_path(path, "%s/aarch64-2/data",
+                    fifo_source.persistent) == 0 &&
+            lstat(path, &directory_metadata) == 0 &&
+            directory_metadata.st_atimespec.tv_sec ==
+                    directory_times[0].tv_sec &&
+            directory_metadata.st_atimespec.tv_nsec ==
+                    directory_times[0].tv_nsec &&
+            directory_metadata.st_mtimespec.tv_sec ==
+                    directory_times[1].tv_sec &&
+            directory_metadata.st_mtimespec.tv_nsec ==
+                    directory_times[1].tv_nsec &&
             format_path(path, "%s/aarch64-2",
                     fifo_source.persistent) == 0 &&
-            path_absent(path) &&
+            verify_database_inode(path) &&
             verify_no_catalog_staging(fifo_source.persistent),
-            "拒绝非普通结构且失败后没有半成品");
+            "导入发布必须保留 FIFO 宿主表示与 fakefs 数据库");
     return 0;
 }
 

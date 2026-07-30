@@ -113,6 +113,20 @@ if libarchive.found()
         '../util/fchdir.c',
     ]
     fakefsify = executable('fakefsify', fakefsify_src, dependencies: [libarchive], link_with: [libfakefs], include_directories: [includes])
+    watch_root_archive_roundtrip = executable(
+        'apple-watch-root-archive-roundtrip-test',
+        [
+            'fakefs.c',
+            '../util/fchdir.c',
+            '../platform/apple-watch-root-archive-roundtrip-test.c',
+        ],
+        dependencies: [libarchive],
+        link_with: [libfakefs],
+        include_directories: [includes],
+        c_args: '-DISH_FAKEFS_TESTING')
+    test(
+        'apple_watch_root_archive_roundtrip',
+        watch_root_archive_roundtrip)
     sqlite3_cli = find_program('sqlite3', required: false)
     if not meson.is_cross_build() and sqlite3_cli.found()
         apple_aarch64_rootfs_test = find_program(
