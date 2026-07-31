@@ -319,12 +319,22 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-resolver.c" \
         -o "$resolver_object"
 
-    local watch_runtime_object="$full_build_dir/apple-watch-runtime-strict.o"
-    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
-        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
-        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
-        -Wcast-align -c "$ROOT/platform/apple-watch-runtime.c" \
-        -o "$watch_runtime_object"
+    local -a watch_runtime_sources=(
+        apple-watch-runtime.c
+        apple-watch-runtime-terminal.c
+    )
+    local -a watch_runtime_objects=()
+    local watch_runtime_source
+    local watch_runtime_object
+    for watch_runtime_source in "${watch_runtime_sources[@]}"; do
+        watch_runtime_object="$full_build_dir/${watch_runtime_source%.c}-strict.o"
+        "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+            -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+            -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+            -Wcast-align -c "$ROOT/platform/$watch_runtime_source" \
+            -o "$watch_runtime_object"
+        watch_runtime_objects+=("$watch_runtime_object")
+    done
 
     local watch_guest_files_object="$full_build_dir/apple-watch-guest-files-strict.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
@@ -369,7 +379,7 @@ build_slice() {
         "$full_build_dir/apple_runtime_force_link_smoke" \
         "$abi_probe" "$backend_probe" "${rootfs_seed_objects[@]}" \
         "$resolver_object" \
-        "$watch_runtime_object" \
+        "${watch_runtime_objects[@]}" \
         "$watch_guest_files_object" \
         "${command_session_objects[@]}" \
         "$public_runtime_object"
@@ -452,7 +462,8 @@ build_slice() {
             platform_apple-command-session-backend.c.o \
             platform_apple-public-runtime.c.o \
             platform_apple-watch-guest-files.c.o \
-            platform_apple-watch-runtime.c.o; do
+            platform_apple-watch-runtime.c.o \
+            platform_apple-watch-runtime-terminal.c.o; do
         if ! grep -Fqx "$required_member" <<< "$archive_members"; then
             echo "错误：${name} 的 libish.a 缺少 ${required_member}。" >&2
             exit 1

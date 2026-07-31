@@ -308,6 +308,7 @@ if get_option('kernel') == 'ish'
             'platform/apple-watch-guest-files.c',
             'platform/apple-resolver.c',
             'platform/apple-watch-runtime.c',
+            'platform/apple-watch-runtime-terminal.c',
         ]
     endif
 
@@ -352,6 +353,7 @@ if get_option('kernel') == 'ish'
                 [
                     'platform/apple-watch-runtime-test.c',
                     'platform/apple-watch-runtime.c',
+                    'platform/apple-watch-runtime-terminal.c',
                 ],
                 c_args: '-DISH_APPLE_WATCH_RUNTIME_TESTING',
                 dependencies: ish)
