@@ -62,7 +62,23 @@
 		A8D000000000000000000030 /* fakefs.c in Sources */ = {isa = PBXBuildFile; fileRef = BB10E5C2248DBA7B009C7A74 /* fakefs.c */; };
 		A8D000000000000000000031 /* apple-watch-root-archive.c in Sources */ = {isa = PBXBuildFile; fileRef = A8D000000000000000000032 /* apple-watch-root-archive.c */; };
 			A7D000000000000000000002 /* WatchTerminalThemeImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D000000000000000000001 /* WatchTerminalThemeImportView.swift */; };
+		A9D000000000000000000002 /* WatchSessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D000000000000000000001 /* WatchSessionsView.swift */; };
+		A9D000000000000000000004 /* WatchFileSystemsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D000000000000000000003 /* WatchFileSystemsView.swift */; };
+		A9D000000000000000000006 /* TerminalScreenStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D000000000000000000005 /* TerminalScreenStorage.swift */; };
+		A9D000000000000000000008 /* WatchRuntimeAPKRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D000000000000000000007 /* WatchRuntimeAPKRepository.swift */; };
+		A9D00000000000000000000A /* WatchRuntimeSessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D000000000000000000009 /* WatchRuntimeSessions.swift */; };
 			A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000000F /* iSHWatchUITests.swift */; };
+			A1E000000000000000000012 /* iSHWatchUITests+Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000011 /* iSHWatchUITests+Appearance.swift */; };
+			A1E000000000000000000014 /* iSHWatchUITests+ArchiveHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000013 /* iSHWatchUITests+ArchiveHelpers.swift */; };
+			A1E000000000000000000016 /* iSHWatchUITests+GuestHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000015 /* iSHWatchUITests+GuestHelpers.swift */; };
+			A1E000000000000000000018 /* iSHWatchUITests+Lifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000017 /* iSHWatchUITests+Lifecycle.swift */; };
+			A1E00000000000000000001A /* iSHWatchUITests+Linux.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000019 /* iSHWatchUITests+Linux.swift */; };
+			A1E00000000000000000001C /* iSHWatchUITests+Maintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000001B /* iSHWatchUITests+Maintenance.swift */; };
+			A1E00000000000000000001E /* iSHWatchUITests+NavigationHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000001D /* iSHWatchUITests+NavigationHelpers.swift */; };
+			A1E000000000000000000020 /* iSHWatchUITests+RootArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E00000000000000000001F /* iSHWatchUITests+RootArchive.swift */; };
+			A1E000000000000000000022 /* iSHWatchUITests+Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000021 /* iSHWatchUITests+Sessions.swift */; };
+			A1E000000000000000000024 /* iSHWatchUITests+Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000023 /* iSHWatchUITests+Settings.swift */; };
+			A1E000000000000000000026 /* iSHWatchUITests+SharedFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E000000000000000000025 /* iSHWatchUITests+SharedFiles.swift */; };
 		A1F000000000000000000002 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
 		A1F000000000000000000003 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */; };
 		A1F000000000000000000006 /* ThirdPartyNoticesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */; };
@@ -556,9 +572,25 @@
 			A7D000000000000000000001 /* WatchTerminalThemeImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTerminalThemeImportView.swift; sourceTree = "<group>"; };
 		A8D000000000000000000010 /* WatchHostRootArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchHostRootArchive.swift; sourceTree = "<group>"; };
 		A8D000000000000000000012 /* WatchRootArchiveImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootArchiveImportView.swift; sourceTree = "<group>"; };
+		A9D000000000000000000001 /* WatchSessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSessionsView.swift; sourceTree = "<group>"; };
+		A9D000000000000000000003 /* WatchFileSystemsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchFileSystemsView.swift; sourceTree = "<group>"; };
+		A9D000000000000000000005 /* TerminalScreenStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreenStorage.swift; sourceTree = "<group>"; };
+		A9D000000000000000000007 /* WatchRuntimeAPKRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntimeAPKRepository.swift; sourceTree = "<group>"; };
+		A9D000000000000000000009 /* WatchRuntimeSessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntimeSessions.swift; sourceTree = "<group>"; };
 			A1E000000000000000000002 /* iSHWatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iSHWatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1E00000000000000000000E /* WatchUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchUITests.xcconfig; sourceTree = "<group>"; };
 		A1E00000000000000000000F /* iSHWatchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iSHWatchUITests.swift; sourceTree = "<group>"; };
+		A1E000000000000000000011 /* iSHWatchUITests+Appearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Appearance.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000013 /* iSHWatchUITests+ArchiveHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+ArchiveHelpers.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000015 /* iSHWatchUITests+GuestHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+GuestHelpers.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000017 /* iSHWatchUITests+Lifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Lifecycle.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000019 /* iSHWatchUITests+Linux.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Linux.swift"; sourceTree = "<group>"; };
+		A1E00000000000000000001B /* iSHWatchUITests+Maintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Maintenance.swift"; sourceTree = "<group>"; };
+		A1E00000000000000000001D /* iSHWatchUITests+NavigationHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+NavigationHelpers.swift"; sourceTree = "<group>"; };
+		A1E00000000000000000001F /* iSHWatchUITests+RootArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+RootArchive.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000021 /* iSHWatchUITests+Sessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Sessions.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000023 /* iSHWatchUITests+Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+Settings.swift"; sourceTree = "<group>"; };
+		A1E000000000000000000025 /* iSHWatchUITests+SharedFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "iSHWatchUITests+SharedFiles.swift"; sourceTree = "<group>"; };
 		A1F000000000000000000001 /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; name = "THIRD-PARTY-NOTICES.txt"; path = "third_party/alpine/3.24.1-aarch64/THIRD-PARTY-NOTICES.txt"; sourceTree = SOURCE_ROOT; };
 		A1F000000000000000000004 /* ThirdPartyNoticesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ThirdPartyNoticesViewController.h; sourceTree = "<group>"; };
 		A1F000000000000000000005 /* ThirdPartyNoticesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ThirdPartyNoticesViewController.m; sourceTree = "<group>"; };
@@ -992,6 +1024,7 @@
 				A1F000000000000000000007 /* ThirdPartyNoticesView.swift */,
 				A1D000000000000000000022 /* VTParser.swift */,
 				A1D000000000000000000020 /* TerminalScreen.swift */,
+				A9D000000000000000000005 /* TerminalScreenStorage.swift */,
 				A1D000000000000000000024 /* WatchTerminalSession.swift */,
 				A1D000000000000000000026 /* WatchTerminalAppearance.swift */,
 				A1D000000000000000000028 /* WatchTerminalView.swift */,
@@ -1000,6 +1033,8 @@
 				A3D000000000000000000001 /* WatchTerminalThemes.swift */,
 				A3D000000000000000000003 /* WatchTerminalThemeSettingsView.swift */,
 				A1D000000000000000000012 /* WatchRuntime.swift */,
+				A9D000000000000000000007 /* WatchRuntimeAPKRepository.swift */,
+				A9D000000000000000000009 /* WatchRuntimeSessions.swift */,
 				A4D000000000000000000001 /* WatchRootMetadata.swift */,
 				A5D000000000000000000001 /* WatchAPKRepositoryMigration.swift */,
 				A6D000000000000000000001 /* WatchPlatformBridge.swift */,
@@ -1012,6 +1047,8 @@
 				A1D00000000000000000001C /* WatchRootStore.swift */,
 				A1D00000000000000000001E /* WatchPreferences.swift */,
 				A1D00000000000000000001A /* WatchSettingsView.swift */,
+				A9D000000000000000000001 /* WatchSessionsView.swift */,
+				A9D000000000000000000003 /* WatchFileSystemsView.swift */,
 				A5D000000000000000000003 /* aarch64-repositories.txt */,
 				A1D000000000000000000013 /* iSHWatch-Bridging-Header.h */,
 			);
@@ -1022,6 +1059,17 @@
 			isa = PBXGroup;
 			children = (
 				A1E00000000000000000000F /* iSHWatchUITests.swift */,
+				A1E000000000000000000011 /* iSHWatchUITests+Appearance.swift */,
+				A1E000000000000000000013 /* iSHWatchUITests+ArchiveHelpers.swift */,
+				A1E000000000000000000015 /* iSHWatchUITests+GuestHelpers.swift */,
+				A1E000000000000000000017 /* iSHWatchUITests+Lifecycle.swift */,
+				A1E000000000000000000019 /* iSHWatchUITests+Linux.swift */,
+				A1E00000000000000000001B /* iSHWatchUITests+Maintenance.swift */,
+				A1E00000000000000000001D /* iSHWatchUITests+NavigationHelpers.swift */,
+				A1E00000000000000000001F /* iSHWatchUITests+RootArchive.swift */,
+				A1E000000000000000000021 /* iSHWatchUITests+Sessions.swift */,
+				A1E000000000000000000023 /* iSHWatchUITests+Settings.swift */,
+				A1E000000000000000000025 /* iSHWatchUITests+SharedFiles.swift */,
 			);
 			path = WatchUITests;
 			sourceTree = "<group>";
@@ -2488,6 +2536,7 @@
 				A1F000000000000000000008 /* ThirdPartyNoticesView.swift in Sources */,
 				A1D000000000000000000023 /* VTParser.swift in Sources */,
 				A1D000000000000000000021 /* TerminalScreen.swift in Sources */,
+				A9D000000000000000000006 /* TerminalScreenStorage.swift in Sources */,
 				A1D000000000000000000025 /* WatchTerminalSession.swift in Sources */,
 				A1D000000000000000000027 /* WatchTerminalAppearance.swift in Sources */,
 				A1D000000000000000000029 /* WatchTerminalView.swift in Sources */,
@@ -2496,6 +2545,8 @@
 				A3D000000000000000000002 /* WatchTerminalThemes.swift in Sources */,
 				A3D000000000000000000004 /* WatchTerminalThemeSettingsView.swift in Sources */,
 				A1D000000000000000000017 /* WatchRuntime.swift in Sources */,
+				A9D000000000000000000008 /* WatchRuntimeAPKRepository.swift in Sources */,
+				A9D00000000000000000000A /* WatchRuntimeSessions.swift in Sources */,
 				A4D000000000000000000002 /* WatchRootMetadata.swift in Sources */,
 				A5D000000000000000000002 /* WatchAPKRepositoryMigration.swift in Sources */,
 				A6D000000000000000000002 /* WatchPlatformBridge.swift in Sources */,
@@ -2509,6 +2560,8 @@
 				A1D00000000000000000001D /* WatchRootStore.swift in Sources */,
 				A1D00000000000000000001F /* WatchPreferences.swift in Sources */,
 				A1D00000000000000000001B /* WatchSettingsView.swift in Sources */,
+				A9D000000000000000000002 /* WatchSessionsView.swift in Sources */,
+				A9D000000000000000000004 /* WatchFileSystemsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2517,6 +2570,17 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1E000000000000000000010 /* iSHWatchUITests.swift in Sources */,
+				A1E000000000000000000012 /* iSHWatchUITests+Appearance.swift in Sources */,
+				A1E000000000000000000014 /* iSHWatchUITests+ArchiveHelpers.swift in Sources */,
+				A1E000000000000000000016 /* iSHWatchUITests+GuestHelpers.swift in Sources */,
+				A1E000000000000000000018 /* iSHWatchUITests+Lifecycle.swift in Sources */,
+				A1E00000000000000000001A /* iSHWatchUITests+Linux.swift in Sources */,
+				A1E00000000000000000001C /* iSHWatchUITests+Maintenance.swift in Sources */,
+				A1E00000000000000000001E /* iSHWatchUITests+NavigationHelpers.swift in Sources */,
+				A1E000000000000000000020 /* iSHWatchUITests+RootArchive.swift in Sources */,
+				A1E000000000000000000022 /* iSHWatchUITests+Sessions.swift in Sources */,
+				A1E000000000000000000024 /* iSHWatchUITests+Settings.swift in Sources */,
+				A1E000000000000000000026 /* iSHWatchUITests+SharedFiles.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

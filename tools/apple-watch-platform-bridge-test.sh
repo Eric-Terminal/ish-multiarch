@@ -8,6 +8,7 @@ trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
 
 set -- \
     "$repo_root/app/Watch/TerminalScreen.swift" \
+    "$repo_root/app/Watch/TerminalScreenStorage.swift" \
     "$repo_root/app/Watch/VTParser.swift" \
     "$repo_root/app/Watch/WatchTerminalAppearance.swift" \
     "$repo_root/app/Watch/WatchTerminalThemes.swift" \

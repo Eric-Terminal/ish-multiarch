@@ -562,7 +562,12 @@ def verify_iphone_contract(project, build_files, resolved):
 def verify_watch_contract(project, build_files, resolved):
     settings_view = read_text("app/Watch/WatchSettingsView.swift")
     notices_view = read_text("app/Watch/ThirdPartyNoticesView.swift")
-    ui_test = read_text("app/WatchUITests/iSHWatchUITests.swift")
+    ui_test_sources = sorted(
+        (ROOT / "app/WatchUITests").glob("iSHWatchUITests*.swift")
+    )
+    ui_test = "\n".join(
+        source.read_text(encoding="utf-8") for source in ui_test_sources
+    )
     watch_sources = sorted((ROOT / "app/Watch").glob("*"))
     for source in watch_sources:
         if source.suffix not in {".swift", ".h"}:
@@ -671,14 +676,14 @@ def verify_watch_contract(project, build_files, resolved):
         )
         if build_ids != used_ids or owners != {"iSHWatch"}:
             fail(f"{relative} 必须只进入 iSHWatch Sources")
-    ui_test_reference = require_unique_reference(
-        resolved, "app/WatchUITests/iSHWatchUITests.swift"
-    )
-    build_ids, used_ids, owners = owners_for_reference(
-        project, ui_test_reference, build_files, "PBXSourcesBuildPhase"
-    )
-    if build_ids != used_ids or owners != {"iSHWatchUITests"}:
-        fail("Watch UI 测试源码必须只进入 iSHWatchUITests")
+    for source in ui_test_sources:
+        relative = str(source.relative_to(ROOT))
+        reference = require_unique_reference(resolved, relative)
+        build_ids, used_ids, owners = owners_for_reference(
+            project, reference, build_files, "PBXSourcesBuildPhase"
+        )
+        if build_ids != used_ids or owners != {"iSHWatchUITests"}:
+            fail(f"{relative} 必须只进入 iSHWatchUITests Sources")
 
 
 def main():

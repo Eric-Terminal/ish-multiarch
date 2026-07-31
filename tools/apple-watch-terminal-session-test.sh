@@ -9,6 +9,7 @@ xcrun --sdk macosx swiftc \
     -warnings-as-errors \
     -parse-as-library \
     "$ROOT/app/Watch/TerminalScreen.swift" \
+    "$ROOT/app/Watch/TerminalScreenStorage.swift" \
     "$ROOT/app/Watch/VTParser.swift" \
     "$ROOT/app/Watch/WatchTerminalSession.swift" \
     "$ROOT/app/Watch/WatchRuntime.swift" \
