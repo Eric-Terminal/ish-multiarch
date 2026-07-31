@@ -163,6 +163,11 @@ if host_machine.system() == 'darwin'
     fakefs_src += [
         'platform/apple-root-catalog.c',
         'platform/apple-rootfs-seed.c',
+        'platform/apple-rootfs-seed-builders.c',
+        'platform/apple-rootfs-seed-copy.c',
+        'platform/apple-rootfs-seed-database.c',
+        'platform/apple-rootfs-seed-manifest.c',
+        'platform/apple-rootfs-seed-staging.c',
     ]
 endif
 
@@ -177,6 +182,11 @@ if host_machine.system() == 'darwin' and not meson.is_cross_build()
         ['platform/apple-rootfs-seed-test.c',
          'platform/apple-root-catalog.c',
          'platform/apple-rootfs-seed.c',
+         'platform/apple-rootfs-seed-builders.c',
+         'platform/apple-rootfs-seed-copy.c',
+         'platform/apple-rootfs-seed-database.c',
+         'platform/apple-rootfs-seed-manifest.c',
+         'platform/apple-rootfs-seed-staging.c',
          'util/fchdir.c'],
         include_directories: includes,
         dependencies: sqlite3,
@@ -292,6 +302,8 @@ if get_option('kernel') == 'ish'
     if host_machine.system() == 'darwin'
         src += [
             'platform/apple-command-session.c',
+            'platform/apple-command-session-arguments.c',
+            'platform/apple-command-session-backend.c',
             'platform/apple-public-runtime.c',
             'platform/apple-watch-guest-files.c',
             'platform/apple-resolver.c',
@@ -369,6 +381,8 @@ if get_option('kernel') == 'ish'
                     'platform/apple-command-session-test.c',
                     'platform/apple-command-session-unit-support.c',
                     'platform/apple-command-session.c',
+                    'platform/apple-command-session-arguments.c',
+                    'platform/apple-command-session-backend.c',
                 ],
                 include_directories: includes,
                 c_args: '-DISH_APPLE_COMMAND_SESSION_TESTING=1',

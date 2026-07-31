@@ -291,12 +291,26 @@ build_slice() {
         -DEXPECTED_AARCH64_THREADED_DEFAULT="$expected_backend_value" \
         -c "$ROOT/tools/apple-aarch64-backend-probe.c" -o "$backend_probe"
 
-    local rootfs_seed_object="$full_build_dir/apple-rootfs-seed-strict.o"
-    "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \
-        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
-        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
-        -Wcast-align -c "$ROOT/platform/apple-rootfs-seed.c" \
-        -o "$rootfs_seed_object"
+    local -a rootfs_seed_sources=(
+        apple-rootfs-seed.c
+        apple-rootfs-seed-builders.c
+        apple-rootfs-seed-copy.c
+        apple-rootfs-seed-database.c
+        apple-rootfs-seed-manifest.c
+        apple-rootfs-seed-staging.c
+    )
+    local -a rootfs_seed_objects=()
+    local rootfs_seed_source
+    local rootfs_seed_object
+    for rootfs_seed_source in "${rootfs_seed_sources[@]}"; do
+        rootfs_seed_object="$full_build_dir/${rootfs_seed_source%.c}-strict.o"
+        "$CLANG" -target "$target" -isysroot "$sysroot" -I"$ROOT" \
+            -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+            -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+            -Wcast-align -c "$ROOT/platform/$rootfs_seed_source" \
+            -o "$rootfs_seed_object"
+        rootfs_seed_objects+=("$rootfs_seed_object")
+    done
 
     local resolver_object="$full_build_dir/apple-resolver-strict.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
@@ -319,12 +333,23 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-watch-guest-files.c" \
         -o "$watch_guest_files_object"
 
-    local command_session_object="$full_build_dir/apple-command-session-strict.o"
-    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
-        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
-        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
-        -Wcast-align -c "$ROOT/platform/apple-command-session.c" \
-        -o "$command_session_object"
+    local -a command_session_sources=(
+        apple-command-session.c
+        apple-command-session-arguments.c
+        apple-command-session-backend.c
+    )
+    local -a command_session_objects=()
+    local command_session_source
+    local command_session_object
+    for command_session_source in "${command_session_sources[@]}"; do
+        command_session_object="$full_build_dir/${command_session_source%.c}-strict.o"
+        "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+            -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+            -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+            -Wcast-align -c "$ROOT/platform/$command_session_source" \
+            -o "$command_session_object"
+        command_session_objects+=("$command_session_object")
+    done
 
     local public_runtime_object="$full_build_dir/apple-public-runtime-strict.o"
     "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
@@ -342,22 +367,30 @@ build_slice() {
         "$full_build_dir/apple_runtime_link_smoke" \
         "$full_build_dir/apple_watch_runtime_link_smoke" \
         "$full_build_dir/apple_runtime_force_link_smoke" \
-        "$abi_probe" "$backend_probe" "$rootfs_seed_object" \
+        "$abi_probe" "$backend_probe" "${rootfs_seed_objects[@]}" \
         "$resolver_object" \
         "$watch_runtime_object" \
         "$watch_guest_files_object" \
-        "$command_session_object" \
+        "${command_session_objects[@]}" \
         "$public_runtime_object"
 
     local fakefs_members
     local fakefs_symbols
     local runtime_symbols
     fakefs_members=$("$AR" -t "$full_build_dir/libfakefs.a")
-    if ! grep -Fqx 'platform_apple-rootfs-seed.c.o' \
-            <<< "$fakefs_members"; then
-        echo "错误：${name} 的 libfakefs.a 缺少 Apple rootfs 安装器对象。" >&2
-        exit 1
-    fi
+    local required_fakefs_member
+    for required_fakefs_member in \
+            platform_apple-rootfs-seed.c.o \
+            platform_apple-rootfs-seed-builders.c.o \
+            platform_apple-rootfs-seed-copy.c.o \
+            platform_apple-rootfs-seed-database.c.o \
+            platform_apple-rootfs-seed-manifest.c.o \
+            platform_apple-rootfs-seed-staging.c.o; do
+        if ! grep -Fqx "$required_fakefs_member" <<< "$fakefs_members"; then
+            echo "错误：${name} 的 libfakefs.a 缺少 ${required_fakefs_member}。" >&2
+            exit 1
+        fi
+    done
     fakefs_symbols=$(xcrun nm -g "$full_build_dir/libfakefs.a")
     if ! grep -Eq \
             '[[:space:]]T[[:space:]]+_ish_apple_rootfs_seed_install$' \
@@ -415,6 +448,8 @@ build_slice() {
     for required_member in kernel_init.c.o fs_fd.c.o platform_darwin.c.o \
             platform_apple-resolver.c.o \
             platform_apple-command-session.c.o \
+            platform_apple-command-session-arguments.c.o \
+            platform_apple-command-session-backend.c.o \
             platform_apple-public-runtime.c.o \
             platform_apple-watch-guest-files.c.o \
             platform_apple-watch-runtime.c.o; do

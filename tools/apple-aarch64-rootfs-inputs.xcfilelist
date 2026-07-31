@@ -21,6 +21,12 @@ $(SRCROOT)/meson.build
 $(SRCROOT)/meson_options.txt
 $(SRCROOT)/misc.h
 $(SRCROOT)/platform/apple-rootfs-seed.c
+$(SRCROOT)/platform/apple-rootfs-seed-builders.c
+$(SRCROOT)/platform/apple-rootfs-seed-copy.c
+$(SRCROOT)/platform/apple-rootfs-seed-database.c
+$(SRCROOT)/platform/apple-rootfs-seed-internal.h
+$(SRCROOT)/platform/apple-rootfs-seed-manifest.c
+$(SRCROOT)/platform/apple-rootfs-seed-staging.c
 $(SRCROOT)/platform/apple-rootfs-seed.h
 $(SRCROOT)/third_party/alpine/3.24.1-aarch64/binary-reference.tsv
 $(SRCROOT)/third_party/alpine/3.24.1-aarch64/lgpl-payloads.tsv
