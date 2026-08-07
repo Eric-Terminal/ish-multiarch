@@ -74,6 +74,44 @@ ASSERT_APPLE_OFFSET(
         struct ish_apple_command_result_v1, elapsed_milliseconds, 48);
 ASSERT_APPLE_OFFSET(struct ish_apple_command_result_v1, reserved, 56);
 
+_Static_assert(sizeof(struct ish_apple_diagnostic_event_v1) == 200,
+        "公共诊断事件必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_diagnostic_event_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, category, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, kind, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, scope, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, architecture, 20);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, backend, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, linux_error, 28);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, signal, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, opcode, 36);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, sequence, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, request_id, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, guest_pc, 56);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, syscall_number, 64);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, syscall_name, 72);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, build_identity, 104);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, reserved, 168);
+
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, version, 0);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, structure_size, 4);

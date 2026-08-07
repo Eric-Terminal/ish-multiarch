@@ -3,6 +3,17 @@ import iSHAppleSwift
 
 @available(iOS 15.0, watchOS 10.0, *)
 func compilePublicAPI(runtime: Runtime) async throws {
+  let diagnostics = RuntimeDiagnostics()
+  let diagnosticScope = DiagnosticScope.command(requestID: 42)
+  let _: UInt32 = try await diagnostics.pendingCount(
+    for: diagnosticScope
+  )
+  let _: [DiagnosticEvent] = try await diagnostics.drain(
+    diagnosticScope,
+    maximumEventCount: 32
+  )
+  let _: UInt32 = try await diagnostics.clear(diagnosticScope)
+
   let mountID = UUID()
   let mountConfiguration = RuntimeMountConfiguration(
     id: mountID,

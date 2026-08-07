@@ -106,6 +106,8 @@ int32_t command_arguments_create_for_spec(
                     spec->environment == NULL))
         return _EINVAL;
 
+    arguments->request_id = spec->request_id;
+
     size_t executable_length;
     int32_t error = command_string_length(
             spec->executable, COMMAND_PATH_BYTES_MAX,

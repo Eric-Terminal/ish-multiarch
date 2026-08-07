@@ -10,6 +10,9 @@ option('aarch64_backend', type: 'combo',
     description: 'AArch64 客体执行后端')
 option('aarch64_threaded_profile', type: 'boolean', value: false,
     description: '采集 AArch64 threaded 后端的动态 C 回落分布')
+option('apple_build_identity', type: 'string',
+    value: 'ish-multiarch-source',
+    description: '写入 iSHApple 诊断与能力快照的可复现源码身份')
 
 option('vdso_c_args', type: 'string', value: '')
 

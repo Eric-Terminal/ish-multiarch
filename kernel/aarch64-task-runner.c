@@ -8,6 +8,10 @@
 #include "kernel/signal.h"
 #include "kernel/task.h"
 
+#if defined(__APPLE__)
+#include "platform/apple-diagnostics-private.h"
+#endif
+
 static struct aarch64_task_event task_event(
         enum aarch64_task_event_action action, dword_t status) {
     return (struct aarch64_task_event) {
@@ -134,6 +138,15 @@ struct aarch64_task_event aarch64_task_run_one(struct task *task) {
             force_memory_fault(task, &result.fault);
             return aarch64_task_poll_signals(task);
         case AARCH64_LINUX_PROCESS_UNDEFINED:
+#if defined(__APPLE__)
+            ish_apple_diagnostics_record_undefined_instruction(
+                    task,
+                    result.fault.address,
+                    result.instruction,
+                    SIGILL_,
+                    aarch64_linux_process_backend(
+                            task->aarch64_process));
+#endif
             force_fault_signal(task, SIGILL_, &(struct siginfo_) {
                 .sig = SIGILL_,
                 .code = ILL_ILLOPC_,

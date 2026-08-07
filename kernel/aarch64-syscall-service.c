@@ -35,6 +35,10 @@
 #include "kernel/task.h"
 #include "util/timer.h"
 
+#if defined(__APPLE__)
+#include "platform/apple-diagnostics-private.h"
+#endif
+
 #define AARCH64_LINUX_MAX_RW_COUNT UINT64_C(0x7ffff000)
 #define AARCH64_LINUX_IO_CHUNK_SIZE 4096
 #define AARCH64_LINUX_IOV_MAX UINT64_C(1024)
@@ -207,6 +211,26 @@ _Static_assert(sizeof(struct pollfd_) == 8 &&
 static qword_t syscall_result(sqword_t result) {
     return (qword_t) result;
 }
+
+#if defined(__APPLE__)
+static void record_unsupported_syscall(
+        struct task *task,
+        const struct guest_linux_syscall *syscall,
+        int32_t linux_error) {
+    qword_t program_counter =
+            aarch64_linux_process_program_counter(
+                    task->aarch64_process);
+    if (program_counter >= 4)
+        program_counter -= 4;
+    ish_apple_diagnostics_record_unsupported_syscall(
+            task,
+            program_counter,
+            syscall->number,
+            linux_error,
+            aarch64_linux_process_backend(
+                    task->aarch64_process));
+}
+#endif
 
 static bool socket_timeout_enabled(
         struct fd *socket, bool receive) {
@@ -4013,6 +4037,9 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_LREMOVEXATTR:
         case AARCH64_LINUX_SYS_FREMOVEXATTR:
             // 与官方 i386 兼容路径一致：当前文件系统明确不提供 xattr。
+#if defined(__APPLE__)
+            record_unsupported_syscall(task, syscall, _ENOTSUP);
+#endif
             return syscall_result(_ENOTSUP);
         case AARCH64_LINUX_SYS_GETCWD:
             return dispatch_getcwd(context, syscall, task, fault);
@@ -4358,8 +4385,12 @@ static qword_t dispatch_syscall_inner(
             return dispatch_writev_at(context, syscall, task, fault,
                     offset != -1, offset == -1 ? 0 : offset, flags);
         }
-        default:
+        default: {
+#if defined(__APPLE__)
+            record_unsupported_syscall(task, syscall, _ENOSYS);
+#endif
             return syscall_result(_ENOSYS);
+        }
     }
 }
 

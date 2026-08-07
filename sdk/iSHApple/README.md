@@ -205,6 +205,38 @@ try await output
 `resize` 更新 `TIOCSWINSZ` 并沿用 iSH 的 `SIGWINCH`、控制终端和前台进程组
 语义。调用方传入的是完整 guest environment，runtime 不继承宿主进程环境。
 
+## 结构化兼容性诊断
+
+命令和终端的 request ID 会在进程发布前写入不可变的宿主诊断归属，并由
+`fork` 后代继承。未定义 AArch64 指令和返回 `ENOSYS` 的未实现 syscall
+不会只剩一段 stderr：SDK 会产生带精确 guest PC、opcode、syscall
+number/name、负 Linux errno、signal、guest architecture、实际 C/threaded
+后端与构建身份的 `DiagnosticEvent`。普通程序以非零状态退出不产生兼容性
+事件。
+
+```swift
+let diagnostics = RuntimeDiagnostics()
+let scope = DiagnosticScope.command(requestID: request.requestID)
+while try await diagnostics.pendingCount(for: scope) != 0 {
+    for event in try await diagnostics.drain(
+        scope,
+        maximumEventCount: 128
+    ) {
+        // 先落盘，再由 ETOS 生成模型可见的脱敏说明或反馈引用。
+    }
+}
+```
+
+底层队列不设事件数量常量；`maximumEventCount` 只是单次跨 ABI 复制的批量，
+宿主应在任务运行期间和完成时持续分批 drain。C API 也可用
+`events == NULL, capacity == 0` 查询数量，或用
+`ish_apple_diagnostics_clear` 明确丢弃某个 scope 的待消费事件。runtime
+启动故障使用全局 runtime scope 和 `requestID == 0`；command、terminal 与
+guest 文件请求均要求非零且在活跃任务间唯一的 ID。
+
+Apple 交付门禁把当前 Git revision 写入 `build_identity`；没有 Git 元数据的
+普通源码构建使用明确的 `ish-multiarch-source`，不会伪造某个提交哈希。
+
 ## C 句柄生命周期
 
 `ish_apple_command_session_start` 成功时交付一个调用方引用。回调可能在线程

@@ -862,6 +862,14 @@ int ish_watch_session_create_process(
     }
 
     struct task *guest_task = current;
+    if (!task_set_host_diagnostic_context(
+                guest_task,
+                TASK_HOST_DIAGNOSTIC_TERMINAL,
+                arguments->request_id)) {
+        error = session_cancel_after_task(session, _EINVAL);
+        unlock(&ish_watch_prepared_task_lock);
+        return error;
+    }
     lock(&sessions_lock);
     session->leader_group = guest_task->group;
     unlock(&sessions_lock);

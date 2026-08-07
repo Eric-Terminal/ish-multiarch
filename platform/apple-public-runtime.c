@@ -5,6 +5,7 @@
 
 #include "kernel/errno.h"
 #include "platform/apple-rootfs-seed.h"
+#include "platform/apple-diagnostics-private.h"
 #include "platform/apple-runtime-mount.h"
 #include "platform/apple-watch-runtime.h"
 
@@ -58,12 +59,18 @@ int32_t ish_apple_runtime_start(
             spec->boot_command);
     if (error < 0)
         return error;
-    return ish_watch_runtime_start(
+    int32_t start_error = ish_watch_runtime_start(
             spec->root_data,
             spec->shared_directory,
             spec->socket_prefix,
             spec->hostname,
             spec->boot_command);
+    if (start_error < 0) {
+        ish_apple_diagnostics_record_runtime(
+                ISH_APPLE_DIAGNOSTIC_RUNTIME_START_FAILED,
+                start_error);
+    }
+    return start_error;
 }
 
 int32_t ish_apple_runtime_start_v2(
@@ -97,6 +104,11 @@ int32_t ish_apple_runtime_start_v2(
             spec->hostname,
             spec->boot_command);
     ish_apple_mount_finish_startup(error == 0);
+    if (error < 0) {
+        ish_apple_diagnostics_record_runtime(
+                ISH_APPLE_DIAGNOSTIC_RUNTIME_START_FAILED,
+                error);
+    }
     return error;
 }
 

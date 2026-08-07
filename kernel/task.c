@@ -401,6 +401,31 @@ bool task_set_host_job_id(
     return unpublished_initial_process;
 }
 
+bool task_set_host_diagnostic_context(
+        struct task *task,
+        enum task_host_diagnostic_scope scope,
+        uint64_t request_id) {
+    if (task == NULL || task->group == NULL ||
+            (scope != TASK_HOST_DIAGNOSTIC_COMMAND &&
+                    scope != TASK_HOST_DIAGNOSTIC_TERMINAL &&
+                    scope != TASK_HOST_DIAGNOSTIC_GUEST_FILE) ||
+            request_id == 0)
+        return false;
+
+    lock(&pids_lock);
+    struct pid *pid = pid_slot(task->pid);
+    bool unpublished_initial_process =
+            pid != NULL && pid->reserved && pid->task == NULL &&
+            task->group->leader == task &&
+            list_empty(&task->group->threads);
+    if (unpublished_initial_process) {
+        task->group->host_diagnostic_scope = (uint32_t) scope;
+        task->group->host_diagnostic_request_id = request_id;
+    }
+    unlock(&pids_lock);
+    return unpublished_initial_process;
+}
+
 size_t task_signal_host_job_locked(
         uint64_t host_job_id, int signal) {
     assert(lock_owned_by_current(&pids_lock));

@@ -80,6 +80,15 @@ static struct task *make_initial_process(
         task_abort_create(leader);
         return NULL;
     }
+    if (!task_set_host_diagnostic_context(
+                leader,
+                TASK_HOST_DIAGNOSTIC_COMMAND,
+                host_job_id)) {
+        sighand_release(leader->sighand);
+        free(group);
+        task_abort_create(leader);
+        return NULL;
+    }
     task_publish(leader);
     *group_out = group;
     return leader;
@@ -147,26 +156,43 @@ int main(void) {
     struct task *root =
             make_initial_process(command_job, &root_group);
     CHECK(root != NULL &&
-            root_group->host_job_id == command_job,
-            "初始进程在发布前接受非零宿主作业身份");
+            root_group->host_job_id == command_job &&
+            root_group->host_diagnostic_scope ==
+                    TASK_HOST_DIAGNOSTIC_COMMAND &&
+            root_group->host_diagnostic_request_id == command_job,
+            "初始进程在发布前接受作业与诊断身份");
     CHECK(!task_set_host_job_id(
                     root, independent_job) &&
             root_group->host_job_id == command_job,
             "发布后的线程组身份保持不可变");
+    CHECK(!task_set_host_diagnostic_context(
+                    root,
+                    TASK_HOST_DIAGNOSTIC_TERMINAL,
+                    independent_job) &&
+            root_group->host_diagnostic_scope ==
+                    TASK_HOST_DIAGNOSTIC_COMMAND &&
+            root_group->host_diagnostic_request_id == command_job,
+            "发布后的诊断归属保持不可变");
     current = root;
 
     struct tgroup *pgroup_child_group;
     struct task *pgroup_child =
             make_forked_process(root, &pgroup_child_group);
     CHECK(pgroup_child != NULL &&
-            pgroup_child_group->host_job_id == command_job,
-            "fork 建立的新线程组继承宿主作业身份");
+            pgroup_child_group->host_job_id == command_job &&
+            pgroup_child_group->host_diagnostic_scope ==
+                    TASK_HOST_DIAGNOSTIC_COMMAND &&
+            pgroup_child_group->host_diagnostic_request_id ==
+                    command_job,
+            "fork 建立的新线程组继承作业与诊断身份");
 
     struct task *thread = make_group_thread(pgroup_child);
     CHECK(thread != NULL &&
             thread->group == pgroup_child_group &&
-            thread->group->host_job_id == command_job,
-            "CLONE_THREAD 语义共享同一个宿主作业身份");
+            thread->group->host_job_id == command_job &&
+            thread->group->host_diagnostic_request_id ==
+                    command_job,
+            "CLONE_THREAD 语义共享同一个作业与诊断身份");
     CHECK(sys_setpgid(
                     pgroup_child->pid, pgroup_child->pid) == 0 &&
             pgroup_child_group->pgid == pgroup_child->pid &&

@@ -70,6 +70,8 @@ verify_public_symbols() {
             ish_apple_runtime_start_v2 \
             ish_apple_runtime_current_phase \
             ish_apple_runtime_last_error \
+            ish_apple_diagnostics_drain \
+            ish_apple_diagnostics_clear \
             ish_apple_mount_add \
             ish_apple_mount_remove \
             ish_apple_mount_list \

@@ -15,6 +15,7 @@
 struct tgroup;
 
 struct command_arguments {
+    uint64_t request_id;
     char *executable;
     char *argument_bytes;
     char **argument_vector;

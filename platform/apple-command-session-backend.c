@@ -141,6 +141,13 @@ int32_t command_backend_prepare(
         error = _EINVAL;
         goto fail_prepared;
     }
+    if (!task_set_host_diagnostic_context(
+                current,
+                TASK_HOST_DIAGNOSTIC_COMMAND,
+                session->request_id)) {
+        error = _EINVAL;
+        goto fail_prepared;
+    }
 
     if (arguments->working_directory != NULL) {
         error = file_chdir_task(

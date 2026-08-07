@@ -60,6 +60,18 @@ aarch64_backend_config.set10(
 configure_file(output: 'aarch64-backend-config.h',
     configuration: aarch64_backend_config)
 
+apple_build_identity = get_option('apple_build_identity')
+if apple_build_identity == ''
+    error('iSHApple 构建身份不能为空')
+endif
+apple_build_identity_config = configuration_data()
+apple_build_identity_config.set_quoted(
+        'ISH_APPLE_BUILD_IDENTITY', apple_build_identity)
+configure_file(
+    input: 'platform/apple-build-identity.h.in',
+    output: 'apple-build-identity.h',
+    configuration: apple_build_identity_config)
+
 aarch64_backend_src = [
     'guest/aarch64/backend.c',
     'guest/aarch64/runner.c',
@@ -83,6 +95,7 @@ aarch64_core_src = [
     'guest/aarch64/execute.c',
 ] + aarch64_backend_src + [
     'guest/aarch64/linux-syscall.c',
+    'guest/aarch64/linux-syscall-name.c',
     'guest/aarch64/linux-signal-info.c',
     'guest/aarch64/linux-signal-frame.c',
     'guest/aarch64/linux-signal-trampoline.c',
@@ -304,6 +317,7 @@ if get_option('kernel') == 'ish'
             'platform/apple-command-session.c',
             'platform/apple-command-session-arguments.c',
             'platform/apple-command-session-backend.c',
+            'platform/apple-diagnostics.c',
             'platform/apple-public-runtime.c',
             'platform/apple-public-terminal.c',
             'platform/apple-runtime-mount.c',
@@ -434,6 +448,13 @@ if get_option('kernel') == 'ish'
                 dependencies: ish)
             test('apple_runtime_mount_guest',
                 apple_runtime_mount_guest_test, timeout: 30)
+
+            apple_diagnostics_test = executable(
+                'apple_diagnostics_test',
+                'platform/apple-diagnostics-test.c',
+                dependencies: ish)
+            test('apple_diagnostics',
+                apple_diagnostics_test, timeout: 30)
         endif
     endif
 

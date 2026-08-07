@@ -1,6 +1,7 @@
 #ifndef GUEST_AARCH64_LINUX_PROCESS_H
 #define GUEST_AARCH64_LINUX_PROCESS_H
 
+#include "guest/aarch64/backend.h"
 #include "guest/linux/file-mapping-service.h"
 #include "guest/linux/signal-service.h"
 #include "guest/linux/syscall-service.h"
@@ -295,6 +296,11 @@ struct aarch64_linux_process_result aarch64_linux_process_run_one(
 // 单独建立信号安全点，不执行 guest 指令。
 struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
         struct aarch64_linux_process *process);
+/* 仅供持有 process 生命周期保证的执行线程读取诊断快照。 */
+qword_t aarch64_linux_process_program_counter(
+        const struct aarch64_linux_process *process);
+enum aarch64_backend aarch64_linux_process_backend(
+        const struct aarch64_linux_process *process);
 
 _Static_assert(sizeof(enum aarch64_linux_process_error_stage) == 4 &&
         sizeof(enum aarch64_linux_process_status) == 4 &&

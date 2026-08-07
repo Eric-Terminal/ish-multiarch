@@ -28,6 +28,14 @@ static int32_t (*volatile mount_lease_entry)(
 static int32_t (*volatile rootfs_seed_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
+static int32_t (*volatile diagnostics_drain_entry)(
+        uint32_t, uint64_t,
+        struct ish_apple_diagnostic_event_v1 *,
+        uint32_t, uint32_t *) =
+        ish_apple_diagnostics_drain;
+static int32_t (*volatile diagnostics_clear_entry)(
+        uint32_t, uint64_t, uint32_t *) =
+        ish_apple_diagnostics_clear;
 static int32_t (*volatile command_start_entry)(
         const struct ish_apple_command_spec_v1 *,
         const struct ish_apple_command_callbacks_v1 *,
@@ -71,6 +79,8 @@ int main(void) {
             mount_path_entry == NULL ||
             mount_lease_entry == NULL ||
             rootfs_seed_entry == NULL ||
+            diagnostics_drain_entry == NULL ||
+            diagnostics_clear_entry == NULL ||
             command_start_entry == NULL ||
             command_write_entry == NULL ||
             command_cancel_entry == NULL ||

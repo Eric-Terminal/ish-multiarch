@@ -1284,3 +1284,15 @@ struct aarch64_linux_process_result aarch64_linux_process_run_one(
     }
     return result;
 }
+
+qword_t aarch64_linux_process_program_counter(
+        const struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    return process->cpu.pc;
+}
+
+enum aarch64_backend aarch64_linux_process_backend(
+        const struct aarch64_linux_process *process) {
+    assert(process != NULL);
+    return aarch64_runner_backend(&process->runner);
+}

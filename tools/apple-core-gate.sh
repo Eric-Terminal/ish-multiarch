@@ -28,6 +28,17 @@ AR=$(xcrun --find ar)
 STRIP=$(xcrun --find strip)
 mkdir -p "$BUILD_ROOT"
 
+APPLE_BUILD_IDENTITY=ish-multiarch-source
+if git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    APPLE_BUILD_IDENTITY="ish-multiarch-$(git -C "$ROOT" rev-parse HEAD)"
+    if ! git -C "$ROOT" diff --quiet --ignore-submodules -- ||
+            ! git -C "$ROOT" diff --cached --quiet --ignore-submodules -- ||
+            [[ -n "$(git -C "$ROOT" status --porcelain \
+                    --untracked-files=normal)" ]]; then
+        APPLE_BUILD_IDENTITY+="-dirty"
+    fi
+fi
+
 write_cross_file() {
     local cross_file=$1
     local sdk=$2
@@ -74,6 +85,7 @@ verify_backend_config() {
     local config_header="$build_dir/aarch64-backend-config.h"
     local configured_backend
     local configured_profile
+    local configured_identity
 
     configured_backend=$("$MESON" configure "$build_dir" |
         awk '$1 == "aarch64_backend" { print $2 }')
@@ -85,6 +97,12 @@ verify_backend_config() {
         awk '$1 == "aarch64_threaded_profile" { print $2 }')
     if [[ "$configured_profile" != false ]]; then
         echo "错误：${name} 不得携带 threaded profiling 采集代码。" >&2
+        exit 1
+    fi
+    configured_identity=$("$MESON" configure "$build_dir" |
+        awk '$1 == "apple_build_identity" { print $2 }')
+    if [[ "$configured_identity" != "$APPLE_BUILD_IDENTITY" ]]; then
+        echo "错误：${name} 的诊断构建身份与源码 revision 不一致。" >&2
         exit 1
     fi
 
@@ -214,15 +232,18 @@ build_slice() {
     if [[ -d "$core_build_dir/meson-private" ]]; then
         apple_meson_refresh_project_options \
             "$MESON" "$core_build_dir" "$ROOT" \
-            core_only aarch64_backend aarch64_threaded_profile
+            core_only aarch64_backend aarch64_threaded_profile \
+            apple_build_identity
         "$MESON" setup --reconfigure "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true \
             -Daarch64_backend=auto -Daarch64_threaded_profile=false \
+            "-Dapple_build_identity=$APPLE_BUILD_IDENTITY" \
             --buildtype=release
     else
         "$MESON" setup "$core_build_dir" "$ROOT" \
             --cross-file "$core_cross_file" -Dcore_only=true \
             -Daarch64_backend=auto -Daarch64_threaded_profile=false \
+            "-Dapple_build_identity=$APPLE_BUILD_IDENTITY" \
             --buildtype=release
     fi
     verify_backend_config "${name} core" "$core_build_dir" \
@@ -250,16 +271,21 @@ build_slice() {
     if [[ -d "$full_build_dir/meson-private" ]]; then
         apple_meson_refresh_project_options \
             "$MESON" "$full_build_dir" "$ROOT" \
-            core_only aarch64_backend aarch64_threaded_profile
+            core_only aarch64_backend aarch64_threaded_profile \
+            apple_build_identity
         "$MESON" setup --reconfigure "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
-            -Daarch64_threaded_profile=false --buildtype=release
+            -Daarch64_threaded_profile=false \
+            "-Dapple_build_identity=$APPLE_BUILD_IDENTITY" \
+            --buildtype=release
     else
         "$MESON" setup "$full_build_dir" "$ROOT" \
             --cross-file "$full_cross_file" -Dcore_only=false \
             -Dkernel=ish -Dengine=asbestos -Daarch64_backend=auto \
-            -Daarch64_threaded_profile=false --buildtype=release
+            -Daarch64_threaded_profile=false \
+            "-Dapple_build_identity=$APPLE_BUILD_IDENTITY" \
+            --buildtype=release
     fi
     verify_backend_config "${name} 完整构建" "$full_build_dir" \
         "$expected_backend_value"
@@ -382,6 +408,14 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-runtime-mount.c" \
         -o "$runtime_mount_object"
 
+    local diagnostics_object="$full_build_dir/apple-diagnostics-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" \
+        -I"$ROOT" -I"$full_build_dir" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-diagnostics.c" \
+        -o "$diagnostics_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -396,7 +430,8 @@ build_slice() {
         "${watch_runtime_objects[@]}" \
         "$watch_guest_files_object" \
         "${command_session_objects[@]}" \
-        "$public_runtime_object" "$public_terminal_object"
+        "$public_runtime_object" "$public_terminal_object" \
+        "$diagnostics_object"
 
     local fakefs_members
     local fakefs_symbols
@@ -438,6 +473,8 @@ build_slice() {
             ish_apple_runtime_start \
             ish_apple_runtime_current_phase \
             ish_apple_runtime_last_error \
+            ish_apple_diagnostics_drain \
+            ish_apple_diagnostics_clear \
             ish_apple_rootfs_install_seed \
             ish_apple_command_session_start \
             ish_apple_command_session_retain \
@@ -474,6 +511,7 @@ build_slice() {
             platform_apple-command-session.c.o \
             platform_apple-command-session-arguments.c.o \
             platform_apple-command-session-backend.c.o \
+            platform_apple-diagnostics.c.o \
             platform_apple-public-runtime.c.o \
             platform_apple-public-terminal.c.o \
             platform_apple-runtime-mount.c.o \

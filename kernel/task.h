@@ -222,6 +222,13 @@ struct tgroup {
      * 建立的新线程组继承该值；0 表示不属于宿主作业。
      */
     uint64_t host_job_id;
+    /*
+     * 兼容性诊断归属同样只在初始进程发布前写入。fork 后代继承，guest
+     * 无法修改；scope 为 0 表示该进程不向宿主诊断队列发布事件。
+     */
+    uint32_t host_diagnostic_scope;
+    uint32_t host_diagnostic_reserved;
+    uint64_t host_diagnostic_request_id;
     // 已生成的未阻塞默认致死信号；内部 exec zap 不写入。
     atomic_int external_fatal_signal;
     // 进程定向 pending 属于线程组，不随单个 peer 退出丢失。
@@ -296,6 +303,16 @@ struct task *pid_get_process_task(dword_t id);
 // 仅允许给尚未发布的初始进程设置宿主作业身份。
 bool task_set_host_job_id(
         struct task *task, uint64_t host_job_id);
+enum task_host_diagnostic_scope {
+    TASK_HOST_DIAGNOSTIC_NONE = 0,
+    TASK_HOST_DIAGNOSTIC_COMMAND = 2,
+    TASK_HOST_DIAGNOSTIC_TERMINAL = 3,
+    TASK_HOST_DIAGNOSTIC_GUEST_FILE = 4,
+};
+bool task_set_host_diagnostic_context(
+        struct task *task,
+        enum task_host_diagnostic_scope scope,
+        uint64_t request_id);
 // 向同一宿主作业内的每个存活线程组发送一次信号；0 不匹配任何作业。
 size_t task_signal_host_job_locked(uint64_t host_job_id, int signal);
 size_t task_signal_host_job(uint64_t host_job_id, int signal);

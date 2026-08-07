@@ -18,10 +18,15 @@
 #include "kernel/aarch64-signal-service.h"
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/aarch64-task-runner.h"
+#include "kernel/errno.h"
 #include "kernel/fs.h"
 #include "kernel/mm.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
+
+#if defined(__APPLE__)
+#include "sdk/iSHApple/Headers/iSHAppleDiagnostics.h"
+#endif
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -382,6 +387,114 @@ static int test_immediate_fault_poll(void) {
     return 0;
 }
 
+static int test_compatibility_diagnostics(void) {
+#if !defined(__APPLE__)
+    return 0;
+#else
+    struct runner_fixture fixture;
+    struct ish_apple_diagnostic_event_v1 event;
+    uint32_t count;
+    uint32_t cleared;
+
+    const uint64_t instruction_request = UINT64_C(7001);
+    CHECK(ish_apple_diagnostics_clear(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    instruction_request, &cleared) == 0,
+            "清理未定义指令诊断上下文");
+    const dword_t undefined_program[] = {UINT32_C(0xffffffff)};
+    init_fixture(&fixture);
+    fixture.group.host_diagnostic_scope =
+            ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND;
+    fixture.group.host_diagnostic_request_id =
+            instruction_request;
+    CHECK(attach_program(&fixture, undefined_program,
+            array_size(undefined_program), true),
+            "创建带诊断归属的未定义指令程序");
+    CHECK(aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_TERMINATE,
+            "未定义指令按原信号语义终止");
+    CHECK(ish_apple_diagnostics_drain(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    instruction_request, &event, 1, &count) == 0 &&
+            count == 1 &&
+            event.category ==
+                    ISH_APPLE_DIAGNOSTIC_CATEGORY_INSTRUCTION &&
+            event.guest_pc == ENTRY_ADDRESS &&
+            event.opcode == UINT32_C(0xffffffff) &&
+            event.signal == SIGILL_ &&
+            event.backend != ISH_APPLE_DIAGNOSTIC_BACKEND_UNKNOWN,
+            "内核 runner 发布精确 PC、opcode、signal 与实际后端");
+    destroy_fixture(&fixture);
+
+    const uint64_t syscall_request = UINT64_C(7002);
+    CHECK(ish_apple_diagnostics_clear(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    syscall_request, &cleared) == 0,
+            "清理未实现 syscall 诊断上下文");
+    const dword_t syscall_program[] = {
+        UINT32_C(0xd28036a8), // movz x8, #437
+        UINT32_C(0xd4000001), // svc #0
+    };
+    init_fixture(&fixture);
+    fixture.group.host_diagnostic_scope =
+            ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND;
+    fixture.group.host_diagnostic_request_id = syscall_request;
+    CHECK(attach_program(&fixture, syscall_program,
+            array_size(syscall_program), true),
+            "创建带诊断归属的 openat2 程序");
+    CHECK(aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_CONTINUE &&
+            aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_CONTINUE,
+            "未实现 syscall 仍按 Linux ENOSYS 返回 guest");
+    CHECK(ish_apple_diagnostics_drain(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    syscall_request, &event, 1, &count) == 0 &&
+            count == 1 &&
+            event.category ==
+                    ISH_APPLE_DIAGNOSTIC_CATEGORY_SYSCALL &&
+            event.guest_pc == ENTRY_ADDRESS + 4 &&
+            event.syscall_number == UINT64_C(437) &&
+            strcmp(event.syscall_name, "openat2") == 0 &&
+            event.linux_error == _ENOSYS,
+            "syscall dispatcher 发布调用点、名称、编号与 ENOSYS");
+    destroy_fixture(&fixture);
+
+    const uint64_t ordinary_exit_request = UINT64_C(7003);
+    CHECK(ish_apple_diagnostics_clear(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    ordinary_exit_request, &cleared) == 0,
+            "清理普通退出诊断上下文");
+    const dword_t ordinary_exit_program[] = {
+        UINT32_C(0xd28004a0), // movz x0, #37
+        UINT32_C(0xd2800ba8), // movz x8, #93
+        UINT32_C(0xd4000001), // svc #0
+    };
+    init_fixture(&fixture);
+    fixture.group.host_diagnostic_scope =
+            ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND;
+    fixture.group.host_diagnostic_request_id =
+            ordinary_exit_request;
+    CHECK(attach_program(&fixture, ordinary_exit_program,
+            array_size(ordinary_exit_program), true),
+            "创建普通非零退出程序");
+    CHECK(aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_CONTINUE &&
+            aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_CONTINUE &&
+            aarch64_task_run_one(&fixture.task).action ==
+                    AARCH64_TASK_EVENT_EXIT,
+            "普通非零退出保持完成语义");
+    CHECK(ish_apple_diagnostics_drain(
+                    ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
+                    ordinary_exit_request, NULL, 0, &count) == 0 &&
+            count == 0,
+            "普通程序非零退出不误报兼容性缺口");
+    destroy_fixture(&fixture);
+    return 0;
+#endif
+}
+
 static int test_stop_resume_and_kill(void) {
     const dword_t nop_program[] = {UINT32_C(0xd503201f)};
     struct runner_fixture fixture;
@@ -624,6 +737,8 @@ int main(void) {
     if (test_fault_mapping() != 0)
         return 1;
     if (test_immediate_fault_poll() != 0)
+        return 1;
+    if (test_compatibility_diagnostics() != 0)
         return 1;
     if (test_stop_resume_and_kill() != 0)
         return 1;

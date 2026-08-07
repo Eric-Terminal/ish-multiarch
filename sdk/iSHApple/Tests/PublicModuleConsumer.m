@@ -13,6 +13,14 @@ static int32_t (*volatile runtime_error_entry)(void) =
 static int32_t (*volatile rootfs_install_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
+static int32_t (*volatile diagnostics_drain_entry)(
+        uint32_t, uint64_t,
+        struct ish_apple_diagnostic_event_v1 *,
+        uint32_t, uint32_t *) =
+        ish_apple_diagnostics_drain;
+static int32_t (*volatile diagnostics_clear_entry)(
+        uint32_t, uint64_t, uint32_t *) =
+        ish_apple_diagnostics_clear;
 static int32_t (*volatile mount_add_entry)(
         const struct ish_apple_mount_spec_v1 *) =
         ish_apple_mount_add;
@@ -108,6 +116,8 @@ int main(void) {
             runtime_phase_entry == 0 ||
             runtime_error_entry == 0 ||
             rootfs_install_entry == 0 ||
+            diagnostics_drain_entry == 0 ||
+            diagnostics_clear_entry == 0 ||
             mount_add_entry == 0 ||
             mount_remove_entry == 0 ||
             mount_list_entry == 0 ||

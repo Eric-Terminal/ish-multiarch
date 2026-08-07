@@ -40,6 +40,10 @@ static void tgroup_init_copy(
     *group = *old_group;
     // 宿主作业身份跨 fork 保持，guest 的会话和进程组变化不会触及它。
     group->host_job_id = old_group->host_job_id;
+    group->host_diagnostic_scope =
+            old_group->host_diagnostic_scope;
+    group->host_diagnostic_request_id =
+            old_group->host_diagnostic_request_id;
     list_init(&group->threads);
     list_init(&group->pgroup);
     list_init(&group->session);
