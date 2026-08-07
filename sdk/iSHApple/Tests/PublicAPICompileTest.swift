@@ -90,6 +90,17 @@ func compilePublicAPI(runtime: Runtime) async throws {
     persistentParent: "/app/data",
     rootName: "default"
   )
+  let _: RootFSInstallDisposition = try RootFS.installArchive(
+    archivePath: "/bundle/rootfs.tar.gz",
+    expectedSHA256: String(repeating: "a", count: 64),
+    expectedUncompressedBytes: 8_000_000,
+    expectedEntryCount: 500,
+    persistentParent: "/app/data",
+    rootName: "default"
+  ) { progress in
+    let _: RootFSArchivePhase = progress.phase
+    return true
+  }
 
   let request = CommandRequest(
     requestID: 42,

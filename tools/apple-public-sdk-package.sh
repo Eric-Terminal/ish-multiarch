@@ -88,6 +88,7 @@ verify_public_symbols() {
             ish_apple_mount_lease_acquire \
             ish_apple_mount_lease_retain \
             ish_apple_mount_lease_release \
+            ish_apple_rootfs_install_archive \
             ish_apple_rootfs_install_seed \
             ish_apple_command_session_start \
             ish_apple_command_session_retain \
@@ -138,7 +139,7 @@ link_module_consumer() {
         -I"$headers" \
         -Wall -Wextra -Werror \
         "$CONSUMER" "$archive" \
-        -lm -ldl -lresolv -lsqlite3 \
+        -lm -ldl -lresolv -lsqlite3 -lz \
         -o "$PUBLIC_ROOT/consumers/$name"
 }
 

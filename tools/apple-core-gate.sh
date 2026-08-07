@@ -318,6 +318,8 @@ build_slice() {
         -c "$ROOT/tools/apple-aarch64-backend-probe.c" -o "$backend_probe"
 
     local -a rootfs_seed_sources=(
+        apple-rootfs-archive.c
+        apple-rootfs-sha256.c
         apple-rootfs-seed.c
         apple-rootfs-seed-builders.c
         apple-rootfs-seed-copy.c
@@ -439,6 +441,8 @@ build_slice() {
     fakefs_members=$("$AR" -t "$full_build_dir/libfakefs.a")
     local required_fakefs_member
     for required_fakefs_member in \
+            platform_apple-rootfs-archive.c.o \
+            platform_apple-rootfs-sha256.c.o \
             platform_apple-rootfs-seed.c.o \
             platform_apple-rootfs-seed-builders.c.o \
             platform_apple-rootfs-seed-copy.c.o \
@@ -475,6 +479,7 @@ build_slice() {
             ish_apple_runtime_last_error \
             ish_apple_diagnostics_drain \
             ish_apple_diagnostics_clear \
+            ish_apple_rootfs_install_archive \
             ish_apple_rootfs_install_seed \
             ish_apple_command_session_start \
             ish_apple_command_session_retain \
@@ -500,6 +505,11 @@ build_slice() {
     if ! otool -L "$full_build_dir/apple_watch_runtime_link_smoke" | \
             grep -Fq '/usr/lib/libresolv.9.dylib'; then
         echo "错误：${name} 的 Watch runtime consumer 未链接 libresolv。" >&2
+        exit 1
+    fi
+    if ! otool -L "$full_build_dir/apple_runtime_link_smoke" | \
+            grep -Fq '/usr/lib/libz.1.dylib'; then
+        echo "错误：${name} 的公共 runtime consumer 未链接 libz。" >&2
         exit 1
     fi
 

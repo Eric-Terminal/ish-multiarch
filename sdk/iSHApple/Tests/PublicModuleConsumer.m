@@ -16,6 +16,10 @@ static int32_t (*volatile runtime_capabilities_entry)(
 static int32_t (*volatile rootfs_install_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
+static int32_t (*volatile rootfs_archive_install_entry)(
+        const struct ish_apple_rootfs_archive_spec_v1 *,
+        const struct ish_apple_rootfs_archive_callbacks_v1 *,
+        int32_t *) = ish_apple_rootfs_install_archive;
 static int32_t (*volatile diagnostics_drain_entry)(
         uint32_t, uint64_t,
         struct ish_apple_diagnostic_event_v1 *,
@@ -151,6 +155,7 @@ int main(void) {
             runtime_error_entry == 0 ||
             runtime_capabilities_entry == 0 ||
             rootfs_install_entry == 0 ||
+            rootfs_archive_install_entry == 0 ||
             diagnostics_drain_entry == 0 ||
             diagnostics_clear_entry == 0 ||
             guest_file_stat_entry == 0 ||

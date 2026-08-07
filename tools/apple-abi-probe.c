@@ -210,6 +210,53 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_capabilities_v1, reserved, 32);
 
+_Static_assert(
+        sizeof(struct ish_apple_rootfs_archive_progress_v1) == 608,
+        "RootFS 归档进度必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_rootfs_archive_progress_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, phase, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, flags, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1,
+        compressed_bytes_completed, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1,
+        compressed_bytes_total, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1,
+        extracted_bytes_completed, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1,
+        extracted_bytes_total, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1,
+        entries_completed, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, entries_total, 56);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, current_path, 64);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_progress_v1, reserved, 576);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, archive_path, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, context, 8);
+
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, version, 0);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, structure_size, 4);
@@ -314,6 +361,32 @@ _Static_assert(sizeof(struct ish_apple_runtime_spec_v1) == 48,
 ASSERT_APPLE_ALIGNMENT(struct ish_apple_runtime_spec_v1, 8);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, shared_directory, 28);
+_Static_assert(sizeof(struct ish_apple_rootfs_archive_spec_v1) == 56,
+        "arm64_32 RootFS 归档配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_rootfs_archive_spec_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, expected_sha256, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, persistent_parent, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, root_name, 20);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1,
+        expected_uncompressed_bytes, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1,
+        expected_entry_count, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, reserved, 40);
+_Static_assert(sizeof(struct ish_apple_rootfs_archive_callbacks_v1) == 32,
+        "arm64_32 RootFS 归档回调布局漂移");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_rootfs_archive_callbacks_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, progress, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, reserved, 16);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, socket_prefix, 32);
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, hostname, 36);
@@ -372,6 +445,32 @@ _Static_assert(sizeof(struct ish_apple_runtime_spec_v1) == 64,
 ASSERT_APPLE_ALIGNMENT(struct ish_apple_runtime_spec_v1, 8);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, shared_directory, 32);
+_Static_assert(sizeof(struct ish_apple_rootfs_archive_spec_v1) == 72,
+        "LP64 RootFS 归档配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_rootfs_archive_spec_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, expected_sha256, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, persistent_parent, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, root_name, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1,
+        expected_uncompressed_bytes, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1,
+        expected_entry_count, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_spec_v1, reserved, 56);
+_Static_assert(sizeof(struct ish_apple_rootfs_archive_callbacks_v1) == 40,
+        "LP64 RootFS 归档回调布局漂移");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_rootfs_archive_callbacks_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, progress, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_rootfs_archive_callbacks_v1, reserved, 24);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, socket_prefix, 40);
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, hostname, 48);

@@ -135,9 +135,12 @@ libm = cc.find_library('m', required: false)
 libdl = cc.find_library('dl', required: false)
 sqlite3 = cc.find_library('sqlite3')
 dependencies = [librt, libm, libdl, threads]
+fakefs_dependencies = [sqlite3]
 if host_machine.system() == 'darwin'
     libresolv = cc.find_library('resolv')
-    dependencies += [libresolv]
+    libz = cc.find_library('z')
+    dependencies += [libresolv, libz]
+    fakefs_dependencies += [libz]
 endif
 
 subdir('vdso') # ish depends on the vdso
@@ -175,6 +178,8 @@ fakefs_src = ['fs/fake-db.c', 'fs/fake-migrate.c', 'fs/fake-rebuild.c']
 if host_machine.system() == 'darwin'
     fakefs_src += [
         'platform/apple-root-catalog.c',
+        'platform/apple-rootfs-archive.c',
+        'platform/apple-rootfs-sha256.c',
         'platform/apple-rootfs-seed.c',
         'platform/apple-rootfs-seed-builders.c',
         'platform/apple-rootfs-seed-copy.c',
@@ -187,7 +192,7 @@ endif
 libfakefs = library('fakefs',
     fakefs_src,
     include_directories: includes,
-    dependencies: sqlite3)
+    dependencies: fakefs_dependencies)
 
 if host_machine.system() == 'darwin' and not meson.is_cross_build()
     apple_rootfs_seed_test = executable(

@@ -126,6 +126,43 @@ int main(void) {
             &disposition) == _ENOENT,
             "公共 RootFS 安装统一映射宿主 ENOENT");
 
+    struct ish_apple_rootfs_archive_spec_v1 archive_spec = {
+        .version = ISH_APPLE_ABI_VERSION + 1,
+        .structure_size = sizeof(archive_spec),
+    };
+    CHECK(ish_apple_rootfs_install_archive(
+            &archive_spec, NULL, &disposition) == _ENOTSUP,
+            "RootFS 归档安装拒绝未知 ABI");
+    archive_spec.version = ISH_APPLE_ABI_VERSION;
+    archive_spec.structure_size--;
+    CHECK(ish_apple_rootfs_install_archive(
+            &archive_spec, NULL, &disposition) == _EINVAL,
+            "RootFS 归档安装拒绝截断配置");
+    archive_spec.structure_size = sizeof(archive_spec);
+    archive_spec.archive_path = "/definitely/missing-rootfs.tar.gz";
+    archive_spec.expected_sha256 =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    archive_spec.persistent_parent = "/definitely/missing-parent";
+    archive_spec.root_name = "aarch64";
+    archive_spec.expected_uncompressed_bytes = 1;
+    archive_spec.expected_entry_count = 1;
+    struct ish_apple_rootfs_archive_callbacks_v1 archive_callbacks = {
+        .version = ISH_APPLE_ABI_VERSION + 1,
+        .structure_size = sizeof(archive_callbacks),
+    };
+    CHECK(ish_apple_rootfs_install_archive(
+            &archive_spec, &archive_callbacks, &disposition) == _ENOTSUP,
+            "RootFS 归档安装拒绝未知回调 ABI");
+    archive_callbacks.version = ISH_APPLE_ABI_VERSION;
+    archive_callbacks.structure_size--;
+    CHECK(ish_apple_rootfs_install_archive(
+            &archive_spec, &archive_callbacks, &disposition) == _EINVAL,
+            "RootFS 归档安装拒绝截断回调配置");
+    CHECK(ish_apple_rootfs_install_archive(
+            &archive_spec, NULL, &disposition) == _ENOENT,
+            "RootFS 归档安装统一映射宿主 ENOENT");
+
     if (failures == 0)
         puts("Apple 公共 runtime ABI 回归通过");
     return failures == 0 ? 0 : 1;

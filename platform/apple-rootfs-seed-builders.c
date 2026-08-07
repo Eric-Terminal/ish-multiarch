@@ -22,43 +22,17 @@
 
 // 将种子、托管副本或导入目录组装成可发布 root。
 
-int ish_apple_rootfs_build_staging_root(int seed, int staging) {
-    struct seed_manifest source_manifest = {0};
-    int error = ish_apple_rootfs_validate_seed_top(seed, &source_manifest);
-    static const char *regular_resources[] = {
-        "meta.db", ish_apple_rootfs_manifest_name, ish_apple_rootfs_hardlink_manifest_name,
-    };
-    for (size_t i = 0; error == 0 &&
-            i < sizeof(regular_resources) / sizeof(regular_resources[0]); i++)
-        error = ish_apple_rootfs_copy_regular_at(seed, staging, regular_resources[i]);
-
-    if (error == 0 && mkdirat(staging, "data", 0700) < 0)
-        error = ish_apple_rootfs_errno_or_io();
-    int source_data = -1;
+int ish_apple_rootfs_finalize_seed_staging(
+        int staging, struct seed_manifest *manifest_out) {
+    struct seed_manifest manifest = {0};
+    int error = ish_apple_rootfs_validate_seed_top(staging, &manifest);
     int staging_data = -1;
-    if (error == 0) {
-        source_data = openat(seed, "data",
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if (source_data < 0)
-            error = ish_apple_rootfs_errno_or_io();
-    }
     if (error == 0) {
         staging_data = openat(staging, "data",
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (staging_data < 0)
             error = ish_apple_rootfs_errno_or_io();
     }
-    if (error == 0)
-        error = ish_apple_rootfs_copy_directory_contents(source_data, staging_data, 0);
-    if (source_data >= 0 && close(source_data) < 0 && error == 0)
-        error = ish_apple_rootfs_errno_or_io();
-
-    struct seed_manifest copied_manifest = {0};
-    if (error == 0)
-        error = ish_apple_rootfs_validate_seed_top(staging, &copied_manifest);
-    if (error == 0 && strcmp(source_manifest.archive_sha256,
-            copied_manifest.archive_sha256) != 0)
-        error = EINVAL;
     if (error == 0)
         error = ish_apple_rootfs_validate_busybox_elf(staging_data);
 
@@ -83,9 +57,57 @@ int ish_apple_rootfs_build_staging_root(int seed, int staging) {
     if (staging_data >= 0 && close(staging_data) < 0 && error == 0)
         error = ish_apple_rootfs_errno_or_io();
     if (error == 0)
-        error = ish_apple_rootfs_write_receipt_at(staging, &copied_manifest);
+        error = ish_apple_rootfs_write_receipt_at(staging, &manifest);
     if (error == 0)
         error = ish_apple_rootfs_sync_directory_internal(staging);
+    if (error == 0 && manifest_out != NULL)
+        *manifest_out = manifest;
+    return error;
+}
+
+int ish_apple_rootfs_build_staging_root(int seed, int staging) {
+    struct seed_manifest source_manifest = {0};
+    int error = ish_apple_rootfs_validate_seed_top(seed, &source_manifest);
+    static const char *regular_resources[] = {
+        "meta.db", ish_apple_rootfs_manifest_name,
+        ish_apple_rootfs_hardlink_manifest_name,
+    };
+    for (size_t i = 0; error == 0 &&
+            i < sizeof(regular_resources) / sizeof(regular_resources[0]); i++)
+        error = ish_apple_rootfs_copy_regular_at(
+                seed, staging, regular_resources[i]);
+
+    if (error == 0 && mkdirat(staging, "data", 0700) < 0)
+        error = ish_apple_rootfs_errno_or_io();
+    int source_data = -1;
+    int staging_data = -1;
+    if (error == 0) {
+        source_data = openat(seed, "data",
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (source_data < 0)
+            error = ish_apple_rootfs_errno_or_io();
+    }
+    if (error == 0) {
+        staging_data = openat(staging, "data",
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (staging_data < 0)
+            error = ish_apple_rootfs_errno_or_io();
+    }
+    if (error == 0)
+        error = ish_apple_rootfs_copy_directory_contents(
+                source_data, staging_data, 0);
+    if (source_data >= 0 && close(source_data) < 0 && error == 0)
+        error = ish_apple_rootfs_errno_or_io();
+    if (staging_data >= 0 && close(staging_data) < 0 && error == 0)
+        error = ish_apple_rootfs_errno_or_io();
+
+    struct seed_manifest copied_manifest = {0};
+    if (error == 0)
+        error = ish_apple_rootfs_finalize_seed_staging(
+                staging, &copied_manifest);
+    if (error == 0 && strcmp(source_manifest.archive_sha256,
+            copied_manifest.archive_sha256) != 0)
+        error = EINVAL;
     return error;
 }
 

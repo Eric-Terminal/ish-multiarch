@@ -173,7 +173,8 @@ build-apple-core/xcframeworks/iSHApple.xcframework
 iOS device、iOS Simulator、watchOS device 与 Watch Simulator 四个变体，
 每个变体都有相同的 Headers 和 `iSHApple` module map。公共 C v1 ABI、
 Swift 6 包装源码、资源上限、回调时序和独立消费者说明见
-`sdk/iSHApple/README.md`；RootFS 种子仍由集成 App 自行打包和安装。
+`sdk/iSHApple/README.md`；RootFS 种子仍由集成 App 自行生成，目录 seed 可直接
+安装，也可用仓库工具生成带固定摘要清单的 gzip/USTAR 归档后安装。
 
 这个门禁会交叉构建并链接最小 Mach-O 消费者，并静态检查后端选择、归档符号与 `arm64e` 指针认证指令，但不会启动这些消费者、watchOS Simulator 或 guest。它不衡量 threaded-code 的运行性能，也不验证应用生命周期、界面、签名、沙箱、entitlement、真机运行或 App Store 交付。
 

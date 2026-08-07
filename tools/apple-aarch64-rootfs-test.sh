@@ -6,9 +6,17 @@ PACKAGER="$ROOT/tools/apple-aarch64-rootfs.sh"
 PACKAGE_VERIFIER="$ROOT/tools/apple-aarch64-rootfs-packages.sh"
 FAKEFSIFY=${1:-}
 SQLITE3_BIN=${2:-}
+ARCHIVE_INSTALL_PROBE=${3:-}
+PYTHON3_BIN=${4:-}
+ARCHIVE_PACKAGER="$ROOT/tools/apple-rootfs-seed-archive.py"
 
 if [[ ! -x "$FAKEFSIFY" || ! -x "$SQLITE3_BIN" ]]; then
-    echo "用法：$0 <fakefsify> <sqlite3>" >&2
+    echo "用法：$0 <fakefsify> <sqlite3> [archive-probe python3]" >&2
+    exit 2
+fi
+if [[ -n "$ARCHIVE_INSTALL_PROBE" || -n "$PYTHON3_BIN" ]] &&
+        [[ ! -x "$ARCHIVE_INSTALL_PROBE" || ! -x "$PYTHON3_BIN" ]]; then
+    echo "错误：压缩 seed 测试必须同时提供 archive-probe 与 python3。" >&2
     exit 2
 fi
 export SQLITE3=$SQLITE3_BIN
@@ -525,6 +533,111 @@ if ! cmp -s "$HARDLINK_GROUP_EXPECTED" "$HARDLINK_GROUP_ACTUAL"; then
     echo "错误：大 inode 必须按完整十进制字符串分组。" >&2
     exit 1
 fi
+
+if [[ -n "$ARCHIVE_INSTALL_PROBE" ]]; then
+mkdir "$TMP/archive-one" "$TMP/archive-two" "$TMP/archive-install"
+ARCHIVE_ONE="$TMP/archive-one/rootfs.tar.gz"
+ARCHIVE_TWO="$TMP/archive-two/rootfs.tar.gz"
+METADATA_ONE="$TMP/archive-one/rootfs.json"
+METADATA_TWO="$TMP/archive-two/rootfs.json"
+"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$OUTPUT" "$ARCHIVE_ONE" \
+    --metadata "$METADATA_ONE"
+"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$OUTPUT" "$ARCHIVE_TWO" \
+    --metadata "$METADATA_TWO"
+if ! cmp -s "$ARCHIVE_ONE" "$ARCHIVE_TWO" ||
+        ! cmp -s "$METADATA_ONE" "$METADATA_TWO"; then
+    echo "错误：相同 seed 没有生成确定性的归档与清单。" >&2
+    exit 1
+fi
+METADATA_FIELDS=$("$PYTHON3_BIN" - "$METADATA_ONE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as source:
+    document = json.load(source)
+print(
+    document["archiveSHA256"],
+    document["uncompressedBytes"],
+    document["entryCount"],
+    sep="\t",
+)
+PY
+)
+IFS=$'\t' read -r ARCHIVE_SHA ARCHIVE_BYTES ARCHIVE_ENTRIES \
+    <<< "$METADATA_FIELDS"
+if [[ ! "$ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ||
+        ! "$ARCHIVE_BYTES" =~ ^[1-9][0-9]*$ ||
+        ! "$ARCHIVE_ENTRIES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误：压缩 seed 清单缺少固定安装参数。" >&2
+    exit 1
+fi
+
+INSTALL_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$ARCHIVE_ONE" \
+    "$ARCHIVE_SHA" "$ARCHIVE_BYTES" "$ARCHIVE_ENTRIES" \
+    "$TMP/archive-install" aarch64 install)
+[[ "$INSTALL_RESULT" == installed ]]
+INSTALL_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$ARCHIVE_ONE" \
+    "$ARCHIVE_SHA" "$ARCHIVE_BYTES" "$ARCHIVE_ENTRIES" \
+    "$TMP/archive-install" aarch64 install)
+[[ "$INSTALL_RESULT" == already-present ]]
+[[ -f "$TMP/archive-install/aarch64/meta.db" &&
+        -f "$TMP/archive-install/aarch64/data/bin/busybox" ]]
+HARDLINK_SOURCE="$TMP/archive-install/aarch64/data/usr/lib/hardlink-source"
+HARDLINK_ALIAS="$TMP/archive-install/aarch64/data/usr/lib/hardlink-alias"
+[[ $(stat_inode "$HARDLINK_SOURCE") == $(stat_inode "$HARDLINK_ALIAS") ]]
+
+CANCEL_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$ARCHIVE_ONE" \
+    "$ARCHIVE_SHA" "$ARCHIVE_BYTES" "$ARCHIVE_ENTRIES" \
+    "$TMP/archive-install" cancelled cancel)
+[[ "$CANCEL_RESULT" == cancelled &&
+        ! -e "$TMP/archive-install/cancelled" &&
+        ! -e "$TMP/archive-install/.cancelled.installing.owner" ]]
+if find "$TMP/archive-install" -maxdepth 1 \
+        -name '.cancelled.installing.*' -print -quit | grep -q .; then
+    echo "错误：取消压缩 seed 安装后留下了 staging。" >&2
+    exit 1
+fi
+BAD_HASH_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$ARCHIVE_ONE" \
+    "$ARCHIVE_SHA" "$ARCHIVE_BYTES" "$ARCHIVE_ENTRIES" \
+    "$TMP/archive-install" badhash bad-hash)
+[[ "$BAD_HASH_RESULT" == bad-hash &&
+        ! -e "$TMP/archive-install/badhash" ]]
+
+MALICIOUS_ARCHIVE="$TMP/malicious.tar.gz"
+"$PYTHON3_BIN" - "$MALICIOUS_ARCHIVE" <<'PY'
+import gzip
+import io
+import sys
+import tarfile
+
+with open(sys.argv[1], "wb") as raw:
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gzip_file:
+        with tarfile.open(mode="w", fileobj=gzip_file, format=tarfile.USTAR_FORMAT) as archive:
+            body = b"escape"
+            info = tarfile.TarInfo("../escape")
+            info.size = len(body)
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(body))
+PY
+MALICIOUS_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$MALICIOUS_ARCHIVE" \
+    "$(sha256_file "$MALICIOUS_ARCHIVE")" 6 1 \
+    "$TMP/archive-install" malicious invalid-archive)
+[[ "$MALICIOUS_RESULT" == invalid-archive &&
+        ! -e "$TMP/archive-install/malicious" &&
+        ! -e "$TMP/escape" ]]
+
+INVALID_SEED="$TMP/archive-invalid-seed"
+cp -R "$OUTPUT" "$INVALID_SEED"
+ln -s /tmp "$INVALID_SEED/unexpected-link"
+if "$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$INVALID_SEED" \
+        "$TMP/invalid.tar.gz" --metadata "$TMP/invalid.json" \
+        >/dev/null 2>&1; then
+    echo "错误：压缩 seed 打包器接受了宿主符号链接。" >&2
+    exit 1
+fi
+[[ ! -e "$TMP/invalid.tar.gz" && ! -e "$TMP/invalid.json" ]]
+fi
+
 if find "$TMP" -maxdepth 1 -name '.result.*' -print -quit | grep -q .; then
     echo "错误：事务替换留下了临时目录。" >&2
     exit 1

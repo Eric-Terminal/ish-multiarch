@@ -21,6 +21,7 @@ if get_option('kernel') == 'ish'
     endif
 endif
 
+python3_cli = find_program('python3', required: false)
 if not meson.is_cross_build()
     meson_cli = find_program('meson', required: false)
     if meson_cli.found()
@@ -38,7 +39,6 @@ if not meson.is_cross_build()
     test('apple_watch_package_prebuilt',
         apple_watch_package_test, timeout: 30)
 
-    python3_cli = find_program('python3', required: false)
     if python3_cli.found()
         apple_aarch64_rootfs_sources_test = find_program(
             'apple-aarch64-rootfs-sources-test.sh')
@@ -129,10 +129,26 @@ if libarchive.found()
         watch_root_archive_roundtrip)
     sqlite3_cli = find_program('sqlite3', required: false)
     if not meson.is_cross_build() and sqlite3_cli.found()
+        apple_aarch64_rootfs_test_args = [
+            fakefsify,
+            sqlite3_cli.full_path(),
+        ]
+        if host_machine.system() == 'darwin' and python3_cli.found()
+            apple_rootfs_archive_probe = executable(
+                'apple-rootfs-archive-probe',
+                '../platform/apple-rootfs-archive-probe.c',
+                dependencies: [sqlite3, libz],
+                link_with: [libfakefs],
+                include_directories: [includes])
+            apple_aarch64_rootfs_test_args += [
+                apple_rootfs_archive_probe,
+                python3_cli.full_path(),
+            ]
+        endif
         apple_aarch64_rootfs_test = find_program(
             'apple-aarch64-rootfs-test.sh')
         test('apple_aarch64_rootfs', apple_aarch64_rootfs_test,
-            args: [fakefsify, sqlite3_cli.full_path()], timeout: 120)
+            args: apple_aarch64_rootfs_test_args, timeout: 120)
     elif not meson.is_cross_build()
         warning('未找到 sqlite3 CLI，跳过 AArch64 rootfs 打包测试')
     endif

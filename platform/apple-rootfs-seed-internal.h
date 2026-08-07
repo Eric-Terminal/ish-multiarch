@@ -231,6 +231,8 @@ int ish_apple_rootfs_rollback_unsynchronized_publish(
         const struct staging_owner *owner);
 
 int ish_apple_rootfs_build_staging_root(int seed, int staging);
+int ish_apple_rootfs_finalize_seed_staging(
+        int staging, struct seed_manifest *manifest_out);
 int ish_apple_rootfs_build_copied_root(
         int source,
         int staging,

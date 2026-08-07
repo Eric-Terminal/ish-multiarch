@@ -45,6 +45,7 @@ target 还需要链接以下系统库：
 - `libresolv.tbd`
 - `libm.tbd`
 - `libdl.tbd`
+- `libz.tbd`
 
 C 使用 `#include <iSHApple.h>`，Objective-C/Objective-C++ 可以使用
 `@import iSHApple;` 或包含同一头文件。Swift 项目可以直接导入底层 C
@@ -65,9 +66,12 @@ sdk/iSHApple/Tests/typecheck.sh
 每个宿主进程只有一个 Linux runtime，启动成功后由所有可见终端与结构化
 命令会话共享：
 
-1. 把项目生成的只读 fakefs seed 放入 App bundle。
-2. 用 `ish_apple_rootfs_install_seed` 或 Swift `RootFS.installSeed` 安装到
-   App 私有持久目录。
+1. 把项目生成的只读 fakefs seed，或工具生成的压缩归档及清单放入 App
+   bundle。
+2. 目录 seed 使用 `ish_apple_rootfs_install_seed`；压缩 seed 使用
+   `ish_apple_rootfs_install_archive` 并传入清单固定的 SHA-256、展开字节数和
+   条目数。Swift 分别对应 `RootFS.installSeed` 与
+   `RootFS.installArchive`。两种入口都安装到 App 私有持久目录。
 3. 以安装目录中的 `data/`、一个真实的共享目录、短 socket prefix、
    hostname 和 PID 1 启动命令调用 `ish_apple_runtime_start_v2`；需要在
    首个进程接受作业前可见的目录通过 `startupMounts` 一并传入。
@@ -77,6 +81,27 @@ sdk/iSHApple/Tests/typecheck.sh
 guest 的 `/mnt/shared`。真机上的 socket prefix 应放在 App 临时目录并
 控制在 82 个 UTF-8 字节以内。runtime 不能在同一进程内停止后重启；若启动
 失败，应读取 phase 和 last error，再由宿主决定是否结束当前进程生命周期。
+
+## 压缩 RootFS seed
+
+发布构建可把已经 fakefs 化并验证完成的目录 seed 压成确定性归档：
+
+```sh
+tools/apple-rootfs-seed-archive.py \
+    /path/to/seed /path/to/rootfs.tar.gz \
+    --metadata /path/to/rootfs.json
+```
+
+JSON 清单记录归档 SHA-256、压缩/展开字节数、条目数、AArch64、Alpine
+版本、上游摘要和 seed manifest 摘要。宿主必须把其中的
+`archiveSHA256`、`uncompressedBytes` 与 `entryCount` 原样传给安装 API；
+不能根据设备上的归档重新计算后再把结果当成可信期望值。
+
+安装器只接受该工具输出的 gzip/USTAR 普通目录与普通文件，不接受符号链接、
+设备节点、绝对路径、路径穿越、重复条目或 USTAR 扩展。它先校验整个压缩文件，
+再在现有托管 staging 中展开，最后复用 seed manifest、AArch64 BusyBox、
+SQLite fakefs 与 hardlink 校验并原子发布。进度回调返回非零只会在安全检查点
+取消；已存在且收据有效的 RootFS 仍返回 `alreadyPresent`，不会被归档覆盖。
 
 启动返回后应读取一次 `Runtime.capabilities()` 并把结果保存到当前进程的运行时
 状态。快照明确报告 PTY、动态挂载、结构化诊断、guest 文件接口、AArch64 架构、

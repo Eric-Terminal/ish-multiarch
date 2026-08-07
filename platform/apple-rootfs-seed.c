@@ -297,8 +297,11 @@ int ish_apple_rootfs_lock_copy_catalog(
 }
 
 static int install_locked(
-        const char *seed_root, int parent, const char *root_name,
-        const char *owner_name, enum ish_apple_rootfs_seed_result *result) {
+        int parent, const char *root_name,
+        const char *owner_name,
+        ish_apple_rootfs_staging_builder builder,
+        void *builder_context,
+        enum ish_apple_rootfs_seed_result *result) {
     bool root_present;
     int error = ish_apple_rootfs_inspect_existing_root(parent, root_name, &root_present);
     if (error != 0)
@@ -314,19 +317,12 @@ static int install_locked(
     error = ish_apple_rootfs_recover_staging(parent, owner_name, root_name);
     if (error != 0)
         return error;
-    int seed = open(seed_root,
-            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (seed < 0)
-        return ish_apple_rootfs_errno_or_io();
-
     int staging = -1;
     struct staging_owner owner = {0};
     error = ish_apple_rootfs_create_staging(parent, root_name,
             owner_name, &staging, &owner);
     if (error == 0)
-        error = ish_apple_rootfs_build_staging_root(seed, staging);
-    if (close(seed) < 0 && error == 0)
-        error = ish_apple_rootfs_errno_or_io();
+        error = builder(staging, builder_context);
     if (staging >= 0 && close(staging) < 0 && error == 0)
         error = ish_apple_rootfs_errno_or_io();
     if (error != 0) {
@@ -484,13 +480,14 @@ static int copy_managed_root_locked(
     return 0;
 }
 
-int ish_apple_rootfs_seed_install(
-        const char *seed_root,
+int ish_apple_rootfs_install_with_builder(
         const char *persistent_parent,
         const char *root_name,
+        ish_apple_rootfs_staging_builder builder,
+        void *builder_context,
         enum ish_apple_rootfs_seed_result *result) {
-    if (seed_root == NULL || persistent_parent == NULL ||
-            result == NULL || !ish_apple_rootfs_name_is_valid(root_name))
+    if (persistent_parent == NULL || builder == NULL || result == NULL ||
+            !ish_apple_rootfs_name_is_valid(root_name))
         return EINVAL;
 
     char lock_name[NAME_MAX + 1];
@@ -510,8 +507,8 @@ int ish_apple_rootfs_seed_install(
     int lock = -1;
     error = lock_file(parent, lock_name, LOCK_EX, &lock);
     if (error == 0)
-        error = install_locked(seed_root, parent, root_name,
-                owner_name, result);
+        error = install_locked(parent, root_name, owner_name,
+                builder, builder_context, result);
     bool completed = error == 0;
     if (lock >= 0) {
         while (flock(lock, LOCK_UN) < 0 && errno == EINTR) {}
@@ -520,6 +517,35 @@ int ish_apple_rootfs_seed_install(
     if (close(parent) < 0 && error == 0)
         error = ish_apple_rootfs_errno_or_io();
     return completed ? 0 : error;
+}
+
+struct install_seed_context {
+    const char *seed_root;
+};
+
+static int install_seed_builder(int staging, void *opaque_context) {
+    const struct install_seed_context *context = opaque_context;
+    int seed = open(context->seed_root,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (seed < 0)
+        return ish_apple_rootfs_errno_or_io();
+    int error = ish_apple_rootfs_build_staging_root(seed, staging);
+    if (close(seed) < 0 && error == 0)
+        error = ish_apple_rootfs_errno_or_io();
+    return error;
+}
+
+int ish_apple_rootfs_seed_install(
+        const char *seed_root,
+        const char *persistent_parent,
+        const char *root_name,
+        enum ish_apple_rootfs_seed_result *result) {
+    if (seed_root == NULL)
+        return EINVAL;
+    struct install_seed_context context = {.seed_root = seed_root};
+    return ish_apple_rootfs_install_with_builder(
+            persistent_parent, root_name,
+            install_seed_builder, &context, result);
 }
 
 int ish_apple_rootfs_publish_imported_root(
