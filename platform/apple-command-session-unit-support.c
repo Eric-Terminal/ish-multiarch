@@ -313,8 +313,8 @@ static void finish_session(
     ish_apple_command_session_release(session);
 }
 
-static void test_active_identity_and_quota(void) {
-    enum { active_count = ISH_APPLE_COMMAND_ACTIVE_SESSION_MAX };
+static void test_active_identity_and_dynamic_registry(void) {
+    enum { active_count = 12 };
     struct callback_context contexts[active_count + 2];
     struct ish_apple_command_session *sessions[active_count] = {};
     for (size_t index = 0; index < active_count + 2; index++)
@@ -326,7 +326,7 @@ static void test_active_identity_and_quota(void) {
         CHECK(start_basic(
                 "--child-pause", NULL, request_id,
                 0, 0, &contexts[index], &sessions[index]) == 0,
-                "并发配额内的命令均可启动");
+                "动态注册表允许大量并发命令启动");
         if (index == 0) {
             struct ish_apple_command_session *duplicate = (void *) 1;
             CHECK(start_basic(
@@ -337,24 +337,24 @@ static void test_active_identity_and_quota(void) {
                     "重复活跃 request_id 返回 _EEXIST");
         }
     }
-    struct ish_apple_command_session *overflow = (void *) 1;
+    struct ish_apple_command_session *additional = NULL;
     CHECK(start_basic(
             "--child-pause", NULL, next_request_id++,
-            0, 0, &contexts[active_count + 1], &overflow) ==
-                    _EAGAIN &&
-            overflow == NULL,
-            "第 5 个活跃命令返回 _EAGAIN");
+            0, 0, &contexts[active_count + 1], &additional) == 0 &&
+            additional != NULL,
+            "动态注册表不以固定会话配额拒绝额外命令");
 
     for (size_t index = 0; index < active_count; index++)
         finish_session(&contexts[index], sessions[index]);
+    finish_session(&contexts[active_count + 1], additional);
     CHECK(wait_for_no_live_sessions(),
-            "活跃命令完成后释放全部配额和 request_id");
+            "活跃命令完成后清空动态注册表和 request_id");
 
     struct ish_apple_command_session *reused = NULL;
     CHECK(start_basic(
             "--child-token", "request-id-reused", first_id,
             0, 0, &contexts[active_count], &reused) == 0,
-            "完成后可复用 request_id 与会话配额");
+            "完成后可复用 request_id");
     if (reused != NULL) {
         CHECK(context_wait(&contexts[active_count], false),
                 "复用 request_id 的命令正常完成");
@@ -474,7 +474,7 @@ int ish_apple_command_session_run_unit_contract_tests(
     test_executable = executable;
     failures = 0;
     test_callback_contract();
-    test_active_identity_and_quota();
+    test_active_identity_and_dynamic_registry();
     test_resource_limits();
     test_worker_rollback_and_cancel_retry();
     CHECK(wait_for_no_live_sessions(),

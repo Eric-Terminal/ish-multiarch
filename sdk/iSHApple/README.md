@@ -110,11 +110,11 @@ stdin 写入是非阻塞的，Swift `send` 会处理部分写入和 Linux `EAGAI
 或 `setpgid` 影响，因此后台后代不能继续持有管道逃逸。显式 timeout 和
 stdout/stderr 合计输出上限也会终止整个作业。
 
-固定资源合同如下：
+资源合同如下。活跃命令由动态注册表管理，不设置 SDK 固定会话配额；宿主可按
+实际用途并发启动，资源不足时会收到真实的 Linux errno 或进程终止结果。
 
 | 项目 | 上限或默认值 |
 | --- | --- |
-| 同时活跃会话 | 4 |
 | argv 或 environment 项数 | 各 4096 |
 | argv 与 environment 合计字节 | 128 KiB |
 | 单路径字节 | 4096 |

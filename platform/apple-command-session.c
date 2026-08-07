@@ -60,11 +60,6 @@ static void command_unregister_active(
 static int32_t command_register_active(
         struct ish_apple_command_session *session) {
     pthread_mutex_lock(&command_active_lock);
-    if (command_active_count >=
-            ISH_APPLE_COMMAND_ACTIVE_SESSION_MAX) {
-        pthread_mutex_unlock(&command_active_lock);
-        return _EAGAIN;
-    }
     for (struct ish_apple_command_session *active =
                     command_active_sessions;
             active != NULL; active = active->active_next) {
