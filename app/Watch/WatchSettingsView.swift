@@ -322,9 +322,7 @@ private struct WatchRuntimeDetailsView: View {
                 LabeledContent("状态", value: runtime.status)
                 LabeledContent(
                     "终端",
-                    value:
-                        "\(runtime.sessionSnapshots.count)/" +
-                        "\(WatchRuntime.maximumSessionCount)")
+                    value: "\(runtime.sessionSnapshots.count)")
                 if let active = runtime.activeSession {
                     LabeledContent("当前终端", value: active.title)
                     LabeledContent(
@@ -416,9 +414,7 @@ private struct WatchSoftwareMaintenanceView: View {
                 LabeledContent("Linux", value: runtime.status)
                 LabeledContent(
                     "可用终端",
-                    value:
-                        "\(runtime.sessionSnapshots.count)/" +
-                        "\(WatchRuntime.maximumSessionCount)")
+                    value: "\(runtime.sessionSnapshots.count)")
             }
 
             Section("软件仓库") {
@@ -550,10 +546,6 @@ private struct WatchSoftwareMaintenanceView: View {
                 $0.maintenancePhase == .executing
         }) {
             return "已有软件维护正在运行，请等待其结束。"
-        }
-        if runtime.sessionSnapshots.count >=
-                WatchRuntime.maximumSessionCount {
-            return "请先关闭一个终端，再开始软件维护。"
         }
         return "Linux 准备完成后即可开始软件维护。"
     }

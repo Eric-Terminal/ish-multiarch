@@ -49,8 +49,6 @@ import WatchKit
 
 @MainActor
 final class WatchRuntime: ObservableObject {
-    static let maximumSessionCount = WatchTerminalSessions.limit
-
     let automaticHostname: String
     let hostname: String
     let bootCommand: String
@@ -845,9 +843,7 @@ final class WatchRuntime: ObservableObject {
     func refreshRuntimeAvailability() {
         let nextCanCreate =
             globalStatusOverride == nil &&
-            guestPhase == .running &&
-            terminalSessions.sessions.count <
-                WatchTerminalSessions.limit
+            guestPhase == .running
         if canCreateSession != nextCanCreate {
             canCreateSession = nextCanCreate
         }

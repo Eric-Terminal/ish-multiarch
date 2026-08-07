@@ -91,9 +91,7 @@ struct WatchSessionsView: View {
                         }
                 }
             } header: {
-                Text(
-                    "\(runtime.sessionSnapshots.count)/" +
-                    "\(WatchRuntime.maximumSessionCount) 个终端")
+                Text("\(runtime.sessionSnapshots.count) 个终端")
                     .accessibilityIdentifier("watch-session-count")
             } footer: {
                 Text(

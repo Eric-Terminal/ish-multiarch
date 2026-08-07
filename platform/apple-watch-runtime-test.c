@@ -822,36 +822,32 @@ static void test_session_lifecycle(void) {
     ish_watch_session_id after_close_before_exit;
     CHECK(ish_watch_runtime_test_add_session(
             ISH_WATCH_SESSION_RUNNING, &after_close_before_exit) == 0,
-            "close-before-exit 完成后必须释放静态槽位");
+            "close-before-exit 完成后必须释放动态会话记录");
     ish_watch_runtime_test_mark_session_exited(after_close_before_exit, 0);
     CHECK(ish_watch_session_close(after_close_before_exit) == 0,
             "close-before-exit 替代 session 应能正常回收");
     CHECK(ish_watch_runtime_test_recycled_transport() == 0,
-            "复用 tty 编号与静态槽位后必须拒绝旧 transport 代际");
+            "复用 tty 编号与动态记录后必须拒绝旧 transport 代际");
 
     free(source);
     free(output);
 }
 
-static void test_session_limit(void) {
-    ish_watch_session_id session_ids[ISH_WATCH_SESSION_LIMIT];
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
+static void test_dynamic_sessions(void) {
+    enum { session_count = 20 };
+    ish_watch_session_id session_ids[session_count];
+    for (size_t index = 0; index < session_count; index++) {
         CHECK(ish_watch_runtime_test_add_session(
                 ISH_WATCH_SESSION_RUNNING,
                 &session_ids[index]) == 0,
-                "四个静态 session 槽位均应可用");
+                "动态 session registry 按需扩展");
     }
 
-    ish_watch_session_id overflow;
-    CHECK(ish_watch_runtime_test_add_session(
-            ISH_WATCH_SESSION_RUNNING, &overflow) == _EMFILE,
-            "第五个并发 session 应报告槽位已满");
-
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
+    for (size_t index = 0; index < session_count; index++) {
         ish_watch_runtime_test_mark_session_exited(
                 session_ids[index], 0);
         CHECK(ish_watch_session_close(session_ids[index]) == 0,
-                "容量测试结束后应释放每个 session 槽位");
+                "动态并发测试结束后应释放每个 session 记录");
     }
 }
 
@@ -885,7 +881,7 @@ int main(void) {
 
     test_session_boundaries();
     test_session_lifecycle();
-    test_session_limit();
+    test_dynamic_sessions();
     CHECK(ish_watch_runtime_test_exit_ownership() == 0,
             "普通前台程序退出不得结束所属 shell 会话");
     CHECK(test_directory_replacement_during_validation(),

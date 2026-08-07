@@ -20,6 +20,7 @@
 #define WATCH_DEFAULT_COLUMNS 40
 #define WATCH_DEFAULT_ROWS 18
 #define WATCH_NO_TTY (-1)
+#define WATCH_SESSION_CHUNK_CAPACITY 8
 
 enum watch_session_internal_phase {
     WATCH_SESSION_FREE = 0,
@@ -42,6 +43,11 @@ struct watch_session {
     struct watch_output_ring output;
 };
 
+struct watch_session_chunk {
+    struct watch_session sessions[WATCH_SESSION_CHUNK_CAPACITY];
+    struct watch_session_chunk *next;
+};
+
 struct watch_session_transport {
     ish_watch_session_id id;
     struct watch_session *session;
@@ -51,7 +57,7 @@ struct watch_session_transport {
 static struct watch_output_ring console_output;
 static lock_t output_lock = LOCK_INITIALIZER;
 
-static struct watch_session sessions[ISH_WATCH_SESSION_LIMIT];
+static struct watch_session_chunk *session_chunks;
 static ish_watch_session_id next_session_id = 1;
 static lock_t sessions_lock = LOCK_INITIALIZER;
 
@@ -149,11 +155,15 @@ static struct watch_session *session_find_locked(
         ish_watch_session_id session_id) {
     if (session_id == 0)
         return NULL;
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
-        struct watch_session *session = &sessions[index];
-        if (session->phase != WATCH_SESSION_FREE &&
-                session->id == session_id)
-            return session;
+    for (struct watch_session_chunk *chunk = session_chunks;
+            chunk != NULL; chunk = chunk->next) {
+        for (size_t index = 0;
+                index < WATCH_SESSION_CHUNK_CAPACITY; index++) {
+            struct watch_session *session = &chunk->sessions[index];
+            if (session->phase != WATCH_SESSION_FREE &&
+                    session->id == session_id)
+                return session;
+        }
     }
     return NULL;
 }
@@ -188,12 +198,16 @@ static void session_mark_exited_locked(
 
 static bool session_mark_group_exited_locked(
         struct tgroup *group, int32_t wait_status) {
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
-        struct watch_session *session = &sessions[index];
-        if (session->phase != WATCH_SESSION_FREE &&
-                session->leader_group == group) {
-            session_mark_exited_locked(session, wait_status);
-            return true;
+    for (struct watch_session_chunk *chunk = session_chunks;
+            chunk != NULL; chunk = chunk->next) {
+        for (size_t index = 0;
+                index < WATCH_SESSION_CHUNK_CAPACITY; index++) {
+            struct watch_session *session = &chunk->sessions[index];
+            if (session->phase != WATCH_SESSION_FREE &&
+                    session->leader_group == group) {
+                session_mark_exited_locked(session, wait_status);
+                return true;
+            }
         }
     }
     return false;
@@ -205,15 +219,25 @@ static int session_reserve_locked(
         return _EOVERFLOW;
 
     struct watch_session *session = NULL;
-    for (size_t index = 0; index < ISH_WATCH_SESSION_LIMIT; index++) {
-        session_release_if_finished_locked(&sessions[index]);
-        if (sessions[index].phase == WATCH_SESSION_FREE) {
-            session = &sessions[index];
-            break;
+    for (struct watch_session_chunk *chunk = session_chunks;
+            chunk != NULL && session == NULL; chunk = chunk->next) {
+        for (size_t index = 0;
+                index < WATCH_SESSION_CHUNK_CAPACITY; index++) {
+            session_release_if_finished_locked(&chunk->sessions[index]);
+            if (chunk->sessions[index].phase == WATCH_SESSION_FREE) {
+                session = &chunk->sessions[index];
+                break;
+            }
         }
     }
-    if (session == NULL)
-        return _EMFILE;
+    if (session == NULL) {
+        struct watch_session_chunk *chunk = calloc(1, sizeof(*chunk));
+        if (chunk == NULL)
+            return _ENOMEM;
+        chunk->next = session_chunks;
+        session_chunks = chunk;
+        session = &chunk->sessions[0];
+    }
 
     session->id = next_session_id++;
     session->phase = phase;

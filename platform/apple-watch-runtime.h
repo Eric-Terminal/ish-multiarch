@@ -16,8 +16,6 @@ enum ish_watch_runtime_phase {
 
 typedef uint64_t ish_watch_session_id;
 
-#define ISH_WATCH_SESSION_LIMIT 4
-
 enum ish_watch_session_phase {
     ISH_WATCH_SESSION_STARTING = 1,
     ISH_WATCH_SESSION_RUNNING = 2,

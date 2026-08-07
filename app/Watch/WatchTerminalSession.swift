@@ -641,8 +641,6 @@ struct WatchTerminalSession: Identifiable {
 }
 
 struct WatchTerminalSessions {
-    static let limit = 4
-
     private(set) var sessions: [WatchTerminalSession] = []
     private(set) var selectedSessionID: UUID?
     private var nextTitleNumber = 1
@@ -690,7 +688,6 @@ struct WatchTerminalSessions {
         purpose: WatchTerminalSessionPurpose = .interactive,
         maintenanceCompletionToken: String? = nil
     ) -> UUID? {
-        guard sessions.count < Self.limit else { return nil }
         let defaultTitle = "终端 \(nextTitleNumber)"
         nextTitleNumber += 1
         let trimmedTitle = suppliedTitle?

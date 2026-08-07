@@ -11,7 +11,7 @@ struct WatchTerminalSessionTest {
         "11111111111111111111111111111111"
 
     static func main() {
-        testLimitTitlesAndSelection()
+        testDynamicTitlesAndSelection()
         testIndependentSessionState()
         testClearBackgroundSessionScrollback()
         testReopenIdentityAndGeneration()
@@ -43,27 +43,24 @@ struct WatchTerminalSessionTest {
         }
     }
 
-    private static func testLimitTitlesAndSelection() {
+    private static func testDynamicTitlesAndSelection() {
         var sessions = WatchTerminalSessions(
             columns: 8,
             rows: 3,
             createsInitialSession: false)
-        let ids = (0..<WatchTerminalSessions.limit).compactMap { _ in
+        let ids = (0..<12).compactMap { _ in
             sessions.add()
         }
 
         expect(
-            ids.count == 4 && Set(ids).count == 4,
-            "最多四个会话应分别获得稳定 UUID")
+            ids.count == 12 && Set(ids).count == 12,
+            "动态会话应分别获得稳定 UUID")
         expect(
             sessions.sessions.map(\.title) ==
-                ["终端 1", "终端 2", "终端 3", "终端 4"],
-            "默认标题应稳定且可区分")
+                (1...12).map { "终端 \($0)" },
+            "大量动态终端的默认标题应稳定且可区分")
         expect(
-            sessions.add() == nil,
-            "第五个可见会话应被拒绝")
-        expect(
-            sessions.selectedSessionID == ids[3],
+            sessions.selectedSessionID == ids[11],
             "新建成功后应立即选择新会话")
 
         expect(
@@ -72,7 +69,7 @@ struct WatchTerminalSessionTest {
         let removed = sessions.remove(ids[2])
         expect(
             removed?.id == ids[2] &&
-                sessions.selectedSessionID == ids[3],
+                sessions.selectedSessionID == ids[11],
             "关闭活动会话后应选择相邻会话")
         expect(
             sessions.rename(ids[0], title: "  构建  "),
