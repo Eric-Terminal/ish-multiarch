@@ -1,7 +1,31 @@
+import Foundation
 import iSHAppleSwift
 
 @available(iOS 15.0, watchOS 10.0, *)
 func compilePublicAPI(runtime: Runtime) async throws {
+  let mountID = UUID()
+  let mountConfiguration = RuntimeMountConfiguration(
+    id: mountID,
+    hostDirectoryDescriptor: 3,
+    guestDirectory: "/mnt/etos/example",
+    access: .readOnly
+  )
+  try await runtime.start(
+    RuntimeConfiguration(
+      rootData: "/app/root/data",
+      sharedDirectory: "/app/shared",
+      socketPrefix: "/tmp/ish",
+      hostname: "ETOS",
+      bootCommand: "/bin/sh",
+      startupMounts: [mountConfiguration]
+    )
+  )
+  let mounts = RuntimeMounts()
+  try await mounts.add(mountConfiguration)
+  let _: RuntimeMountLease = try await mounts.acquireLease(id: mountID)
+  let _: [RuntimeMountInfo] = try await mounts.list()
+  try await mounts.remove(id: mountID, force: true)
+
   let _: RootFSInstallDisposition = try RootFS.installSeed(
     seedRoot: "/bundle/rootfs",
     persistentParent: "/app/data",

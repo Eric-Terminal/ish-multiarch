@@ -14,6 +14,7 @@ compile_test="$repository_root/sdk/iSHApple/Tests/PublicAPICompileTest.swift"
 c_string_test="$repository_root/sdk/iSHApple/Tests/CStringStorageTest.swift"
 channel_test="$repository_root/sdk/iSHApple/Tests/BoundedOutputChannelTest.swift"
 terminal_channel_test="$repository_root/sdk/iSHApple/Tests/TerminalOutputChannelTest.swift"
+mount_types_test="$repository_root/sdk/iSHApple/Tests/MountTypesTest.swift"
 temporary_directory=$(mktemp -d /private/tmp/ish-apple-swift.XXXXXX)
 trap 'rm -rf "$temporary_directory"' EXIT
 
@@ -80,6 +81,20 @@ xcrun swiftc \
     "$terminal_channel_test" \
     -o "$temporary_directory/terminal-output-channel-test"
 "$temporary_directory/terminal-output-channel-test"
+
+xcrun swiftc \
+    -swift-version 6 \
+    -strict-concurrency=complete \
+    -warnings-as-errors \
+    -parse-as-library \
+    -I "$headers" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/BridgeError.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/CommandTypes.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/CStringStorage.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/MountTypes.swift" \
+    "$mount_types_test" \
+    -o "$temporary_directory/mount-types-test"
+"$temporary_directory/mount-types-test"
 
 for platform in \
     "iphoneos arm64-apple-ios15.0 ios-arm64.swiftmodule" \

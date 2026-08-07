@@ -7,6 +7,24 @@ static int32_t (*volatile runtime_start_entry)(
         ish_apple_runtime_start;
 static int32_t (*volatile runtime_phase_entry)(void) =
         ish_apple_runtime_current_phase;
+static int32_t (*volatile runtime_start_v2_entry)(
+        const struct ish_apple_runtime_spec_v2 *) =
+        ish_apple_runtime_start_v2;
+static int32_t (*volatile mount_add_entry)(
+        const struct ish_apple_mount_spec_v1 *) =
+        ish_apple_mount_add;
+static int32_t (*volatile mount_list_entry)(
+        struct ish_apple_mount_info_v1 *, uint32_t, uint32_t *) =
+        ish_apple_mount_list;
+static int32_t (*volatile mount_remove_entry)(
+        struct ish_apple_mount_id, uint32_t) =
+        ish_apple_mount_remove;
+static int32_t (*volatile mount_path_entry)(
+        struct ish_apple_mount_id, char *, uint32_t, uint32_t *) =
+        ish_apple_mount_copy_guest_directory;
+static int32_t (*volatile mount_lease_entry)(
+        struct ish_apple_mount_id, ish_apple_mount_lease **) =
+        ish_apple_mount_lease_acquire;
 static int32_t (*volatile rootfs_seed_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
@@ -45,7 +63,13 @@ static int32_t (*volatile terminal_result_entry)(
 int main(void) {
     // 保留真实入口的链接依赖，但验证程序本身不启动 guest。
     return runtime_start_entry == NULL ||
+            runtime_start_v2_entry == NULL ||
             runtime_phase_entry == NULL ||
+            mount_add_entry == NULL ||
+            mount_list_entry == NULL ||
+            mount_remove_entry == NULL ||
+            mount_path_entry == NULL ||
+            mount_lease_entry == NULL ||
             rootfs_seed_entry == NULL ||
             command_start_entry == NULL ||
             command_write_entry == NULL ||

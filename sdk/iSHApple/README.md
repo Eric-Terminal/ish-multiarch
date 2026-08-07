@@ -69,13 +69,42 @@ sdk/iSHApple/Tests/typecheck.sh
 2. 用 `ish_apple_rootfs_install_seed` 或 Swift `RootFS.installSeed` 安装到
    App 私有持久目录。
 3. 以安装目录中的 `data/`、一个真实的共享目录、短 socket prefix、
-   hostname 和 PID 1 启动命令调用 `ish_apple_runtime_start`。
+   hostname 和 PID 1 启动命令调用 `ish_apple_runtime_start_v2`；需要在
+   首个进程接受作业前可见的目录通过 `startupMounts` 一并传入。
 4. runtime 返回成功后，再创建结构化命令会话。
 
 `root_data` 必须指向 fakefs 的 `data/`；`shared_directory` 会挂载为
 guest 的 `/mnt/shared`。真机上的 socket prefix 应放在 App 临时目录并
 控制在 82 个 UTF-8 字节以内。runtime 不能在同一进程内停止后重启；若启动
 失败，应读取 phase 和 last error，再由宿主决定是否结束当前进程生命周期。
+
+## 多目录挂载
+
+`RuntimeMountConfiguration` 只接收调用方已经打开的目录 fd，不接收宿主
+路径。SDK 在调用返回前复制 fd，因此 security-scoped URL 的授权、File
+Provider 物化和原 fd 生命周期仍由 App 管理；guest、状态结构和诊断中只会
+出现稳定 UUID 与 `/mnt/` 下的 guest 路径。`/mnt/shared` 保留给 runtime 的
+兼容共享目录，其他挂载使用 `/mnt/etos/<stable-id>`、`/mnt/icloud` 等路径。
+
+```swift
+let selected = RuntimeMountConfiguration(
+    id: mountID,
+    hostDirectoryDescriptor: directoryFD,
+    guestDirectory: "/mnt/etos/01234567",
+    access: .readOnly
+)
+try await RuntimeMounts().add(selected)
+```
+
+只读属性进入 guest mount flags，写打开、创建、删除、重命名、链接、属性和
+时间戳修改都会返回 Linux `EROFS`，不是 Swift 侧的软约束。registry 使用动态
+链表，不设置挂载数量常量。
+
+作业在启动前应通过 `acquireLease(id:)` 持有 lease。普通 `remove` 会先把
+条目改为 draining、拒绝新 lease，并在宿主 lease 或 guest fd/cwd 引用仍活跃
+时返回 `EBUSY`；最后一个 lease 释放后会自动尝试卸载。`force: true` 可以忽略
+宿主 lease，但不会释放或伪造仍被 guest 内核引用的对象，调用方应先取消关联
+作业并在引用退出后重试。卸载只移除映射，不删除宿主目录或文件。
 
 ## 结构化命令
 

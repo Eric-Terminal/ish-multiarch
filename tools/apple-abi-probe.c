@@ -80,6 +80,37 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, reserved, 8);
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, root_data, 24);
 
+_Static_assert(sizeof(struct ish_apple_mount_spec_v1) == 56,
+        "公共 mount 配置必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_mount_spec_v1, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_spec_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_spec_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_spec_v1, reserved, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_spec_v1, mount_id, 24);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_spec_v1, access, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_spec_v1, host_directory_fd, 44);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_spec_v1, guest_directory, 48);
+
+_Static_assert(sizeof(struct ish_apple_mount_info_v1) == 72,
+        "公共 mount 状态必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_mount_info_v1, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_info_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_info_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_info_v1, mount_id, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_info_v1, access, 24);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_info_v1, state, 28);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_info_v1, active_leases, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_info_v1, active_references, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_mount_info_v1, guest_directory_bytes, 48);
+ASSERT_APPLE_OFFSET(struct ish_apple_mount_info_v1, reserved, 56);
+
 ASSERT_APPLE_OFFSET(struct ish_apple_command_spec_v1, version, 0);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_command_spec_v1, structure_size, 4);
@@ -152,6 +183,15 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, hostname, 36);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, boot_command, 40);
+_Static_assert(sizeof(struct ish_apple_runtime_spec_v2) == 56,
+        "arm64_32 公共 runtime v2 配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_runtime_spec_v2, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, mounts, 44);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, mount_count, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, reserved_0, 52);
 _Static_assert(sizeof(struct ish_apple_command_spec_v1) == 72,
         "arm64_32 公共命令配置布局漂移");
 ASSERT_APPLE_ALIGNMENT(struct ish_apple_command_spec_v1, 8);
@@ -201,6 +241,15 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, hostname, 48);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, boot_command, 56);
+_Static_assert(sizeof(struct ish_apple_runtime_spec_v2) == 80,
+        "LP64 公共 runtime v2 配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_runtime_spec_v2, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, mounts, 64);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, mount_count, 72);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_spec_v2, reserved_0, 76);
 _Static_assert(sizeof(struct ish_apple_command_spec_v1) == 88,
         "LP64 公共命令配置布局漂移");
 ASSERT_APPLE_ALIGNMENT(struct ish_apple_command_spec_v1, 8);

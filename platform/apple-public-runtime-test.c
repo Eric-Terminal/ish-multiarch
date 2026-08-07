@@ -84,6 +84,31 @@ int main(void) {
             ish_apple_runtime_last_error() == 0,
             "底层参数失败不消耗一次性 runtime 启动机会");
 
+    struct ish_apple_runtime_spec_v2 spec_v2 = {
+        .version = ISH_APPLE_ABI_VERSION + 1,
+        .structure_size = sizeof(spec_v2),
+    };
+    CHECK(ish_apple_runtime_start_v2(&spec_v2) == _ENOTSUP,
+            "runtime v2 拒绝未知 ABI");
+    spec_v2.version = ISH_APPLE_ABI_VERSION;
+    spec_v2.structure_size--;
+    CHECK(ish_apple_runtime_start_v2(&spec_v2) == _EINVAL,
+            "runtime v2 拒绝截断配置");
+    spec_v2.structure_size = sizeof(spec_v2);
+    spec_v2.mount_count = 1;
+    CHECK(ish_apple_runtime_start_v2(&spec_v2) == _EINVAL,
+            "runtime v2 拒绝缺失的启动 mount 数组");
+    spec_v2.mount_count = 0;
+    spec_v2.root_data = "";
+    spec_v2.shared_directory = "";
+    spec_v2.socket_prefix = "";
+    spec_v2.hostname = "";
+    spec_v2.boot_command = "";
+    CHECK(ish_apple_runtime_start_v2(&spec_v2) == _EINVAL &&
+            ish_apple_runtime_current_phase() ==
+                    ISH_APPLE_RUNTIME_PHASE_IDLE,
+            "runtime v2 参数失败不消耗启动机会");
+
     int32_t disposition = -1;
     CHECK(ish_apple_rootfs_install_seed(
             "/definitely/missing-seed",

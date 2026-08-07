@@ -2,6 +2,7 @@
 #define ISH_APPLE_H
 
 #include "iSHAppleCommand.h"
+#include "iSHAppleMount.h"
 #include "iSHAppleRootFS.h"
 #include "iSHAppleRuntime.h"
 #include "iSHAppleTerminal.h"

@@ -5,11 +5,35 @@ static int32_t (*volatile runtime_start_entry)(
         ish_apple_runtime_start;
 static int32_t (*volatile runtime_phase_entry)(void) =
         ish_apple_runtime_current_phase;
+static int32_t (*volatile runtime_start_v2_entry)(
+        const struct ish_apple_runtime_spec_v2 *) =
+        ish_apple_runtime_start_v2;
 static int32_t (*volatile runtime_error_entry)(void) =
         ish_apple_runtime_last_error;
 static int32_t (*volatile rootfs_install_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
+static int32_t (*volatile mount_add_entry)(
+        const struct ish_apple_mount_spec_v1 *) =
+        ish_apple_mount_add;
+static int32_t (*volatile mount_remove_entry)(
+        struct ish_apple_mount_id, uint32_t) =
+        ish_apple_mount_remove;
+static int32_t (*volatile mount_list_entry)(
+        struct ish_apple_mount_info_v1 *, uint32_t, uint32_t *) =
+        ish_apple_mount_list;
+static int32_t (*volatile mount_path_entry)(
+        struct ish_apple_mount_id, char *, uint32_t, uint32_t *) =
+        ish_apple_mount_copy_guest_directory;
+static int32_t (*volatile mount_lease_entry)(
+        struct ish_apple_mount_id, ish_apple_mount_lease **) =
+        ish_apple_mount_lease_acquire;
+static void (*volatile mount_lease_retain_entry)(
+        ish_apple_mount_lease *) =
+        ish_apple_mount_lease_retain;
+static void (*volatile mount_lease_release_entry)(
+        ish_apple_mount_lease *) =
+        ish_apple_mount_lease_release;
 
 static int32_t (*volatile command_start_entry)(
         const struct ish_apple_command_spec_v1 *,
@@ -80,9 +104,17 @@ int main(void) {
      * 中抽取完整运行时闭包；测试本身不启动 guest。
      */
     return runtime_start_entry == 0 ||
+            runtime_start_v2_entry == 0 ||
             runtime_phase_entry == 0 ||
             runtime_error_entry == 0 ||
             rootfs_install_entry == 0 ||
+            mount_add_entry == 0 ||
+            mount_remove_entry == 0 ||
+            mount_list_entry == 0 ||
+            mount_path_entry == 0 ||
+            mount_lease_entry == 0 ||
+            mount_lease_retain_entry == 0 ||
+            mount_lease_release_entry == 0 ||
             command_start_entry == 0 ||
             command_retain_entry == 0 ||
             command_release_entry == 0 ||

@@ -67,8 +67,16 @@ verify_public_symbols() {
     local required
     for required in \
             ish_apple_runtime_start \
+            ish_apple_runtime_start_v2 \
             ish_apple_runtime_current_phase \
             ish_apple_runtime_last_error \
+            ish_apple_mount_add \
+            ish_apple_mount_remove \
+            ish_apple_mount_list \
+            ish_apple_mount_copy_guest_directory \
+            ish_apple_mount_lease_acquire \
+            ish_apple_mount_lease_retain \
+            ish_apple_mount_lease_release \
             ish_apple_rootfs_install_seed \
             ish_apple_command_session_start \
             ish_apple_command_session_retain \

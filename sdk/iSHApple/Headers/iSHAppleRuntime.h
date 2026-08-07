@@ -2,6 +2,7 @@
 #define ISH_APPLE_RUNTIME_H
 
 #include "iSHAppleDefines.h"
+#include "iSHAppleMount.h"
 
 #define ISH_APPLE_RUNTIME_PHASE_IDLE INT32_C(0)
 #define ISH_APPLE_RUNTIME_PHASE_PREPARING INT32_C(1)
@@ -26,12 +27,29 @@ struct ish_apple_runtime_spec_v1 {
     const char *ISH_APPLE_NONNULL boot_command;
 };
 
+struct ish_apple_runtime_spec_v2 {
+    uint32_t version;
+    uint32_t structure_size;
+    uint64_t reserved[2];
+    const char *ISH_APPLE_NONNULL root_data;
+    const char *ISH_APPLE_NONNULL shared_directory;
+    const char *ISH_APPLE_NONNULL socket_prefix;
+    const char *ISH_APPLE_NONNULL hostname;
+    const char *ISH_APPLE_NONNULL boot_command;
+    const struct ish_apple_mount_spec_v1 *ISH_APPLE_NULLABLE mounts;
+    uint32_t mount_count;
+    uint32_t reserved_0;
+};
+
 /*
  * 每个宿主进程只能启动一个 runtime。所有路径在返回前复制或打开，成功后
  * 同一 Linux runtime 同时服务可见终端和结构化命令。
  */
 ISH_APPLE_API int32_t ish_apple_runtime_start(
         const struct ish_apple_runtime_spec_v1 *ISH_APPLE_NONNULL spec);
+/* v2 会在 PID 1 接受作业前原子注册并挂载 mounts。 */
+ISH_APPLE_API int32_t ish_apple_runtime_start_v2(
+        const struct ish_apple_runtime_spec_v2 *ISH_APPLE_NONNULL spec);
 ISH_APPLE_API int32_t ish_apple_runtime_current_phase(void);
 ISH_APPLE_API int32_t ish_apple_runtime_last_error(void);
 

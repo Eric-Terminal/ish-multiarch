@@ -25,6 +25,7 @@
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "platform/apple-resolver.h"
+#include "platform/apple-runtime-mount.h"
 #include "platform/apple-watch-runtime-private.h"
 
 
@@ -429,6 +430,13 @@ int ish_watch_runtime_start(
     watch_release_host_directory(
             &shared_directory_fd, documents_directory);
     free(canonical_documents_source);
+    if (error < 0) {
+        free(owned_documents_directory);
+        free(owned_hostname);
+        free(owned_socket_prefix);
+        return runtime_fail_after_task(error);
+    }
+    error = ish_apple_mount_activate_startup(current);
     if (error < 0) {
         free(owned_documents_directory);
         free(owned_hostname);
