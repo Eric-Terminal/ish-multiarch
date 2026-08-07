@@ -7,6 +7,9 @@ static int32_t (*volatile runtime_start_entry)(
         ish_apple_runtime_start;
 static int32_t (*volatile runtime_phase_entry)(void) =
         ish_apple_runtime_current_phase;
+static int32_t (*volatile runtime_capabilities_entry)(
+        struct ish_apple_runtime_capabilities_v1 *) =
+        ish_apple_runtime_copy_capabilities;
 static int32_t (*volatile runtime_start_v2_entry)(
         const struct ish_apple_runtime_spec_v2 *) =
         ish_apple_runtime_start_v2;
@@ -85,6 +88,7 @@ int main(void) {
     return runtime_start_entry == NULL ||
             runtime_start_v2_entry == NULL ||
             runtime_phase_entry == NULL ||
+            runtime_capabilities_entry == NULL ||
             mount_add_entry == NULL ||
             mount_list_entry == NULL ||
             mount_remove_entry == NULL ||

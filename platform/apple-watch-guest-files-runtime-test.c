@@ -18,6 +18,7 @@
 #include "kernel/signal.h"
 #include "kernel/task.h"
 #include "sdk/iSHApple/Headers/iSHAppleGuestFile.h"
+#include "sdk/iSHApple/Headers/iSHAppleRuntime.h"
 
 #define IMAGE_SIZE 1024
 #define IMAGE_BASE UINT64_C(0x400000)
@@ -594,6 +595,23 @@ int main(void) {
             ish_watch_runtime_current_phase() ==
                     ISH_WATCH_RUNTIME_RUNNING,
             "启动真实 RUNNING runtime");
+
+    struct ish_apple_runtime_capabilities_v1 capabilities;
+    CHECK(ish_apple_runtime_copy_capabilities(&capabilities) == 0 &&
+            capabilities.version == ISH_APPLE_ABI_VERSION &&
+            capabilities.structure_size == sizeof(capabilities) &&
+            capabilities.public_abi_version == ISH_APPLE_ABI_VERSION &&
+            capabilities.guest_architecture ==
+                    ISH_APPLE_RUNTIME_ARCHITECTURE_AARCH64 &&
+            (capabilities.backend == ISH_APPLE_RUNTIME_BACKEND_C ||
+                    capabilities.backend ==
+                            ISH_APPLE_RUNTIME_BACKEND_THREADED) &&
+            capabilities.feature_flags ==
+                    (ISH_APPLE_RUNTIME_CAPABILITY_PTY |
+                    ISH_APPLE_RUNTIME_CAPABILITY_LIVE_MOUNTS |
+                    ISH_APPLE_RUNTIME_CAPABILITY_DIAGNOSTICS |
+                    ISH_APPLE_RUNTIME_CAPABILITY_GUEST_FILES),
+            "RUNNING 后公开完整且不可猜测的能力快照");
 
     unsigned char buffer[256] = {0};
     char path[PATH_MAX];

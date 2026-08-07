@@ -24,6 +24,7 @@ _ish_apple_mount_lease_retain
 _ish_apple_mount_list
 _ish_apple_mount_remove
 _ish_apple_rootfs_install_seed
+_ish_apple_runtime_copy_capabilities
 _ish_apple_runtime_current_phase
 _ish_apple_runtime_last_error
 _ish_apple_runtime_start

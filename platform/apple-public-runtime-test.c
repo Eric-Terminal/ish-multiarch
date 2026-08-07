@@ -16,6 +16,15 @@ static int failures;
 } while (0)
 
 int main(void) {
+    struct ish_apple_runtime_capabilities_v1 capabilities;
+    memset(&capabilities, 0xa5, sizeof(capabilities));
+    CHECK(ish_apple_runtime_copy_capabilities(NULL) == _EINVAL,
+            "能力快照拒绝空输出指针");
+    CHECK(ish_apple_runtime_copy_capabilities(&capabilities) == _EAGAIN &&
+            capabilities.version == 0 &&
+            capabilities.feature_flags == 0,
+            "runtime 就绪前不发布猜测的能力并清空输出");
+
     struct ish_apple_runtime_spec_v1 spec = {
         .version = ISH_APPLE_ABI_VERSION + 1,
         .structure_size = sizeof(spec),

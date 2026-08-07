@@ -190,6 +190,26 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(
         struct ish_apple_guest_file_directory_entry_v1, name, 136);
 
+_Static_assert(sizeof(struct ish_apple_runtime_capabilities_v1) == 64,
+        "runtime 能力快照必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_runtime_capabilities_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1, feature_flags, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1,
+        guest_architecture, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1, backend, 20);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1,
+        public_abi_version, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_runtime_capabilities_v1, reserved, 32);
+
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, version, 0);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, structure_size, 4);

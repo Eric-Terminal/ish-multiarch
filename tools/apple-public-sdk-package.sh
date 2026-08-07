@@ -69,6 +69,7 @@ verify_public_symbols() {
             ish_apple_runtime_start \
             ish_apple_runtime_start_v2 \
             ish_apple_runtime_current_phase \
+            ish_apple_runtime_copy_capabilities \
             ish_apple_runtime_last_error \
             ish_apple_diagnostics_drain \
             ish_apple_diagnostics_clear \

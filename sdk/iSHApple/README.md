@@ -78,6 +78,11 @@ guest 的 `/mnt/shared`。真机上的 socket prefix 应放在 App 临时目录�
 控制在 82 个 UTF-8 字节以内。runtime 不能在同一进程内停止后重启；若启动
 失败，应读取 phase 和 last error，再由宿主决定是否结束当前进程生命周期。
 
+启动返回后应读取一次 `Runtime.capabilities()` 并把结果保存到当前进程的运行时
+状态。快照明确报告 PTY、动态挂载、结构化诊断、guest 文件接口、AArch64 架构、
+实际 C/threaded 后端和公共 ABI 版本；在 runtime 尚未接受作业时返回 `EAGAIN`，
+不会让 UI 根据版本号推测能力。当前进程进入 RUNNING 后这些字段保持不变。
+
 ## 多目录挂载
 
 `RuntimeMountConfiguration` 只接收调用方已经打开的目录 fd，不接收宿主

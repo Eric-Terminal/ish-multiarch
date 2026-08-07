@@ -3,11 +3,24 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "guest/aarch64/backend.h"
 #include "kernel/errno.h"
 #include "platform/apple-rootfs-seed.h"
 #include "platform/apple-diagnostics-private.h"
 #include "platform/apple-runtime-mount.h"
 #include "platform/apple-watch-runtime.h"
+#include "platform/apple-watch-runtime-private.h"
+
+_Static_assert(
+        ISH_APPLE_RUNTIME_ARCHITECTURE_AARCH64 ==
+                ISH_APPLE_DIAGNOSTIC_ARCHITECTURE_AARCH64 &&
+        ISH_APPLE_RUNTIME_BACKEND_UNKNOWN ==
+                ISH_APPLE_DIAGNOSTIC_BACKEND_UNKNOWN &&
+        ISH_APPLE_RUNTIME_BACKEND_C ==
+                ISH_APPLE_DIAGNOSTIC_BACKEND_C &&
+        ISH_APPLE_RUNTIME_BACKEND_THREADED ==
+                ISH_APPLE_DIAGNOSTIC_BACKEND_THREADED,
+        "能力快照与诊断事件必须使用同一架构和后端编号");
 
 static bool apple_public_reserved_zero(const uint64_t values[2]) {
     return values[0] == 0 && values[1] == 0;
@@ -118,6 +131,40 @@ int32_t ish_apple_runtime_current_phase(void) {
 
 int32_t ish_apple_runtime_last_error(void) {
     return (int32_t) ish_watch_runtime_last_error();
+}
+
+int32_t ish_apple_runtime_copy_capabilities(
+        struct ish_apple_runtime_capabilities_v1 *capabilities_out) {
+    if (capabilities_out == NULL)
+        return _EINVAL;
+    memset(capabilities_out, 0, sizeof(*capabilities_out));
+    int error = ish_watch_runtime_operation_availability();
+    if (error < 0)
+        return error;
+
+    uint32_t backend = ISH_APPLE_RUNTIME_BACKEND_UNKNOWN;
+    switch (aarch64_backend_default()) {
+        case AARCH64_BACKEND_C:
+            backend = ISH_APPLE_RUNTIME_BACKEND_C;
+            break;
+        case AARCH64_BACKEND_THREADED:
+            backend = ISH_APPLE_RUNTIME_BACKEND_THREADED;
+            break;
+    }
+    *capabilities_out =
+            (struct ish_apple_runtime_capabilities_v1) {
+        .version = ISH_APPLE_ABI_VERSION,
+        .structure_size = sizeof(*capabilities_out),
+        .feature_flags = ISH_APPLE_RUNTIME_CAPABILITY_PTY |
+                ISH_APPLE_RUNTIME_CAPABILITY_LIVE_MOUNTS |
+                ISH_APPLE_RUNTIME_CAPABILITY_DIAGNOSTICS |
+                ISH_APPLE_RUNTIME_CAPABILITY_GUEST_FILES,
+        .guest_architecture =
+                ISH_APPLE_RUNTIME_ARCHITECTURE_AARCH64,
+        .backend = backend,
+        .public_abi_version = ISH_APPLE_ABI_VERSION,
+    };
+    return 0;
 }
 
 int32_t ish_apple_rootfs_install_seed(

@@ -10,6 +10,9 @@ static int32_t (*volatile runtime_start_v2_entry)(
         ish_apple_runtime_start_v2;
 static int32_t (*volatile runtime_error_entry)(void) =
         ish_apple_runtime_last_error;
+static int32_t (*volatile runtime_capabilities_entry)(
+        struct ish_apple_runtime_capabilities_v1 *) =
+        ish_apple_runtime_copy_capabilities;
 static int32_t (*volatile rootfs_install_entry)(
         const char *, const char *, const char *, int32_t *) =
         ish_apple_rootfs_install_seed;
@@ -146,6 +149,7 @@ int main(void) {
             runtime_start_v2_entry == 0 ||
             runtime_phase_entry == 0 ||
             runtime_error_entry == 0 ||
+            runtime_capabilities_entry == 0 ||
             rootfs_install_entry == 0 ||
             diagnostics_drain_entry == 0 ||
             diagnostics_clear_entry == 0 ||

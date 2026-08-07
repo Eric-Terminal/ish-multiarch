@@ -74,6 +74,11 @@ func compilePublicAPI(runtime: Runtime) async throws {
       startupMounts: [mountConfiguration]
     )
   )
+  let capabilities: RuntimeCapabilities = try await runtime.capabilities()
+  let _: RuntimeFeatureSet = capabilities.features
+  let _: GuestArchitecture = capabilities.guestArchitecture
+  let _: RuntimeBackend = capabilities.backend
+  let _: UInt32 = capabilities.publicABIVersion
   let mounts = RuntimeMounts()
   try await mounts.add(mountConfiguration)
   let _: RuntimeMountLease = try await mounts.acquireLease(id: mountID)
