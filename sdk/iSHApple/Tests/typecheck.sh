@@ -13,6 +13,7 @@ consumer="$repository_root/examples/iSHAppleCommandConsumer/main.swift"
 compile_test="$repository_root/sdk/iSHApple/Tests/PublicAPICompileTest.swift"
 c_string_test="$repository_root/sdk/iSHApple/Tests/CStringStorageTest.swift"
 channel_test="$repository_root/sdk/iSHApple/Tests/BoundedOutputChannelTest.swift"
+terminal_channel_test="$repository_root/sdk/iSHApple/Tests/TerminalOutputChannelTest.swift"
 temporary_directory=$(mktemp -d /private/tmp/ish-apple-swift.XXXXXX)
 trap 'rm -rf "$temporary_directory"' EXIT
 
@@ -65,6 +66,20 @@ xcrun swiftc \
     "$channel_test" \
     -o "$temporary_directory/bounded-output-channel-test"
 "$temporary_directory/bounded-output-channel-test"
+
+xcrun swiftc \
+    -swift-version 6 \
+    -strict-concurrency=complete \
+    -warnings-as-errors \
+    -parse-as-library \
+    -I "$headers" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/BridgeError.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/CommandTypes.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/TerminalTypes.swift" \
+    "$repository_root/sdk/iSHApple/Sources/iSHAppleSwift/TerminalOutputChannel.swift" \
+    "$terminal_channel_test" \
+    -o "$temporary_directory/terminal-output-channel-test"
+"$temporary_directory/terminal-output-channel-test"
 
 for platform in \
     "iphoneos arm64-apple-ios15.0 ios-arm64.swiftmodule" \

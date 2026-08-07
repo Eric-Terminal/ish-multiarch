@@ -4,5 +4,6 @@
 #include "iSHAppleCommand.h"
 #include "iSHAppleRootFS.h"
 #include "iSHAppleRuntime.h"
+#include "iSHAppleTerminal.h"
 
 #endif

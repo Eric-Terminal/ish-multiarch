@@ -14,9 +14,10 @@
 #include "kernel/errno.h"
 #include "kernel/init.h"
 #include "kernel/task.h"
+#include "platform/apple-command-session-private.h"
 #include "platform/apple-watch-runtime-private.h"
 
-#define WATCH_OUTPUT_CAPACITY (64 * 1024)
+#define WATCH_OUTPUT_INITIAL_CAPACITY (64 * 1024)
 #define WATCH_DEFAULT_COLUMNS 40
 #define WATCH_DEFAULT_ROWS 18
 #define WATCH_NO_TTY (-1)
@@ -27,7 +28,8 @@ enum watch_session_internal_phase {
 };
 
 struct watch_output_ring {
-    unsigned char bytes[WATCH_OUTPUT_CAPACITY];
+    unsigned char *bytes;
+    size_t capacity;
     size_t head;
     size_t count;
     uint64_t dropped;
@@ -72,6 +74,41 @@ static void output_note_dropped(
         output->dropped += increment;
 }
 
+static bool output_reserve_locked(
+        struct watch_output_ring *output, size_t additional) {
+    if (additional > SIZE_MAX - output->count)
+        return false;
+    size_t required = output->count + additional;
+    if (required <= output->capacity)
+        return true;
+
+    size_t capacity = output->capacity == 0 ?
+            WATCH_OUTPUT_INITIAL_CAPACITY : output->capacity;
+    while (capacity < required) {
+        if (capacity > SIZE_MAX / 2) {
+            capacity = required;
+            break;
+        }
+        capacity *= 2;
+    }
+    unsigned char *replacement = malloc(capacity);
+    if (replacement == NULL)
+        return false;
+    if (output->count != 0) {
+        size_t first = output->capacity - output->head;
+        if (first > output->count)
+            first = output->count;
+        memcpy(replacement, output->bytes + output->head, first);
+        memcpy(replacement + first, output->bytes,
+                output->count - first);
+    }
+    free(output->bytes);
+    output->bytes = replacement;
+    output->capacity = capacity;
+    output->head = 0;
+    return true;
+}
+
 static void output_append_locked(
         struct watch_output_ring *output,
         const void *bytes,
@@ -80,25 +117,41 @@ static void output_append_locked(
         return;
     const unsigned char *source = bytes;
 
-    if (length >= sizeof(output->bytes)) {
+    if (!output_reserve_locked(output, length)) {
+        if (output->capacity == 0) {
+            output_note_dropped(output, length);
+            return;
+        }
+    } else {
+        size_t tail = (output->head + output->count) % output->capacity;
+        size_t first = output->capacity - tail;
+        if (first > length)
+            first = length;
+        memcpy(output->bytes + tail, source, first);
+        memcpy(output->bytes, source + first, length - first);
+        output->count += length;
+        return;
+    }
+
+    if (length >= output->capacity) {
         output_note_dropped(output, output->count);
-        output_note_dropped(output, length - sizeof(output->bytes));
-        source += length - sizeof(output->bytes);
-        length = sizeof(output->bytes);
+        output_note_dropped(output, length - output->capacity);
+        source += length - output->capacity;
+        length = output->capacity;
         memcpy(output->bytes, source, length);
         output->head = 0;
         output->count = length;
         return;
     }
 
-    size_t overflow = output->count + length > sizeof(output->bytes) ?
-            output->count + length - sizeof(output->bytes) : 0;
+    size_t available = output->capacity - output->count;
+    size_t overflow = length > available ? length - available : 0;
     output_note_dropped(output, overflow);
-    output->head = (output->head + overflow) % sizeof(output->bytes);
+    output->head = (output->head + overflow) % output->capacity;
     output->count -= overflow;
 
-    size_t tail = (output->head + output->count) % sizeof(output->bytes);
-    size_t first = sizeof(output->bytes) - tail;
+    size_t tail = (output->head + output->count) % output->capacity;
+    size_t first = output->capacity - tail;
     if (first > length)
         first = length;
     memcpy(output->bytes + tail, source, first);
@@ -120,7 +173,9 @@ static size_t output_read_locked(
 
     size_t length = output->count < capacity ?
             output->count : capacity;
-    size_t first = sizeof(output->bytes) - output->head;
+    if (output->capacity == 0)
+        return 0;
+    size_t first = output->capacity - output->head;
     if (first > length)
         first = length;
     memcpy(buffer, output->bytes + output->head, first);
@@ -175,9 +230,8 @@ static void session_reset_locked(struct watch_session *session) {
     session->leader_group = NULL;
     session->tty_number = WATCH_NO_TTY;
     session->client_closed = false;
-    session->output.head = 0;
-    session->output.count = 0;
-    session->output.dropped = 0;
+    free(session->output.bytes);
+    session->output = (struct watch_output_ring) {};
 }
 
 static void session_release_if_finished_locked(
@@ -486,8 +540,45 @@ int ish_watch_session_set_window_size(
     return 0;
 }
 
+int ish_watch_session_cancel(ish_watch_session_id session_id) {
+    lock(&sessions_lock);
+    struct watch_session *session = session_find_locked(session_id);
+    if (session == NULL || session->client_closed) {
+        unlock(&sessions_lock);
+        return _ESTALE;
+    }
+    if (session->phase == ISH_WATCH_SESSION_EXITED) {
+        unlock(&sessions_lock);
+        return 0;
+    }
+    if (session->phase == ISH_WATCH_SESSION_STARTING) {
+        unlock(&sessions_lock);
+        return _EAGAIN;
+    }
+    struct watch_session_transport transport = {
+        .id = session->id,
+        .session = session,
+        .tty_number = session->tty_number,
+    };
+    unlock(&sessions_lock);
+
+    struct tty *tty = session_tty_acquire(transport, false);
+    if (tty == NULL)
+        return _ESHUTDOWN;
+    // 强引用的 tty 是不可复用身份，不依赖可能发生 ABA 的 PID 或 tgroup 地址。
+    (void) task_kill_controlling_tty(tty);
+    lock(&tty->lock);
+    tty_hangup(tty);
+    unlock(&tty->lock);
+    session_tty_release(tty);
+    return 0;
+}
+
 int ish_watch_session_close(ish_watch_session_id session_id) {
-    struct watch_session_transport transport;
+    int cancel_error = ish_watch_session_cancel(session_id);
+    if (cancel_error < 0 && cancel_error != _ESHUTDOWN &&
+            cancel_error != _EAGAIN)
+        return cancel_error;
 
     lock(&sessions_lock);
     struct watch_session *session = session_find_locked(session_id);
@@ -495,24 +586,9 @@ int ish_watch_session_close(ish_watch_session_id session_id) {
         unlock(&sessions_lock);
         return _ESTALE;
     }
-    transport = (struct watch_session_transport) {
-        .id = session->id,
-        .session = session,
-        .tty_number = session->tty_number,
-    };
     session->client_closed = true;
     session_release_if_finished_locked(session);
     unlock(&sessions_lock);
-
-    struct tty *tty = session_tty_acquire(transport, true);
-    if (tty != NULL) {
-        // 强引用的 tty 是不可复用身份，不依赖可能发生 ABA 的 PID 或 tgroup 地址。
-        (void) task_kill_controlling_tty(tty);
-        lock(&tty->lock);
-        tty_hangup(tty);
-        unlock(&tty->lock);
-        session_tty_release(tty);
-    }
     return 0;
 }
 
@@ -742,17 +818,17 @@ void ish_watch_session_handle_exit(
         (void) task_kill_controlling_tty_locked(controlling_tty);
 }
 
-int ish_watch_session_create(
-        const char *command,
+int ish_watch_session_create_process(
+        const struct command_arguments *arguments,
         uint16_t columns,
         uint16_t rows,
         ish_watch_session_id *session_id) {
-    if (command == NULL || command[0] == '\0' ||
+    if (arguments == NULL || arguments->executable == NULL ||
+            arguments->argument_count == 0 ||
+            arguments->argument_bytes == NULL ||
+            arguments->environment_bytes == NULL ||
             columns == 0 || rows == 0 || session_id == NULL)
         return _EINVAL;
-    size_t command_length = strlen(command);
-    if (command_length >= WATCH_COMMAND_LIMIT)
-        return _E2BIG;
     *session_id = 0;
 
     int error = ish_watch_runtime_operation_availability();
@@ -790,6 +866,16 @@ int ish_watch_session_create(
     session->leader_group = guest_task->group;
     unlock(&sessions_lock);
 
+    if (arguments->working_directory != NULL) {
+        error = file_chdir_task(
+                guest_task, arguments->working_directory);
+        if (error < 0) {
+            error = session_cancel_after_task(session, error);
+            unlock(&ish_watch_prepared_task_lock);
+            return error;
+        }
+    }
+
     opening_session = session;
     struct tty *tty = pty_open_fake(&watch_session_pty_driver);
     opening_session = NULL;
@@ -825,7 +911,11 @@ int ish_watch_session_create(
         return error;
     }
 
-    error = exec_shell_command(command, command_length);
+    error = do_execve(
+            arguments->executable,
+            arguments->argument_count,
+            arguments->argument_bytes,
+            arguments->environment_bytes);
     if (error < 0) {
         error = session_cancel_after_task(session, error);
         unlock(&ish_watch_prepared_task_lock);
@@ -846,4 +936,37 @@ int ish_watch_session_create(
     *session_id = created_id;
     unlock(&ish_watch_prepared_task_lock);
     return 0;
+}
+
+int ish_watch_session_create(
+        const char *command,
+        uint16_t columns,
+        uint16_t rows,
+        ish_watch_session_id *session_id) {
+    if (command == NULL || command[0] == '\0')
+        return _EINVAL;
+    size_t command_length = strlen(command);
+    if (command_length >= WATCH_COMMAND_LIMIT)
+        return _E2BIG;
+
+    const char *arguments[] = {"/bin/sh", "-c", command};
+    const char *environment[] = {"TERM=xterm-256color"};
+    struct ish_apple_command_spec_v1 spec = {
+        .version = ISH_APPLE_ABI_VERSION,
+        .structure_size = sizeof(spec),
+        .request_id = 1,
+        .executable = "/bin/sh",
+        .arguments = arguments,
+        .environment = environment,
+        .argument_count = 3,
+        .environment_count = 1,
+    };
+    struct command_arguments packed = {};
+    int32_t error = command_arguments_create_for_spec(&spec, &packed);
+    if (error == 0) {
+        error = ish_watch_session_create_process(
+                &packed, columns, rows, session_id);
+    }
+    command_arguments_destroy(&packed);
+    return error;
 }

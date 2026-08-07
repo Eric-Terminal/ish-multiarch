@@ -82,6 +82,9 @@ int32_t command_arguments_create(
         const struct ish_apple_command_spec_v1 *spec,
         const struct ish_apple_command_callbacks_v1 *callbacks,
         struct command_arguments *arguments);
+int32_t command_arguments_create_for_spec(
+        const struct ish_apple_command_spec_v1 *spec,
+        struct command_arguments *arguments);
 void command_arguments_destroy(struct command_arguments *arguments);
 
 int32_t command_map_host_error(int error);

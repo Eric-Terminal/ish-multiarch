@@ -35,6 +35,27 @@ func compilePublicAPI(runtime: Runtime) async throws {
   try session.finishInput()
   _ = try await session.result()
   try await consume
+
+  let terminal = try TerminalSession.start(
+    TerminalRequest(
+      terminalID: 44,
+      executable: "/bin/sh",
+      argv: ["/bin/sh", "-l"],
+      environment: ["TERM=xterm-256color"],
+      workingDirectory: "/",
+      columns: 80,
+      rows: 24
+    )
+  )
+  async let consumeTerminal: Void = consumeTerminalEvents(
+    terminal.output
+  )
+  try await terminal.send(Array("printf hello\\n".utf8))
+  try terminal.resize(columns: 100, rows: 30)
+  try terminal.interrupt()
+  try terminal.finishInput()
+  _ = try await terminal.result()
+  try await consumeTerminal
 }
 
 @available(iOS 15.0, watchOS 10.0, *)
@@ -42,5 +63,16 @@ private func consumeEvents(_ events: CommandOutputEvents) async throws {
   for try await event in events {
     let _: CommandStream = event.stream
     let _: [UInt8] = event.bytes
+  }
+}
+
+@available(iOS 15.0, watchOS 10.0, *)
+private func consumeTerminalEvents(
+  _ events: TerminalOutputEvents
+) async throws {
+  for try await event in events {
+    let _: UInt64 = event.terminalID
+    let _: [UInt8] = event.bytes
+    let _: UInt64 = event.droppedBytes
   }
 }

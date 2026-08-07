@@ -132,6 +132,50 @@ stdout/stderr 合计输出上限也会终止整个作业。
 值直接比较；应使用 `iSHAppleLinuxErrno.h` 中的
 `ISH_APPLE_LINUX_*` 常量。结果中的 signal 也是 Linux 信号编号。
 
+## 交互式终端
+
+`TerminalSession` 与管道式 `CommandSession` 是两种不同的进程合同。前者为
+每个会话创建独立 PTY、控制终端与前台进程组，适用于登录 Shell、readline、
+编辑器、`top`、SSH 和 REPL；后者保留独立 stdout/stderr 和结构化结果，适合
+Agent 普通命令与 stdio MCP。两者共享同一个 runtime、RootFS 和挂载，但不
+共享 cwd、环境变更、stdin/stdout 或 Shell 历史。
+
+```swift
+let terminal = try TerminalSession.start(
+    TerminalRequest(
+        terminalID: 2,
+        executable: "/bin/sh",
+        argv: ["/bin/sh", "-l"],
+        environment: [
+            "TERM=xterm-256color",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/root",
+        ],
+        workingDirectory: "/root",
+        columns: 80,
+        rows: 24
+    )
+)
+
+async let output: Void = {
+    for try await event in terminal.output {
+        // event.bytes 是未解码的 PTY 字节；交给宿主终端解析器。
+    }
+}()
+try await terminal.send(Array("uname -a\n".utf8))
+try terminal.resize(columns: 100, rows: 30)
+let result = try await terminal.result()
+try await output
+```
+
+终端数量由动态注册表和系统实际资源决定，SDK 不设置固定配额。raw output 在
+底层按需扩容，Swift 包装使用有界事件通道限制已进入 Swift 的待消费数据；消费
+停滞时原生缓冲继续保存 PTY 输出。若宿主内存分配失败，事件与最终结果会准确
+报告 `droppedBytes`，不会把缺失输出伪装成完整。
+`finishInput()` 与 `interrupt()` 分别写入真实终端的 Ctrl-D 与 Ctrl-C；
+`resize` 更新 `TIOCSWINSZ` 并沿用 iSH 的 `SIGWINCH`、控制终端和前台进程组
+语义。调用方传入的是完整 guest environment，runtime 不继承宿主进程环境。
+
 ## C 句柄生命周期
 
 `ish_apple_command_session_start` 成功时交付一个调用方引用。回调可能在线程

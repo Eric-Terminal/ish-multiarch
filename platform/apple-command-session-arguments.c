@@ -79,22 +79,16 @@ static bool command_u64_reserved_zero(const uint64_t values[2]) {
     return values[0] == 0 && values[1] == 0;
 }
 
-int32_t command_arguments_create(
+int32_t command_arguments_create_for_spec(
         const struct ish_apple_command_spec_v1 *spec,
-        const struct ish_apple_command_callbacks_v1 *callbacks,
         struct command_arguments *arguments) {
-    if (spec == NULL || callbacks == NULL)
+    if (spec == NULL)
         return _EINVAL;
-    if (spec->version != ISH_APPLE_ABI_VERSION ||
-            callbacks->version != ISH_APPLE_ABI_VERSION)
+    if (spec->version != ISH_APPLE_ABI_VERSION)
         return _ENOTSUP;
     if (spec->structure_size < sizeof(*spec) ||
-            callbacks->structure_size < sizeof(*callbacks) ||
-            callbacks->stream == NULL ||
-            callbacks->completed == NULL ||
             spec->reserved_0 != 0 ||
             !command_u64_reserved_zero(spec->reserved) ||
-            !command_u64_reserved_zero(callbacks->reserved) ||
             spec->request_id == 0 ||
             (spec->timeout_milliseconds >
                     ISH_APPLE_COMMAND_TIMEOUT_MS_MAX &&
@@ -176,4 +170,20 @@ int32_t command_arguments_create(
 fail:
     command_arguments_destroy(arguments);
     return error;
+}
+
+int32_t command_arguments_create(
+        const struct ish_apple_command_spec_v1 *spec,
+        const struct ish_apple_command_callbacks_v1 *callbacks,
+        struct command_arguments *arguments) {
+    if (callbacks == NULL)
+        return _EINVAL;
+    if (callbacks->version != ISH_APPLE_ABI_VERSION)
+        return _ENOTSUP;
+    if (callbacks->structure_size < sizeof(*callbacks) ||
+            callbacks->stream == NULL ||
+            callbacks->completed == NULL ||
+            !command_u64_reserved_zero(callbacks->reserved))
+        return _EINVAL;
+    return command_arguments_create_for_spec(spec, arguments);
 }

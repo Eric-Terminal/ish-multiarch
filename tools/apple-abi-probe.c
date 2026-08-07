@@ -99,6 +99,42 @@ ASSERT_APPLE_OFFSET(
         struct ish_apple_command_callbacks_v1, structure_size, 4);
 ASSERT_APPLE_OFFSET(struct ish_apple_command_callbacks_v1, context, 8);
 
+_Static_assert(sizeof(struct ish_apple_terminal_result_v1) == 72,
+        "公共终端结果必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_terminal_result_v1, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_result_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, terminal_id, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_result_v1, reason, 16);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_result_v1, exit_code, 20);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, termination_signal, 24);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_result_v1, error, 28);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, output_bytes, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, dropped_bytes, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, elapsed_milliseconds, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_result_v1, reserved, 56);
+
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_spec_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_spec_v1, columns, 8);
+ASSERT_APPLE_OFFSET(struct ish_apple_terminal_spec_v1, rows, 10);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, reserved_0, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, terminal_id, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, reserved, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, executable, 40);
+
 #if EXPECTED_APPLE_WORD_BYTES == 4
 #ifndef __ILP32__
 #error "watchOS arm64_32 必须使用 ILP32 ABI"
@@ -138,6 +174,19 @@ ASSERT_APPLE_OFFSET(
         struct ish_apple_command_callbacks_v1, completed, 16);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_command_callbacks_v1, reserved, 24);
+_Static_assert(sizeof(struct ish_apple_terminal_spec_v1) == 64,
+        "arm64_32 公共终端配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_terminal_spec_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, arguments, 44);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, environment, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, working_directory, 52);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, argument_count, 56);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, environment_count, 60);
 #elif EXPECTED_APPLE_WORD_BYTES == 8
 #ifdef __ILP32__
 #error "Apple arm64 切片不得使用 ILP32 ABI"
@@ -174,6 +223,19 @@ ASSERT_APPLE_OFFSET(
         struct ish_apple_command_callbacks_v1, completed, 24);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_command_callbacks_v1, reserved, 32);
+_Static_assert(sizeof(struct ish_apple_terminal_spec_v1) == 80,
+        "LP64 公共终端配置布局漂移");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_terminal_spec_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, arguments, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, environment, 56);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, working_directory, 64);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, argument_count, 72);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_terminal_spec_v1, environment_count, 76);
 #else
 #error "Apple 门禁只支持 4 或 8 字节宿主字宽"
 #endif

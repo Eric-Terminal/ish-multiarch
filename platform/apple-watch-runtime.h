@@ -87,6 +87,8 @@ int ish_watch_session_set_window_size(
         ish_watch_session_id session_id,
         uint16_t columns,
         uint16_t rows);
+// cancel 终止控制终端进程组，但保留句柄供调用方 drain 输出和读取退出状态。
+int ish_watch_session_cancel(ish_watch_session_id session_id);
 // close 使句柄立即失效，并终止仍绑定该 PTY 的全部进程组。
 int ish_watch_session_close(ish_watch_session_id session_id);
 

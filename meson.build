@@ -305,6 +305,7 @@ if get_option('kernel') == 'ish'
             'platform/apple-command-session-arguments.c',
             'platform/apple-command-session-backend.c',
             'platform/apple-public-runtime.c',
+            'platform/apple-public-terminal.c',
             'platform/apple-watch-guest-files.c',
             'platform/apple-resolver.c',
             'platform/apple-watch-runtime.c',
@@ -405,6 +406,13 @@ if get_option('kernel') == 'ish'
                 dependencies: ish)
             test('apple_public_runtime',
                 apple_public_runtime_test, timeout: 30)
+
+            apple_public_terminal_test = executable(
+                'apple_public_terminal_test',
+                'platform/apple-public-terminal-test.c',
+                dependencies: ish)
+            test('apple_public_terminal',
+                apple_public_terminal_test, timeout: 30)
         endif
     endif
 

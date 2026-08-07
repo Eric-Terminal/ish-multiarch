@@ -26,6 +26,21 @@ static int32_t (*volatile command_wait_entry)(
         ish_apple_command_session *,
         struct ish_apple_command_result_v1 *) =
         ish_apple_command_session_wait;
+static int32_t (*volatile terminal_start_entry)(
+        const struct ish_apple_terminal_spec_v1 *,
+        ish_apple_terminal_session **) =
+        ish_apple_terminal_session_start;
+static int32_t (*volatile terminal_read_entry)(
+        ish_apple_terminal_session *, void *, uint32_t,
+        uint32_t *, uint64_t *) =
+        ish_apple_terminal_session_read_output;
+static int32_t (*volatile terminal_cancel_entry)(
+        ish_apple_terminal_session *) =
+        ish_apple_terminal_session_cancel;
+static int32_t (*volatile terminal_result_entry)(
+        ish_apple_terminal_session *,
+        struct ish_apple_terminal_result_v1 *) =
+        ish_apple_terminal_session_copy_result;
 
 int main(void) {
     // 保留真实入口的链接依赖，但验证程序本身不启动 guest。
@@ -35,5 +50,9 @@ int main(void) {
             command_start_entry == NULL ||
             command_write_entry == NULL ||
             command_cancel_entry == NULL ||
-            command_wait_entry == NULL;
+            command_wait_entry == NULL ||
+            terminal_start_entry == NULL ||
+            terminal_read_entry == NULL ||
+            terminal_cancel_entry == NULL ||
+            terminal_result_entry == NULL;
 }

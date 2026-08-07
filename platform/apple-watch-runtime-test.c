@@ -598,11 +598,11 @@ static void check_idle(const char *message) {
             "参数校验失败不应记录 runtime 错误");
 }
 
-static void test_output_overflow(void) {
+static void test_output_growth(void) {
     const size_t extra = 7;
     const size_t source_length = TEST_OUTPUT_CAPACITY + extra;
     unsigned char *source = malloc(source_length);
-    unsigned char *output = malloc(TEST_OUTPUT_CAPACITY);
+    unsigned char *output = malloc(source_length);
     CHECK(source != NULL && output != NULL,
             "应能分配终端环形缓冲测试数据");
     if (source == NULL || output == NULL) {
@@ -617,13 +617,13 @@ static void test_output_overflow(void) {
 
     uint64_t dropped = 0;
     size_t length = ish_watch_runtime_read_output(
-            output, TEST_OUTPUT_CAPACITY, &dropped);
-    CHECK(length == TEST_OUTPUT_CAPACITY,
-            "终端环形缓冲应保留最新的 64 KiB 输出");
-    CHECK(dropped == extra,
-            "终端环形缓冲应报告精确的丢弃字节数");
-    CHECK(memcmp(output, source + extra, TEST_OUTPUT_CAPACITY) == 0,
-            "终端环形缓冲溢出后应保持最新字节顺序");
+            output, source_length, &dropped);
+    CHECK(length == source_length,
+            "终端输出缓冲应按需扩展到 64 KiB 以上");
+    CHECK(dropped == 0,
+            "正常扩容不应丢弃终端输出");
+    CHECK(memcmp(output, source, source_length) == 0,
+            "终端输出缓冲扩容后应保持全部字节顺序");
 
     ish_watch_runtime_test_append_output(
             source, TEST_OUTPUT_CAPACITY - 4);
@@ -631,13 +631,13 @@ static void test_output_overflow(void) {
             source + TEST_OUTPUT_CAPACITY - 4, 8);
     dropped = 0;
     length = ish_watch_runtime_read_output(
-            output, TEST_OUTPUT_CAPACITY, &dropped);
-    CHECK(length == TEST_OUTPUT_CAPACITY,
-            "多次小块写入溢出后应保留完整容量");
-    CHECK(dropped == 4,
-            "多次小块写入应报告被覆盖的四个字节");
-    CHECK(memcmp(output, source + 4, TEST_OUTPUT_CAPACITY) == 0,
-            "跨环形尾部的读取应保持字节顺序");
+            output, source_length, &dropped);
+    CHECK(length == TEST_OUTPUT_CAPACITY + 4,
+            "多次小块写入可继续扩展终端输出缓冲");
+    CHECK(dropped == 0,
+            "跨初始容量的小块写入不应覆盖旧输出");
+    CHECK(memcmp(output, source, TEST_OUTPUT_CAPACITY + 4) == 0,
+            "多块扩容后的读取应保持字节顺序");
 
     dropped = UINT64_MAX;
     CHECK(ish_watch_runtime_read_output(
@@ -720,7 +720,7 @@ static void test_session_lifecycle(void) {
     const size_t extra = 9;
     const size_t source_length = TEST_OUTPUT_CAPACITY + extra;
     unsigned char *source = malloc(source_length);
-    unsigned char *output = malloc(TEST_OUTPUT_CAPACITY);
+    unsigned char *output = malloc(source_length);
     CHECK(source != NULL && output != NULL,
             "应能分配 session 环形缓冲测试数据");
     if (source == NULL || output == NULL) {
@@ -750,13 +750,13 @@ static void test_session_lifecycle(void) {
 
     uint64_t dropped = 0;
     ssize_t length = ish_watch_session_read_output(
-            first, output, TEST_OUTPUT_CAPACITY, &dropped);
-    CHECK(length == TEST_OUTPUT_CAPACITY,
-            "session 环形缓冲应保留最新 64 KiB 输出");
-    CHECK(dropped == extra,
-            "session 环形缓冲应报告精确丢弃字节数");
-    CHECK(memcmp(output, source + extra, TEST_OUTPUT_CAPACITY) == 0,
-            "session 环形缓冲溢出后应保持最新字节顺序");
+            first, output, source_length, &dropped);
+    CHECK(length == (ssize_t) source_length,
+            "session 输出缓冲应按需扩展到 64 KiB 以上");
+    CHECK(dropped == 0,
+            "session 正常扩容不应丢弃输出");
+    CHECK(memcmp(output, source, source_length) == 0,
+            "session 输出缓冲扩容后应保持全部字节顺序");
 
     memset(output, 0, sizeof(second_output));
     dropped = UINT64_MAX;
@@ -1010,7 +1010,7 @@ int main(void) {
             "拒绝过长启动命令");
     check_idle("过长启动命令不消耗一次性启动机会");
 
-    test_output_overflow();
+    test_output_growth();
 
     CHECK(test_shared_mountpoint_failure(
             SHARED_MOUNTPOINT_MNT_FILE,

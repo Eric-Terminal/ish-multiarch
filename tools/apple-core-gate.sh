@@ -368,6 +368,13 @@ build_slice() {
         -Wcast-align -c "$ROOT/platform/apple-public-runtime.c" \
         -o "$public_runtime_object"
 
+    local public_terminal_object="$full_build_dir/apple-public-terminal-strict.o"
+    "$CLANG" -target "$target" -isysroot "$sysroot" -isystem "$ROOT" \
+        -std=gnu11 -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+        -Wshorten-64-to-32 -Wpointer-to-int-cast -Wint-to-pointer-cast \
+        -Wcast-align -c "$ROOT/platform/apple-public-terminal.c" \
+        -o "$public_terminal_object"
+
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
@@ -382,7 +389,7 @@ build_slice() {
         "${watch_runtime_objects[@]}" \
         "$watch_guest_files_object" \
         "${command_session_objects[@]}" \
-        "$public_runtime_object"
+        "$public_runtime_object" "$public_terminal_object"
 
     local fakefs_members
     local fakefs_symbols
@@ -461,6 +468,7 @@ build_slice() {
             platform_apple-command-session-arguments.c.o \
             platform_apple-command-session-backend.c.o \
             platform_apple-public-runtime.c.o \
+            platform_apple-public-terminal.c.o \
             platform_apple-watch-guest-files.c.o \
             platform_apple-watch-runtime.c.o \
             platform_apple-watch-runtime-terminal.c.o; do
