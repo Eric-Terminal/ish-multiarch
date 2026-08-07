@@ -3,6 +3,7 @@
 
 #include "iSHAppleCommand.h"
 #include "iSHAppleDiagnostics.h"
+#include "iSHAppleGuestFile.h"
 #include "iSHAppleMount.h"
 #include "iSHAppleRootFS.h"
 #include "iSHAppleRuntime.h"

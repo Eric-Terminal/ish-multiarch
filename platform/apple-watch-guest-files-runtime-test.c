@@ -17,6 +17,7 @@
 #include "kernel/init.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
+#include "sdk/iSHApple/Headers/iSHAppleGuestFile.h"
 
 #define IMAGE_SIZE 1024
 #define IMAGE_BASE UINT64_C(0x400000)
@@ -554,6 +555,18 @@ static bool host_directory_exists(const char *path) {
     return lstat(path, &status) == 0 && S_ISDIR(status.st_mode);
 }
 
+static struct ish_apple_guest_file_request_v1 guest_file_request(
+        const char *path,
+        uint64_t request_id) {
+    return (struct ish_apple_guest_file_request_v1) {
+        .version = ISH_APPLE_ABI_VERSION,
+        .structure_size = sizeof(
+                struct ish_apple_guest_file_request_v1),
+        .request_id = request_id,
+        .path = path,
+    };
+}
+
 int main(void) {
     struct fixture fixture;
     memset(&fixture, 0, sizeof(fixture));
@@ -697,6 +710,111 @@ int main(void) {
             current == NULL &&
             no_published_children(),
             "连续公共读取返回第二次发布结果且再次释放锁");
+
+    struct ish_apple_guest_file_request_v1 request =
+            guest_file_request("/etc/agent/nested", 1001);
+    CHECK(ish_apple_guest_file_mkdir(
+            &request,
+            0750,
+            ISH_APPLE_GUEST_FILE_MKDIR_PARENTS) == 0,
+            "公共 guest 文件接口递归创建目录");
+
+    static const unsigned char original[] = "abcdef";
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1002);
+    CHECK(ish_apple_guest_file_write(
+            &request,
+            original,
+            sizeof(original) - 1,
+            0640) == 0,
+            "完整内容通过同目录临时文件原子发布");
+
+    struct ish_apple_guest_file_info_v1 info;
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1003);
+    CHECK(ish_apple_guest_file_stat(&request, &info) == 0 &&
+            info.request_id == 1003 &&
+            info.size == sizeof(original) - 1 &&
+            (info.mode & 0777) == 0640,
+            "stat 返回固定宽度元数据并保留新文件权限");
+
+    uint32_t read_count = 0;
+    uint64_t total_size = 0;
+    int32_t eof = 0;
+    memset(buffer, 0, sizeof(buffer));
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1004);
+    CHECK(ish_apple_guest_file_read(
+            &request,
+            2,
+            buffer,
+            3,
+            &read_count,
+            &total_size,
+            &eof) == 0 &&
+            read_count == 3 &&
+            total_size == sizeof(original) - 1 &&
+            eof == 0 &&
+            memcmp(buffer, "cde", 3) == 0,
+            "read 使用 64 位 offset 分页且报告总长度");
+
+    static const unsigned char replacement[] = "XY";
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1005);
+    CHECK(ish_apple_guest_file_edit(
+            &request,
+            2,
+            2,
+            replacement,
+            sizeof(replacement) - 1) == 0,
+            "edit 流式复制未修改区间并原子替换");
+    memset(buffer, 0, sizeof(buffer));
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1006);
+    CHECK(ish_apple_guest_file_read(
+            &request,
+            0,
+            buffer,
+            sizeof(buffer),
+            &read_count,
+            &total_size,
+            &eof) == 0 &&
+            read_count == 6 && eof == 1 &&
+            memcmp(buffer, "abXYef", 6) == 0,
+            "edit 结果完整且读取到末尾");
+
+    struct ish_apple_guest_file_directory_entry_v1 entries[1];
+    uint64_t next_cursor = 0;
+    uint32_t entry_count = 0;
+    request = guest_file_request("/etc/agent/nested", 1007);
+    CHECK(ish_apple_guest_file_list(
+            &request,
+            0,
+            entries,
+            1,
+            &entry_count,
+            &next_cursor,
+            &eof) == 0 &&
+            entry_count == 1 && eof == 1 &&
+            strcmp(entries[0].name, "example.txt") == 0 &&
+            entries[0].info.size == 6,
+            "目录分页跳过点目录并返回子项 stat");
+
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1008);
+    CHECK(ish_apple_guest_file_rename(
+            &request,
+            "/etc/agent/nested/renamed.txt") == 0,
+            "rename 保持 guest 命名空间语义");
+    request = guest_file_request("/etc/agent", 1009);
+    CHECK(ish_apple_guest_file_remove(
+            &request,
+            ISH_APPLE_GUEST_FILE_REMOVE_RECURSIVE) == 0,
+            "递归删除只遍历 guest 目录且删除完整子树");
+    request = guest_file_request("/etc/agent", 1010);
+    CHECK(ish_apple_guest_file_stat(&request, &info) == _ENOENT &&
+            current == NULL && no_published_children(),
+            "所有公共文件操作结束后释放 prepared task");
 
     fixture.runtime_stopped = stop_runtime();
     CHECK(fixture.runtime_stopped, "测试结束时停止 PID 1");

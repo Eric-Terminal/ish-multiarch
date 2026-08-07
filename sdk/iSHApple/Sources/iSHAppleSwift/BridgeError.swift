@@ -18,7 +18,7 @@ extension BridgeError: LocalizedError {
   public var errorDescription: String? {
     switch self {
     case .invalidArguments:
-      return "argv 至少需要包含 argv[0]"
+      return "传入的桥接参数无效"
     case .tooManyArguments(let limit):
       return "argv 和 environment 分别不能超过 \(limit) 项"
     case .embeddedNull(let field):

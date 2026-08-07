@@ -36,6 +36,18 @@ static int32_t (*volatile diagnostics_drain_entry)(
 static int32_t (*volatile diagnostics_clear_entry)(
         uint32_t, uint64_t, uint32_t *) =
         ish_apple_diagnostics_clear;
+static int32_t (*volatile guest_file_stat_entry)(
+        const struct ish_apple_guest_file_request_v1 *,
+        struct ish_apple_guest_file_info_v1 *) =
+        ish_apple_guest_file_stat;
+static int32_t (*volatile guest_file_read_entry)(
+        const struct ish_apple_guest_file_request_v1 *, uint64_t,
+        void *, uint32_t, uint32_t *, uint64_t *, int32_t *) =
+        ish_apple_guest_file_read;
+static int32_t (*volatile guest_file_write_entry)(
+        const struct ish_apple_guest_file_request_v1 *,
+        const void *, uint32_t, uint32_t) =
+        ish_apple_guest_file_write;
 static int32_t (*volatile command_start_entry)(
         const struct ish_apple_command_spec_v1 *,
         const struct ish_apple_command_callbacks_v1 *,
@@ -81,6 +93,9 @@ int main(void) {
             rootfs_seed_entry == NULL ||
             diagnostics_drain_entry == NULL ||
             diagnostics_clear_entry == NULL ||
+            guest_file_stat_entry == NULL ||
+            guest_file_read_entry == NULL ||
+            guest_file_write_entry == NULL ||
             command_start_entry == NULL ||
             command_write_entry == NULL ||
             command_cancel_entry == NULL ||

@@ -21,6 +21,37 @@ static int32_t (*volatile diagnostics_drain_entry)(
 static int32_t (*volatile diagnostics_clear_entry)(
         uint32_t, uint64_t, uint32_t *) =
         ish_apple_diagnostics_clear;
+static int32_t (*volatile guest_file_stat_entry)(
+        const struct ish_apple_guest_file_request_v1 *,
+        struct ish_apple_guest_file_info_v1 *) =
+        ish_apple_guest_file_stat;
+static int32_t (*volatile guest_file_list_entry)(
+        const struct ish_apple_guest_file_request_v1 *, uint64_t,
+        struct ish_apple_guest_file_directory_entry_v1 *, uint32_t,
+        uint32_t *, uint64_t *, int32_t *) =
+        ish_apple_guest_file_list;
+static int32_t (*volatile guest_file_read_entry)(
+        const struct ish_apple_guest_file_request_v1 *, uint64_t,
+        void *, uint32_t, uint32_t *, uint64_t *, int32_t *) =
+        ish_apple_guest_file_read;
+static int32_t (*volatile guest_file_write_entry)(
+        const struct ish_apple_guest_file_request_v1 *,
+        const void *, uint32_t, uint32_t) =
+        ish_apple_guest_file_write;
+static int32_t (*volatile guest_file_edit_entry)(
+        const struct ish_apple_guest_file_request_v1 *, uint64_t,
+        uint64_t, const void *, uint32_t) =
+        ish_apple_guest_file_edit;
+static int32_t (*volatile guest_file_remove_entry)(
+        const struct ish_apple_guest_file_request_v1 *, uint32_t) =
+        ish_apple_guest_file_remove;
+static int32_t (*volatile guest_file_rename_entry)(
+        const struct ish_apple_guest_file_request_v1 *, const char *) =
+        ish_apple_guest_file_rename;
+static int32_t (*volatile guest_file_mkdir_entry)(
+        const struct ish_apple_guest_file_request_v1 *,
+        uint32_t, uint32_t) =
+        ish_apple_guest_file_mkdir;
 static int32_t (*volatile mount_add_entry)(
         const struct ish_apple_mount_spec_v1 *) =
         ish_apple_mount_add;
@@ -118,6 +149,14 @@ int main(void) {
             rootfs_install_entry == 0 ||
             diagnostics_drain_entry == 0 ||
             diagnostics_clear_entry == 0 ||
+            guest_file_stat_entry == 0 ||
+            guest_file_list_entry == 0 ||
+            guest_file_read_entry == 0 ||
+            guest_file_write_entry == 0 ||
+            guest_file_edit_entry == 0 ||
+            guest_file_remove_entry == 0 ||
+            guest_file_rename_entry == 0 ||
+            guest_file_mkdir_entry == 0 ||
             mount_add_entry == 0 ||
             mount_remove_entry == 0 ||
             mount_list_entry == 0 ||

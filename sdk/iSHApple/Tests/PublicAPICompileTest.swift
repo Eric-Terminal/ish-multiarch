@@ -14,6 +14,49 @@ func compilePublicAPI(runtime: Runtime) async throws {
   )
   let _: UInt32 = try await diagnostics.clear(diagnosticScope)
 
+  let guestFiles = GuestFileSystem()
+  let _: GuestFileInfo = try guestFiles.stat(
+    path: "/root",
+    requestID: 50
+  )
+  let _: GuestDirectoryPage = try guestFiles.list(
+    path: "/root",
+    requestID: 51,
+    maximumEntryCount: 32
+  )
+  let _: GuestFileReadPage = try guestFiles.read(
+    path: "/root/example.txt",
+    requestID: 52,
+    maximumByteCount: 4096
+  )
+  try guestFiles.write(
+    path: "/root/example.txt",
+    requestID: 53,
+    bytes: Array("example".utf8)
+  )
+  try guestFiles.edit(
+    path: "/root/example.txt",
+    requestID: 54,
+    offset: 0,
+    removedByteCount: 0,
+    replacement: []
+  )
+  try guestFiles.rename(
+    path: "/root/example.txt",
+    to: "/root/renamed.txt",
+    requestID: 55
+  )
+  try guestFiles.createDirectory(
+    path: "/root/nested/example",
+    requestID: 56,
+    withIntermediateDirectories: true
+  )
+  try guestFiles.remove(
+    path: "/root/nested",
+    requestID: 57,
+    recursively: true
+  )
+
   let mountID = UUID()
   let mountConfiguration = RuntimeMountConfiguration(
     id: mountID,

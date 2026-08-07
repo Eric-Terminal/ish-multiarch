@@ -72,6 +72,14 @@ verify_public_symbols() {
             ish_apple_runtime_last_error \
             ish_apple_diagnostics_drain \
             ish_apple_diagnostics_clear \
+            ish_apple_guest_file_stat \
+            ish_apple_guest_file_list \
+            ish_apple_guest_file_read \
+            ish_apple_guest_file_write \
+            ish_apple_guest_file_edit \
+            ish_apple_guest_file_remove \
+            ish_apple_guest_file_rename \
+            ish_apple_guest_file_mkdir \
             ish_apple_mount_add \
             ish_apple_mount_remove \
             ish_apple_mount_list \

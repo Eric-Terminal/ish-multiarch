@@ -112,6 +112,84 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(
         struct ish_apple_diagnostic_event_v1, reserved, 168);
 
+_Static_assert(sizeof(struct ish_apple_guest_file_request_v1) == 48,
+        "guest 文件请求必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_guest_file_request_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, flags, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, reserved_0, 12);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, request_id, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, reserved, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_request_v1, path, 40);
+
+_Static_assert(sizeof(struct ish_apple_guest_file_info_v1) == 128,
+        "guest 文件 stat 必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(struct ish_apple_guest_file_info_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, version, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, structure_size, 4);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, request_id, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, device, 16);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, inode, 24);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, size, 32);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, blocks, 40);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, mode, 48);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, link_count, 52);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, user_id, 56);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, group_id, 60);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, block_size, 64);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        access_time_seconds, 72);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        modification_time_seconds, 80);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        status_change_time_seconds, 88);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        access_time_nanoseconds, 96);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        modification_time_nanoseconds, 100);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1,
+        status_change_time_nanoseconds, 104);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_info_v1, reserved, 112);
+
+_Static_assert(
+        sizeof(struct ish_apple_guest_file_directory_entry_v1) == 392,
+        "guest 目录项必须保持固定宽度布局");
+ASSERT_APPLE_ALIGNMENT(
+        struct ish_apple_guest_file_directory_entry_v1, 8);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_directory_entry_v1, info, 0);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_directory_entry_v1, name_bytes, 128);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_guest_file_directory_entry_v1, name, 136);
+
 ASSERT_APPLE_OFFSET(struct ish_apple_runtime_spec_v1, version, 0);
 ASSERT_APPLE_OFFSET(
         struct ish_apple_runtime_spec_v1, structure_size, 4);

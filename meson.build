@@ -318,6 +318,8 @@ if get_option('kernel') == 'ish'
             'platform/apple-command-session-arguments.c',
             'platform/apple-command-session-backend.c',
             'platform/apple-diagnostics.c',
+            'platform/apple-guest-file-mutations.c',
+            'platform/apple-guest-files.c',
             'platform/apple-public-runtime.c',
             'platform/apple-public-terminal.c',
             'platform/apple-runtime-mount.c',

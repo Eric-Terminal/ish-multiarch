@@ -237,6 +237,50 @@ guest 文件请求均要求非零且在活跃任务间唯一的 ID。
 Apple 交付门禁把当前 Git revision 写入 `build_identity`；没有 Git 元数据的
 普通源码构建使用明确的 `ish-multiarch-source`，不会伪造某个提交哈希。
 
+## Guest 文件系统
+
+`GuestFileSystem` 供 App 文件浏览器和 Agent 的结构化文件工具使用。路径始终
+是 Linux guest 中的绝对路径，接口通过同一套路径解析、fakefs 元数据和 mount
+权限执行；不得用宿主 `FileManager` 直接修改 rootfs 的 `data/`，否则会绕过
+fakefs 数据库并破坏权限、符号链接和 inode 语义。
+
+```swift
+let files = GuestFileSystem()
+let page = try files.list(
+    path: "/root/project",
+    requestID: 200,
+    cursor: 0,
+    maximumEntryCount: 128
+)
+let contents = try files.read(
+    path: "/root/project/main.c",
+    requestID: 201,
+    offset: 0,
+    maximumByteCount: 64 * 1024
+)
+try files.edit(
+    path: "/root/project/main.c",
+    requestID: 202,
+    offset: 10,
+    removedByteCount: 4,
+    replacement: Array("value".utf8)
+)
+```
+
+`list` 使用不透明 cursor 分页，`read` 使用 64 位 offset；两者都不会要求把整
+个目录或文件一次装进内存。`write` 与 `edit` 在同目录创建临时文件，完整写入
+并同步后才以 guest rename 发布。`edit` 会流式复制未修改区间，并在提交前发现
+目标被并发替换时返回 `ESTALE`。失败只清理由本次请求创建的精确临时文件。
+
+删除、重命名和递归建目录同样执行 guest 操作。只读 mount 的创建、写入、删除
+和重命名由内核返回 `EROFS`；递归删除不会跟随最终符号链接，但如果用户明确对
+挂载目录执行递归删除，仍会按 Linux 可见命名空间访问其内容。SDK 不设置文件
+大小、目录项总数或递归目标数量的产品配额，单次 ABI 复制量由调用方选择。
+
+所有调用均为同步阻塞接口，应由 App 的后台任务或 actor 调用，不能放进 SwiftUI
+渲染链。每次请求使用非零唯一 `requestID`，遇到 `ENOSYS`/`ENOTSUP` 时可从
+`DiagnosticScope.guestFile` 消费对应结构化兼容性诊断。
+
 ## C 句柄生命周期
 
 `ish_apple_command_session_start` 成功时交付一个调用方引用。回调可能在线程
