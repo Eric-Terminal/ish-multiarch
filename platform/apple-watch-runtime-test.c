@@ -750,13 +750,18 @@ static void test_session_lifecycle(void) {
 
     uint64_t dropped = 0;
     ssize_t length = ish_watch_session_read_output(
-            first, output, source_length, &dropped);
-    CHECK(length == (ssize_t) source_length,
-            "session 输出缓冲应按需扩展到 64 KiB 以上");
+            first, output, 13, &dropped);
+    CHECK(length == 13 && memcmp(output, source, 13) == 0,
+            "session 输出缓冲支持非对齐的部分消费");
     CHECK(dropped == 0,
             "session 正常扩容不应丢弃输出");
-    CHECK(memcmp(output, source, source_length) == 0,
-            "session 输出缓冲扩容后应保持全部字节顺序");
+    length = ish_watch_session_read_output(
+            first, output, source_length, &dropped);
+    CHECK(length == (ssize_t) (source_length - 13) &&
+            memcmp(output, source + 13, source_length - 13) == 0,
+            "部分消费后仍按动态容量推进环形缓冲读指针");
+    CHECK(dropped == 0,
+            "分段读取扩容输出不应产生虚假丢弃计数");
 
     memset(output, 0, sizeof(second_output));
     dropped = UINT64_MAX;

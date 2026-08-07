@@ -180,7 +180,7 @@ static size_t output_read_locked(
         first = length;
     memcpy(buffer, output->bytes + output->head, first);
     memcpy((unsigned char *) buffer + first, output->bytes, length - first);
-    output->head = (output->head + length) % sizeof(output->bytes);
+    output->head = (output->head + length) % output->capacity;
     output->count -= length;
     return length;
 }
