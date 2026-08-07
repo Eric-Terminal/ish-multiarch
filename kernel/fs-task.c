@@ -379,6 +379,9 @@ ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
     int access_mode = flags & O_ACCMODE_;
     if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
         return _EBADF;
+    if (fd->mount != NULL &&
+            (fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
     if (offset < 0)
         return _EINVAL;
     if (fd->ops->page_pwrite == NULL)
@@ -595,6 +598,9 @@ int file_write_check_fd(struct fd *fd) {
     int access_mode = flags & O_ACCMODE_;
     if (access_mode != O_WRONLY_ && access_mode != O_RDWR_)
         return _EBADF;
+    if (fd->mount != NULL &&
+            (fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
     if (fd->ops->write == NULL && fd->ops->pwrite == NULL)
         return _EBADF;
     return 0;
@@ -1070,6 +1076,8 @@ static int file_fchmod_fd(struct fd *fd, mode_t_ mode) {
         return _EBADF;
     if (fd->mount == NULL || fd->mount->fs->fsetattr == NULL)
         return _EPERM;
+    if ((fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
     return fd->mount->fs->fsetattr(fd, mode_attr(mode));
 }
 
@@ -1122,6 +1130,8 @@ static int file_fchown_fd(
         return _EBADF;
     if (fd->mount == NULL || fd->mount->fs->fsetattr == NULL)
         return _EPERM;
+    if ((fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
     return fd->mount->fs->fsetattr(
             fd, ownership_attr(owner, group));
 }

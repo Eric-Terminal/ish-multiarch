@@ -40,6 +40,16 @@ static struct fd *provider_open(struct mount *mount, const char *path,
     return mount->fs->open(mount, path, flags, mode);
 }
 
+static bool mount_is_read_only(const struct mount *mount) {
+    return (mount->flags & MS_READONLY_) != 0;
+}
+
+static bool open_requests_write(int flags) {
+    int access_mode = flags & O_ACCMODE_;
+    return access_mode == O_WRONLY_ || access_mode == O_RDWR_ ||
+            (flags & (O_CREAT_ | O_TRUNC_)) != 0;
+}
+
 static struct fd *generic_openat_task_access(struct task *task,
         struct fd *at, const char *path_raw,
         int flags, int mode, int accmode) {
@@ -61,6 +71,10 @@ static struct fd *generic_openat_task_access(struct task *task,
     if (err < 0)
         return ERR_PTR(err);
     struct mount *mount = find_mount_and_trim_path(path);
+    if (mount_is_read_only(mount) && open_requests_write(flags)) {
+        mount_release(mount);
+        return ERR_PTR(_EROFS);
+    }
     int provider_flags = flags & ~O_TRUNC_;
     bool upgraded_truncate = (flags & O_TRUNC_) != 0 &&
             (flags & O_ACCMODE_) == O_RDONLY_;
@@ -225,9 +239,13 @@ int generic_accessat_task(struct task *task, struct fd *dirfd,
     struct mount *mount = find_mount_and_trim_path(path);
     struct statbuf stat = {};
     err = mount->fs->stat(mount, path, &stat);
+    bool read_only_write = err == 0 && (mode & AC_W) != 0 &&
+            mount_is_read_only(mount);
     mount_release(mount);
     if (err < 0)
         return err;
+    if (read_only_write)
+        return _EROFS;
     return access_check_identity(identity, &stat, mode);
 }
 
@@ -249,6 +267,8 @@ int generic_link_normalized(
     int err;
     if (mount != dst_mount)
         err = _EXDEV;
+    else if (mount_is_read_only(dst_mount))
+        err = _EROFS;
     else if (mount->fs->link == NULL)
         err = _EPERM;
     else
@@ -283,7 +303,9 @@ int generic_unlinkat_task(struct task *task,
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->unlink)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->unlink)
         err = mount->fs->unlink(mount, path);
     mount_release(mount);
     return err;
@@ -312,6 +334,8 @@ int generic_renameat_task(struct task *task,
     struct mount *dst_mount = find_mount_and_trim_path(dst);
     if (mount != dst_mount)
         err = _EXDEV;
+    else if (mount_is_read_only(mount))
+        err = _EROFS;
     else if (mount->fs->rename == NULL)
         err = _EPERM;
     else
@@ -336,7 +360,9 @@ int generic_symlinkat_task(struct task *task,
         return err;
     struct mount *mount = find_mount_and_trim_path(link);
     err = _EPERM;
-    if (mount->fs->symlink)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->symlink)
         err = mount->fs->symlink(mount, target, link);
     mount_release(mount);
     return err;
@@ -359,7 +385,9 @@ int generic_mknodat(struct fd *at, const char *path_raw, mode_t_ mode, dev_t_ de
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->mknod)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->mknod)
         err = mount->fs->mknod(mount, path, mode, dev);
     mount_release(mount);
     return err;
@@ -374,7 +402,9 @@ int generic_setattrat_task(struct task *task, struct fd *at,
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->setattr) {
+    if (mount_is_read_only(mount)) {
+        err = _EROFS;
+    } else if (mount->fs->setattr) {
         attr.follow_links = follow_links;
         err = mount->fs->setattr(mount, path, attr);
     }
@@ -428,7 +458,9 @@ int generic_utimens_task(struct task *task, struct fd *at,
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->utime)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->utime)
         err = mount->fs->utime(mount, path,
                 host_times[0], host_times[1], follow_links);
     mount_release(mount);
@@ -445,6 +477,8 @@ int generic_futimens(
         return err;
     if (fd->mount == NULL || fd->mount->fs->futime == NULL)
         return _EPERM;
+    if (mount_is_read_only(fd->mount))
+        return _EROFS;
     return fd->mount->fs->futime(fd, host_times[0], host_times[1]);
 }
 
@@ -455,7 +489,9 @@ int generic_utime(struct fd *at, const char *path_raw, struct timespec atime, st
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->utime)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->utime)
         err = mount->fs->utime(
                 mount, path, atime, mtime, follow_links);
     mount_release(mount);
@@ -491,7 +527,9 @@ int generic_mkdirat_task(struct task *task,
         return err;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->mkdir)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->mkdir)
         err = mount->fs->mkdir(mount, path, mode);
     mount_release(mount);
     return err;
@@ -512,7 +550,9 @@ int generic_rmdirat_task(struct task *task,
         return _EBUSY;
     struct mount *mount = find_mount_and_trim_path(path);
     err = _EPERM;
-    if (mount->fs->rmdir)
+    if (mount_is_read_only(mount))
+        err = _EROFS;
+    else if (mount->fs->rmdir)
         err = mount->fs->rmdir(mount, path);
     mount_release(mount);
     return err;

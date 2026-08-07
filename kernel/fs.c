@@ -727,6 +727,8 @@ dword_t sys_utime(addr_t path_addr, addr_t times_addr) {
 static int generic_fsetattr(struct fd *fd, struct attr attr) {
     if (fd->mount->fs->fsetattr == NULL)
         return _EPERM;
+    if ((fd->mount->flags & MS_READONLY_) != 0)
+        return _EROFS;
     return fd->mount->fs->fsetattr(fd, attr);
 }
 

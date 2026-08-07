@@ -1473,6 +1473,101 @@ int main(void) {
             "fchdir 只更新显式目标任务并保留诱饵任务 cwd");
     target.pwd = target.fs.pwd;
 
+    unsigned read_only_opens = probe.opens;
+    unsigned read_only_unlinks = probe.unlinks;
+    unsigned read_only_rmdirs = probe.rmdirs;
+    unsigned read_only_mkdirs = probe.mkdirs;
+    unsigned read_only_links = probe.links;
+    unsigned read_only_renames = probe.renames;
+    unsigned read_only_symlinks = probe.symlinks;
+    unsigned read_only_setattrs = probe.setattrs;
+    unsigned read_only_mode_fsetattrs = probe.mode_fsetattrs;
+    unsigned read_only_ownership_fsetattrs = probe.ownership_fsetattrs;
+    unsigned read_only_utimes = probe.utimes;
+    unsigned read_only_futimes = probe.futimes;
+    mount->flags = saved_mount_flags | MS_READONLY_;
+
+    struct fd *read_only_open = generic_openat_task(
+            &target.task, AT_PWD, "write", O_WRONLY_, 0600);
+    CHECK(IS_ERR(read_only_open) && PTR_ERR(read_only_open) == _EROFS &&
+            probe.opens == read_only_opens,
+            "只读 mount 在调用 provider 前拒绝写打开");
+    read_only_open = generic_openat_task(
+            &target.task, AT_PWD, "create", O_CREAT_ | O_RDONLY_, 0600);
+    CHECK(IS_ERR(read_only_open) && PTR_ERR(read_only_open) == _EROFS &&
+            probe.opens == read_only_opens,
+            "只读 mount 在调用 provider 前拒绝创建");
+    read_only_open = generic_openat_task(
+            &target.task, AT_PWD, "truncate", O_TRUNC_ | O_RDONLY_, 0600);
+    CHECK(IS_ERR(read_only_open) && PTR_ERR(read_only_open) == _EROFS &&
+            probe.opens == read_only_opens,
+            "只读 mount 拒绝只读描述符请求的截断副作用");
+
+    const struct fs_access_identity read_only_identity = {
+        .uid = target.task.euid,
+        .gid = target.task.egid,
+    };
+    CHECK(generic_accessat_task(&target.task, AT_PWD,
+            "child", AC_W, &read_only_identity) == _EROFS,
+            "只读 mount 的写访问探测返回 EROFS");
+    CHECK(file_unlinkat_task(&target.task, AT_FDCWD_,
+                    "victim", false) == _EROFS &&
+            file_unlinkat_task(&target.task, AT_FDCWD_,
+                    "directory", true) == _EROFS &&
+            probe.unlinks == read_only_unlinks &&
+            probe.rmdirs == read_only_rmdirs,
+            "只读 mount 拒绝文件与目录删除");
+    CHECK(file_mkdirat_task(&target.task, AT_FDCWD_,
+                    "directory", 0755) == _EROFS &&
+            probe.mkdirs == read_only_mkdirs,
+            "只读 mount 拒绝创建目录");
+    CHECK(file_symlinkat_task(&target.task, "target",
+                    AT_FDCWD_, "link-new") == _EROFS &&
+            probe.symlinks == read_only_symlinks,
+            "只读 mount 拒绝创建符号链接");
+    CHECK(file_renameat_task(&target.task, AT_FDCWD_, "source",
+                    AT_FDCWD_, "destination") == _EROFS &&
+            probe.renames == read_only_renames,
+            "只读 mount 拒绝重命名");
+    char read_only_source[] = "/target/source";
+    char read_only_destination[] = "/target/destination";
+    CHECK(generic_link_normalized(
+                    read_only_source, read_only_destination) == _EROFS &&
+            probe.links == read_only_links,
+            "只读 mount 拒绝创建硬链接");
+    CHECK(generic_mknodat(AT_PWD, "node", S_IFREG | 0600, 0) == _EROFS,
+            "只读 mount 拒绝创建设备或普通节点");
+
+    CHECK(file_fchmodat_task(&target.task, AT_FDCWD_,
+                    "child", 0600) == _EROFS &&
+            probe.setattrs == read_only_setattrs,
+            "只读 mount 拒绝路径属性变更");
+    int explicit_flags = explicit_dir->flags;
+    explicit_dir->flags = O_RDWR_;
+    CHECK(file_write_fd(explicit_dir, "x", 1) == _EROFS &&
+            file_page_pwrite_fd_uncoordinated(
+                    explicit_dir, "x", 1, 0) == _EROFS,
+            "只读 mount 拒绝已有描述符写入与页写回");
+    CHECK(file_fchmod_task(&target.task, 0, 0600) == _EROFS &&
+            probe.mode_fsetattrs == read_only_mode_fsetattrs &&
+            file_fchown_task(&target.task, 0, 1000, 100) == _EROFS &&
+            probe.ownership_fsetattrs ==
+                    read_only_ownership_fsetattrs,
+            "只读 mount 拒绝描述符权限与所有者变更");
+    explicit_dir->flags = explicit_flags;
+
+    const struct file_timespec read_only_times[2] = {
+        {.nsec = LINUX_UTIME_NOW_},
+        {.nsec = LINUX_UTIME_NOW_},
+    };
+    CHECK(file_utimensat_task(&target.task, AT_FDCWD_,
+                    "child", read_only_times, 0) == _EROFS &&
+            probe.utimes == read_only_utimes &&
+            generic_futimens(explicit_dir, read_only_times) == _EROFS &&
+            probe.futimes == read_only_futimes,
+            "只读 mount 拒绝路径与描述符时间戳更新");
+    mount->flags = saved_mount_flags;
+
     current = NULL;
     mm_release(decoy.task.mm);
     fdtable_release(decoy.task.files);
