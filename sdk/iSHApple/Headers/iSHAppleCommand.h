@@ -10,8 +10,10 @@
 #define ISH_APPLE_COMMAND_STDIN_WRITE_BYTES_MAX UINT32_C(2147483647)
 #define ISH_APPLE_COMMAND_OUTPUT_BYTES_DEFAULT UINT64_C(8388608)
 #define ISH_APPLE_COMMAND_OUTPUT_BYTES_MAX UINT64_C(67108864)
+#define ISH_APPLE_COMMAND_OUTPUT_BYTES_DISABLED UINT64_MAX
 #define ISH_APPLE_COMMAND_TIMEOUT_MS_DEFAULT UINT32_C(300000)
 #define ISH_APPLE_COMMAND_TIMEOUT_MS_MAX UINT32_C(3600000)
+#define ISH_APPLE_COMMAND_TIMEOUT_MS_DISABLED UINT32_MAX
 
 #define ISH_APPLE_COMMAND_STREAM_STDOUT UINT32_C(1)
 #define ISH_APPLE_COMMAND_STREAM_STDERR UINT32_C(2)
@@ -29,7 +31,8 @@ typedef struct ish_apple_command_session ish_apple_command_session;
 
 /*
  * arguments 必须包含 argv[0]；environment 是完整 guest 环境，不继承宿主。
- * timeout_milliseconds 和 output_byte_limit 为 0 时分别使用公共默认值。
+ * timeout_milliseconds 和 output_byte_limit 为 0 时分别使用公共默认值；
+ * 传入对应的 DISABLED 常量时不由 bridge 按时间或输出量终止进程。
  */
 struct ish_apple_command_spec_v1 {
     uint32_t version;

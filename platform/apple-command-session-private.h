@@ -56,9 +56,11 @@ struct ish_apple_command_session {
     uint64_t request_id;
     uint64_t host_job_id;
     uint64_t output_byte_limit;
+    bool output_limit_enabled;
     uint64_t stdout_bytes;
     uint64_t stderr_bytes;
     uint32_t timeout_milliseconds;
+    bool timeout_enabled;
     int32_t completion_reason;
     struct timespec started_at;
     struct ish_apple_command_result_v1 result;

@@ -15,6 +15,12 @@ enum CommandABI {
 
 @available(iOS 15.0, watchOS 10.0, *)
 public struct CommandRequest: Sendable, Equatable {
+  /// 关闭 bridge 的 wall-clock timeout，由调用方或系统决定何时结束。
+  public static let timeoutDisabled = UInt32.max
+
+  /// 关闭 bridge 的原始输出终止阈值；宿主仍应持续消费并自行落盘。
+  public static let outputLimitDisabled = UInt64.max
+
   public var requestID: UInt64
   public var executable: String
   public var argv: [String]

@@ -187,10 +187,15 @@ static int32_t command_session_create(
         __builtin_trap();
     session->host_job_id = job_id;
     session->request_id = spec->request_id;
-    session->output_byte_limit = spec->output_byte_limit == 0 ?
+    session->output_limit_enabled = spec->output_byte_limit !=
+            ISH_APPLE_COMMAND_OUTPUT_BYTES_DISABLED;
+    session->output_byte_limit = !session->output_limit_enabled ? 0 :
+            spec->output_byte_limit == 0 ?
             ISH_APPLE_COMMAND_OUTPUT_BYTES_DEFAULT :
             spec->output_byte_limit;
-    session->timeout_milliseconds =
+    session->timeout_enabled = spec->timeout_milliseconds !=
+            ISH_APPLE_COMMAND_TIMEOUT_MS_DISABLED;
+    session->timeout_milliseconds = !session->timeout_enabled ? 0 :
             spec->timeout_milliseconds == 0 ?
             ISH_APPLE_COMMAND_TIMEOUT_MS_DEFAULT :
             spec->timeout_milliseconds;
@@ -289,11 +294,12 @@ static void *command_read_output(void *opaque) {
                 uint64_t delivered_total =
                         session->stdout_bytes +
                         session->stderr_bytes;
-                if (session->completion_reason ==
+                if (session->output_limit_enabled &&
+                        session->completion_reason ==
                         ISH_APPLE_COMMAND_COMPLETION_OUTPUT_LIMIT) {
                     delivered = 0;
                     limit_reached = true;
-                } else {
+                } else if (session->output_limit_enabled) {
                     uint64_t remaining =
                             session->output_byte_limit -
                             delivered_total;
@@ -311,6 +317,14 @@ static void *command_read_output(void *opaque) {
                             &session->stdout_bytes :
                             &session->stderr_bytes;
                     *stream_bytes += delivered;
+                } else {
+                    uint64_t *stream_bytes =
+                            reader->stream ==
+                                    ISH_APPLE_COMMAND_STREAM_STDOUT ?
+                            &session->stdout_bytes :
+                            &session->stderr_bytes;
+                    *stream_bytes = UINT64_MAX - *stream_bytes < delivered ?
+                            UINT64_MAX : *stream_bytes + delivered;
                 }
                 pthread_mutex_unlock(&session->lock);
                 if (delivered != 0) {
@@ -378,7 +392,7 @@ static int32_t command_wait_for_exit_event(
     bool timeout_delivered = false;
     for (;;) {
         int timeout = -1;
-        if (!timeout_delivered) {
+        if (session->timeout_enabled && !timeout_delivered) {
             struct timespec now;
             if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
                 __builtin_trap();

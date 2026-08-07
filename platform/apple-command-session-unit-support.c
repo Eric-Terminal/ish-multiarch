@@ -413,6 +413,30 @@ static void test_resource_limits(void) {
         ish_apple_command_session_release(session);
     }
     context_destroy(&timeout);
+
+    struct callback_context unlimited;
+    context_init(&unlimited);
+    session = NULL;
+    CHECK(start_basic(
+            "--child-pause", NULL, next_request_id++,
+            ISH_APPLE_COMMAND_TIMEOUT_MS_DISABLED,
+            ISH_APPLE_COMMAND_OUTPUT_BYTES_DISABLED,
+            &unlimited, &session) == 0,
+            "允许显式关闭命令超时和输出终止阈值");
+    if (session != NULL) {
+        CHECK(context_wait(&unlimited, true),
+                "无限时长命令在取消前保持运行并产生输出");
+        CHECK(ish_apple_command_session_cancel(session) == 0 &&
+                context_wait(&unlimited, false) &&
+                unlimited.result.reason ==
+                        ISH_APPLE_COMMAND_COMPLETION_CANCELLED,
+                "无限时长命令仍可由调用方明确取消");
+        struct ish_apple_command_result_v1 result = {};
+        CHECK(ish_apple_command_session_wait(session, &result) == 0,
+                "无限时长命令取消后的完成回调已经退出");
+        ish_apple_command_session_release(session);
+    }
+    context_destroy(&unlimited);
 }
 
 static int count_open_fds(void) {

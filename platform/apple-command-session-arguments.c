@@ -96,10 +96,14 @@ int32_t command_arguments_create(
             !command_u64_reserved_zero(spec->reserved) ||
             !command_u64_reserved_zero(callbacks->reserved) ||
             spec->request_id == 0 ||
-            spec->timeout_milliseconds >
-                    ISH_APPLE_COMMAND_TIMEOUT_MS_MAX ||
-            spec->output_byte_limit >
-                    ISH_APPLE_COMMAND_OUTPUT_BYTES_MAX ||
+            (spec->timeout_milliseconds >
+                    ISH_APPLE_COMMAND_TIMEOUT_MS_MAX &&
+                    spec->timeout_milliseconds !=
+                    ISH_APPLE_COMMAND_TIMEOUT_MS_DISABLED) ||
+            (spec->output_byte_limit >
+                    ISH_APPLE_COMMAND_OUTPUT_BYTES_MAX &&
+                    spec->output_byte_limit !=
+                    ISH_APPLE_COMMAND_OUTPUT_BYTES_DISABLED) ||
             spec->argument_count == 0 ||
             spec->argument_count > COMMAND_ARGUMENT_COUNT_MAX ||
             spec->arguments == NULL ||

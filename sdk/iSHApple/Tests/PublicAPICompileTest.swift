@@ -17,6 +17,14 @@ func compilePublicAPI(runtime: Runtime) async throws {
     timeoutMilliseconds: 10_000,
     outputLimitBytes: 65_536
   )
+  let unlimitedRequest = CommandRequest(
+    requestID: 43,
+    executable: "/bin/cat",
+    argv: ["/bin/cat"],
+    timeoutMilliseconds: CommandRequest.timeoutDisabled,
+    outputLimitBytes: CommandRequest.outputLimitDisabled
+  )
+  _ = unlimitedRequest
   let session = try CommandSession.start(
     request,
     eventBufferByteCapacity: 32_768

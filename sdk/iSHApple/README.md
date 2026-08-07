@@ -109,6 +109,9 @@ stdin 写入是非阻塞的，Swift `send` 会处理部分写入和 Linux `EAGAI
 任务取消会取消整个 guest 作业；该作业身份不受 guest 的 `fork`、`setsid`
 或 `setpgid` 影响，因此后台后代不能继续持有管道逃逸。显式 timeout 和
 stdout/stderr 合计输出上限也会终止整个作业。
+需要让用户自己决定长任务何时结束时，可分别传入
+`CommandRequest.timeoutDisabled` 与 `CommandRequest.outputLimitDisabled`；
+关闭 bridge 终止阈值不等于允许停止消费输出，宿主仍必须持续 drain 并落盘。
 
 资源合同如下。活跃命令由动态注册表管理，不设置 SDK 固定会话配额；宿主可按
 实际用途并发启动，资源不足时会收到真实的 Linux errno 或进程终止结果。
@@ -120,8 +123,8 @@ stdout/stderr 合计输出上限也会终止整个作业。
 | 单路径字节 | 4096 |
 | 单次 stdin 写入 | 最大 2,147,483,647 字节 |
 | 原生输出回调块 | 最大 16 KiB |
-| 合计输出 | 默认 8 MiB，最大 64 MiB |
-| wall-clock timeout | 默认 300 秒，最大 1 小时 |
+| 合计输出 | 默认 8 MiB，可设最大 64 MiB 或显式关闭终止阈值 |
+| wall-clock timeout | 默认 300 秒，可设最大 1 小时或显式关闭 |
 
 同一 session 的回调不会重叠，也不会在持有 session 内部锁时进入宿主代码；
 不同 session 可以并发。每路输出各有一次终止事件，两路都终止后才产生完成
