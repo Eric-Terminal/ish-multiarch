@@ -99,8 +99,11 @@ verify_backend_config() {
         echo "错误：${name} 不得携带 threaded profiling 采集代码。" >&2
         exit 1
     fi
-    configured_identity=$("$MESON" configure "$build_dir" |
-        awk '$1 == "apple_build_identity" { print $2 }')
+    # Meson 的人类可读 configure 表会按终端列宽截断长字符串；构建身份包含完整
+    # Git 哈希，必须从机器可读的 introspection 输出取值才能进行精确核验。
+    configured_identity=$("$MESON" introspect --buildoptions "$build_dir" |
+        /usr/bin/sed -n \
+            's/.*"name": "apple_build_identity", "value": "\([^"]*\)".*/\1/p')
     if [[ "$configured_identity" != "$APPLE_BUILD_IDENTITY" ]]; then
         echo "错误：${name} 的诊断构建身份与源码 revision 不一致。" >&2
         exit 1
