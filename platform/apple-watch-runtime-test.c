@@ -162,7 +162,7 @@ static bool insert_fakefs_entry(
     return inserted_path;
 }
 
-static bool create_boot_failure_root(
+static bool create_boot_failure_root_layout(
         char root[PATH_MAX],
         char data[PATH_MAX],
         char documents[PATH_MAX]) {
@@ -199,9 +199,11 @@ static bool create_boot_failure_root(
     bool wrote_shell = fwrite(
             "不是 ELF\n", 1, sizeof("不是 ELF\n") - 1, shell) ==
             sizeof("不是 ELF\n") - 1;
-    if (fclose(shell) != 0 || !wrote_shell)
-        return false;
+    return fclose(shell) == 0 && wrote_shell;
+}
 
+static bool create_boot_failure_database(const char *root) {
+    char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/meta.db", root) >=
             (int) sizeof(path))
         return false;
@@ -241,6 +243,14 @@ static bool create_boot_failure_root(
     if (sqlite3_close(database) != SQLITE_OK)
         created = false;
     return created;
+}
+
+static bool create_boot_failure_root(
+        char root[PATH_MAX],
+        char data[PATH_MAX],
+        char documents[PATH_MAX]) {
+    return create_boot_failure_root_layout(root, data, documents) &&
+            create_boot_failure_database(root);
 }
 
 enum shared_mountpoint_fixture {
@@ -308,39 +318,40 @@ static bool shared_mountpoint_start_fails_without_pid_one(
         const char *documents,
         int expected_error,
         int alternate_error) {
-    pid_t child = fork();
-    if (child < 0)
-        return false;
-    if (child == 0) {
-        reset_directory_hook(DIRECTORY_HOOK_OBSERVE, NULL);
-        int error = ish_watch_runtime_start(
-                data,
-                documents,
-                "/tmp/ish-watch-mountpoint-test-",
-                "Watch",
-                "exec /sbin/init");
-        lock(&pids_lock);
-        bool pid_one_unpublished = pid_get_task_zombie(1) == NULL;
-        unlock(&pids_lock);
-        bool passed =
-                (error == expected_error ||
-                        error == alternate_error) &&
-                ish_watch_runtime_current_phase() ==
-                        ISH_WATCH_RUNTIME_FAILED &&
-                ish_watch_runtime_last_error() == error &&
-                directory_hook_state.validation_count == 1 &&
-                directory_hook_state.release_count == 1 &&
-                directory_hook_state.released_fd_was_closed &&
-                current == NULL &&
-                pid_one_unpublished;
-        disable_directory_hook();
-        _exit(passed ? 0 : 1);
+    reset_directory_hook(DIRECTORY_HOOK_OBSERVE, NULL);
+    int error = ish_watch_runtime_start(
+            data,
+            documents,
+            "/tmp/ish-watch-mountpoint-test-",
+            "Watch",
+            "exec /sbin/init");
+    lock(&pids_lock);
+    bool pid_one_unpublished = pid_get_task_zombie(1) == NULL;
+    unlock(&pids_lock);
+    bool passed =
+            (error == expected_error || error == alternate_error) &&
+            ish_watch_runtime_current_phase() == ISH_WATCH_RUNTIME_FAILED &&
+            ish_watch_runtime_last_error() == error &&
+            directory_hook_state.validation_count == 1 &&
+            directory_hook_state.release_count == 1 &&
+            directory_hook_state.released_fd_was_closed &&
+            current == NULL &&
+            pid_one_unpublished;
+    if (!passed) {
+        fprintf(stderr,
+                "挂载点失败详情：error=%d phase=%d last=%d "
+                "validation=%u release=%u closed=%d current=%p pid1=%d\n",
+                error,
+                ish_watch_runtime_current_phase(),
+                ish_watch_runtime_last_error(),
+                directory_hook_state.validation_count,
+                directory_hook_state.release_count,
+                directory_hook_state.released_fd_was_closed,
+                (void *) current,
+                pid_one_unpublished);
     }
-
-    int status;
-    return waitpid(child, &status, 0) == child &&
-            WIFEXITED(status) &&
-            WEXITSTATUS(status) == 0;
+    disable_directory_hook();
+    return passed;
 }
 
 static void remove_boot_failure_root(
@@ -402,19 +413,32 @@ static bool test_shared_mountpoint_failure(
     char root[PATH_MAX];
     char data[PATH_MAX];
     char documents[PATH_MAX];
-    bool created = create_boot_failure_root(
+    bool created = create_boot_failure_root_layout(
             root, data, documents);
     if (!created)
         return false;
 
-    bool passed =
-            configure_shared_mountpoint_fixture(
-                    root, data, fixture) &&
-            shared_mountpoint_start_fails_without_pid_one(
-                    data,
-                    documents,
-                    expected_error,
-                    alternate_error);
+    // macOS 的系统 SQLite 在 fork 后不能复用父进程初始化状态，数据库必须在子进程首次打开。
+    pid_t child = fork();
+    if (child == 0) {
+        bool passed =
+                create_boot_failure_database(root) &&
+                configure_shared_mountpoint_fixture(
+                        root, data, fixture) &&
+                shared_mountpoint_start_fails_without_pid_one(
+                        data,
+                        documents,
+                        expected_error,
+                        alternate_error);
+        _exit(passed ? 0 : 1);
+    }
+    int status = 0;
+    bool passed = child > 0 &&
+            waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0;
+    if (!passed)
+        fprintf(stderr, "挂载点测试子进程状态：%d\n", status);
     remove_boot_failure_root(root, data, documents);
     return passed;
 }
@@ -483,6 +507,8 @@ static bool test_directory_replacement_during_validation(void) {
             waitpid(child, &status, 0) == child &&
             WIFEXITED(status) &&
             WEXITSTATUS(status) == 0;
+    if (!passed)
+        fprintf(stderr, "目录校验竞态测试子进程状态：%d\n", status);
     remove_directory_marker(documents, "replacement-only");
     (void) rmdir(documents);
     (void) rmdir(displaced);
@@ -494,7 +520,7 @@ static bool test_validated_replacement_mounts_open_directory(void) {
     char root[PATH_MAX];
     char data[PATH_MAX];
     char documents[PATH_MAX];
-    if (!create_boot_failure_root(root, data, documents))
+    if (!create_boot_failure_root_layout(root, data, documents))
         return false;
 
     char displaced[PATH_MAX];
@@ -513,6 +539,8 @@ static bool test_validated_replacement_mounts_open_directory(void) {
 
     pid_t child = fork();
     if (child == 0) {
+        if (!create_boot_failure_database(root))
+            _exit(1);
         char expected_source[PATH_MAX];
         bool source_resolved =
                 realpath(documents, expected_source) != NULL;
@@ -573,6 +601,22 @@ static bool test_validated_replacement_mounts_open_directory(void) {
                 mounted_original &&
                 current == NULL &&
                 pid_one_unpublished;
+        if (!passed) {
+            fprintf(stderr,
+                    "稳定目录失败详情：error=%d phase=%d last=%d "
+                    "mutated=%d validation=%u release=%u closed=%d "
+                    "mounted=%d current=%p pid1=%d\n",
+                    error,
+                    ish_watch_runtime_current_phase(),
+                    ish_watch_runtime_last_error(),
+                    directory_hook_state.mutation_succeeded,
+                    directory_hook_state.validation_count,
+                    directory_hook_state.release_count,
+                    directory_hook_state.released_fd_was_closed,
+                    mounted_original,
+                    (void *) current,
+                    pid_one_unpublished);
+        }
         disable_directory_hook();
         _exit(passed ? 0 : 1);
     }
@@ -583,6 +627,8 @@ static bool test_validated_replacement_mounts_open_directory(void) {
             waitpid(child, &status, 0) == child &&
             WIFEXITED(status) &&
             WEXITSTATUS(status) == 0;
+    if (!passed)
+        fprintf(stderr, "稳定挂载目录测试子进程状态：%d\n", status);
     remove_directory_marker(documents, "replacement-only");
     (void) rmdir(documents);
     remove_directory_marker(displaced, "original-only");
