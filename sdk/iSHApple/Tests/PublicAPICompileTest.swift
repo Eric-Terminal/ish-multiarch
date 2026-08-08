@@ -41,19 +41,24 @@ func compilePublicAPI(runtime: Runtime) async throws {
     removedByteCount: 0,
     replacement: []
   )
+  try guestFiles.copy(
+    path: "/root/example.txt",
+    to: "/root/copied.txt",
+    requestID: 55
+  )
   try guestFiles.rename(
     path: "/root/example.txt",
     to: "/root/renamed.txt",
-    requestID: 55
+    requestID: 56
   )
   try guestFiles.createDirectory(
     path: "/root/nested/example",
-    requestID: 56,
+    requestID: 57,
     withIntermediateDirectories: true
   )
   try guestFiles.remove(
     path: "/root/nested",
-    requestID: 57,
+    requestID: 58,
     recursively: true
   )
 

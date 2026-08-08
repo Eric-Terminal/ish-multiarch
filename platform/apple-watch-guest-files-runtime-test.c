@@ -17,6 +17,7 @@
 #include "kernel/init.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
+#include "platform/apple-guest-file-mutations.h"
 #include "sdk/iSHApple/Headers/iSHAppleGuestFile.h"
 #include "sdk/iSHApple/Headers/iSHAppleRuntime.h"
 
@@ -801,49 +802,104 @@ int main(void) {
             memcmp(buffer, "abXYef", 6) == 0,
             "edit 结果完整且读取到末尾");
 
-    struct ish_apple_guest_file_directory_entry_v1 entries[1];
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1007);
+    CHECK(ish_apple_guest_file_copy(
+            &request,
+            "/etc/agent/nested/copied.txt") == 0,
+            "copy 通过固定缓冲区原子复制普通文件");
+    memset(buffer, 0, sizeof(buffer));
+    request = guest_file_request(
+            "/etc/agent/nested/copied.txt", 1008);
+    CHECK(ish_apple_guest_file_read(
+            &request,
+            0,
+            buffer,
+            sizeof(buffer),
+            &read_count,
+            &total_size,
+            &eof) == 0 &&
+            read_count == 6 && eof == 1 &&
+            memcmp(buffer, "abXYef", 6) == 0,
+            "copy 结果与源文件一致");
+    request = guest_file_request(
+            "/etc/agent/nested/copied.txt", 1009);
+    CHECK(ish_apple_guest_file_stat(&request, &info) == 0 &&
+            (info.mode & 0777) == 0640 &&
+            info.user_id == 0 && info.group_id == 0,
+            "copy 新目标保留源文件权限与属主");
+    static const unsigned char old_copy[] = "old";
+    request = guest_file_request(
+            "/etc/agent/nested/copied.txt", 1089);
+    CHECK(ish_apple_guest_file_write(
+            &request,
+            old_copy,
+            sizeof(old_copy) - 1,
+            0640) == 0,
+            "为 copy 中途失败准备不同内容的既有目标");
+    ish_apple_guest_file_test_fail_copy_after(1, _EIO);
+    request = guest_file_request(
+            "/etc/agent/nested/example.txt", 1090);
+    CHECK(ish_apple_guest_file_copy(
+            &request,
+            "/etc/agent/nested/copied.txt") < 0,
+            "copy 写入部分临时文件后失败时不发布临时目标");
+    memset(buffer, 0, sizeof(buffer));
+    request = guest_file_request(
+            "/etc/agent/nested/copied.txt", 1091);
+    CHECK(ish_apple_guest_file_read(
+            &request,
+            0,
+            buffer,
+            sizeof(buffer),
+            &read_count,
+            &total_size,
+            &eof) == 0 &&
+            read_count == sizeof(old_copy) - 1 && eof == 1 &&
+            memcmp(buffer, old_copy, sizeof(old_copy) - 1) == 0,
+            "copy 中途失败后保留原目标内容");
+
+    struct ish_apple_guest_file_directory_entry_v1 entries[2];
     uint64_t next_cursor = 0;
     uint32_t entry_count = 0;
-    request = guest_file_request("/etc/agent/nested", 1007);
+    request = guest_file_request("/etc/agent/nested", 1010);
     CHECK(ish_apple_guest_file_list(
             &request,
             0,
             entries,
-            1,
+            2,
             &entry_count,
             &next_cursor,
             &eof) == 0 &&
-            entry_count == 1 && eof == 1 &&
-            strcmp(entries[0].name, "example.txt") == 0 &&
-            entries[0].info.size == 6,
-            "目录分页跳过点目录并返回子项 stat");
+            entry_count == 2 && eof == 1,
+            "目录分页跳过点目录且 copy 失败未留下临时节点");
 
     request = guest_file_request(
-            "/etc/agent/nested/example.txt", 1008);
+            "/etc/agent/nested/example.txt", 1011);
     CHECK(ish_apple_guest_file_rename(
             &request,
             "/etc/agent/nested/renamed.txt") == 0,
             "rename 保持 guest 命名空间语义");
-    request = guest_file_request("/etc/agent", 1009);
+    request = guest_file_request("/etc/agent", 1012);
     CHECK(ish_apple_guest_file_remove(
             &request,
             ISH_APPLE_GUEST_FILE_REMOVE_RECURSIVE) == 0,
             "递归删除只遍历 guest 目录且删除完整子树");
-    request = guest_file_request("/etc/agent", 1010);
+    request = guest_file_request("/etc/agent", 1013);
     CHECK(ish_apple_guest_file_stat(&request, &info) == _ENOENT &&
             current == NULL && no_published_children(),
             "所有公共文件操作结束后释放 prepared task");
 
-    request = guest_file_request("/", 1011);
+    request = guest_file_request("/", 1014);
     CHECK(ish_apple_guest_file_remove(
             &request,
             ISH_APPLE_GUEST_FILE_REMOVE_RECURSIVE) == 0,
             "递归删除 guest 根目录会清空内容并保留命名空间锚点");
-    request = guest_file_request("/", 1012);
+    request = guest_file_request("/", 1015);
     CHECK(ish_apple_guest_file_stat(&request, &info) == 0 &&
             (info.mode & S_IFMT) == S_IFDIR,
             "清空后 guest 根目录仍可用于后续损坏检测与恢复");
-    request = guest_file_request("/bin/sh", 1013);
+    request = guest_file_request("/bin/sh", 1016);
     CHECK(ish_apple_guest_file_stat(&request, &info) == _ENOENT &&
             current == NULL && no_published_children(),
             "清空 guest 根目录确实删除系统内容并释放 prepared task");

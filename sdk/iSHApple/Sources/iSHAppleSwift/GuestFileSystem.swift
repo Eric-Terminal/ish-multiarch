@@ -165,6 +165,27 @@ public struct GuestFileSystem: Sendable {
     try requireSuccess(status, operation: "编辑 Linux 文件")
   }
 
+  /// 在 guest 内流式复制普通文件，内存占用不随文件大小增长。
+  public func copy(
+    path: String,
+    to destination: String,
+    requestID: UInt64
+  ) throws {
+    guard !destination.utf8.contains(0) else {
+      throw BridgeError.embeddedNull(field: "destination")
+    }
+    let status = try withNativeGuestFileRequest(
+      path: path,
+      requestID: requestID,
+      followSymbolicLinks: false
+    ) { request in
+      destination.withCString { destinationPointer in
+        ish_apple_guest_file_copy(request, destinationPointer)
+      }
+    }
+    try requireSuccess(status, operation: "复制 Linux 文件")
+  }
+
   public func remove(
     path: String,
     requestID: UInt64,

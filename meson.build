@@ -335,8 +335,13 @@ if get_option('kernel') == 'ish'
         ]
     endif
 
+    libish_c_args = []
+    if host_machine.system() == 'darwin' and not meson.is_cross_build()
+        libish_c_args += ['-DISH_APPLE_GUEST_FILES_TESTING']
+    endif
     libish = library('ish', src,
         include_directories: includes,
+        c_args: libish_c_args,
         link_whole: libish_aarch64_core)
     ish = declare_dependency(
         link_with: [libish, libish_emu, libfakefs],
@@ -396,6 +401,7 @@ if get_option('kernel') == 'ish'
             apple_watch_guest_files_runtime_test = executable(
                 'apple_watch_guest_files_runtime_test',
                 'platform/apple-watch-guest-files-runtime-test.c',
+                c_args: '-DISH_APPLE_GUEST_FILES_TESTING',
                 dependencies: ish)
             test('apple_watch_guest_files_runtime',
                 apple_watch_guest_files_runtime_test, timeout: 30)

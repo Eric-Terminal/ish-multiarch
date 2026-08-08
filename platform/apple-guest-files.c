@@ -710,9 +710,101 @@ static int copy_to_end(
             return 0;
         int error = write_all(
                 task, destination, buffer, (size_t) count);
+        if (error == 0)
+            error = ish_apple_guest_file_test_after_copy_write((size_t) count);
         if (error < 0)
             return error;
     }
+}
+
+struct copy_arguments {
+    const char *destination;
+};
+
+static int copy_operation(
+        struct task *task,
+        const struct ish_apple_guest_file_request_v1 *request,
+        void *opaque) {
+    struct copy_arguments *arguments = opaque;
+    if (strcmp(request->path, arguments->destination) == 0)
+        return _EINVAL;
+
+    fd_t source = file_openat_task(
+            task,
+            AT_FDCWD_,
+            request->path,
+            O_RDONLY_ | O_NOFOLLOW_,
+            0);
+    if (source < 0)
+        return source;
+
+    struct statbuf source_stat;
+    int error = file_fstat_task(task, source, &source_stat);
+    if (error == 0 && !S_ISREG(source_stat.mode))
+        error = S_ISDIR(source_stat.mode) ? _EISDIR : _EINVAL;
+
+    struct ish_apple_guest_file_request_v1 destination_request = *request;
+    destination_request.path = arguments->destination;
+    struct replacement_file replacement = {
+        .parent = -1,
+        .temporary = -1,
+    };
+    if (error == 0)
+        error = open_replacement(
+                task,
+                &destination_request,
+                source_stat.mode & 07777,
+                false,
+                &replacement);
+
+    unsigned char *buffer = NULL;
+    if (error == 0) {
+        buffer = malloc(GUEST_FILE_COPY_CHUNK);
+        if (buffer == NULL)
+            error = _ENOMEM;
+    }
+    if (error == 0)
+        error = copy_to_end(
+                task, source, replacement.temporary, buffer);
+
+    struct statbuf current_source_stat;
+    if (error == 0)
+        error = file_fstat_task(task, source, &current_source_stat);
+    if (error == 0 && !stat_identity_equal(
+            &source_stat, &current_source_stat))
+        error = _ESTALE;
+
+    free(buffer);
+    int close_error = f_close_task(task, source);
+    if (error == 0 && close_error < 0)
+        error = close_error;
+    if (error == 0 && !replacement.target_exists)
+        error = file_fchown_task(
+                task,
+                replacement.temporary,
+                source_stat.uid,
+                source_stat.gid);
+    if (error == 0)
+        error = commit_replacement(
+                &replacement,
+                source_stat.mode & 07777,
+                replacement.target_exists);
+    if (error < 0)
+        cleanup_replacement(&replacement);
+    return error;
+}
+
+int32_t ish_apple_guest_file_copy(
+        const struct ish_apple_guest_file_request_v1 *request,
+        const char *destination) {
+    int error = validate_guest_path(destination);
+    if (error < 0)
+        return error;
+    struct copy_arguments arguments = {
+        .destination = destination,
+    };
+    return run_guest_file_operation(
+            request, copy_operation, &arguments);
 }
 
 struct edit_arguments {

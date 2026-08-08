@@ -45,6 +45,9 @@ static int32_t (*volatile guest_file_write_entry)(
         const struct ish_apple_guest_file_request_v1 *,
         const void *, uint32_t, uint32_t) =
         ish_apple_guest_file_write;
+static int32_t (*volatile guest_file_copy_entry)(
+        const struct ish_apple_guest_file_request_v1 *, const char *) =
+        ish_apple_guest_file_copy;
 static int32_t (*volatile guest_file_edit_entry)(
         const struct ish_apple_guest_file_request_v1 *, uint64_t,
         uint64_t, const void *, uint32_t) =
@@ -162,6 +165,7 @@ int main(void) {
             guest_file_list_entry == 0 ||
             guest_file_read_entry == 0 ||
             guest_file_write_entry == 0 ||
+            guest_file_copy_entry == 0 ||
             guest_file_edit_entry == 0 ||
             guest_file_remove_entry == 0 ||
             guest_file_rename_entry == 0 ||

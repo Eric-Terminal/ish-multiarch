@@ -11,6 +11,31 @@
 #include "kernel/fs.h"
 #include "kernel/task.h"
 
+#ifdef ISH_APPLE_GUEST_FILES_TESTING
+static size_t copy_failure_remaining;
+static int copy_failure_error;
+
+void ish_apple_guest_file_test_fail_copy_after(
+        size_t copied_bytes,
+        int error) {
+    copy_failure_remaining = copied_bytes;
+    copy_failure_error = error;
+}
+
+int ish_apple_guest_file_test_after_copy_write(size_t copied_bytes) {
+    if (copy_failure_error == 0)
+        return 0;
+    if (copy_failure_remaining > copied_bytes) {
+        copy_failure_remaining -= copied_bytes;
+        return 0;
+    }
+    int error = copy_failure_error;
+    copy_failure_remaining = 0;
+    copy_failure_error = 0;
+    return error;
+}
+#endif
+
 struct child_name {
     struct child_name *next;
     char value[NAME_MAX + 1];

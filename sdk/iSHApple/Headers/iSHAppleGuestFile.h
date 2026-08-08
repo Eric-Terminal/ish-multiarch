@@ -96,6 +96,14 @@ ISH_APPLE_API int32_t ish_apple_guest_file_write(
         uint32_t length,
         uint32_t mode);
 
+/*
+ * copy 在 guest 内以固定大小缓冲区流式复制普通文件，并原子替换 destination。
+ * 新文件沿用源文件 mode/uid/gid；已存在目标仍保留自身 mode/uid/gid。
+ */
+ISH_APPLE_API int32_t ish_apple_guest_file_copy(
+        const struct ish_apple_guest_file_request_v1 *ISH_APPLE_NONNULL request,
+        const char *ISH_APPLE_NONNULL destination);
+
 /* edit 流式复制未修改区间，不会把原文件整体载入宿主内存。 */
 ISH_APPLE_API int32_t ish_apple_guest_file_edit(
         const struct ish_apple_guest_file_request_v1 *ISH_APPLE_NONNULL request,

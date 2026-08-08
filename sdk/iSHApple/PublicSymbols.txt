@@ -8,6 +8,7 @@ _ish_apple_command_session_wait
 _ish_apple_command_session_write_stdin
 _ish_apple_diagnostics_clear
 _ish_apple_diagnostics_drain
+_ish_apple_guest_file_copy
 _ish_apple_guest_file_edit
 _ish_apple_guest_file_list
 _ish_apple_guest_file_mkdir

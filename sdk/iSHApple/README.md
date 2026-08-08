@@ -295,12 +295,19 @@ try files.edit(
     removedByteCount: 4,
     replacement: Array("value".utf8)
 )
+try files.copy(
+    path: "/root/project/main.c",
+    to: "/root/project/main.backup.c",
+    requestID: 203
+)
 ```
 
 `list` 使用不透明 cursor 分页，`read` 使用 64 位 offset；两者都不会要求把整
 个目录或文件一次装进内存。`write` 与 `edit` 在同目录创建临时文件，完整写入
 并同步后才以 guest rename 发布。`edit` 会流式复制未修改区间，并在提交前发现
-目标被并发替换时返回 `ESTALE`。失败只清理由本次请求创建的精确临时文件。
+目标被并发替换时返回 `ESTALE`。`copy` 在 guest 内使用固定缓冲区复制普通文件，
+并通过同目录 staging 原子替换目标；失败时保留原目标。失败只清理由本次请求创建
+的精确临时文件。
 
 删除、重命名和递归建目录同样执行 guest 操作。只读 mount 的创建、写入、删除
 和重命名由内核返回 `EROFS`；递归删除不会跟随最终符号链接，但如果用户明确对
