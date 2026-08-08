@@ -36,6 +36,12 @@
 #define has_feature __has_feature
 #endif
 
+#if !defined(__has_builtin)
+#define has_builtin(x) 0
+#else
+#define has_builtin __has_builtin
+#endif
+
 // keywords
 #define bitfield unsigned int
 #define forceinline inline __attribute__((always_inline))
@@ -49,8 +55,14 @@
 #ifndef __KERNEL__
 #define unlikely(x) __builtin_expect((x), 0)
 #define typecheck(type, x) ({type _x = x; x;})
+#if has_builtin(__builtin_assume_aligned)
+#define container_of(ptr, type, member) \
+    ((type *) __builtin_assume_aligned( \
+            (char *) (ptr) - offsetof(type, member), _Alignof(type)))
+#else
 #define container_of(ptr, type, member) \
     ((type *) ((char *) (ptr) - offsetof(type, member)))
+#endif
 #if has_attribute(fallthrough)
 #define fallthrough __attribute__((fallthrough))
 #else
