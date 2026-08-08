@@ -197,6 +197,8 @@ static inline bool gen_op(struct gen_state *state, gadget_t *gadgets, enum arg a
             arg = arg_imm;
             *imm = 1;
             break;
+        default:
+            break;
     }
     if (arg >= arg_count || gadgets[arg] == NULL) {
         UNDEFINED;
