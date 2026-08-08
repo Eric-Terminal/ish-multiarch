@@ -138,7 +138,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (error != 0) {
-        fprintf(stderr, "归档安装失败：%d\n", error);
+        fprintf(stderr, "归档安装失败：%d（阶段 %u）\n",
+                error, progress.previous_phase);
         return 1;
     }
     puts(result == ISH_APPLE_ROOTFS_SEED_INSTALLED ?

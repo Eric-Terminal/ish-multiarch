@@ -136,8 +136,10 @@ if libarchive.found()
         if host_machine.system() == 'darwin' and python3_cli.found()
             apple_rootfs_archive_probe = executable(
                 'apple-rootfs-archive-probe',
-                '../platform/apple-rootfs-archive-probe.c',
-                dependencies: [sqlite3, libz],
+                [
+                    '../platform/apple-rootfs-archive-probe.c',
+                    '../util/fchdir.c',
+                ],
                 link_with: [libfakefs],
                 include_directories: [includes])
             apple_aarch64_rootfs_test_args += [

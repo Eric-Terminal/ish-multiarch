@@ -536,13 +536,21 @@ fi
 
 if [[ -n "$ARCHIVE_INSTALL_PROBE" ]]; then
 mkdir "$TMP/archive-one" "$TMP/archive-two" "$TMP/archive-install"
+ARCHIVE_SEED="$TMP/archive-seed"
+cp -R "$OUTPUT" "$ARCHIVE_SEED"
+# 运行时只接受可随 App 发布的官方 seed；fixture 产物需改成同等合同再验证安装链。
+sed -i.bak \
+    -e 's/^source_kind=test-fixture$/source_kind=official/' \
+    -e 's|^source_url=test-fixture://synthetic$|source_url=https://example.invalid/test-fixture|' \
+    "$ARCHIVE_SEED/rootfs-manifest.txt"
+rm "$ARCHIVE_SEED/rootfs-manifest.txt.bak"
 ARCHIVE_ONE="$TMP/archive-one/rootfs.tar.gz"
 ARCHIVE_TWO="$TMP/archive-two/rootfs.tar.gz"
 METADATA_ONE="$TMP/archive-one/rootfs.json"
 METADATA_TWO="$TMP/archive-two/rootfs.json"
-"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$OUTPUT" "$ARCHIVE_ONE" \
+"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$ARCHIVE_SEED" "$ARCHIVE_ONE" \
     --metadata "$METADATA_ONE"
-"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$OUTPUT" "$ARCHIVE_TWO" \
+"$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$ARCHIVE_SEED" "$ARCHIVE_TWO" \
     --metadata "$METADATA_TWO"
 if ! cmp -s "$ARCHIVE_ONE" "$ARCHIVE_TWO" ||
         ! cmp -s "$METADATA_ONE" "$METADATA_TWO"; then
@@ -627,7 +635,7 @@ MALICIOUS_RESULT=$("$ARCHIVE_INSTALL_PROBE" "$MALICIOUS_ARCHIVE" \
         ! -e "$TMP/escape" ]]
 
 INVALID_SEED="$TMP/archive-invalid-seed"
-cp -R "$OUTPUT" "$INVALID_SEED"
+cp -R "$ARCHIVE_SEED" "$INVALID_SEED"
 ln -s /tmp "$INVALID_SEED/unexpected-link"
 if "$PYTHON3_BIN" "$ARCHIVE_PACKAGER" "$INVALID_SEED" \
         "$TMP/invalid.tar.gz" --metadata "$TMP/invalid.json" \

@@ -139,7 +139,7 @@ fakefs_dependencies = [sqlite3]
 if host_machine.system() == 'darwin'
     libresolv = cc.find_library('resolv')
     libz = cc.find_library('z')
-    dependencies += [libresolv, libz]
+    dependencies += [libresolv]
     fakefs_dependencies += [libz]
 endif
 
