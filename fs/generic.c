@@ -7,6 +7,7 @@
 #include "fs/inode.h"
 #include "fs/path.h"
 #include "fs/dev.h"
+#include "kernel/calls.h"
 #include "kernel/task.h"
 #include "kernel/errno.h"
 

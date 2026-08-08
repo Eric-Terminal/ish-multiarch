@@ -52,6 +52,8 @@ static void free_child_names(struct child_name *head) {
 }
 
 static int remove_path_recursive(struct task *task, const char *path) {
+    if (strcmp(path, "/") != 0 && contains_mount_point(path))
+        return _EBUSY;
     struct statbuf stat;
     int error = file_statat_task(
             task,
@@ -107,12 +109,17 @@ static int remove_path_recursive(struct task *task, const char *path) {
             break;
         }
         error = remove_path_recursive(task, child_path);
-        if (error == _ENOENT)
+        /* 清空 / 时挂载点保留为命名空间锚点，但其中内容仍按真实挂载语义处理。 */
+        if (error == _ENOENT ||
+                (parent_length == 1 && error == _EBUSY))
             error = 0;
     }
     free_child_names(names.head);
     if (error < 0)
         return error;
+    /* 根目录本身是 guest 命名空间锚点；递归删除 / 表示清空其内容。 */
+    if (strcmp(path, "/") == 0)
+        return 0;
     return file_unlinkat_task(
             task, AT_FDCWD_, path, true);
 }

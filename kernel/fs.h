@@ -330,6 +330,7 @@ struct fs_ops {
 };
 
 struct mount *find_mount_and_trim_path(char *path);
+bool contains_mount_point(const char *path);
 
 // adhoc fs
 struct fd *adhoc_fd_create(const struct fd_ops *ops);

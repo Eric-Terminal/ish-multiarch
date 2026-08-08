@@ -834,6 +834,31 @@ int main(void) {
             current == NULL && no_published_children(),
             "所有公共文件操作结束后释放 prepared task");
 
+    request = guest_file_request("/", 1011);
+    CHECK(ish_apple_guest_file_remove(
+            &request,
+            ISH_APPLE_GUEST_FILE_REMOVE_RECURSIVE) == 0,
+            "递归删除 guest 根目录会清空内容并保留命名空间锚点");
+    request = guest_file_request("/", 1012);
+    CHECK(ish_apple_guest_file_stat(&request, &info) == 0 &&
+            (info.mode & S_IFMT) == S_IFDIR,
+            "清空后 guest 根目录仍可用于后续损坏检测与恢复");
+    request = guest_file_request("/bin/sh", 1013);
+    CHECK(ish_apple_guest_file_stat(&request, &info) == _ENOENT &&
+            current == NULL && no_published_children(),
+            "清空 guest 根目录确实删除系统内容并释放 prepared task");
+    memset(buffer, 0, sizeof(buffer));
+    CHECK(snprintf(
+            path,
+            sizeof(path),
+            "%s/from-host.txt",
+            fixture.documents) < (int) sizeof(path),
+            "生成根目录清空后的宿主挂载检查路径");
+    length = read_host_path(path, buffer, sizeof(buffer));
+    CHECK(length == (ssize_t) (sizeof(shared_from_host) - 1) &&
+            memcmp(buffer, shared_from_host, sizeof(shared_from_host) - 1) == 0,
+            "清空 guest 根目录不会递归删除独立挂载中的用户数据");
+
     fixture.runtime_stopped = stop_runtime();
     CHECK(fixture.runtime_stopped, "测试结束时停止 PID 1");
     destroy_fixture(&fixture);

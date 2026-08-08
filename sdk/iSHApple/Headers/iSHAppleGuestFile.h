@@ -104,6 +104,7 @@ ISH_APPLE_API int32_t ish_apple_guest_file_edit(
         const void *ISH_APPLE_NULLABLE replacement,
         uint32_t replacement_length);
 
+/* 递归删除 "/" 会清空 guest 根目录内容，但保留根目录命名空间锚点。 */
 ISH_APPLE_API int32_t ish_apple_guest_file_remove(
         const struct ish_apple_guest_file_request_v1 *ISH_APPLE_NONNULL request,
         uint32_t flags);
