@@ -14,7 +14,10 @@
 typedef uint32_t dev_t_;
 
 static inline dev_t_ dev_make(int major, int minor) {
-    return ((minor & 0xfff00) << 12) | (major << 8) | (minor & 0xff);
+    dev_t_ major_bits = (dev_t_) major;
+    dev_t_ minor_bits = (dev_t_) minor;
+    return ((minor_bits & UINT32_C(0xfff00)) << 12) |
+            (major_bits << 8) | (minor_bits & UINT32_C(0xff));
 }
 static inline int dev_major(dev_t_ dev) {
     return (dev & 0xfff00) >> 8;
