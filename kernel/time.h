@@ -39,15 +39,15 @@ static inline clock_t_ clock_from_timeval(struct timeval_ timeval) {
 
 static inline struct timespec convert_timespec(struct timespec_ t) {
     struct timespec ts;
-    ts.tv_sec = t.sec;
-    ts.tv_nsec = t.nsec;
+    ts.tv_sec = (time_t) (int32_t) t.sec;
+    ts.tv_nsec = (long) t.nsec;
     return ts;
 }
 
 static inline struct timespec convert_timeval(struct timeval_ t) {
     struct timespec ts;
-    ts.tv_sec = t.sec;
-    ts.tv_nsec = t.usec * 1000;
+    ts.tv_sec = (time_t) (int32_t) t.sec;
+    ts.tv_nsec = (long) t.usec * 1000L;
     return ts;
 }
 
