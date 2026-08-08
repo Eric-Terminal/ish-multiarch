@@ -528,7 +528,7 @@ int32_t ish_apple_mount_list(
         };
         index++;
     }
-    int result = capacity < *count_out ? _ENOSPC : 0;
+    int result = entries != NULL && capacity < *count_out ? _ENOSPC : 0;
     unlock(&apple_mount_lock);
     return result;
 }

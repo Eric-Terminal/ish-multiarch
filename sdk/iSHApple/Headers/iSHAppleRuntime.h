@@ -76,7 +76,7 @@ ISH_APPLE_API int32_t ish_apple_runtime_start_v2(
 ISH_APPLE_API int32_t ish_apple_runtime_current_phase(void);
 ISH_APPLE_API int32_t ish_apple_runtime_last_error(void);
 ISH_APPLE_API int32_t ish_apple_runtime_copy_capabilities(
-        struct ish_apple_runtime_capabilities_v1 *ISH_APPLE_NONNULL capabilities_out);
+        struct ish_apple_runtime_capabilities_v1 *ISH_APPLE_NULLABLE capabilities_out);
 
 ISH_APPLE_EXTERN_C_END
 

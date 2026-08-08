@@ -50,7 +50,7 @@ struct ish_apple_terminal_result_v1 {
 
 ISH_APPLE_API int32_t ish_apple_terminal_session_start(
         const struct ish_apple_terminal_spec_v1 *ISH_APPLE_NONNULL spec,
-        ish_apple_terminal_session *ISH_APPLE_NULLABLE *ISH_APPLE_NONNULL session_out);
+        ish_apple_terminal_session *ISH_APPLE_NULLABLE *ISH_APPLE_NULLABLE session_out);
 ISH_APPLE_API ish_apple_terminal_session *ISH_APPLE_NULLABLE
 ish_apple_terminal_session_retain(
         ish_apple_terminal_session *ISH_APPLE_NULLABLE session);
