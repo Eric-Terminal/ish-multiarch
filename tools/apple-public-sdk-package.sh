@@ -113,8 +113,8 @@ verify_public_symbols() {
     fi
     if ! diff -u \
             <(LC_ALL=C sort "$PUBLIC_SYMBOLS") \
-            <(xcrun nm -g "$archive" |
-                awk 'NF >= 3 && $2 != "U" { print $3 }' |
+            <(xcrun nm -gjU "$archive" |
+                awk '/^_/ { print }' |
                 LC_ALL=C sort -u); then
         echo "错误：${name} 含有公共清单之外的全局定义。" >&2
         exit 1
