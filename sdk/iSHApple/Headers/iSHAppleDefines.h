@@ -5,7 +5,7 @@
 
 #include "iSHAppleLinuxErrno.h"
 
-#define ISH_APPLE_ABI_VERSION UINT32_C(1)
+#define ISH_APPLE_ABI_VERSION 1U
 
 #if defined(__GNUC__)
 #define ISH_APPLE_API __attribute__((visibility("default")))

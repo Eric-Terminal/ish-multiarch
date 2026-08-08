@@ -138,6 +138,10 @@ public actor RuntimeMounts {
         code: status
       )
     }
-    return String(cString: buffer)
+    let terminator = buffer.firstIndex(of: 0) ?? buffer.endIndex
+    return String(
+      decoding: buffer[..<terminator].map { UInt8(bitPattern: $0) },
+      as: UTF8.self
+    )
   }
 }
