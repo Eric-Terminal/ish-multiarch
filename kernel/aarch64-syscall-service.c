@@ -12,6 +12,7 @@
 #include "fs/tty.h"
 #include "guest/aarch64/linux-file-abi.h"
 #include "guest/aarch64/linux-futex-abi.h"
+#include "guest/aarch64/linux-process.h"
 #include "guest/aarch64/linux-process-abi.h"
 #include "guest/aarch64/linux-resource-abi.h"
 #include "guest/aarch64/linux-signal-abi.h"
@@ -217,6 +218,9 @@ static void record_unsupported_syscall(
         struct task *task,
         const struct guest_linux_syscall *syscall,
         int32_t linux_error) {
+    // 独立系统调用测试没有绑定完整 AArch64 进程，不能解引用仅在真实执行器中存在的上下文。
+    if (task == NULL || task->aarch64_process == NULL)
+        return;
     qword_t program_counter =
             aarch64_linux_process_program_counter(
                     task->aarch64_process);
