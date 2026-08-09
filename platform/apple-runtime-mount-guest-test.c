@@ -126,6 +126,16 @@ int main(void) {
         return 1;
     }
 
+    struct fd *mounted_directory = generic_open(
+            "/mnt/etos/read-write", O_RDONLY_ | O_DIRECTORY_, 0);
+    char mounted_guest_path[MAX_PATH] = {};
+    CHECK(!IS_ERR(mounted_directory) &&
+            generic_getpath(mounted_directory, mounted_guest_path) == 0 &&
+            strcmp(mounted_guest_path, "/mnt/etos/read-write") == 0,
+            "fd mount 的 getpath 只返回 guest 路径而不泄漏宿主目录");
+    if (!IS_ERR(mounted_directory))
+        fd_close(mounted_directory);
+
     struct fd *guest_file = generic_open(
             "/mnt/etos/read-only/original.txt", O_RDONLY_, 0);
     char guest_bytes[sizeof(original)] = {};

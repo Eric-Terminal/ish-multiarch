@@ -393,10 +393,21 @@ int realfs_getpath(struct fd *fd, char *buf) {
     int err = getpath(fd->real_fd, buf);
     if (err < 0)
         return err;
-    if (strcmp(fd->mount->source, "/") != 0 || strcmp(buf, "/") == 0) {
-        size_t source_len = strlen(fd->mount->source);
-        memmove(buf, buf + source_len, MAX_PATH - source_len);
+    char root[MAX_PATH + 1];
+    err = getpath(fd->mount->root_fd, root);
+    if (err < 0)
+        return err;
+    if (strcmp(root, "/") == 0)
+        return 0;
+
+    size_t root_len = strlen(root);
+    if (strcmp(buf, root) == 0) {
+        buf[0] = '\0';
+        return 0;
     }
+    if (strncmp(buf, root, root_len) != 0 || buf[root_len] != '/')
+        return _ENOENT;
+    memmove(buf, buf + root_len, strlen(buf + root_len) + 1);
     return 0;
 }
 
