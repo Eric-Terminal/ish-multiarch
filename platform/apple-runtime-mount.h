@@ -19,4 +19,8 @@ int ish_apple_mount_activate_startup(struct task *task)
 void ish_apple_mount_finish_startup(int success)
         __attribute__((visibility("hidden")));
 
+/* runtime 已卸载 guest 文件系统后释放宿主 mount 注册；仍有 lease 时拒绝。 */
+int ish_apple_mount_reset_runtime(void)
+        __attribute__((visibility("hidden")));
+
 #endif

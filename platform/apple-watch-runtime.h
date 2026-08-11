@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-// Watch runtime 与现有 iSH 全局内核状态一致：每个宿主进程只能启动一次。
+// Watch runtime 在任一时刻只允许一个全局 guest；stop 完成后可以再次启动。
 enum ish_watch_runtime_phase {
     ISH_WATCH_RUNTIME_IDLE = 0,
     ISH_WATCH_RUNTIME_PREPARING = 1,
@@ -45,6 +45,7 @@ int ish_watch_runtime_start(
         const char *socket_prefix,
         const char *hostname,
         const char *boot_command);
+int ish_watch_runtime_stop(void);
 
 int ish_watch_runtime_current_phase(void);
 int ish_watch_runtime_last_error(void);

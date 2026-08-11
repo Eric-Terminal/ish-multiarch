@@ -8,6 +8,8 @@ static int32_t (*volatile runtime_phase_entry)(void) =
 static int32_t (*volatile runtime_start_v2_entry)(
         const struct ish_apple_runtime_spec_v2 *) =
         ish_apple_runtime_start_v2;
+static int32_t (*volatile runtime_stop_entry)(void) =
+        ish_apple_runtime_stop;
 static int32_t (*volatile runtime_error_entry)(void) =
         ish_apple_runtime_last_error;
 static int32_t (*volatile runtime_capabilities_entry)(
@@ -154,6 +156,7 @@ int main(void) {
      */
     return runtime_start_entry == 0 ||
             runtime_start_v2_entry == 0 ||
+            runtime_stop_entry == 0 ||
             runtime_phase_entry == 0 ||
             runtime_error_entry == 0 ||
             runtime_capabilities_entry == 0 ||

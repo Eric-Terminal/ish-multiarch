@@ -547,6 +547,7 @@ struct task *task_create_(struct task *parent) {
 
     task_thread_store(task, zero_init(pthread_t));
     atomic_init(&task->start_ready, false);
+    atomic_init(&task->host_thread_exited, false);
     task->threadid = 0;
     task->cpu.poked_ptr = NULL;
     task->cpu._poked = false;

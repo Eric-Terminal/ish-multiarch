@@ -7,6 +7,8 @@ static int32_t (*volatile runtime_start_entry)(
         ish_apple_runtime_start;
 static int32_t (*volatile runtime_phase_entry)(void) =
         ish_apple_runtime_current_phase;
+static int32_t (*volatile runtime_stop_entry)(void) =
+        ish_apple_runtime_stop;
 static int32_t (*volatile runtime_capabilities_entry)(
         struct ish_apple_runtime_capabilities_v1 *) =
         ish_apple_runtime_copy_capabilities;
@@ -94,6 +96,7 @@ int main(void) {
     // 保留真实入口的链接依赖，但验证程序本身不启动 guest。
     return runtime_start_entry == NULL ||
             runtime_start_v2_entry == NULL ||
+            runtime_stop_entry == NULL ||
             runtime_phase_entry == NULL ||
             runtime_capabilities_entry == NULL ||
             mount_add_entry == NULL ||

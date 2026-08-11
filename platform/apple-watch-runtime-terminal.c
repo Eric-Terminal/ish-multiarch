@@ -804,6 +804,26 @@ void ish_watch_terminal_install_console(void) {
     set_console_device(TTY_CONSOLE_MAJOR, WATCH_CONSOLE_NUMBER);
 }
 
+void ish_watch_terminal_reset_runtime(void) {
+    lock(&sessions_lock);
+    struct watch_session_chunk *chunk = session_chunks;
+    session_chunks = NULL;
+    while (chunk != NULL) {
+        struct watch_session_chunk *next = chunk->next;
+        for (size_t index = 0;
+                index < WATCH_SESSION_CHUNK_CAPACITY; index++)
+            session_reset_locked(&chunk->sessions[index]);
+        free(chunk);
+        chunk = next;
+    }
+    unlock(&sessions_lock);
+
+    lock(&output_lock);
+    free(console_output.bytes);
+    console_output = (struct watch_output_ring) {};
+    unlock(&output_lock);
+}
+
 void ish_watch_session_handle_exit(
         struct tgroup *group,
         int32_t wait_status,

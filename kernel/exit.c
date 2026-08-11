@@ -132,6 +132,26 @@ static void release_detached_tty(struct tty *tty) {
     unlock(&ttys_lock);
 }
 
+int reap_stopped_first_process(void) {
+    lock(&pids_lock);
+    struct task *init = pid_get_task_zombie(1);
+    if (init == NULL) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    if (init->parent != NULL || !init->exiting ||
+            !list_empty(&init->group->threads) ||
+            !atomic_load_explicit(
+                    &init->host_thread_exited, memory_order_acquire)) {
+        unlock(&pids_lock);
+        return _EAGAIN;
+    }
+    struct tty *tty = release_reaped_task_locked(init);
+    unlock(&pids_lock);
+    release_detached_tty(tty);
+    return 0;
+}
+
 static struct task *find_new_parent(struct task *task) {
     struct task *new_parent;
     list_for_each_entry(&task->group->threads, new_parent, group_links) {
@@ -256,6 +276,13 @@ noreturn void do_exit(int status) {
     if (group_dead && auto_reap)
         reaped_tty = release_reaped_task_locked(leader);
     unlock(&pids_lock);
+    // init 没有父进程代为 wait。先发布“不会再访问 task”，宿主才能安全释放空壳。
+    struct task *stopped_init = group_dead && !auto_reap &&
+            leader->parent == NULL ? leader : NULL;
+    if (stopped_init != NULL)
+        atomic_store_explicit(
+                &stopped_init->host_thread_exited, true,
+                memory_order_release);
     // 此线程不再执行 guest 工作；auto-reap 还可能已经释放 TLS 指向的 task。
     current = NULL;
     release_detached_tty(reaped_tty);

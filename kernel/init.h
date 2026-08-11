@@ -26,6 +26,8 @@ int commit_prepared_process(void);
 // 子进程专用入口额外校验当前事务类型。
 void cancel_new_init_child(void);
 int commit_new_init_child(void);
+// runtime 停止后回收无父进程的 PID 1；执行线程尚未完全退出时返回 EAGAIN。
+int reap_stopped_first_process(void);
 // do_exit 用这对入口把 PID 1 的 exiting 发布与上述事务串行。
 bool init_child_lifecycle_begin_exit(struct task *task);
 void init_child_lifecycle_end_exit(bool held);

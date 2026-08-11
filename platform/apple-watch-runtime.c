@@ -55,7 +55,10 @@ _Static_assert(
 static _Atomic int runtime_phase = ISH_WATCH_RUNTIME_IDLE;
 static _Atomic int runtime_error;
 static _Atomic bool runtime_accepts_sessions;
-static const char *runtime_documents_directory;
+static char *runtime_documents_directory;
+static char *runtime_hostname;
+static char *runtime_socket_prefix;
+static lock_t runtime_stop_lock = LOCK_INITIALIZER;
 #ifdef ISH_APPLE_WATCH_RUNTIME_TESTING
 static ish_watch_runtime_test_directory_hook runtime_test_directory_hook;
 #endif
@@ -75,6 +78,32 @@ int ish_watch_runtime_current_phase(void) {
 
 int ish_watch_runtime_last_error(void) {
     return atomic_load_explicit(&runtime_error, memory_order_acquire);
+}
+
+static int runtime_unmount_all(void) {
+    lock(&mounts_lock);
+    int result = 0;
+    struct mount *mount, *temporary;
+    list_for_each_entry_safe(&mounts, mount, temporary, mounts) {
+        int error = mount_remove(mount);
+        if (result == 0 && error < 0)
+            result = error;
+    }
+    unlock(&mounts_lock);
+    return result;
+}
+
+static void runtime_release_host_configuration(void) {
+    extern const char *uname_hostname_override;
+    uname_hostname_override = NULL;
+    sock_tmp_prefix = "/tmp/ishsock";
+    get_documents_directory = NULL;
+    free(runtime_hostname);
+    free(runtime_socket_prefix);
+    free(runtime_documents_directory);
+    runtime_hostname = NULL;
+    runtime_socket_prefix = NULL;
+    runtime_documents_directory = NULL;
 }
 
 static int runtime_fail(int error) {
@@ -370,6 +399,7 @@ int ish_watch_runtime_start(
     }
     atomic_store_explicit(
             &runtime_accepts_sessions, false, memory_order_release);
+    atomic_store_explicit(&runtime_error, 0, memory_order_release);
 
     char *owned_socket_prefix = strdup(socket_prefix);
     if (owned_socket_prefix == NULL) {
@@ -482,6 +512,8 @@ int ish_watch_runtime_start(
     uname_hostname_override = owned_hostname;
     sock_tmp_prefix = owned_socket_prefix;
     runtime_documents_directory = owned_documents_directory;
+    runtime_hostname = owned_hostname;
+    runtime_socket_prefix = owned_socket_prefix;
     get_documents_directory = watch_get_documents_directory;
     expected = ISH_WATCH_RUNTIME_PREPARING;
     if (!atomic_compare_exchange_strong_explicit(
@@ -501,5 +533,95 @@ int ish_watch_runtime_start(
 
     // DNS 暂不可用不应阻止离线 shell；PID 1 发布后才能取得其 fs 快照。
     (void) ish_apple_guest_configure_dns_pid(1);
+    return 0;
+}
+
+int ish_watch_runtime_stop(void) {
+    lock(&runtime_stop_lock);
+    int phase = atomic_load_explicit(
+            &runtime_phase, memory_order_acquire);
+    if (phase == ISH_WATCH_RUNTIME_IDLE) {
+        unlock(&runtime_stop_lock);
+        return 0;
+    }
+    if (phase == ISH_WATCH_RUNTIME_PREPARING) {
+        unlock(&runtime_stop_lock);
+        return _EBUSY;
+    }
+
+    atomic_store_explicit(
+            &runtime_accepts_sessions, false, memory_order_release);
+    if (phase == ISH_WATCH_RUNTIME_RUNNING) {
+        lock(&pids_lock);
+        struct task *init = pid_get_task(1);
+        if (init != NULL)
+            send_signal_locked(init, SIGKILL_, SIGINFO_NIL);
+        unlock(&pids_lock);
+    } else if (phase != ISH_WATCH_RUNTIME_FAILED &&
+            phase != ISH_WATCH_RUNTIME_STOPPED) {
+        unlock(&runtime_stop_lock);
+        return _ESHUTDOWN;
+    }
+
+    if (phase == ISH_WATCH_RUNTIME_RUNNING) {
+        bool stopped = false;
+        for (unsigned attempt = 0; attempt < 10000; attempt++) {
+            if (atomic_load_explicit(
+                    &runtime_phase, memory_order_acquire) ==
+                    ISH_WATCH_RUNTIME_STOPPED) {
+                stopped = true;
+                break;
+            }
+            usleep(1000);
+        }
+        if (!stopped) {
+            unlock(&runtime_stop_lock);
+            return _ETIMEDOUT;
+        }
+    }
+
+    if (phase == ISH_WATCH_RUNTIME_RUNNING ||
+            phase == ISH_WATCH_RUNTIME_STOPPED) {
+        int reap_error = _EAGAIN;
+        for (unsigned attempt = 0;
+                attempt < 10000 && reap_error == _EAGAIN; attempt++) {
+            reap_error = reap_stopped_first_process();
+            if (reap_error == _EAGAIN)
+                usleep(1000);
+        }
+        if (reap_error < 0 && reap_error != _ESRCH) {
+            unlock(&runtime_stop_lock);
+            return reap_error;
+        }
+    }
+
+    int unmount_error = runtime_unmount_all();
+    if (unmount_error < 0) {
+        unlock(&runtime_stop_lock);
+        return unmount_error;
+    }
+
+    int mount_error = _EBUSY;
+    for (unsigned attempt = 0;
+            attempt < 5000 && mount_error == _EBUSY; attempt++) {
+        mount_error = ish_apple_mount_reset_runtime();
+        if (mount_error == _EBUSY)
+            usleep(1000);
+    }
+    if (mount_error < 0) {
+        atomic_store_explicit(
+                &runtime_phase, ISH_WATCH_RUNTIME_STOPPED,
+                memory_order_release);
+        unlock(&runtime_stop_lock);
+        return mount_error;
+    }
+
+    ish_watch_terminal_reset_runtime();
+    runtime_release_host_configuration();
+    atomic_store_explicit(&runtime_error, 0, memory_order_release);
+    atomic_store_explicit(
+            &runtime_phase, ISH_WATCH_RUNTIME_IDLE,
+            memory_order_release);
+    unlock(&runtime_stop_lock);
     return 0;
 }

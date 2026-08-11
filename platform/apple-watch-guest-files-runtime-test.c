@@ -360,28 +360,6 @@ static bool no_published_children(void) {
     return absent;
 }
 
-static bool stop_runtime(void) {
-    lock(&pids_lock);
-    struct task *init = pid_get_task(1);
-    if (init != NULL)
-        send_signal_locked(init, SIGKILL_, SIGINFO_NIL);
-    unlock(&pids_lock);
-    if (init == NULL)
-        return false;
-
-    for (unsigned attempt = 0; attempt < 5000; attempt++) {
-        /*
-         * PID 1 没有父进程可回收，停机后会保留无资源的进程表记录；
-         * STOPPED 在 halt_system 已卸载文件系统之后发布。
-         */
-        if (ish_watch_runtime_current_phase() ==
-                ISH_WATCH_RUNTIME_STOPPED)
-            return true;
-        usleep(1000);
-    }
-    return false;
-}
-
 static void remove_if_present(const char *path) {
     if (unlink(path) < 0)
         (void) path;
@@ -890,6 +868,22 @@ int main(void) {
             current == NULL && no_published_children(),
             "所有公共文件操作结束后释放 prepared task");
 
+    fixture.runtime_stopped = ish_apple_runtime_stop() == 0;
+    CHECK(fixture.runtime_stopped &&
+            ish_watch_runtime_current_phase() == ISH_WATCH_RUNTIME_IDLE,
+            "公共 stop 应完整回收首轮 runtime");
+    int restart_error = ish_watch_runtime_start(
+            fixture.data,
+            fixture.documents,
+            socket_prefix,
+            "Watch-Test-Restarted",
+            "ignored");
+    fixture.runtime_stopped = restart_error != 0;
+    CHECK(restart_error == 0 &&
+            ish_watch_runtime_current_phase() ==
+                    ISH_WATCH_RUNTIME_RUNNING,
+            "同一宿主进程中应能重新启动完整 guest runtime");
+
     request = guest_file_request("/", 1014);
     CHECK(ish_apple_guest_file_remove(
             &request,
@@ -915,8 +909,11 @@ int main(void) {
             memcmp(buffer, shared_from_host, sizeof(shared_from_host) - 1) == 0,
             "清空 guest 根目录不会递归删除独立挂载中的用户数据");
 
-    fixture.runtime_stopped = stop_runtime();
-    CHECK(fixture.runtime_stopped, "测试结束时停止 PID 1");
+    fixture.runtime_stopped = ish_apple_runtime_stop() == 0;
+    CHECK(fixture.runtime_stopped,
+            "公共 stop 应停止 PID 1 并回到可再次启动的空闲态");
+    CHECK(ish_watch_runtime_current_phase() == ISH_WATCH_RUNTIME_IDLE,
+            "公共 stop 完成后 runtime 应回到 IDLE");
     destroy_fixture(&fixture);
 
     if (failures != 0) {

@@ -413,6 +413,25 @@ void ish_apple_mount_finish_startup(int success) {
     unlock(&apple_mount_lock);
 }
 
+int ish_apple_mount_reset_runtime(void) {
+    lock(&apple_mount_lock);
+    struct apple_mount_entry *entry;
+    list_for_each_entry(&apple_mount_entries, entry, links) {
+        if (entry->active_leases != 0) {
+            unlock(&apple_mount_lock);
+            return _EBUSY;
+        }
+    }
+
+    struct apple_mount_entry *temporary;
+    list_for_each_entry_safe(
+            &apple_mount_entries, entry, temporary, links) {
+        remove_and_destroy_entry_locked(entry);
+    }
+    unlock(&apple_mount_lock);
+    return 0;
+}
+
 int32_t ish_apple_mount_add(
         const struct ish_apple_mount_spec_v1 *spec) {
     int error = validate_mount_spec(spec);

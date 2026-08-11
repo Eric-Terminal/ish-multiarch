@@ -65,14 +65,16 @@ struct ish_apple_runtime_capabilities_v1 {
 };
 
 /*
- * 每个宿主进程只能启动一个 runtime。所有路径在返回前复制或打开，成功后
- * 同一 Linux runtime 同时服务可见终端和结构化命令。
+ * 同一时刻每个宿主进程只能启动一个 runtime。所有路径在返回前复制或打开，
+ * 成功后同一 Linux runtime 同时服务可见终端和结构化命令。
  */
 ISH_APPLE_API int32_t ish_apple_runtime_start(
         const struct ish_apple_runtime_spec_v1 *ISH_APPLE_NONNULL spec);
 /* v2 会在 PID 1 接受作业前原子注册并挂载 mounts。 */
 ISH_APPLE_API int32_t ish_apple_runtime_start_v2(
         const struct ish_apple_runtime_spec_v2 *ISH_APPLE_NONNULL spec);
+/* 停止 guest、释放挂载与终端句柄；成功后可在同一宿主进程再次 start。 */
+ISH_APPLE_API int32_t ish_apple_runtime_stop(void);
 ISH_APPLE_API int32_t ish_apple_runtime_current_phase(void);
 ISH_APPLE_API int32_t ish_apple_runtime_last_error(void);
 ISH_APPLE_API int32_t ish_apple_runtime_copy_capabilities(

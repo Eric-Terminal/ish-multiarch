@@ -6,6 +6,8 @@ static int (*volatile start_entry)(
         ish_watch_runtime_start;
 static int (*volatile phase_entry)(void) =
         ish_watch_runtime_current_phase;
+static int (*volatile stop_entry)(void) =
+        ish_watch_runtime_stop;
 static int (*volatile error_entry)(void) =
         ish_watch_runtime_last_error;
 static size_t (*volatile output_entry)(
@@ -41,7 +43,7 @@ static int (*volatile session_close_entry)(ish_watch_session_id) =
 
 int main(void) {
     // 只引用公开外观，验证静态归档能抽取它及其传递依赖。
-    return start_entry == NULL || phase_entry == NULL ||
+    return start_entry == NULL || stop_entry == NULL || phase_entry == NULL ||
             error_entry == NULL || output_entry == NULL ||
             input_entry == NULL || window_entry == NULL ||
             guest_file_read_entry == NULL ||

@@ -22,6 +22,8 @@ int exec_shell_command(
         size_t command_length) __attribute__((visibility("hidden")));
 void ish_watch_terminal_install_console(void)
         __attribute__((visibility("hidden")));
+void ish_watch_terminal_reset_runtime(void)
+        __attribute__((visibility("hidden")));
 void ish_watch_session_handle_exit(
         struct tgroup *group,
         int32_t wait_status,

@@ -126,6 +126,10 @@ int32_t ish_apple_runtime_start_v2(
     return error;
 }
 
+int32_t ish_apple_runtime_stop(void) {
+    return (int32_t) ish_watch_runtime_stop();
+}
+
 int32_t ish_apple_runtime_current_phase(void) {
     return (int32_t) ish_watch_runtime_current_phase();
 }

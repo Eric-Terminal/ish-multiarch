@@ -45,6 +45,7 @@ struct task {
     struct mem *mem; // pointer to mm.mem, for convenience
     pthread_t thread; // 并发访问必须使用 task_thread_load/store。
     atomic_bool start_ready; // host 线程在完整发布前等待。
+    atomic_bool host_thread_exited; // 允许宿主在不 join detached 线程的前提下安全回收 init。
     uint64_t threadid;
 
     struct tgroup *group; // immutable

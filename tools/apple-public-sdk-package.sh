@@ -68,6 +68,7 @@ verify_public_symbols() {
     for required in \
             ish_apple_runtime_start \
             ish_apple_runtime_start_v2 \
+            ish_apple_runtime_stop \
             ish_apple_runtime_current_phase \
             ish_apple_runtime_copy_capabilities \
             ish_apple_runtime_last_error \
