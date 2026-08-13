@@ -53,7 +53,13 @@ static int test_event_fields_and_filtering(void) {
                 ISH_APPLE_DIAGNOSTIC_SCOPE_COMMAND,
         .host_diagnostic_request_id = command_id,
     };
-    struct task task = {.group = &group};
+    struct task task = {
+        .group = &group,
+        .pid = 123,
+        .tgid = 120,
+    };
+    lock_init(&task.general_lock);
+    strcpy(task.comm, "python3");
     ish_apple_diagnostics_record_undefined_instruction(
             &task,
             UINT64_C(0x400100),
@@ -97,6 +103,9 @@ static int test_event_fields_and_filtering(void) {
             events[0].guest_pc == UINT64_C(0x400100) &&
             events[0].opcode == UINT32_C(0xffffffff) &&
             events[0].signal == SIGILL_ &&
+            events[0].guest_process_id == 123 &&
+            events[0].guest_thread_group_id == 120 &&
+            strcmp(events[0].process_name, "python3") == 0 &&
             events[0].backend == ISH_APPLE_DIAGNOSTIC_BACKEND_C &&
             events[0].build_identity[0] != '\0',
             "未定义指令事件保留完整诊断字段");
@@ -127,6 +136,7 @@ static int test_event_fields_and_filtering(void) {
                     ISH_APPLE_DIAGNOSTIC_CATEGORY_FILESYSTEM &&
             events[0].request_id == guest_file_id,
             "文件系统事件与命令上下文严格隔离");
+    lock_destroy(&task.general_lock);
     return 0;
 }
 

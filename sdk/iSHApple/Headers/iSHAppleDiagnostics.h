@@ -27,6 +27,7 @@
 
 #define ISH_APPLE_DIAGNOSTIC_SYSCALL_NAME_BYTES_MAX 32U
 #define ISH_APPLE_DIAGNOSTIC_BUILD_IDENTITY_BYTES_MAX 64U
+#define ISH_APPLE_DIAGNOSTIC_PROCESS_NAME_BYTES_MAX 16U
 
 ISH_APPLE_EXTERN_C_BEGIN
 
@@ -51,7 +52,10 @@ struct ish_apple_diagnostic_event_v1 {
     uint64_t syscall_number;
     char syscall_name[ISH_APPLE_DIAGNOSTIC_SYSCALL_NAME_BYTES_MAX];
     char build_identity[ISH_APPLE_DIAGNOSTIC_BUILD_IDENTITY_BYTES_MAX];
-    uint64_t reserved[4];
+    uint32_t guest_process_id;
+    uint32_t guest_thread_group_id;
+    char process_name[ISH_APPLE_DIAGNOSTIC_PROCESS_NAME_BYTES_MAX];
+    uint64_t reserved[1];
 };
 
 /*

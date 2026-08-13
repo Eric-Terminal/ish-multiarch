@@ -153,6 +153,9 @@ public struct DiagnosticEvent: Sendable, Equatable {
   public let syscallName: String
   public let linuxError: Int32
   public let signal: Int32
+  public let guestProcessID: UInt32
+  public let guestThreadGroupID: UInt32
+  public let processName: String
   public let architecture: GuestArchitecture
   public let backend: RuntimeBackend
   public let buildIdentity: String
@@ -175,6 +178,9 @@ public struct DiagnosticEvent: Sendable, Equatable {
     syscallName = decodeDiagnosticCString(native.syscall_name)
     linuxError = native.linux_error
     signal = native.signal
+    guestProcessID = native.guest_process_id
+    guestThreadGroupID = native.guest_thread_group_id
+    processName = decodeDiagnosticCString(native.process_name)
     architecture = GuestArchitecture(rawValue: native.architecture)
     backend = RuntimeBackend(rawValue: native.backend)
     buildIdentity = decodeDiagnosticCString(native.build_identity)

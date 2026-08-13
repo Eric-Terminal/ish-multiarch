@@ -226,8 +226,21 @@ static bool diagnostic_task_context(
     return diagnostic_scope_valid(*scope, *request_id);
 }
 
+static void diagnostic_set_task_identity(
+        struct ish_apple_diagnostic_event_v1 *event,
+        struct task *task) {
+    event->guest_process_id = (uint32_t) task->pid;
+    event->guest_thread_group_id = (uint32_t) task->tgid;
+    lock(&task->general_lock);
+    diagnostic_copy_text(
+            event->process_name,
+            sizeof(event->process_name),
+            task->comm);
+    unlock(&task->general_lock);
+}
+
 void ish_apple_diagnostics_record_undefined_instruction(
-        const struct task *task,
+        struct task *task,
         uint64_t guest_pc,
         uint32_t opcode,
         int32_t signal,
@@ -236,7 +249,7 @@ void ish_apple_diagnostics_record_undefined_instruction(
     uint64_t request_id;
     if (!diagnostic_task_context(task, &scope, &request_id))
         return;
-    diagnostic_enqueue((struct ish_apple_diagnostic_event_v1) {
+    struct ish_apple_diagnostic_event_v1 event = {
         .category = ISH_APPLE_DIAGNOSTIC_CATEGORY_INSTRUCTION,
         .kind = ISH_APPLE_DIAGNOSTIC_INSTRUCTION_UNDEFINED,
         .scope = scope,
@@ -245,11 +258,13 @@ void ish_apple_diagnostics_record_undefined_instruction(
         .opcode = opcode,
         .request_id = request_id,
         .guest_pc = guest_pc,
-    });
+    };
+    diagnostic_set_task_identity(&event, task);
+    diagnostic_enqueue(event);
 }
 
 void ish_apple_diagnostics_record_unsupported_syscall(
-        const struct task *task,
+        struct task *task,
         uint64_t guest_pc,
         uint64_t syscall_number,
         int32_t linux_error,
@@ -258,7 +273,7 @@ void ish_apple_diagnostics_record_unsupported_syscall(
     uint64_t request_id;
     if (!diagnostic_task_context(task, &scope, &request_id))
         return;
-    diagnostic_enqueue((struct ish_apple_diagnostic_event_v1) {
+    struct ish_apple_diagnostic_event_v1 event = {
         .category = ISH_APPLE_DIAGNOSTIC_CATEGORY_SYSCALL,
         .kind = ISH_APPLE_DIAGNOSTIC_SYSCALL_UNSUPPORTED,
         .scope = scope,
@@ -267,7 +282,9 @@ void ish_apple_diagnostics_record_unsupported_syscall(
         .request_id = request_id,
         .guest_pc = guest_pc,
         .syscall_number = syscall_number,
-    });
+    };
+    diagnostic_set_task_identity(&event, task);
+    diagnostic_enqueue(event);
 }
 
 void ish_apple_diagnostics_record_filesystem(

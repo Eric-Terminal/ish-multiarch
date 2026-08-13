@@ -110,7 +110,13 @@ ASSERT_APPLE_OFFSET(
 ASSERT_APPLE_OFFSET(
         struct ish_apple_diagnostic_event_v1, build_identity, 104);
 ASSERT_APPLE_OFFSET(
-        struct ish_apple_diagnostic_event_v1, reserved, 168);
+        struct ish_apple_diagnostic_event_v1, guest_process_id, 168);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, guest_thread_group_id, 172);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, process_name, 176);
+ASSERT_APPLE_OFFSET(
+        struct ish_apple_diagnostic_event_v1, reserved, 192);
 
 _Static_assert(sizeof(struct ish_apple_guest_file_request_v1) == 48,
         "guest 文件请求必须保持固定宽度布局");

@@ -422,8 +422,11 @@ static int test_compatibility_diagnostics(void) {
             event.guest_pc == ENTRY_ADDRESS &&
             event.opcode == UINT32_C(0xffffffff) &&
             event.signal == SIGILL_ &&
+            event.guest_process_id == (uint32_t) fixture.task.pid &&
+            event.guest_thread_group_id == (uint32_t) fixture.task.tgid &&
+            strcmp(event.process_name, fixture.task.comm) == 0 &&
             event.backend != ISH_APPLE_DIAGNOSTIC_BACKEND_UNKNOWN,
-            "内核 runner 发布精确 PC、opcode、signal 与实际后端");
+            "内核 runner 发布进程身份、精确 PC、opcode、signal 与实际后端");
     destroy_fixture(&fixture);
 
     const uint64_t syscall_request = UINT64_C(7002);

@@ -239,10 +239,10 @@ try await output
 
 命令和终端的 request ID 会在进程发布前写入不可变的宿主诊断归属，并由
 `fork` 后代继承。未定义 AArch64 指令和返回 `ENOSYS` 的未实现 syscall
-不会只剩一段 stderr：SDK 会产生带精确 guest PC、opcode、syscall
-number/name、负 Linux errno、signal、guest architecture、实际 C/threaded
-后端与构建身份的 `DiagnosticEvent`。普通程序以非零状态退出不产生兼容性
-事件。
+不会只剩一段 stderr：SDK 会产生带精确 guest PC、opcode、PID/TGID、进程名、
+syscall number/name、负 Linux errno、signal、guest architecture、实际
+C/threaded 后端与构建身份的 `DiagnosticEvent`。普通程序以非零状态退出不产生
+兼容性事件。
 
 ```swift
 let diagnostics = RuntimeDiagnostics()

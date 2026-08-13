@@ -10,13 +10,13 @@
 struct task;
 
 void ish_apple_diagnostics_record_undefined_instruction(
-        const struct task *task,
+        struct task *task,
         uint64_t guest_pc,
         uint32_t opcode,
         int32_t signal,
         enum aarch64_backend backend);
 void ish_apple_diagnostics_record_unsupported_syscall(
-        const struct task *task,
+        struct task *task,
         uint64_t guest_pc,
         uint64_t syscall_number,
         int32_t linux_error,
