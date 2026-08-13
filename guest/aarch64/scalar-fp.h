@@ -1022,7 +1022,7 @@ static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_sqrt(
     int result_exponent = (exponent - (exponent & 1)) / 2;
     struct aarch64_scalar_fp_result result = aarch64_scalar_fp_round(
             false, root,
-            result_exponent - (int) format.fraction_bits - extra_bits,
+            result_exponent - (int) format.fraction_bits - (int) extra_bits,
             remainder != 0, &format, fpcr);
     result.exceptions |= exceptions;
     return result;
