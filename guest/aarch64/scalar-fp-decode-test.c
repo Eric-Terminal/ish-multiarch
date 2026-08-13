@@ -10,6 +10,7 @@
 #define IMMEDIATE_FIXED_MASK UINT32_C(0xffe01fe0)
 #define COMPARE_REGISTER_FIXED_MASK UINT32_C(0xffe0fc1f)
 #define COMPARE_ZERO_FIXED_MASK UINT32_C(0xfffffc1f)
+#define CONDITIONAL_COMPARE_FIXED_MASK UINT32_C(0xffe00c10)
 
 struct binary_case {
     dword_t bits;
@@ -53,6 +54,12 @@ struct compare_case {
     bool zero;
 };
 
+struct conditional_compare_case {
+    dword_t bits;
+    enum aarch64_opcode opcode;
+    byte_t width;
+};
+
 static const struct binary_case binary_operations[] = {
     {UINT32_C(0x1e202800), AARCH64_OP_FADD_SCALAR, 32},
     {UINT32_C(0x1e602800), AARCH64_OP_FADD_SCALAR, 64},
@@ -80,6 +87,8 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x1e604000), AARCH64_OP_FMOV_SCALAR, 64},
     {UINT32_C(0x5ea1b800), AARCH64_OP_FCVTZS_SCALAR, 32},
     {UINT32_C(0x5ee1b800), AARCH64_OP_FCVTZS_SCALAR, 64},
+    {UINT32_C(0x7ea1b800), AARCH64_OP_FCVTZU_SCALAR, 32},
+    {UINT32_C(0x7ee1b800), AARCH64_OP_FCVTZU_SCALAR, 64},
     {UINT32_C(0x5e21d800), AARCH64_OP_SCVTF_SCALAR, 32},
     {UINT32_C(0x5e61d800), AARCH64_OP_SCVTF_SCALAR, 64},
     {UINT32_C(0x7e21d800), AARCH64_OP_UCVTF_SCALAR, 32},
@@ -88,6 +97,8 @@ static const struct unary_case unary_operations[] = {
     {UINT32_C(0x1e654000), AARCH64_OP_FRINTM_SCALAR, 64},
     {UINT32_C(0x1e214000), AARCH64_OP_FNEG_SCALAR, 32},
     {UINT32_C(0x1e614000), AARCH64_OP_FNEG_SCALAR, 64},
+    {UINT32_C(0x1e21c000), AARCH64_OP_FSQRT_SCALAR, 32},
+    {UINT32_C(0x1e61c000), AARCH64_OP_FSQRT_SCALAR, 64},
 };
 
 static const struct select_case select_operations[] = {
@@ -122,6 +133,13 @@ static const struct compare_case comparisons[] = {
             AARCH64_OP_FCMPE_SCALAR, 32, true},
     {UINT32_C(0x1e602018), COMPARE_ZERO_FIXED_MASK,
             AARCH64_OP_FCMPE_SCALAR, 64, true},
+};
+
+static const struct conditional_compare_case conditional_comparisons[] = {
+    {UINT32_C(0x1e200400), AARCH64_OP_FCCMP_SCALAR, 32},
+    {UINT32_C(0x1e600400), AARCH64_OP_FCCMP_SCALAR, 64},
+    {UINT32_C(0x1e200410), AARCH64_OP_FCCMPE_SCALAR, 32},
+    {UINT32_C(0x1e600410), AARCH64_OP_FCCMPE_SCALAR, 64},
 };
 
 static dword_t encode_binary(unsigned operation, byte_t rn, byte_t rm,
@@ -176,6 +194,13 @@ static dword_t encode_compare(unsigned comparison, byte_t rn, byte_t rm) {
             (comparisons[comparison].zero ? 0 : (dword_t) rm << 16);
 }
 
+static dword_t encode_conditional_compare(unsigned comparison, byte_t rn,
+        byte_t rm, byte_t nzcv, byte_t condition) {
+    return conditional_comparisons[comparison].bits |
+            (dword_t) rm << 16 | (dword_t) condition << 12 |
+            (dword_t) rn << 5 | nzcv;
+}
+
 static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
     switch (opcode) {
         case AARCH64_OP_FMADD_SCALAR:
@@ -189,12 +214,16 @@ static bool is_scalar_fp_opcode(enum aarch64_opcode opcode) {
         case AARCH64_OP_FCSEL_SCALAR:
         case AARCH64_OP_FNEG_SCALAR:
         case AARCH64_OP_FRINTM_SCALAR:
+        case AARCH64_OP_FSQRT_SCALAR:
         case AARCH64_OP_FMOV_SCALAR:
         case AARCH64_OP_FCVT_SCALAR:
         case AARCH64_OP_FMOV_IMMEDIATE:
         case AARCH64_OP_FCMP_SCALAR:
         case AARCH64_OP_FCMPE_SCALAR:
+        case AARCH64_OP_FCCMP_SCALAR:
+        case AARCH64_OP_FCCMPE_SCALAR:
         case AARCH64_OP_FCVTZS_SCALAR:
+        case AARCH64_OP_FCVTZU_SCALAR:
         case AARCH64_OP_SCVTF_SCALAR:
         case AARCH64_OP_UCVTF_SCALAR:
             return true;
@@ -239,6 +268,12 @@ static bool is_scalar_fp_encoding(dword_t word) {
     for (unsigned i = 0; i < sizeof(comparisons) /
             sizeof(comparisons[0]); i++) {
         if ((word & comparisons[i].mask) == comparisons[i].bits)
+            return true;
+    }
+    for (unsigned i = 0; i < sizeof(conditional_comparisons) /
+            sizeof(conditional_comparisons[0]); i++) {
+        if ((word & CONDITIONAL_COMPARE_FIXED_MASK) ==
+                conditional_comparisons[i].bits)
             return true;
     }
     return false;
@@ -335,6 +370,19 @@ static void assert_compare(dword_t word, unsigned comparison, byte_t rn,
             comparisons[comparison].zero);
 }
 
+static void assert_conditional_compare(dword_t word, unsigned comparison,
+        byte_t rn, byte_t rm, byte_t nzcv, byte_t condition) {
+    struct aarch64_decoded instruction = decode(word);
+    assert(instruction.opcode ==
+            conditional_comparisons[comparison].opcode);
+    assert(instruction.width == conditional_comparisons[comparison].width);
+    assert(instruction.operands.conditional_compare.rn == rn);
+    assert(instruction.operands.conditional_compare.operand == rm);
+    assert(instruction.operands.conditional_compare.nzcv == nzcv);
+    assert(instruction.operands.conditional_compare.condition == condition);
+    assert(!instruction.operands.conditional_compare.immediate);
+}
+
 static void test_apple_clang_vectors(void) {
     assert_fused(UINT32_C(0x1f020c20), 0, 0, 1, 2, 3);
     assert_fused(UINT32_C(0x1f4f7c1f), 1, 31, 0, 15, 31);
@@ -366,19 +414,25 @@ static void test_apple_clang_vectors(void) {
     assert_unary(UINT32_C(0x1e6040a3), 1, 3, 5);
     assert_unary(UINT32_C(0x5ea1b8a3), 2, 3, 5);
     assert_unary(UINT32_C(0x5ee1b8a3), 3, 3, 5);
-    assert_unary(UINT32_C(0x5e21d8a3), 4, 3, 5);
-    assert_unary(UINT32_C(0x5e61d8a3), 5, 3, 5);
-    assert_unary(UINT32_C(0x7e21d8a3), 6, 3, 5);
-    assert_unary(UINT32_C(0x7e61d8a3), 7, 3, 5);
-    assert_unary(UINT32_C(0x7e61dbff), 7, 31, 31);
-    assert_unary(UINT32_C(0x1e254020), 8, 0, 1);
-    assert_unary(UINT32_C(0x1e2543ff), 8, 31, 31);
-    assert_unary(UINT32_C(0x1e654062), 9, 2, 3);
-    assert_unary(UINT32_C(0x1e6543ff), 9, 31, 31);
-    assert_unary(UINT32_C(0x1e214020), 10, 0, 1);
-    assert_unary(UINT32_C(0x1e2143ff), 10, 31, 31);
-    assert_unary(UINT32_C(0x1e614062), 11, 2, 3);
-    assert_unary(UINT32_C(0x1e6143ff), 11, 31, 31);
+    assert_unary(UINT32_C(0x7ea1b8a3), 4, 3, 5);
+    assert_unary(UINT32_C(0x7ee1b8a3), 5, 3, 5);
+    assert_unary(UINT32_C(0x5e21d8a3), 6, 3, 5);
+    assert_unary(UINT32_C(0x5e61d8a3), 7, 3, 5);
+    assert_unary(UINT32_C(0x7e21d8a3), 8, 3, 5);
+    assert_unary(UINT32_C(0x7e61d8a3), 9, 3, 5);
+    assert_unary(UINT32_C(0x7e61dbff), 9, 31, 31);
+    assert_unary(UINT32_C(0x1e254020), 10, 0, 1);
+    assert_unary(UINT32_C(0x1e2543ff), 10, 31, 31);
+    assert_unary(UINT32_C(0x1e654062), 11, 2, 3);
+    assert_unary(UINT32_C(0x1e6543ff), 11, 31, 31);
+    assert_unary(UINT32_C(0x1e214020), 12, 0, 1);
+    assert_unary(UINT32_C(0x1e2143ff), 12, 31, 31);
+    assert_unary(UINT32_C(0x1e614062), 13, 2, 3);
+    assert_unary(UINT32_C(0x1e6143ff), 13, 31, 31);
+    assert_unary(UINT32_C(0x1e21c020), 14, 0, 1);
+    assert_unary(UINT32_C(0x1e21c3ff), 14, 31, 31);
+    assert_unary(UINT32_C(0x1e61c062), 15, 2, 3);
+    assert_unary(UINT32_C(0x1e61c3ff), 15, 31, 31);
 
     assert_precision(UINT32_C(0x1e22c0a3), 0, 3, 5);
     assert_precision(UINT32_C(0x1e6240a3), 1, 3, 5);
@@ -396,6 +450,15 @@ static void test_apple_clang_vectors(void) {
     assert_compare(UINT32_C(0x1e6020a8), 5, 5, 0);
     assert_compare(UINT32_C(0x1e2020b8), 6, 5, 0);
     assert_compare(UINT32_C(0x1e6020b8), 7, 5, 0);
+
+    assert_conditional_compare(UINT32_C(0x1e2514a3), 0,
+            5, 5, 3, 1);
+    assert_conditional_compare(UINT32_C(0x1e7f1404), 1,
+            0, 31, 4, 1);
+    assert_conditional_compare(UINT32_C(0x1e25e4b7), 2,
+            5, 5, 7, 14);
+    assert_conditional_compare(UINT32_C(0x1e7ff7ff), 3,
+            31, 31, 15, 15);
 }
 
 static void test_fused_encoding_space(void) {
@@ -449,7 +512,7 @@ static void test_unary_encoding_space(void) {
             }
         }
     }
-    assert(decoded_count == 12288);
+    assert(decoded_count == 16384);
 }
 
 static void test_rejected_unary_precision_spaces(void) {
@@ -458,6 +521,8 @@ static void test_rejected_unary_precision_spaces(void) {
         UINT32_C(0x1ee54000),
         UINT32_C(0x1ea14000),
         UINT32_C(0x1ee14000),
+        UINT32_C(0x1ea1c000),
+        UINT32_C(0x1ee1c000),
     };
     unsigned rejected_count = 0;
     for (unsigned precision = 0; precision <
@@ -472,7 +537,7 @@ static void test_rejected_unary_precision_spaces(void) {
             }
         }
     }
-    assert(rejected_count == 4096);
+    assert(rejected_count == 6144);
 }
 
 static void test_select_encoding_space(void) {
@@ -579,6 +644,30 @@ static void test_compare_encoding_space(void) {
     assert(zero_count == 128);
 }
 
+static void test_conditional_compare_encoding_space(void) {
+    unsigned decoded_count = 0;
+    for (unsigned comparison = 0;
+            comparison < sizeof(conditional_comparisons) /
+                    sizeof(conditional_comparisons[0]); comparison++) {
+        for (unsigned condition = 0; condition < 16; condition++) {
+            for (unsigned nzcv = 0; nzcv < 16; nzcv++) {
+                for (unsigned rn = 0; rn < 32; rn++) {
+                    for (unsigned rm = 0; rm < 32; rm++) {
+                        assert_conditional_compare(
+                                encode_conditional_compare(comparison,
+                                        (byte_t) rn, (byte_t) rm,
+                                        (byte_t) nzcv, (byte_t) condition),
+                                comparison, (byte_t) rn, (byte_t) rm,
+                                (byte_t) nzcv, (byte_t) condition);
+                        decoded_count++;
+                    }
+                }
+            }
+        }
+    }
+    assert(decoded_count == 1048576);
+}
+
 static void test_fixed_bits(void) {
     for (unsigned operation = 0; operation < sizeof(fused_operations) /
             sizeof(fused_operations[0]); operation++) {
@@ -638,6 +727,16 @@ static void test_fixed_bits(void) {
                 assert_classification(base ^ (UINT32_C(1) << bit));
         }
     }
+    for (unsigned comparison = 0;
+            comparison < sizeof(conditional_comparisons) /
+                    sizeof(conditional_comparisons[0]); comparison++) {
+        dword_t base = encode_conditional_compare(
+                comparison, 5, 7, 9, 11);
+        for (unsigned bit = 0; bit < 32; bit++) {
+            if (CONDITIONAL_COMPARE_FIXED_MASK & (UINT32_C(1) << bit))
+                assert_classification(base ^ (UINT32_C(1) << bit));
+        }
+    }
     assert(FUSED_FIXED_MASK == UINT32_C(0xffe08000));
     assert(BINARY_FIXED_MASK == UINT32_C(0xffe0fc00));
     assert(SELECT_FIXED_MASK == UINT32_C(0xffe00c00));
@@ -646,6 +745,7 @@ static void test_fixed_bits(void) {
     assert(IMMEDIATE_FIXED_MASK == UINT32_C(0xffe01fe0));
     assert(COMPARE_REGISTER_FIXED_MASK == UINT32_C(0xffe0fc1f));
     assert(COMPARE_ZERO_FIXED_MASK == UINT32_C(0xfffffc1f));
+    assert(CONDITIONAL_COMPARE_FIXED_MASK == UINT32_C(0xffe00c10));
 }
 
 static void test_rejected_neighbors(void) {
@@ -694,10 +794,8 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e2798a3),
         UINT32_C(0x1eee1003),
         UINT32_C(0x1eae1003),
-        UINT32_C(0x1e6704a0),
         UINT32_C(0x1ebf4c00),
         UINT32_C(0x1eff4c00),
-        UINT32_C(0x1e7f4400),
         UINT32_C(0x1e7f4800),
         UINT32_C(0x1e7f4000),
         UINT32_C(0x1e5f4c00),
@@ -717,15 +815,11 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x4e6198a4),
         UINT32_C(0x1e20c0a3),
         UINT32_C(0x1e60c0a3),
-        UINT32_C(0x1e21c0a3),
-        UINT32_C(0x1e61c0a3),
         UINT32_C(0x2ea0f820),
         UINT32_C(0x6ea0f862),
         UINT32_C(0x6ee0f8a4),
         UINT32_C(0x5ef9b8a3),
         UINT32_C(0x5e79d8a3),
-        UINT32_C(0x7ea1b8a3),
-        UINT32_C(0x7ee1b8a3),
         UINT32_C(0x7e79d8a3),
         UINT32_C(0x7ea1d8a3),
         UINT32_C(0x7ee1d8a3),
@@ -795,6 +889,7 @@ int main(void) {
     test_precision_encoding_space();
     test_immediate_encoding_space();
     test_compare_encoding_space();
+    test_conditional_compare_encoding_space();
     test_fixed_bits();
     test_rejected_neighbors();
     return 0;

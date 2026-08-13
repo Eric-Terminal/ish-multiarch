@@ -700,6 +700,48 @@ static void execute_advsimd_add_sub(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
+static void execute_advsimd_add_sub_wide(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.advsimd_three_same.rd;
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t source_size =
+            instruction->operands.advsimd_three_same.element_size;
+    byte_t destination_size = source_size * 2;
+    byte_t lanes = 8 / source_size;
+    bool upper = instruction->opcode == AARCH64_OP_ADVSIMD_SADDW2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_UADDW2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSUBW2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_USUBW2;
+    bool is_signed = instruction->opcode == AARCH64_OP_ADVSIMD_SADDW ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SADDW2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSUBW ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSUBW2;
+    bool subtract = instruction->opcode == AARCH64_OP_ADVSIMD_SSUBW ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_SSUBW2 ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_USUBW ||
+            instruction->opcode == AARCH64_OP_ADVSIMD_USUBW2;
+    qword_t source_sign = UINT64_C(1) << (source_size * 8 - 1);
+    qword_t source_mask = vector_element_mask(source_size);
+    union aarch64_vector_reg wide = cpu->v[rn];
+    union aarch64_vector_reg narrow = cpu->v[rm];
+    union aarch64_vector_reg result = {0};
+
+    for (byte_t lane = 0; lane < lanes; lane++) {
+        qword_t left = read_vector_element(
+                &wide, destination_size, lane);
+        qword_t right = read_vector_element(&narrow, source_size,
+                (byte_t) (lane + (upper ? lanes : 0)));
+        if (is_signed && (right & source_sign))
+            right |= ~source_mask;
+        write_vector_element(&result, destination_size, lane,
+                subtract ? left - right : left + right);
+    }
+    // 两个源都先快照，保证 Vd 与 Vn/Vm 重叠时仍读取原始 lane。
+    cpu->v[rd] = result;
+    cpu->pc += 4;
+}
+
 static void execute_advsimd_uqsub_scalar(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
@@ -1342,6 +1384,18 @@ static void execute_scalar_fp_round_to_integral_minus(
     cpu->pc += 4;
 }
 
+static void execute_scalar_fp_sqrt(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rd = instruction->operands.data_processing_1source.rd;
+    byte_t rn = instruction->operands.data_processing_1source.rn;
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_sqrt(
+            read_scalar_fp(cpu, rn, instruction->width),
+            instruction->width, cpu->fpcr);
+    write_scalar_fp(cpu, rd, instruction->width, result.bits);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
 static void execute_scalar_fp_move(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.data_processing_1source.rd;
@@ -1389,6 +1443,29 @@ static void execute_scalar_fp_compare(struct cpu_state *cpu,
                     instruction->opcode == AARCH64_OP_FCMPE_SCALAR);
     aarch64_set_nzcv(cpu, result.nzcv);
     cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
+static void execute_scalar_fp_conditional_compare(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    const byte_t condition =
+            instruction->operands.conditional_compare.condition;
+    if (aarch64_condition_holds(cpu->nzcv, condition)) {
+        const byte_t width = instruction->width;
+        const qword_t left = read_scalar_fp(cpu,
+                instruction->operands.conditional_compare.rn, width);
+        const qword_t right = read_scalar_fp(cpu,
+                instruction->operands.conditional_compare.operand, width);
+        struct aarch64_scalar_fp_compare_result result =
+                aarch64_scalar_fp_compare(left, right, width, cpu->fpcr,
+                        instruction->opcode == AARCH64_OP_FCCMPE_SCALAR);
+        aarch64_set_nzcv(cpu, result.nzcv);
+        cpu->fpsr |= result.exceptions;
+    } else {
+        aarch64_set_nzcv(cpu,
+                (dword_t) instruction->operands.conditional_compare.nzcv <<
+                        28);
+    }
     cpu->pc += 4;
 }
 
@@ -1491,7 +1568,8 @@ static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
     struct scalar_fp_to_integer_result result =
             convert_scalar_fp_to_integer(
                     read_scalar_fp(cpu, rn, width), width, width,
-                    cpu->fpcr, true);
+                    cpu->fpcr,
+                    instruction->opcode == AARCH64_OP_FCVTZS_SCALAR);
     write_scalar_fp(cpu, rd, width, result.value);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
@@ -2337,6 +2415,16 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_ADVSIMD_SUB:
             execute_advsimd_add_sub(cpu, instruction);
             break;
+        case AARCH64_OP_ADVSIMD_SADDW:
+        case AARCH64_OP_ADVSIMD_SADDW2:
+        case AARCH64_OP_ADVSIMD_UADDW:
+        case AARCH64_OP_ADVSIMD_UADDW2:
+        case AARCH64_OP_ADVSIMD_SSUBW:
+        case AARCH64_OP_ADVSIMD_SSUBW2:
+        case AARCH64_OP_ADVSIMD_USUBW:
+        case AARCH64_OP_ADVSIMD_USUBW2:
+            execute_advsimd_add_sub_wide(cpu, instruction);
+            break;
         case AARCH64_OP_ADVSIMD_UQSUB_SCALAR:
             execute_advsimd_uqsub_scalar(cpu, instruction);
             break;
@@ -2443,6 +2531,9 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FRINTM_SCALAR:
             execute_scalar_fp_round_to_integral_minus(cpu, instruction);
             break;
+        case AARCH64_OP_FSQRT_SCALAR:
+            execute_scalar_fp_sqrt(cpu, instruction);
+            break;
         case AARCH64_OP_FMOV_SCALAR:
             execute_scalar_fp_move(cpu, instruction);
             break;
@@ -2456,7 +2547,12 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FCMPE_SCALAR:
             execute_scalar_fp_compare(cpu, instruction);
             break;
+        case AARCH64_OP_FCCMP_SCALAR:
+        case AARCH64_OP_FCCMPE_SCALAR:
+            execute_scalar_fp_conditional_compare(cpu, instruction);
+            break;
         case AARCH64_OP_FCVTZS_SCALAR:
+        case AARCH64_OP_FCVTZU_SCALAR:
             execute_scalar_fp_to_integer(cpu, instruction);
             break;
         case AARCH64_OP_SCVTF_SCALAR:

@@ -44,8 +44,13 @@
 #define FCMP_ZERO_D UINT32_C(0x1e602008)
 #define FCMPE_ZERO_S UINT32_C(0x1e202018)
 #define FCMPE_ZERO_D UINT32_C(0x1e602018)
+#define FCCMP_S UINT32_C(0x1e200400)
+#define FCCMP_D UINT32_C(0x1e600400)
+#define FCCMPE_D UINT32_C(0x1e600410)
 #define FCVTZS_S UINT32_C(0x5ea1b800)
 #define FCVTZS_D UINT32_C(0x5ee1b800)
+#define FCVTZU_S UINT32_C(0x7ea1b800)
+#define FCVTZU_D UINT32_C(0x7ee1b800)
 #define SCVTF_S UINT32_C(0x5e21d800)
 #define SCVTF_D UINT32_C(0x5e61d800)
 #define UCVTF_S UINT32_C(0x7e21d800)
@@ -79,6 +84,12 @@ static qword_t expected_immediate(byte_t width, byte_t imm8) {
 
 static dword_t comparison(dword_t base, byte_t rn, byte_t rm) {
     return base | (dword_t) rm << 16 | (dword_t) rn << 5;
+}
+
+static dword_t conditional_comparison(dword_t base, byte_t rn, byte_t rm,
+        byte_t nzcv, byte_t condition) {
+    return base | (dword_t) rm << 16 | (dword_t) condition << 12 |
+            (dword_t) rn << 5 | nzcv;
 }
 
 static struct aarch64_decoded decode(dword_t word) {
@@ -731,6 +742,40 @@ static void test_comparison_nan_signaling(void) {
     }
 }
 
+static void test_conditional_comparison(void) {
+    struct cpu_state product = initial_cpu();
+    set_scalar(&product, 0, 64, UINT64_C(0x4000000000000000));
+    set_scalar(&product, 31, 64, UINT64_C(0x4008000000000000));
+    // Python pip 启动路径的真实故障字：fccmp d0, d31, #4, ne。
+    execute_word(&product, UINT32_C(0x1e7f1404));
+    assert(product.nzcv == TEST_NZCV_LESS);
+    assert(product.fpsr == TEST_FPSR_QC);
+
+    struct cpu_state skipped = initial_cpu();
+    skipped.nzcv = TEST_NZCV_EQUAL;
+    set_scalar(&skipped, 4, 64, UINT64_C(0x7ff8123456789abc));
+    set_scalar(&skipped, 5, 64, UINT64_C(0x7ff0123456789abc));
+    execute_word(&skipped,
+            conditional_comparison(FCCMPE_D, 4, 5, 4, 1));
+    assert(skipped.nzcv == UINT32_C(0x40000000));
+    assert(skipped.fpsr == TEST_FPSR_QC);
+
+    struct cpu_state single = initial_cpu();
+    set_scalar(&single, 6, 32, UINT32_C(0x3f800000));
+    set_scalar(&single, 7, 32, UINT32_C(0x3f800000));
+    execute_word(&single,
+            conditional_comparison(FCCMP_S, 6, 7, 0, 14));
+    assert(single.nzcv == TEST_NZCV_EQUAL);
+
+    struct cpu_state signaling = initial_cpu();
+    set_scalar(&signaling, 8, 64, UINT64_C(0x7ff8123456789abc));
+    set_scalar(&signaling, 9, 64, UINT64_C(0x3ff0000000000000));
+    execute_word(&signaling,
+            conditional_comparison(FCCMPE_D, 8, 9, 0, 14));
+    assert(signaling.nzcv == TEST_NZCV_UNORDERED);
+    assert(signaling.fpsr == (TEST_FPSR_QC | TEST_FPSR_IOC));
+}
+
 static void test_compare_with_zero_and_fz(void) {
     struct cpu_state cpu = initial_cpu();
     set_scalar(&cpu, 0, 64, UINT64_C(0xbff0000000000000));
@@ -840,6 +885,49 @@ static void test_fcvtzs_boundaries(void) {
         assert_scalar_result(&cpu, 2, 32, UINT32_C(1));
         assert(cpu.fpsr == (TEST_FPSR_QC | TEST_FPSR_IXC));
     }
+}
+
+static void test_fcvtzu_boundaries(void) {
+    static const struct conversion_case single_cases[] = {
+        {UINT32_C(0x00000000), 0, 0},
+        {UINT32_C(0x3ff33333), 1, TEST_FPSR_IXC},
+        {UINT32_C(0xbff33333), 0, TEST_FPSR_IOC},
+        {UINT32_C(0x4f7fffff), UINT32_C(0xffffff00), 0},
+        {UINT32_C(0x4f800000), UINT32_MAX, TEST_FPSR_IOC},
+        {UINT32_C(0x7f800000), UINT32_MAX, TEST_FPSR_IOC},
+        {UINT32_C(0x7fc12345), 0, TEST_FPSR_IOC},
+    };
+    static const struct conversion_case double_cases[] = {
+        {UINT64_C(0x0000000000000000), 0, 0},
+        {UINT64_C(0x3ffe666666666666), 1, TEST_FPSR_IXC},
+        {UINT64_C(0xbffe666666666666), 0, TEST_FPSR_IOC},
+        {UINT64_C(0x43efffffffffffff), UINT64_C(0xfffffffffffff800), 0},
+        {UINT64_C(0x43f0000000000000), UINT64_MAX, TEST_FPSR_IOC},
+        {UINT64_C(0x7ff0000000000000), UINT64_MAX, TEST_FPSR_IOC},
+        {UINT64_C(0x7ff8123456789abc), 0, TEST_FPSR_IOC},
+    };
+
+    for (unsigned width_index = 0; width_index < 2; width_index++) {
+        byte_t width = width_index == 0 ? 32 : 64;
+        dword_t base = width == 32 ? FCVTZU_S : FCVTZU_D;
+        const struct conversion_case *cases = width == 32 ?
+                single_cases : double_cases;
+        unsigned count = width == 32 ?
+                ARRAY_SIZE(single_cases) : ARRAY_SIZE(double_cases);
+        for (unsigned i = 0; i < count; i++) {
+            struct cpu_state cpu = initial_cpu();
+            set_scalar(&cpu, 11, width, cases[i].input);
+            execute_word(&cpu, unary(base, 12, 11));
+            assert_scalar_result(&cpu, 12, width, cases[i].expected);
+            assert(cpu.fpsr == (TEST_FPSR_QC | cases[i].flags));
+        }
+    }
+
+    struct cpu_state product = initial_cpu();
+    set_scalar(&product, 0, 64, UINT64_C(0x4000000000000000));
+    // Python math.sqrt 返回前执行的真实指令字，同时覆盖 D31/D0 别名。
+    execute_word(&product, UINT32_C(0x7ee1b81f));
+    assert_scalar_result(&product, 31, 64, UINT64_C(2));
 }
 
 static void run_scalar_integer_to_fp(dword_t base, byte_t width,
@@ -964,8 +1052,10 @@ int main(void) {
     test_flush_to_zero_and_sticky_flags();
     test_comparison_relations();
     test_comparison_nan_signaling();
+    test_conditional_comparison();
     test_compare_with_zero_and_fz();
     test_fcvtzs_boundaries();
+    test_fcvtzu_boundaries();
     test_scvtf_extremes_and_rounding();
     test_ucvtf_extremes_and_rounding();
     return 0;

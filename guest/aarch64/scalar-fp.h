@@ -943,6 +943,91 @@ static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_divide(
     return result;
 }
 
+static inline qword_t aarch64_scalar_fp_integer_sqrt(
+        __uint128_t radicand, __uint128_t *remainder) {
+    __uint128_t root = 0;
+    __uint128_t bit = ((__uint128_t) 1) << 126;
+    while (bit > radicand)
+        bit >>= 2;
+    while (bit != 0) {
+        if (radicand >= root + bit) {
+            radicand -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    *remainder = radicand;
+    return (qword_t) root;
+}
+
+static inline struct aarch64_scalar_fp_result aarch64_scalar_fp_sqrt(
+        qword_t source_bits, byte_t width, dword_t fpcr) {
+    struct aarch64_scalar_fp_format format =
+            aarch64_scalar_fp_format(width);
+    struct aarch64_scalar_fp_number source =
+            aarch64_scalar_fp_unpack(source_bits, &format);
+    dword_t exceptions = 0;
+    aarch64_scalar_fp_flush_input(&source, &format, fpcr, &exceptions);
+
+    if (aarch64_scalar_fp_is_nan(&source, &format)) {
+        bool invalid = aarch64_scalar_fp_is_signaling_nan(
+                &source, &format);
+        return (struct aarch64_scalar_fp_result) {
+            .bits = (fpcr & AARCH64_FPCR_DN) != 0 ?
+                    format.default_nan : source.bits | format.quiet_bit,
+            .exceptions = exceptions |
+                    (invalid ? AARCH64_FPSR_IOC : 0),
+        };
+    }
+    if (aarch64_scalar_fp_is_zero(&source)) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = source.bits,
+            .exceptions = exceptions,
+        };
+    }
+    if (source.sign) {
+        struct aarch64_scalar_fp_result result =
+                aarch64_scalar_fp_default_nan(&format);
+        result.exceptions |= exceptions;
+        return result;
+    }
+    if (aarch64_scalar_fp_is_infinity(&source, &format)) {
+        return (struct aarch64_scalar_fp_result) {
+            .bits = format.exponent_mask,
+            .exceptions = exceptions,
+        };
+    }
+
+    qword_t significand =
+            aarch64_scalar_fp_significand(&source, &format);
+    int exponent = aarch64_scalar_fp_exponent(&source, &format);
+    unsigned normalization = format.fraction_bits -
+            aarch64_scalar_fp_top_bit(significand);
+    significand <<= normalization;
+    exponent -= (int) normalization;
+
+    /*
+     * 先把奇数指数的一因子 2 并入规格化尾数，再保留四个额外位。
+     * 最大双精度被开方数只占 114 位，整数路径不会依赖宿主浮点环境。
+     */
+    const unsigned extra_bits = 4;
+    unsigned radicand_shift = format.fraction_bits +
+            2 * extra_bits + (unsigned) (exponent & 1);
+    __uint128_t radicand = (__uint128_t) significand << radicand_shift;
+    __uint128_t remainder;
+    qword_t root = aarch64_scalar_fp_integer_sqrt(
+            radicand, &remainder);
+    int result_exponent = (exponent - (exponent & 1)) / 2;
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_round(
+            false, root,
+            result_exponent - (int) format.fraction_bits - extra_bits,
+            remainder != 0, &format, fpcr);
+    result.exceptions |= exceptions;
+    return result;
+}
+
 static inline struct aarch64_scalar_fp_compare_result
 aarch64_scalar_fp_compare(qword_t left_bits, qword_t right_bits,
         byte_t width, dword_t fpcr, bool signaling) {

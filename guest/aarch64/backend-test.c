@@ -161,6 +161,8 @@
 #define INSTRUCTION_FCSEL_D0_D0_D31_MI UINT32_C(0x1e7f4c00)
 #define INSTRUCTION_FRINTM_D0_D0 UINT32_C(0x1e654000)
 #define INSTRUCTION_FNEG_D0_D0 UINT32_C(0x1e614000)
+/* musl sqrt 的入口指令，也是 pip 启动路径的真实故障字。 */
+#define INSTRUCTION_FSQRT_D0_D0 UINT32_C(0x1e61c000)
 #define INSTRUCTION_EXT_V0_V27_V30_8 UINT32_C(0x6e1e4360)
 #define INSTRUCTION_MVN_V31_V30 UINT32_C(0x6e205bdf)
 #define INSTRUCTION_USHR_V30_2D_V30_2D_6 UINT32_C(0x6f7a07de)
@@ -13234,6 +13236,58 @@ static void test_integer_to_fp_fixed_fallback(void) {
     assert_stats(&threaded_runner, 1, 1, 0, 2);
 }
 
+static void test_scalar_fsqrt_c_fallback(void) {
+    struct test_fixture c_fixture;
+    struct test_fixture threaded_fixture;
+    init_fixture(&c_fixture);
+    init_fixture(&threaded_fixture);
+    write_instruction(&c_fixture.tlb,
+            CODE_PAGE, INSTRUCTION_FSQRT_D0_D0);
+    write_instruction(&threaded_fixture.tlb,
+            CODE_PAGE, INSTRUCTION_FSQRT_D0_D0);
+
+    struct aarch64_runner c_runner;
+    struct aarch64_runner threaded_runner;
+    assert(aarch64_runner_init_backend(
+            &c_runner, &c_fixture.tlb, AARCH64_BACKEND_C));
+    assert(aarch64_runner_init_backend(&threaded_runner,
+            &threaded_fixture.tlb, AARCH64_BACKEND_THREADED));
+    struct cpu_state c_cpu;
+    struct cpu_state threaded_cpu;
+    init_differential_cpu(&c_cpu);
+    init_differential_cpu(&threaded_cpu);
+    c_cpu.v[0] = threaded_cpu.v[0] = (union aarch64_vector_reg) {
+        .d = {UINT64_C(0x4010000000000000), UINT64_MAX},
+    };
+
+    struct aarch64_step_result c_result =
+            aarch64_run_one(&c_runner, &c_cpu);
+    struct aarch64_step_result threaded_result =
+            aarch64_run_one(&threaded_runner, &threaded_cpu);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[0].d[0] == UINT64_C(0x4000000000000000));
+    assert(c_cpu.v[0].d[1] == 0);
+    assert_stats(&threaded_runner, 0, 1, 0, 1);
+
+    c_cpu.v[0].d[0] = threaded_cpu.v[0].d[0] =
+            UINT64_C(0x4000000000000000);
+    c_cpu.fpsr = threaded_cpu.fpsr = 0;
+    c_result = run_at(&c_runner, &c_cpu, CODE_PAGE);
+    threaded_result = run_at(
+            &threaded_runner, &threaded_cpu, CODE_PAGE);
+    assert(c_result.stop == AARCH64_STEP_RETIRED);
+    assert_step_equal(&c_result, &threaded_result);
+    assert_cpu_equal(&c_cpu, &threaded_cpu);
+    assert_memory_equal(&c_fixture.memory, &threaded_fixture.memory);
+    assert(c_cpu.v[0].d[0] == UINT64_C(0x3ff6a09e667f3bcd));
+    assert(c_cpu.v[0].d[1] == 0);
+    assert(c_cpu.fpsr == AARCH64_FPSR_IXC);
+    assert_stats(&threaded_runner, 1, 1, 0, 2);
+}
+
 static void test_scalar_uqsub_c_fallback(void) {
     struct test_fixture c_fixture;
     struct test_fixture threaded_fixture;
@@ -13963,6 +14017,7 @@ int main(void) {
     test_fast_dispatch_structure();
     test_product_c_fallback();
     test_integer_to_fp_fixed_fallback();
+    test_scalar_fsqrt_c_fallback();
     test_scalar_uqsub_c_fallback();
     test_c_and_threaded_differential();
     test_cache_keys_and_collision();

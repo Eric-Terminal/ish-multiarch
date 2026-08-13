@@ -678,6 +678,7 @@ typedef NS_ENUM(NSUInteger, ISHGuestTransportResult) {
                          "assert hashlib.sha256(b\"iSH-iOS\").hexdigest() == "
                          "\"5a2119976555f8eca995f30ba421f17be94704cd44450ee37c32227efcedfe3a\"; "
                          "assert math.factorial(10) == 3628800; "
+                         "assert math.sqrt(4.0) == 2.0; "
                          "assert sqlite3.connect(\":memory:\").execute("
                          "\"select 6 * 7\").fetchone()[0] == 42; "
                          "assert ssl.OPENSSL_VERSION.startswith(\"OpenSSL \"); "
