@@ -104,9 +104,30 @@ static bool decode_simd_transfer(byte_t size_field, byte_t operation,
 }
 
 bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
-    // 未实现 BTI 状态机时，四种 BTI landing pad 都按兼容 hint 退休。
-    bool noop_hint = word == UINT32_C(0xd503201f) ||
-            (word & UINT32_C(0xffffff3f)) == UINT32_C(0xd503241f);
+    // guest 未公布 PAuth/BTI 能力；架构放在 HINT 空间的兼容编码必须无副作用退休。
+    bool noop_hint;
+    switch (word) {
+        case UINT32_C(0xd503201f): // NOP
+        case UINT32_C(0xd50320ff): // XPACLRI
+        case UINT32_C(0xd503211f): // PACIA1716
+        case UINT32_C(0xd503215f): // PACIB1716
+        case UINT32_C(0xd503219f): // AUTIA1716
+        case UINT32_C(0xd50321df): // AUTIB1716
+        case UINT32_C(0xd503231f): // PACIAZ
+        case UINT32_C(0xd503233f): // PACIASP
+        case UINT32_C(0xd503235f): // PACIBZ
+        case UINT32_C(0xd503237f): // PACIBSP
+        case UINT32_C(0xd503239f): // AUTIAZ
+        case UINT32_C(0xd50323bf): // AUTIASP
+        case UINT32_C(0xd50323df): // AUTIBZ
+        case UINT32_C(0xd50323ff): // AUTIBSP
+            noop_hint = true;
+            break;
+        default:
+            noop_hint = (word & UINT32_C(0xffffff3f)) ==
+                    UINT32_C(0xd503241f); // BTI、BTI c、BTI j、BTI jc
+            break;
+    }
     if (noop_hint) {
         *decoded = (struct aarch64_decoded) {
             .opcode = AARCH64_OP_NOP,

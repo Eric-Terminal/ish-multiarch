@@ -863,14 +863,27 @@ static void test_svc_decode(void) {
 }
 
 static void test_compatible_hints(void) {
-    const dword_t bti_hints[] = {
+    const dword_t compatible_hints[] = {
+        UINT32_C(0xd50320ff),
+        UINT32_C(0xd503211f),
+        UINT32_C(0xd503215f),
+        UINT32_C(0xd503219f),
+        UINT32_C(0xd50321df),
+        UINT32_C(0xd503231f),
+        UINT32_C(0xd503233f),
+        UINT32_C(0xd503235f),
+        UINT32_C(0xd503237f),
+        UINT32_C(0xd503239f),
+        UINT32_C(0xd50323bf),
+        UINT32_C(0xd50323df),
+        UINT32_C(0xd50323ff),
         UINT32_C(0xd503241f),
         UINT32_C(0xd503245f),
         UINT32_C(0xd503249f),
         UINT32_C(0xd50324df),
     };
-    for (size_t index = 0; index < array_size(bti_hints); index++) {
-        struct aarch64_decoded instruction = decode(bti_hints[index]);
+    for (size_t index = 0; index < array_size(compatible_hints); index++) {
+        struct aarch64_decoded instruction = decode(compatible_hints[index]);
         assert(instruction.opcode == AARCH64_OP_NOP);
         assert(instruction.width == 64);
         struct cpu_state cpu = {

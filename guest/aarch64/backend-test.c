@@ -1251,20 +1251,38 @@ static void test_fast_data_processing_differential(void) {
     assert(result.exclusive.write_epoch == 5);
     assert(result.exclusive.sync_identity == 7);
 
-    const dword_t bti_hints[] = {
+    const dword_t compatible_hints[] = {
+        UINT32_C(0xd50320ff),
+        UINT32_C(0xd503211f),
+        UINT32_C(0xd503215f),
+        UINT32_C(0xd503219f),
+        UINT32_C(0xd50321df),
+        UINT32_C(0xd503231f),
+        UINT32_C(0xd503233f),
+        UINT32_C(0xd503235f),
+        UINT32_C(0xd503237f),
+        UINT32_C(0xd503239f),
+        UINT32_C(0xd50323bf),
+        UINT32_C(0xd50323df),
+        UINT32_C(0xd50323ff),
         UINT32_C(0xd503241f),
         UINT32_C(0xd503245f),
         UINT32_C(0xd503249f),
         UINT32_C(0xd50324df),
     };
-    for (size_t index = 0; index < array_size(bti_hints); index++) {
+    for (size_t index = 0; index < array_size(compatible_hints); index++) {
         init_differential_cpu(&initial);
+        aarch64_set_exclusive(&initial, DATA_PAGE + 0x40, 8, false,
+                UINT64_C(0x1122), 0, NULL, 3, 5, 7);
         result = run_fast_differential(
-                bti_hints[index], initial, AARCH64_STEP_RETIRED);
+                compatible_hints[index], initial, AARCH64_STEP_RETIRED);
         assert(result.pc == CODE_PAGE + 4);
         assert(result.cycle == initial.cycle + 1);
         assert(result.x[0] == initial.x[0]);
         assert(result.nzcv == initial.nzcv);
+        assert(result.exclusive.valid);
+        assert(result.exclusive.write_epoch == 5);
+        assert(result.exclusive.sync_identity == 7);
     }
 
     init_differential_cpu(&initial);
