@@ -304,6 +304,14 @@ static void test_mmap_validation(void) {
     assert(guest_linux_mmap(&memory, 0, GUEST_MEMORY_PAGE_SIZE, 0,
             private_anonymous | UINT64_C(0x40), UINT64_MAX, 0) ==
             encoded_error(GUEST_LINUX_EINVAL));
+    qword_t stack = guest_linux_mmap(&memory, 0,
+            GUEST_MEMORY_PAGE_SIZE, GUEST_LINUX_PROT_READ |
+                    GUEST_LINUX_PROT_WRITE,
+            private_anonymous | GUEST_LINUX_MAP_STACK,
+            UINT64_MAX, 0);
+    assert((sqword_t) stack >= 0);
+    lookup_page(&table, (guest_addr_t) stack,
+            GUEST_MEMORY_READ | GUEST_MEMORY_WRITE);
     assert(guest_linux_mmap(&memory, 0, GUEST_MEMORY_PAGE_SIZE, 0,
             private_anonymous, UINT64_MAX, 1) ==
             encoded_error(GUEST_LINUX_EINVAL));

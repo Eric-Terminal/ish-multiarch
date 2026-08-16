@@ -555,6 +555,44 @@ int main(void) {
             &cpu, &tlb, &runtime, &task);
     assert(cpu.x[0] == encoded_error(GUEST_LINUX_ENOMEM));
 
+    // Rust 为备用信号栈申请匿名 MAP_STACK，再把首个页面设为 guard。
+    cpu.x[8] = 222;
+    cpu.x[0] = 0;
+    cpu.x[1] = 2 * GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = GUEST_LINUX_PROT_READ | GUEST_LINUX_PROT_WRITE;
+    cpu.x[3] = GUEST_LINUX_MAP_PRIVATE | GUEST_LINUX_MAP_ANONYMOUS |
+            GUEST_LINUX_MAP_STACK;
+    cpu.x[4] = UINT64_MAX;
+    cpu.x[5] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    guest_addr_t rust_altstack = (guest_addr_t) cpu.x[0];
+    assert(result.action == AARCH64_LINUX_SYSCALL_RESUME &&
+            (sqword_t) cpu.x[0] >= 0);
+
+    cpu.x[8] = 226;
+    cpu.x[0] = rust_altstack;
+    cpu.x[1] = GUEST_MEMORY_PAGE_SIZE;
+    cpu.x[2] = 0;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+    assert(guest_page_table_lookup(&table, rust_altstack,
+            &mapped_page, &mapped_permissions) == GUEST_PAGE_TABLE_OK &&
+            mapped_permissions == 0);
+    assert(guest_page_table_lookup(&table,
+            rust_altstack + GUEST_MEMORY_PAGE_SIZE,
+            &mapped_page, &mapped_permissions) == GUEST_PAGE_TABLE_OK &&
+            mapped_permissions ==
+                    (GUEST_MEMORY_READ | GUEST_MEMORY_WRITE));
+
+    cpu.x[8] = 215;
+    cpu.x[0] = rust_altstack;
+    cpu.x[1] = 2 * GUEST_MEMORY_PAGE_SIZE;
+    result = aarch64_linux_dispatch_syscall(
+            &cpu, &tlb, &runtime, &task);
+    assert(cpu.x[0] == 0);
+
     cpu.x[8] = 222;
     cpu.x[0] = 0;
     cpu.x[1] = 0;

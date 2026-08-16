@@ -589,7 +589,7 @@ static qword_t guest_linux_mmap_unlocked(struct guest_linux_mm *memory,
 
     qword_t allowed = GUEST_LINUX_MAP_SHARED | GUEST_LINUX_MAP_PRIVATE |
             GUEST_LINUX_MAP_FIXED | GUEST_LINUX_MAP_ANONYMOUS |
-            GUEST_LINUX_MAP_FIXED_NOREPLACE;
+            GUEST_LINUX_MAP_STACK | GUEST_LINUX_MAP_FIXED_NOREPLACE;
     qword_t mapping_type = flags & GUEST_LINUX_MAP_TYPE;
     bool shared = mapping_type == GUEST_LINUX_MAP_SHARED;
     if ((flags & ~allowed) != 0 ||
