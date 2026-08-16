@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "fs/fd.h"
 #include "fs/sock.h"
@@ -48,6 +49,10 @@
 #define AARCH64_LINUX_SOCKET_OPTMEM_MAX UINT64_C(0x20000)
 #define AARCH64_LINUX_MAX_PID_NS_LEVEL UINT64_C(32)
 #define AARCH64_LINUX_CLONE3_ZERO_CHUNK 32
+#define AARCH64_LINUX_CPUSET_MAX_CPUS 1024
+#define AARCH64_LINUX_CPUSET_WORD_BITS 64
+#define AARCH64_LINUX_CPUSET_WORDS \
+    (AARCH64_LINUX_CPUSET_MAX_CPUS / AARCH64_LINUX_CPUSET_WORD_BITS)
 #define AARCH64_LINUX_USER_ADDRESS_LIMIT \
     (AARCH64_LINUX_USER_ADDRESS_MAX + UINT64_C(1))
 
@@ -150,6 +155,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GET_ROBUST_LIST = 100,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
     AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
+    AARCH64_LINUX_SYS_SCHED_GETAFFINITY = 123,
     AARCH64_LINUX_SYS_KILL = 129,
     AARCH64_LINUX_SYS_TKILL = 130,
     AARCH64_LINUX_SYS_TGKILL = 131,
@@ -408,6 +414,47 @@ static qword_t dispatch_clone3(
     return syscall_result((sdword_t) sys_clone_aarch64(
             legacy_flags, stack_pointer, args.parent_tid,
             args.tls, args.child_tid, fault));
+}
+
+static qword_t dispatch_sched_getaffinity(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    long host_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    if (host_cpus < 1)
+        host_cpus = 1;
+    if (host_cpus > AARCH64_LINUX_CPUSET_MAX_CPUS)
+        host_cpus = AARCH64_LINUX_CPUSET_MAX_CPUS;
+    dword_t cpus = (dword_t) host_cpus;
+    dword_t mask_size = ((cpus + AARCH64_LINUX_CPUSET_WORD_BITS - 1) /
+            AARCH64_LINUX_CPUSET_WORD_BITS) * sizeof(qword_t);
+    dword_t guest_size = (dword_t) syscall->arguments[1];
+    if (guest_size < mask_size ||
+            guest_size % sizeof(qword_t) != 0)
+        return syscall_result(_EINVAL);
+
+    pid_t_ pid = syscall_pid(syscall->arguments[0]);
+    if (pid != 0) {
+        lock(&pids_lock);
+        struct task *target = pid_get_task((dword_t) pid);
+        unlock(&pids_lock);
+        if (target == NULL)
+            return syscall_result(_ESRCH);
+    }
+
+    qword_t mask[AARCH64_LINUX_CPUSET_WORDS] = {0};
+    for (dword_t cpu = 0; cpu < cpus; cpu++)
+        mask[cpu / AARCH64_LINUX_CPUSET_WORD_BITS] |=
+                UINT64_C(1) << (cpu % AARCH64_LINUX_CPUSET_WORD_BITS);
+
+    qword_t address = syscall->arguments[2];
+    if (!aarch64_user_range_fits(address, mask_size))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, mask, mask_size, fault))
+        return syscall_result(_EFAULT);
+    return mask_size;
 }
 
 static int copy_iovecs_from_user(
@@ -4295,6 +4342,9 @@ static qword_t dispatch_syscall_inner(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOCK_GETTIME:
             return aarch64_linux_dispatch_clock_gettime(
+                    context, syscall, fault);
+        case AARCH64_LINUX_SYS_SCHED_GETAFFINITY:
+            return dispatch_sched_getaffinity(
                     context, syscall, fault);
         case AARCH64_LINUX_SYS_KILL:
             return syscall_result((sdword_t) sys_kill(

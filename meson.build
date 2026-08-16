@@ -854,6 +854,13 @@ if get_option('kernel') == 'ish'
         test('aarch64_clock_gettime_syscall',
             aarch64_clock_gettime_syscall_test)
 
+        aarch64_affinity_syscall_test = executable(
+            'aarch64_affinity_syscall_test',
+            'kernel/aarch64-affinity-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_affinity_syscall',
+            aarch64_affinity_syscall_test)
+
         aarch64_clone_test = executable(
             'aarch64_clone_test',
             'kernel/aarch64-clone-test.c',
