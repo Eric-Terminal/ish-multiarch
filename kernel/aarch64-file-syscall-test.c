@@ -10,6 +10,7 @@
 #include "kernel/aarch64-syscall-service.h"
 #include "kernel/calls.h"
 #include "kernel/errno.h"
+#include "kernel/fs.h"
 #include "kernel/resource.h"
 #include "kernel/task.h"
 
@@ -275,11 +276,20 @@ static int probe_poll(struct fd *fd) {
     return probe->poll_events;
 }
 
+static off_t_ probe_lseek(
+        struct fd *fd, off_t_ offset, int whence) {
+    struct io_probe *probe = fd->data;
+    int error = generic_seek(fd, offset, whence,
+            (off_t_) probe->readable_size);
+    return error < 0 ? error : fd->offset;
+}
+
 static const struct fd_ops probe_fd_ops = {
     .read = probe_read,
     .write = probe_write,
     .pread = probe_pread,
     .pwrite = probe_pwrite,
+    .lseek = probe_lseek,
     .poll = probe_poll,
 };
 
@@ -423,6 +433,13 @@ static qword_t invoke_positioned(struct syscall_fixture *fixture,
     };
     return ish_aarch64_linux_syscall_service.dispatch(
             &context, &syscall, fault);
+}
+
+static qword_t invoke_sendfile(struct syscall_fixture *fixture,
+        struct user_memory *memory, struct guest_linux_user_fault *fault,
+        qword_t output, qword_t input, qword_t offset, qword_t count) {
+    return invoke_positioned(fixture, memory, fault, 71,
+            output, input, offset, count, 0, 0);
 }
 
 static qword_t invoke_epoll(struct syscall_fixture *fixture,
@@ -635,6 +652,217 @@ int main(void) {
             "epoll_pwait 在无就绪登记时立即返回且忽略空掩码长度");
     CHECK(f_close_task(&fixture.task, epoll_fd) == 0,
             "AArch64 epoll 测试实例关闭成功");
+
+    const size_t sendfile_offset_address = 0x6300;
+    struct fd *sendfile_input = f_get_task(&fixture.task, 0);
+    CHECK(sendfile_input != NULL, "sendfile 输入描述符可用");
+    sendfile_input->flags = O_RDONLY_;
+    struct io_probe sendfile_output_io = {0};
+    struct fd *sendfile_output = fd_create(&probe_fd_ops);
+    CHECK(sendfile_output != NULL, "sendfile 输出描述符创建成功");
+    sendfile_output->data = &sendfile_output_io;
+    sendfile_output->type = S_IFREG;
+    sendfile_output->flags = O_WRONLY_;
+    fd_t sendfile_output_fd = f_install_task(
+            &fixture.task, sendfile_output, 0);
+    CHECK(sendfile_output_fd == 1, "sendfile 输出描述符安装成功");
+
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    memcpy(io.readable_data, "0123456789", 10);
+    io.readable_size = 10;
+    sendfile_input->offset = 7;
+    off_t_ sendfile_offset = 2;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 5);
+    memcpy(&sendfile_offset, memory.bytes + sendfile_offset_address,
+            sizeof(sendfile_offset));
+    CHECK(result == 5 && io.pread_calls == 1 &&
+            io.pread_offsets[0] == 2 && io.pread_requests[0] == 5 &&
+            sendfile_output_io.write_calls == 1 &&
+            memcmp(sendfile_output_io.written_data, "23456", 5) == 0,
+            "sendfile 从显式 64 位 offset 复制精确字节范围");
+    CHECK(sendfile_offset == 7 && sendfile_input->offset == 7 &&
+            memory.read_calls == 1 && memory.write_calls == 1 &&
+            memory.max_read_size == sizeof(off_t_) &&
+            memory.max_write_size == sizeof(off_t_),
+            "显式 offset 仅按已传输字节写回且不改变输入顺序位置");
+
+    reset_io(&sendfile_output_io);
+    sendfile_input->offset = 3;
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0, 0, 4);
+    CHECK(result == 4 && io.pread_calls == 2 &&
+            io.pread_offsets[1] == 3 &&
+            memcmp(sendfile_output_io.written_data, "3456", 4) == 0 &&
+            sendfile_input->offset == 7 &&
+            memory.read_calls == 0 && memory.write_calls == 0,
+            "空 offset 使用并推进输入描述符的顺序位置");
+
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    memcpy(io.readable_data, "0123456789", 10);
+    io.readable_size = 10;
+    sendfile_input->offset = 0;
+    sendfile_output_io.max_write = 2;
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0, 0, 5);
+    CHECK(result == 2 && io.pread_calls == 1 &&
+            sendfile_output_io.write_calls == 1 &&
+            memcmp(sendfile_output_io.written_data, "01", 2) == 0 &&
+            sendfile_input->offset == 2,
+            "输出短写时只提交可见前缀并按真实写出量推进源位置");
+
+    reset_io(&sendfile_output_io);
+    sendfile_input->offset = 123;
+    sendfile_offset = 4;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    sendfile_output_io.max_write = 2;
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 5);
+    memcpy(&sendfile_offset, memory.bytes + sendfile_offset_address,
+            sizeof(sendfile_offset));
+    CHECK(result == 2 && sendfile_offset == 6 &&
+            sendfile_input->offset == 123 &&
+            memcmp(sendfile_output_io.written_data, "45", 2) == 0,
+            "显式 offset 在短写后只增加输出端已接收的字节数");
+
+    reset_io(&sendfile_output_io);
+    sendfile_offset = 10;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 3);
+    memcpy(&sendfile_offset, memory.bytes + sendfile_offset_address,
+            sizeof(sendfile_offset));
+    CHECK(result == 0 && sendfile_offset == 10 &&
+            sendfile_output_io.write_calls == 0,
+            "sendfile 在输入 EOF 返回零并保持显式 offset");
+
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    sendfile_offset = -1;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 1);
+    CHECK(result == encoded_error(_EINVAL) && io.pread_calls == 0 &&
+            sendfile_output_io.write_calls == 0,
+            "sendfile 拒绝负的显式输入 offset");
+
+    sendfile_offset = INT64_MAX;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 1);
+    CHECK(result == encoded_error(_EOVERFLOW) && io.pread_calls == 0 &&
+            sendfile_output_io.write_calls == 0,
+            "sendfile 在正数 count 无法推进 64 位 offset 时返回 EOVERFLOW");
+
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    memcpy(io.readable_data, "fault", 5);
+    io.readable_size = 5;
+    sendfile_offset = 1;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    memory.fail_read_at = USER_BASE + sendfile_offset_address;
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 3);
+    CHECK(result == encoded_error(_EFAULT) && io.pread_calls == 0 &&
+            sendfile_output_io.write_calls == 0 &&
+            memory.read_calls == 1 && memory.write_calls == 0 &&
+            fault.address == memory.fail_read_at &&
+            fault.access == GUEST_MEMORY_READ,
+            "sendfile 在读取 offset 失败时不触及文件对象");
+
+    sendfile_offset = 1;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    memory.fail_write_at = USER_BASE + sendfile_offset_address;
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0,
+            USER_BASE + sendfile_offset_address, 3);
+    CHECK(result == encoded_error(_EFAULT) && io.pread_calls == 1 &&
+            sendfile_output_io.written_size == 3 &&
+            memcmp(sendfile_output_io.written_data, "aul", 3) == 0 &&
+            fault.address == memory.fail_write_at &&
+            fault.access == GUEST_MEMORY_WRITE,
+            "offset 写回故障覆盖返回值但不撤销已经完成的文件复制");
+
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    memcpy(io.readable_data, "bounded", 7);
+    io.readable_size = 7;
+    sendfile_input->offset = 0;
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0, 0, UINT64_MAX);
+    CHECK(result == 7 && io.pread_calls == 1 &&
+            io.pread_requests[0] == 4096 &&
+            sendfile_output_io.write_requests[0] == 7 &&
+            sendfile_input->offset == 7,
+            "巨大 count 受 Linux 上限与固定分块约束而不分配巨型缓冲");
+
+    sendfile_output->flags = O_WRONLY_ | O_APPEND_;
+    reset_io(&io);
+    reset_io(&sendfile_output_io);
+    memcpy(io.readable_data, "append", 6);
+    io.readable_size = 6;
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 0, 0, 6);
+    CHECK(result == encoded_error(_EINVAL) && io.pread_calls == 0 &&
+            sendfile_output_io.write_calls == 0,
+            "sendfile 按 Linux 语义拒绝 O_APPEND 输出文件");
+    sendfile_output->flags = O_WRONLY_;
+
+    sendfile_offset = 3;
+    memcpy(memory.bytes + sendfile_offset_address,
+            &sendfile_offset, sizeof(sendfile_offset));
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            99, 0, USER_BASE + sendfile_offset_address, 1);
+    memcpy(&sendfile_offset, memory.bytes + sendfile_offset_address,
+            sizeof(sendfile_offset));
+    CHECK(result == encoded_error(_EBADF) && sendfile_offset == 3 &&
+            memory.read_calls == 1 && memory.write_calls == 1,
+            "无效输出 fd 仍按 sendfile64 ABI 写回未改变的 offset");
+
+    reset_io(&sendfile_output_io);
+    reset_user(&memory);
+    result = invoke_sendfile(&fixture, &memory, &fault,
+            sendfile_output_fd, 99,
+            USER_BASE + sendfile_offset_address, 1);
+    CHECK(result == encoded_error(_EBADF) &&
+            sendfile_output_io.write_calls == 0 &&
+            memory.read_calls == 1 && memory.write_calls == 1,
+            "无效输入 fd 不写输出文件且仍完成 offset ABI 写回");
+
+    CHECK(f_close_task(&fixture.task, sendfile_output_fd) == 0,
+            "sendfile 输出描述符清理成功");
+    sendfile_input->flags = O_RDWR_;
+    sendfile_input->offset = 0;
+    reset_io(&io);
+    reset_user(&memory);
 
     const size_t vector_offset = 0x100;
     const size_t first_offset = 0x1000;

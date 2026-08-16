@@ -133,6 +133,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_PWRITE64 = 68,
     AARCH64_LINUX_SYS_PREADV = 69,
     AARCH64_LINUX_SYS_PWRITEV = 70,
+    AARCH64_LINUX_SYS_SENDFILE = 71,
     AARCH64_LINUX_SYS_PSELECT6 = 72,
     AARCH64_LINUX_SYS_PPOLL = 73,
     AARCH64_LINUX_SYS_READLINKAT = 78,
@@ -3318,6 +3319,62 @@ static qword_t dispatch_pwrite64(
     return completed;
 }
 
+static qword_t dispatch_sendfile(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    qword_t offset_address = syscall->arguments[2];
+    off_t_ offset;
+    off_t_ *offset_pointer = NULL;
+    if (offset_address != 0) {
+        if (!aarch64_user_range_fits(
+                offset_address, sizeof(offset)))
+            return user_range_error(
+                    fault, offset_address, GUEST_MEMORY_READ);
+        assert(context->user.read != NULL);
+        if (!context->user.read(context->user.opaque,
+                offset_address, &offset, sizeof(offset), fault))
+            return syscall_result(_EFAULT);
+        offset_pointer = &offset;
+    }
+
+    qword_t result = syscall_result(_EBADF);
+    struct fd *output = NULL;
+    bool timeout_enabled = false;
+    struct fd *input = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[1]));
+    if (input == NULL)
+        goto out;
+    output = f_get_task_retain(
+            task, syscall_fd(syscall->arguments[0]));
+    if (output == NULL)
+        goto out;
+
+    qword_t limited_count = syscall->arguments[3] <
+            AARCH64_LINUX_MAX_RW_COUNT ? syscall->arguments[3] :
+            AARCH64_LINUX_MAX_RW_COUNT;
+    byte_t buffer[AARCH64_LINUX_IO_CHUNK_SIZE];
+    timeout_enabled = socket_timeout_enabled(output, false);
+    ssize_t transferred = file_sendfile_fd(output, input,
+            offset_pointer, buffer, sizeof(buffer), (size_t) limited_count);
+    result = syscall_result(transferred);
+out:
+    if (offset_pointer != NULL) {
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                offset_address, &offset, sizeof(offset), fault))
+            result = syscall_result(_EFAULT);
+    }
+    if (output != NULL)
+        complete_socket_interrupt(
+                context, timeout_enabled, (sqword_t) result);
+    if (output != NULL)
+        fd_close(output);
+    if (input != NULL)
+        fd_close(input);
+    return result;
+}
+
 static qword_t dispatch_writev_at(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -4151,6 +4208,8 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_PWRITEV:
             return dispatch_writev_at(context, syscall, task, fault,
                     true, (off_t_) syscall->arguments[3], 0);
+        case AARCH64_LINUX_SYS_SENDFILE:
+            return dispatch_sendfile(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_PSELECT6:
             return dispatch_pselect6(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_PPOLL:

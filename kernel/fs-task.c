@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -366,6 +367,158 @@ ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
         guest_file_pager_commit_file_write(guard.pager,
                 actual_offset, buffer, (size_t) result);
     end_file_io(&guard);
+    return result;
+}
+
+ssize_t file_sendfile_fd(struct fd *output, struct fd *input,
+        off_t_ *offset, void *buffer, size_t buffer_size, size_t count) {
+    int error = file_read_check_fd(input);
+    if (error < 0)
+        return error;
+    error = file_write_check_fd(output);
+    if (error < 0)
+        return error;
+    if (!S_ISREG(input->type) && !S_ISBLK(input->type))
+        return _EINVAL;
+    int output_flags = fd_getflags(output);
+    if (output_flags < 0)
+        return output_flags;
+    if ((output_flags & O_APPEND_) != 0)
+        return _EINVAL;
+    if (offset != NULL && *offset < 0)
+        return _EINVAL;
+    if (count != 0 && (buffer == NULL || buffer_size == 0))
+        return _EINVAL;
+
+    bool input_cacheable = fd_has_coherent_page_cache(input);
+    bool output_cacheable = fd_has_coherent_page_cache(output);
+    bool shared_io_domain = input_cacheable && output_cacheable &&
+            input->inode == output->inode;
+    struct file_io_guard input_guard = {0};
+    struct file_io_guard output_guard = {0};
+    bool input_guard_first = true;
+    // 相向复制可能同时触及两个 inode；稳定顺序避免交叉持锁死锁。
+    if (shared_io_domain) {
+        begin_file_io(input, &input_guard);
+    } else if (input_cacheable && output_cacheable &&
+            (uintptr_t) input->inode > (uintptr_t) output->inode) {
+        input_guard_first = false;
+        begin_file_io(output, &output_guard);
+        begin_file_io(input, &input_guard);
+    } else {
+        begin_file_io(input, &input_guard);
+        begin_file_io(output, &output_guard);
+    }
+    struct guest_file_pager *input_pager = input_guard.pager;
+    struct guest_file_pager *output_pager = shared_io_domain ?
+            input_guard.pager : output_guard.pager;
+
+    bool output_locked = output_cacheable && output != input;
+    bool input_locked_first = true;
+    // fd 锁也使用稳定顺序，且同一打开文件只获取一次。
+    if (output_locked &&
+            (uintptr_t) input > (uintptr_t) output) {
+        input_locked_first = false;
+        lock(&output->lock);
+        lock(&input->lock);
+    } else {
+        lock(&input->lock);
+        if (output_locked)
+            lock(&output->lock);
+    }
+
+    ssize_t result;
+    off_t_ position;
+    if (offset != NULL) {
+        position = *offset;
+    } else if (input->ops->lseek == NULL) {
+        result = _ESPIPE;
+        goto out_unlock;
+    } else {
+        position = input->ops->lseek(input, 0, LSEEK_CUR);
+        if (position < 0) {
+            result = position;
+            goto out_unlock;
+        }
+    }
+
+    if (count != 0 && position >= INT64_MAX) {
+        result = _EOVERFLOW;
+        goto out_unlock;
+    }
+    size_t remaining = count;
+    if ((qword_t) remaining > (qword_t) INT64_MAX - (qword_t) position)
+        remaining = (size_t) ((qword_t) INT64_MAX - (qword_t) position);
+    size_t completed = 0;
+    while (remaining != 0) {
+        size_t chunk = remaining < buffer_size ? remaining : buffer_size;
+        // 先定位读取；只有真实写出的前缀才允许推进源文件位置。
+        ssize_t read = pread_locked(input, buffer, chunk, position);
+        if (read < 0) {
+            result = completed != 0 ? (ssize_t) completed : read;
+            goto out_position;
+        }
+        assert((size_t) read <= chunk);
+        if (read == 0)
+            break;
+        if (input_pager != NULL)
+            guest_file_pager_read_resident(input_pager,
+                    (qword_t) position, buffer, (size_t) read);
+
+        qword_t output_position = 0;
+        bool output_position_known;
+        ssize_t written = write_locked(output, buffer, (size_t) read,
+                output_pager != NULL,
+                &output_position, &output_position_known);
+        if (written < 0) {
+            result = completed != 0 ? (ssize_t) completed : written;
+            goto out_position;
+        }
+        assert(written <= read);
+        if (written == 0)
+            break;
+        if (output_pager != NULL && output_position_known)
+            guest_file_pager_commit_file_write(output_pager,
+                    output_position, buffer, (size_t) written);
+        completed += (size_t) written;
+        position += (off_t_) written;
+        remaining -= (size_t) written;
+        if (written != read || (size_t) read != chunk)
+            break;
+    }
+    result = (ssize_t) completed;
+
+out_position:
+    if (completed != 0) {
+        if (offset != NULL) {
+            *offset = position;
+        } else {
+            off_t_ positioned = input->ops->lseek(
+                    input, position, LSEEK_SET);
+            assert(positioned == position);
+        }
+    }
+out_unlock:
+    if (output_locked) {
+        if (input_locked_first) {
+            unlock(&output->lock);
+            unlock(&input->lock);
+        } else {
+            unlock(&input->lock);
+            unlock(&output->lock);
+        }
+    } else {
+        unlock(&input->lock);
+    }
+    if (shared_io_domain) {
+        end_file_io(&input_guard);
+    } else if (input_guard_first) {
+        end_file_io(&output_guard);
+        end_file_io(&input_guard);
+    } else {
+        end_file_io(&input_guard);
+        end_file_io(&output_guard);
+    }
     return result;
 }
 

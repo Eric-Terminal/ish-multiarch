@@ -52,6 +52,8 @@ ssize_t file_write_task(struct task *task, fd_t fd, const void *buffer, size_t s
 ssize_t file_write_fd(struct fd *fd, const void *buffer, size_t size);
 ssize_t file_pwrite_fd(struct fd *fd, const void *buffer,
         size_t size, off_t_ offset);
+ssize_t file_sendfile_fd(struct fd *output, struct fd *input,
+        off_t_ *offset, void *buffer, size_t buffer_size, size_t count);
 /* pager 精确写回入口；调用方已持 inode I/O 域，且 O_APPEND 不生效。 */
 ssize_t file_page_pwrite_fd_uncoordinated(struct fd *fd,
         const void *buffer, size_t size, off_t_ offset);
