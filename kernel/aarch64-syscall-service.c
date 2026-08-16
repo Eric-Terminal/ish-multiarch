@@ -19,6 +19,7 @@
 #include "guest/aarch64/linux-signal-abi.h"
 #include "guest/aarch64/linux-signal-info.h"
 #include "guest/aarch64/linux-socket-abi.h"
+#include "guest/aarch64/linux-system-abi.h"
 #include "guest/aarch64/linux-time-abi.h"
 #include "guest/memory/address-space.h"
 #include "kernel/aarch64-exec.h"
@@ -35,6 +36,7 @@
 #include "kernel/fs.h"
 #include "kernel/random.h"
 #include "kernel/task.h"
+#include "platform/platform.h"
 #include "util/timer.h"
 
 #if defined(__APPLE__)
@@ -179,6 +181,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_GETEUID = 175,
     AARCH64_LINUX_SYS_GETGID = 176,
     AARCH64_LINUX_SYS_GETEGID = 177,
+    AARCH64_LINUX_SYS_SYSINFO = 179,
     AARCH64_LINUX_SYS_SOCKET = 198,
     AARCH64_LINUX_SYS_SOCKETPAIR = 199,
     AARCH64_LINUX_SYS_BIND = 200,
@@ -455,6 +458,37 @@ static qword_t dispatch_sched_getaffinity(
             address, mask, mask_size, fault))
         return syscall_result(_EFAULT);
     return mask_size;
+}
+
+static qword_t dispatch_sysinfo(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct guest_linux_user_fault *fault) {
+    qword_t address = syscall->arguments[0];
+    if (!aarch64_user_range_fits(
+            address, sizeof(struct aarch64_linux_sysinfo)))
+        return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+
+    struct uptime_info uptime = get_uptime();
+    struct mem_usage memory = get_mem_usage();
+    struct aarch64_linux_sysinfo wire = {
+        .uptime = (sqword_t) uptime.uptime_ticks,
+        .loads = {
+            uptime.load_1m,
+            uptime.load_5m,
+            uptime.load_15m,
+        },
+        .totalram = memory.total,
+        .freeram = memory.free,
+        // 当前 guest 没有交换区；进程数至少包含调用者本身。
+        .procs = 1,
+        .mem_unit = 1,
+    };
+    assert(context->user.write != NULL);
+    if (!context->user.write(context->user.opaque,
+            address, &wire, sizeof(wire), fault))
+        return syscall_result(_EFAULT);
+    return 0;
 }
 
 static int copy_iovecs_from_user(
@@ -4411,6 +4445,8 @@ static qword_t dispatch_syscall_inner(
             return task->gid;
         case AARCH64_LINUX_SYS_GETEGID:
             return task->egid;
+        case AARCH64_LINUX_SYS_SYSINFO:
+            return dispatch_sysinfo(context, syscall, fault);
         case AARCH64_LINUX_SYS_SOCKET:
             return syscall_result(socket_create_task(task,
                     (dword_t) syscall->arguments[0],
