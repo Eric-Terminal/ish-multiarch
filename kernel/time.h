@@ -3,6 +3,7 @@
 #include "misc.h"
 
 struct tgroup;
+struct timer_spec;
 
 dword_t sys_time(addr_t time_out);
 dword_t sys_stime(addr_t time);
@@ -72,6 +73,11 @@ struct tms_ {
 };
 
 int_t sys_setitimer(int_t which, addr_t new_val, addr_t old_val);
+// ABI 包装负责 timeval 校验；共享服务仅接收与宿主字长无关的时间值。
+int_t tgroup_itimer_set(struct tgroup *group, int which,
+        struct timer_spec spec, struct timer_spec *old_spec);
+int_t tgroup_itimer_get(struct tgroup *group, int which,
+        struct timer_spec *spec);
 uint_t sys_alarm(uint_t seconds);
 int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr);
 int_t sys_timer_settime(dword_t timer, int_t flags, addr_t new_value_addr, addr_t old_value_addr);

@@ -2,14 +2,15 @@
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-    echo "用法：$0 <ish 可执行文件> <fakefs 根目录> <DNS 端口重定向动态库>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+    echo "用法：$0 <ish 可执行文件> <fakefs 根目录> <DNS 端口重定向动态库> [Apple 命令桥探针]" >&2
     exit 2
 fi
 
 ish=$1
 rootfs=$2
 redirect_library=$3
+command_probe=${4:-}
 script_dir=$(cd "$(dirname "$0")" && pwd)
 network_fixture=$script_dir/local-network-fixture.py
 timeout_bin=$(command -v timeout || command -v gtimeout || true)
@@ -23,6 +24,10 @@ smoke_rootfs=
 
 if [[ ! -x $ish ]]; then
     echo "ish 可执行文件不存在或不可执行：$ish" >&2
+    exit 2
+fi
+if [[ -n $command_probe && ! -x $command_probe ]]; then
+    echo "Apple 命令桥探针不可执行：$command_probe" >&2
     exit 2
 fi
 if [[ ! -f $rootfs/meta.db || ! -d $rootfs/data ]]; then
@@ -164,10 +169,27 @@ run_guest /bin/sh -c '
 ready_file=$fixture_dir/ready
 query_log=$fixture_dir/queries
 fixture_log=$fixture_dir/fixture.log
+# 证书仅进入隔离 rootfs；HTTPS 必须完成证书校验，不能靠关闭校验过关。
+cat > "$fixture_dir/tls.cnf" <<'EOF'
+[req]
+distinguished_name = subject
+x509_extensions = extensions
+prompt = no
+[subject]
+CN = ish-dns.test
+[extensions]
+basicConstraints = critical,CA:TRUE
+subjectAltName = DNS:http.ish-dns.test,IP:127.0.0.1
+EOF
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -config "$fixture_dir/tls.cnf" \
+    -keyout "$fixture_dir/tls.key" -out "$fixture_dir/tls.crt" \
+    > "$fixture_dir/tls.log" 2>&1
 /usr/bin/python3 -u "$network_fixture" \
     --ready-file "$ready_file" \
     --query-log "$query_log" \
-    --parent-pid "$$" >"$fixture_log" 2>&1 9>&- &
+    --parent-pid "$$" --tls-cert "$fixture_dir/tls.crt" \
+    --tls-key "$fixture_dir/tls.key" >"$fixture_log" 2>&1 9>&- &
 fixture_pid=$!
 for _ in {1..100}; do
     if [[ -f $ready_file ]]; then
@@ -190,6 +212,7 @@ fi
 source "$ready_file"
 if [[ ! $DNS_PORT =~ ^[0-9]+$ ||
         ! $HTTP_PORT =~ ^[0-9]+$ ||
+        ! $HTTPS_PORT =~ ^[0-9]+$ || $HTTPS_PORT == 0 ||
         ! $PROOF =~ ^[0-9a-z-]+$ ]]; then
     echo "本地网络夹具返回了无效参数" >&2
     exit 1
@@ -198,6 +221,40 @@ fi
 numeric_http=$(run_guest /usr/bin/wget -qO- \
     "http://127.0.0.1:$HTTP_PORT/proof")
 [[ $numeric_http == "$PROOF" ]]
+
+if run_guest /usr/bin/wget -qO- \
+        "https://127.0.0.1:$HTTPS_PORT/proof" \
+        > "$fixture_dir/untrusted.log" 2>&1; then
+    echo "HTTPS 错误地接受了未受信任的证书" >&2
+    exit 1
+else
+    untrusted_status=$?
+fi
+if [[ $untrusted_status -ne 1 ]] ||
+        ! grep -Ei 'certificate.*(verify|verification).*failed' \
+            "$fixture_dir/untrusted.log" >/dev/null; then
+    cat "$fixture_dir/untrusted.log" >&2
+    echo "HTTPS 未按预期返回证书校验失败" >&2
+    exit 1
+fi
+run_guest /bin/sh -c 'cat >> /etc/ssl/certs/ca-certificates.crt' \
+    < "$fixture_dir/tls.crt"
+numeric_https=$(run_guest /usr/bin/wget -qO- \
+    "https://127.0.0.1:$HTTPS_PORT/proof")
+[[ $numeric_https == "$PROOF" ]]
+
+run_guest /usr/bin/nc -z -w 1 127.0.0.1 "$HTTP_PORT"
+# 端口 0 由内核分配，避免抢占固定端口；无客户端时必须由 guest alarm 退出。
+"$timeout_bin" -k 2s 8s "$ish" -f "$smoke_rootfs" /bin/sh -c '
+    nc -l -w 1 -p 0 </dev/null 2>/tmp/nc-timeout
+    status=$?
+    test "$status" -eq 1 && grep -F "timeout" /tmp/nc-timeout
+'
+"$timeout_bin" -k 2s 8s "$ish" -f "$smoke_rootfs" /bin/sh -c '
+    wget -T 1 -O /dev/null "http://127.0.0.1:$1/stall" 2>/tmp/wget-timeout
+    status=$?
+    test "$status" -eq 1 && grep -F "download timed out" /tmp/wget-timeout
+' network-timeout "$HTTP_PORT"
 
 run_guest_with_dns /bin/sh -c '
     set -eu
@@ -224,5 +281,21 @@ grep -Fx 'getent.ish-dns.test. A' "$query_log" >/dev/null
 grep -Fx 'nslookup.ish-dns.test. A' "$query_log" >/dev/null
 grep -Fx 'http.ish-dns.test. A' "$query_log" >/dev/null
 grep -Fx 'http.ish-dns.test. AAAA' "$query_log" >/dev/null
+
+if [[ -n $command_probe ]]; then
+    # 不依赖 shell 的最终 exit code 判断兼容性；探针同时检查命令 scope 的诊断。
+    "$timeout_bin" -k 2s 40s "$command_probe" "$smoke_rootfs" "
+        set -e
+        nc -z -w 1 127.0.0.1 $HTTP_PORT
+        wget -qO- https://127.0.0.1:$HTTPS_PORT/proof
+        set +e
+        nc -l -w 1 -p 0 </dev/null
+        test \$? -eq 1
+    " > "$fixture_dir/command.log" 2>&1 || {
+        cat "$fixture_dir/command.log" >&2
+        exit 1
+    }
+    grep -Fx "$PROOF" "$fixture_dir/command.log" >/dev/null
+fi
 
 echo "AArch64 Alpine 冒烟验收通过"

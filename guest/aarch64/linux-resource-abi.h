@@ -1,16 +1,11 @@
 #ifndef GUEST_AARCH64_LINUX_RESOURCE_ABI_H
 #define GUEST_AARCH64_LINUX_RESOURCE_ABI_H
 
-#include "misc.h"
+#include "guest/aarch64/linux-time-abi.h"
 
 struct aarch64_linux_rlimit64 {
     qword_t cur;
     qword_t max;
-} __attribute__((packed, aligned(8)));
-
-struct aarch64_linux_timeval {
-    sqword_t sec;
-    sqword_t usec;
 } __attribute__((packed, aligned(8)));
 
 struct aarch64_linux_rusage {
@@ -37,11 +32,6 @@ _Static_assert(sizeof(struct aarch64_linux_rlimit64) == 16 &&
         __builtin_offsetof(struct aarch64_linux_rlimit64, cur) == 0 &&
         __builtin_offsetof(struct aarch64_linux_rlimit64, max) == 8,
         "AArch64 Linux rlimit64 ABI 必须固定为 16 字节且按 8 字节对齐");
-_Static_assert(sizeof(struct aarch64_linux_timeval) == 16 &&
-        _Alignof(struct aarch64_linux_timeval) == 8 &&
-        __builtin_offsetof(struct aarch64_linux_timeval, sec) == 0 &&
-        __builtin_offsetof(struct aarch64_linux_timeval, usec) == 8,
-        "AArch64 Linux timeval ABI 必须固定为 16 字节且按 8 字节对齐");
 _Static_assert(sizeof(struct aarch64_linux_rusage) == 144 &&
         _Alignof(struct aarch64_linux_rusage) == 8,
         "AArch64 Linux rusage ABI 必须固定为 144 字节且按 8 字节对齐");

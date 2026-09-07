@@ -130,6 +130,81 @@ static int_t time_syscall_int(qword_t argument) {
     return (int_t) (sdword_t) (dword_t) argument;
 }
 
+static qword_t write_guest_itimerval(
+        const struct guest_linux_syscall_context *context,
+        qword_t address, const struct timer_spec *spec,
+        struct guest_linux_user_fault *fault) {
+    const struct aarch64_linux_itimerval wire = {
+        .interval = {spec->interval.sec, spec->interval.nsec / 1000},
+        .value = {spec->value.sec, spec->value.nsec / 1000},
+    };
+    if (!time_user_range_fits(address, sizeof(wire)))
+        return time_user_range_error(fault, address, GUEST_MEMORY_WRITE);
+    if (!context->user.write(context->user.opaque,
+            address, &wire, sizeof(wire), fault))
+        return time_result(_EFAULT);
+    return 0;
+}
+
+static bool valid_itimer_timeval(struct aarch64_linux_timeval value) {
+    return value.sec >= 0 && value.usec >= 0 && value.usec < 1000000;
+}
+
+static struct timer_time itimer_timeval_to_time(
+        struct aarch64_linux_timeval value) {
+    // Linux 的 timespec64_to_ktime 将过大的正秒数饱和到 KTIME_MAX。
+    if (value.sec >= AARCH64_LINUX_KTIME_MAX_SEC)
+        return (struct timer_time) {
+            AARCH64_LINUX_KTIME_MAX_SEC, AARCH64_LINUX_KTIME_MAX_NSEC,
+        };
+    return (struct timer_time) {value.sec, value.usec * 1000};
+}
+
+qword_t aarch64_linux_dispatch_setitimer(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct aarch64_linux_itimerval wire = {0};
+    qword_t address = syscall->arguments[1];
+    // Linux 将 NULL new_value 视为停用；必须先完成 copyin 再校验 which。
+    if (address != 0) {
+        if (!time_user_range_fits(address, sizeof(wire)))
+            return time_user_range_error(fault, address, GUEST_MEMORY_READ);
+        if (!context->user.read(context->user.opaque,
+                address, &wire, sizeof(wire), fault))
+            return time_result(_EFAULT);
+    }
+    if (!valid_itimer_timeval(wire.interval) ||
+            !valid_itimer_timeval(wire.value))
+        return time_result(_EINVAL);
+    struct timer_spec spec = {
+        .interval = itimer_timeval_to_time(wire.interval),
+        .value = itimer_timeval_to_time(wire.value),
+    };
+    struct timer_spec old_spec;
+    int_t error = tgroup_itimer_set(task->group,
+            time_syscall_int(syscall->arguments[0]), spec, &old_spec);
+    if (error < 0)
+        return time_result(error);
+    // old_value 写回失败不撤销已经生效的定时器，保持 Linux 的副作用顺序。
+    if (syscall->arguments[2] == 0)
+        return 0;
+    return write_guest_itimerval(context,
+            syscall->arguments[2], &old_spec, fault);
+}
+
+qword_t aarch64_linux_dispatch_getitimer(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    struct timer_spec spec;
+    int_t error = tgroup_itimer_get(task->group,
+            time_syscall_int(syscall->arguments[0]), &spec);
+    if (error < 0)
+        return time_result(error);
+    return write_guest_itimerval(context, syscall->arguments[1], &spec, fault);
+}
+
 qword_t aarch64_linux_dispatch_timerfd_create(
         const struct guest_linux_syscall *syscall, struct task *task) {
     return time_result(timerfd_create_task(task,

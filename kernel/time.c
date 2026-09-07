@@ -173,6 +173,41 @@ static int itimer_set(struct tgroup *group, int which, struct timer_spec spec, s
     return timer_set(group->itimer, spec, old_spec);
 }
 
+int_t tgroup_itimer_set(struct tgroup *group, int which,
+        struct timer_spec spec, struct timer_spec *old_spec) {
+    if (timer_time_is_zero(spec.value))
+        spec.interval = (struct timer_time) {0};
+    lock(&pids_lock);
+    lock(&group->lock);
+    int_t error = itimer_set(group, which, spec, old_spec);
+    unlock(&group->lock);
+    unlock(&pids_lock);
+    return error;
+}
+
+int_t tgroup_itimer_get(struct tgroup *group, int which,
+        struct timer_spec *spec) {
+    if (which != ITIMER_REAL_)
+        return _EINVAL;
+    *spec = (struct timer_spec) {0};
+    lock(&group->lock);
+    struct timer *timer = group->itimer;
+    if (timer != NULL) {
+        lock(&timer->lock);
+        spec->interval = timer->interval;
+        if (timer->active) {
+            spec->value = timer_time_subtract(timer->end,
+                    timer_time_from_timespec(timespec_now(timer->clockid)));
+            // 到期回调尚未取得锁时，不能把仍活动的定时器报告为停用。
+            if (!timer_time_positive(spec->value))
+                spec->value = (struct timer_time) {.nsec = 1000};
+        }
+        unlock(&timer->lock);
+    }
+    unlock(&group->lock);
+    return 0;
+}
+
 int_t sys_setitimer(int_t which, addr_t new_val_addr, addr_t old_val_addr) {
     struct itimerval_ val;
     if (user_get(new_val_addr, val))
@@ -189,15 +224,7 @@ int_t sys_setitimer(int_t which, addr_t new_val_addr, addr_t old_val_addr) {
         .value.nsec = (int64_t) val.value.usec * 1000,
     };
     struct timer_spec old_spec;
-    if (timer_time_is_zero(spec.value))
-        spec.interval = (struct timer_time) {0};
-
-    struct tgroup *group = current->group;
-    lock(&pids_lock);
-    lock(&group->lock);
-    int err = itimer_set(group, which, spec, &old_spec);
-    unlock(&group->lock);
-    unlock(&pids_lock);
+    int err = tgroup_itimer_set(current->group, which, spec, &old_spec);
     if (err < 0)
         return err;
 
@@ -226,12 +253,7 @@ uint_t sys_alarm(uint_t seconds) {
     };
     struct timer_spec old_spec;
 
-    struct tgroup *group = current->group;
-    lock(&pids_lock);
-    lock(&group->lock);
-    int err = itimer_set(group, ITIMER_REAL_, spec, &old_spec);
-    unlock(&group->lock);
-    unlock(&pids_lock);
+    int err = tgroup_itimer_set(current->group, ITIMER_REAL_, spec, &old_spec);
     if (err < 0)
         return err;
 

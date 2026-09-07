@@ -156,6 +156,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_SET_ROBUST_LIST = 99,
     AARCH64_LINUX_SYS_GET_ROBUST_LIST = 100,
     AARCH64_LINUX_SYS_NANOSLEEP = 101,
+    AARCH64_LINUX_SYS_GETITIMER = 102,
+    AARCH64_LINUX_SYS_SETITIMER = 103,
     AARCH64_LINUX_SYS_CLOCK_GETTIME = 113,
     AARCH64_LINUX_SYS_SCHED_GETAFFINITY = 123,
     AARCH64_LINUX_SYS_KILL = 129,
@@ -4373,6 +4375,12 @@ static qword_t dispatch_syscall_inner(
         }
         case AARCH64_LINUX_SYS_NANOSLEEP:
             return aarch64_linux_dispatch_nanosleep(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_GETITIMER:
+            return aarch64_linux_dispatch_getitimer(
+                    context, syscall, task, fault);
+        case AARCH64_LINUX_SYS_SETITIMER:
+            return aarch64_linux_dispatch_setitimer(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_CLOCK_GETTIME:
             return aarch64_linux_dispatch_clock_gettime(

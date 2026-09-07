@@ -3,6 +3,29 @@
 
 #include "misc.h"
 
+struct aarch64_linux_timeval {
+    sqword_t sec;
+    sqword_t usec;
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_timeval) == 16 &&
+        _Alignof(struct aarch64_linux_timeval) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_timeval, sec) == 0 &&
+        __builtin_offsetof(struct aarch64_linux_timeval, usec) == 8,
+        "AArch64 Linux timeval ABI 必须固定为 16 字节且按 8 字节对齐");
+
+struct aarch64_linux_itimerval {
+    struct aarch64_linux_timeval interval;
+    struct aarch64_linux_timeval value;
+} __attribute__((packed, aligned(8)));
+
+_Static_assert(sizeof(struct aarch64_linux_itimerval) == 32 &&
+        _Alignof(struct aarch64_linux_itimerval) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_itimerval, interval.usec) == 8 &&
+        __builtin_offsetof(struct aarch64_linux_itimerval, value.sec) == 16 &&
+        __builtin_offsetof(struct aarch64_linux_itimerval, value.usec) == 24,
+        "AArch64 itimerval 使用四个 64 位字段，不能复用 i386 timeval");
+
 struct aarch64_linux_timespec {
     sqword_t sec;
     sqword_t nsec;

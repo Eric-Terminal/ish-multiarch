@@ -428,6 +428,9 @@ if get_option('kernel') == 'ish'
             test('apple_command_session_guest',
                 apple_command_session_guest_test, timeout: 30)
 
+            executable('aarch64_apple_command_probe',
+                'tests/aarch64/apple-command-probe.c', dependencies: ish)
+
             apple_public_runtime_test = executable(
                 'apple_public_runtime_test',
                 'platform/apple-public-runtime-test.c',
@@ -846,6 +849,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_nanosleep_syscall',
             aarch64_nanosleep_syscall_test)
+
+        aarch64_itimer_syscall_test = executable(
+            'aarch64_itimer_syscall_test',
+            'kernel/aarch64-itimer-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_itimer_syscall', aarch64_itimer_syscall_test)
 
         aarch64_clock_gettime_syscall_test = executable(
             'aarch64_clock_gettime_syscall_test',

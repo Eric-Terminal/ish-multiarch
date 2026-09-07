@@ -758,10 +758,17 @@ build/tools/fakefsify \
     /tmp/alpine-minirootfs-3.24.1-aarch64.tar.gz \
     /tmp/ish-a64-alpine
 tests/aarch64/alpine-smoke.bash build/ish /tmp/ish-a64-alpine \
-    build/libish_aarch64_e2e_dns_redirect.dylib
+    build/libish_aarch64_e2e_dns_redirect.dylib \
+    build/aarch64_apple_command_probe
 ```
 
 冒烟脚本不会下载或提交 rootfs。macOS 普通进程不能监听 UDP 53，因此测试专用动态库只在该次 `ish` 子进程中把 guest 可见的 `127.0.0.53:53` 映射到本地夹具随机选择的高位端口，并把响应来源恢复为 guest 看到的 53 端口；生产 socket 实现不含测试重定向。DNS 阶段会先把 fakefs 复制到宿主临时目录，resolver 只写入隔离副本，不会改动输入 rootfs 的 resolver；顶层存储或 `data` 树含真实宿主符号链接的非规范 fakefs 会被拒绝。脚本会拒绝与已有 `ish` 进程或同一 rootfs 的另一份验收重叠运行，并为每个 guest 命令设置硬超时；正常退出或收到可捕获信号时会清理隔离副本和自己启动的 DNS/HTTP 服务。若宿主直接以 `SIGKILL` 终止脚本，夹具会监测父进程并自行退出，带硬上限的 guest 子进程也会释放锁，但随机命名的临时 fakefs 副本可能留在磁盘上，需要人工删除。
+
+网络验收还会调用宿主 `openssl` 生成临时证书，仅在隔离 rootfs 中加入其信任，
+验证 HTTPS 证书校验与下载，以及 `nc -w`、`wget -T` 的实际到期退出。
+可选的第四个参数通过与客户端相同的 Apple runtime/command API 再执行
+TCP、HTTPS 和超时命令，并在命令成功退出时仍检查兼容性诊断队列。
+问题背景与证据见[网络超时兼容性排查](network-timeout-investigation.md)。
 
 当前已取得以下构建与测试门禁证据；这些结果不自动选择发行 profile，也不
 等同于许可闭合或发布就绪：

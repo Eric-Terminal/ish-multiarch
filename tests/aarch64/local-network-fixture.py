@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import socket
+import ssl
 import struct
 import threading
 from pathlib import Path
@@ -74,19 +75,24 @@ def query_type_name(query_type: int) -> str:
 
 
 def publish_ready(path: Path, dns_port: int,
-        http_port: int, proof: str) -> None:
+        http_port: int, https_port: int, proof: str) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
-        f"DNS_PORT={dns_port}\nHTTP_PORT={http_port}\nPROOF={proof}\n",
+        f"DNS_PORT={dns_port}\nHTTP_PORT={http_port}\n"
+        f"HTTPS_PORT={https_port}\nPROOF={proof}\n",
         encoding="ascii")
     os.replace(temporary, path)
 
 
-def make_http_server(proof: str) -> http.server.ThreadingHTTPServer:
+def make_http_server(proof: str, stop: threading.Event) -> http.server.ThreadingHTTPServer:
     body = (proof + "\n").encode("ascii")
 
     class ProofHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path == "/stall":
+                # 接受连接后不发送响应，用真实阻塞读验证 guest 自己的超时。
+                stop.wait(60)
+                return
             if self.path != "/proof":
                 self.send_error(404)
                 return
@@ -129,6 +135,8 @@ def main() -> None:
     parser.add_argument("--ready-file", type=Path, required=True)
     parser.add_argument("--query-log", type=Path, required=True)
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--tls-cert", type=Path)
+    parser.add_argument("--tls-key", type=Path)
     arguments = parser.parse_args()
 
     arguments.ready_file.unlink(missing_ok=True)
@@ -139,19 +147,28 @@ def main() -> None:
 
     dns_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dns_server.bind(("127.0.0.1", 0))
-    http_server = make_http_server(proof)
+    http_server = make_http_server(proof, stop)
     while http_server.server_address[1] == dns_server.getsockname()[1]:
         http_server.server_close()
-        http_server = make_http_server(proof)
+        http_server = make_http_server(proof, stop)
+    https_server = None
+    if arguments.tls_cert and arguments.tls_key:
+        https_server = make_http_server(proof, stop)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(arguments.tls_cert, arguments.tls_key)
+        https_server.socket = tls.wrap_socket(https_server.socket, server_side=True)
     dns_thread = threading.Thread(target=serve_dns,
             args=(dns_server, stop, arguments.query_log), daemon=True)
     http_thread = threading.Thread(
             target=http_server.serve_forever, daemon=True)
     dns_thread.start()
     http_thread.start()
+    if https_server is not None:
+        threading.Thread(target=https_server.serve_forever, daemon=True).start()
     publish_ready(arguments.ready_file,
             dns_server.getsockname()[1],
-            http_server.server_address[1], proof)
+            http_server.server_address[1],
+            https_server.server_address[1] if https_server else 0, proof)
 
     try:
         while not stop.wait(0.2):
@@ -164,6 +181,9 @@ def main() -> None:
         dns_thread.join(timeout=2)
         http_thread.join(timeout=2)
         http_server.server_close()
+        if https_server is not None:
+            https_server.shutdown()
+            https_server.server_close()
 
 
 if __name__ == "__main__":
