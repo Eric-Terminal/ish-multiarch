@@ -57,6 +57,25 @@ build/aarch64_apple_command_probe /tmp/ish-a64-alpine \
     'nc -l -w 1 -p 0; test $? -eq 1'
 ```
 
+## 自动反馈 #144 的核对
+
+2026-09-08 核对客户端的 [#144](https://github.com/Eric-Terminal/ETOS-LLM-Studio/issues/144)：
+反馈来自 TestFlight 1.9.0（Build 438），事件采集于 2026-09-06，内核为
+修复前的 `90c1923a`，执行后端为 AArch64 threaded。四条事件全部是
+`nc` 调用 `setitimer(103)` 返回 `-38`（ENOSYS），属于本次已修复的问题。
+事件类别是未实现系统调用，其中的零 opcode 不能用作缺失指令的证据。
+上报的 Alpine 版本及种子 SHA256 与当前客户端种子清单的
+`alpineVersion`、`upstreamArchiveSHA256` 一致。
+
+修复位于 iSH 提交 `3c4fe752`；客户端提交 `a4a7e90d` 已更新该依赖。
+针对反馈再次运行 AArch64 itimer、原有 i386 定时器及生命周期三项回归，
+全部通过。通过公共 Apple 命令桥连续运行两次 `nc -l -w 1 -p 0`，
+两次均按预期超时并返回 1；验收脚本返回 0，总耗时约 2.13 秒，
+兼容性事件为零。此命令是用于验证修复的工作负载，反馈并未记录用户原始命令。
+
+因此不需要重复修改系统调用实现；包含新依赖的 App 构建才会向设备交付修复。
+以上核对未执行 App 的构建、发布或真机验证。
+
 ## 真机与交付边界
 
 截图中的 SSH 目标地址、原始 stderr 和 iPhone 的本地网络授权状态未知，
