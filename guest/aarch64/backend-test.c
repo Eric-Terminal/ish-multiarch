@@ -13492,7 +13492,7 @@ static void test_cache_keys_and_collision(void) {
     assert(cpu.x[0] == 5);
     assert_stats(&runner, 2, 3, 5, 0);
     assert(run_at(&runner, &cpu, first).stop == AARCH64_STEP_RETIRED);
-    assert_stats(&runner, 2, 4, 6, 0);
+    assert_stats(&runner, 3, 3, 6, 0);
 }
 
 static void test_rwx_self_modifying_code(void) {

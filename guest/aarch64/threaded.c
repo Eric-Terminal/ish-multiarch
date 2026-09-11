@@ -1280,8 +1280,31 @@ bool aarch64_threaded_execute(struct aarch64_threaded_cache *cache,
     assert(result != NULL);
     assert((pc & 3) == 0);
 
-    struct aarch64_threaded_cache_entry *entry =
-            &cache->entries[cache_index(pc)];
+    unsigned set = cache_index(pc);
+    struct aarch64_threaded_cache_entry *entry = NULL;
+    struct aarch64_threaded_cache_entry *vacant = NULL;
+    for (unsigned way = 0; way < AARCH64_THREADED_CACHE_WAYS; way++) {
+        struct aarch64_threaded_cache_entry *candidate =
+                &cache->entries[set][way];
+        if (candidate->valid && candidate->pc == pc) {
+            entry = candidate;
+            break;
+        }
+        if (!candidate->valid && vacant == NULL)
+            vacant = candidate;
+    }
+    if (entry == NULL) {
+        if (vacant != NULL) {
+            entry = vacant;
+        } else {
+            unsigned victim = cache->next_victim[set];
+            entry = &cache->entries[set][victim];
+            cache->next_victim[set] =
+                    (byte_t) ((victim + 1) % AARCH64_THREADED_CACHE_WAYS);
+        }
+    }
+    // 同槽位的调用者与被调用者可以并存；仍校验当前取到的指令字，
+    // 自修改代码必须覆盖原 PC 的缓存项，不能复用旧解码。
     if (entry->valid && entry->pc == pc && entry->word == word) {
         cache->stats.cache_hits++;
     } else {

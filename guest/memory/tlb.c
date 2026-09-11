@@ -322,6 +322,55 @@ bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
     return true;
 }
 
+bool guest_tlb_fetch_u32(struct guest_tlb *tlb, guest_addr_t address,
+        dword_t *instruction, struct guest_memory_fault *fault) {
+    assert((address & 3) == 0);
+    byte_t bytes[4];
+    bool locked = guest_address_space_read_lock(tlb->address_space);
+    guest_addr_t page = address & ~GUEST_MEMORY_PAGE_MASK;
+    const struct guest_tlb_entry *entry =
+            &tlb->entries[guest_tlb_index(page)];
+    if (tlb->observed_generation == tlb->address_space->generation &&
+            entry->valid && entry->guest_page == page &&
+            (entry->permissions & GUEST_MEMORY_EXECUTE) != 0 &&
+            guest_address_space_contains(tlb->address_space, address, 4)) {
+        const struct guest_page_sync *sync =
+                entry->sync != NULL ? entry->sync : entry->access_sync;
+        if (sync != NULL)
+            guest_page_sync_read_lock(sync);
+        bool accessible = sync == NULL || guest_page_sync_accessible(sync);
+        if (accessible) {
+            // 对齐取指不会跨页；在映射锁与页面同步锁内直接读取四字节，
+            // 省去通用访问的分片构造、同步域排序和重复页面可访问性检查。
+            memcpy(bytes, entry->host_page +
+                    (size_t) (address & GUEST_MEMORY_PAGE_MASK), 4);
+        }
+        if (sync != NULL)
+            guest_page_sync_read_unlock(sync);
+        if (accessible) {
+            guest_address_space_read_unlock(tlb->address_space, locked);
+            *fault = (struct guest_memory_fault) {
+                .address = address,
+                .access = GUEST_MEMORY_EXECUTE,
+                .kind = GUEST_MEMORY_FAULT_NONE,
+            };
+            goto decoded;
+        }
+    }
+    guest_address_space_read_unlock(tlb->address_space, locked);
+    // 映射更新、缺页和权限变化仍由同一慢路径处理；不缓存代码字节，
+    // 让 RWX 页和共享映射上的自修改立即进入现有解码校验。
+    if (!guest_tlb_read(tlb, address, bytes, sizeof(bytes),
+            GUEST_MEMORY_EXECUTE, fault))
+        return false;
+decoded:
+    *instruction = (dword_t) bytes[0] |
+            (dword_t) bytes[1] << 8 |
+            (dword_t) bytes[2] << 16 |
+            (dword_t) bytes[3] << 24;
+    return true;
+}
+
 static bool exclusive_access_fits_granule(
         guest_addr_t address, size_t size) {
     assert(size != 0);

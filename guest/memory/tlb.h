@@ -63,6 +63,9 @@ void guest_tlb_flush(struct guest_tlb *tlb);
 bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         void *destination, size_t size, enum guest_memory_access access,
         struct guest_memory_fault *fault);
+// AArch64 自然对齐的 32 位取指；始终读取当前页面字节并验证执行权限。
+bool guest_tlb_fetch_u32(struct guest_tlb *tlb, guest_addr_t address,
+        dword_t *instruction, struct guest_memory_fault *fault);
 // 返回的数据与保留令牌来自同一个读事务。
 bool guest_tlb_load_exclusive(struct guest_tlb *tlb,
         guest_addr_t address, void *destination, size_t size,

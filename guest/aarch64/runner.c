@@ -35,13 +35,6 @@ const struct aarch64_threaded_stats *aarch64_runner_threaded_stats(
     return &runner->threaded_cache.stats;
 }
 
-static dword_t read_instruction_word(const byte_t bytes[4]) {
-    return (dword_t) bytes[0] |
-            (dword_t) bytes[1] << 8 |
-            (dword_t) bytes[2] << 16 |
-            (dword_t) bytes[3] << 24;
-}
-
 struct aarch64_step_result aarch64_run_one(
         struct aarch64_runner *runner, struct cpu_state *cpu) {
     struct aarch64_step_result result = {
@@ -58,13 +51,11 @@ struct aarch64_step_result aarch64_run_one(
         return result;
     }
 
-    byte_t bytes[4];
-    if (!guest_tlb_read(runner->tlb, cpu->pc, bytes, sizeof(bytes),
-            GUEST_MEMORY_EXECUTE, &result.fault)) {
+    if (!guest_tlb_fetch_u32(runner->tlb, cpu->pc,
+            &result.instruction, &result.fault)) {
         result.stop = AARCH64_STEP_FETCH_FAULT;
         return result;
     }
-    result.instruction = read_instruction_word(bytes);
 
     struct aarch64_execute_result execute_result;
     bool defined;

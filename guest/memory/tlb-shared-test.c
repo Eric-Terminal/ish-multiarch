@@ -22,6 +22,7 @@ struct shared_test_space {
     struct guest_address_space address_space;
     struct shared_test_page pages[2];
     unsigned page_count;
+    unsigned permissions;
 };
 
 static bool shared_read_lock(void *opaque) {
@@ -58,7 +59,7 @@ static enum guest_memory_fault_kind resolve_shared_page(void *opaque,
             continue;
         view->host_page = guest_page_backing_bytes(
                 space->pages[index].backing);
-        view->permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
+        view->permissions = space->permissions;
         view->sync = guest_page_backing_sync(space->pages[index].backing);
         return GUEST_MEMORY_FAULT_NONE;
     }
@@ -80,12 +81,57 @@ static void shared_test_space_init(struct shared_test_space *space,
     assert(pthread_rwlock_init(&space->lock, NULL) == 0);
     memcpy(space->pages, pages, page_count * sizeof(*pages));
     space->page_count = page_count;
+    space->permissions = GUEST_MEMORY_READ | GUEST_MEMORY_WRITE;
     guest_address_space_init(
             &space->address_space, &shared_test_ops, space, 48);
 }
 
 static void shared_test_space_destroy(struct shared_test_space *space) {
     assert(pthread_rwlock_destroy(&space->lock) == 0);
+}
+
+static void test_instruction_fetch_shared_changes(void) {
+    struct guest_file_page_domain *domain = guest_file_page_domain_create();
+    struct guest_page_backing *backing = guest_page_backing_create();
+    assert(domain != NULL && backing != NULL);
+    guest_page_backing_track_file_writes(backing, domain, 0);
+    const struct shared_test_page reader_page = {TEST_PAGE, backing};
+    const struct shared_test_page writer_page = {TEST_ALIAS_PAGE, backing};
+    struct shared_test_space reader;
+    struct shared_test_space writer;
+    shared_test_space_init(&reader, &reader_page, 1);
+    shared_test_space_init(&writer, &writer_page, 1);
+    reader.permissions |= GUEST_MEMORY_EXECUTE;
+    struct guest_tlb reader_tlb;
+    struct guest_tlb writer_tlb;
+    guest_tlb_init(&reader_tlb, &reader.address_space);
+    guest_tlb_init(&writer_tlb, &writer.address_space);
+    struct guest_memory_fault fault;
+    const byte_t nop[] = {0x1f, 0x20, 0x03, 0xd5};
+    const byte_t add[] = {0x00, 0x04, 0x00, 0x91};
+    assert(guest_tlb_write(&writer_tlb, TEST_ALIAS_PAGE,
+            nop, sizeof(nop), &fault));
+    dword_t instruction;
+    assert(guest_tlb_fetch_u32(&reader_tlb, TEST_PAGE, &instruction, &fault));
+    assert(instruction == UINT32_C(0xd503201f));
+
+    // 两个地址空间共享 backing；已缓存的取指必须看到另一个别名的改写。
+    assert(guest_tlb_write(&writer_tlb, TEST_ALIAS_PAGE,
+            add, sizeof(add), &fault));
+    assert(guest_tlb_fetch_u32(&reader_tlb, TEST_PAGE, &instruction, &fault));
+    assert(instruction == UINT32_C(0x91000400));
+
+    // 截断只使 backing 失效，地址空间世代不变，命中路径也必须拒绝读取。
+    guest_file_page_domain_resize(domain, GUEST_MEMORY_PAGE_SIZE, 0);
+    assert(!guest_tlb_fetch_u32(&reader_tlb, TEST_PAGE, &instruction, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(fault.address == TEST_PAGE && fault.access == GUEST_MEMORY_EXECUTE);
+    assert(instruction == UINT32_C(0x91000400));
+
+    shared_test_space_destroy(&reader);
+    shared_test_space_destroy(&writer);
+    guest_page_backing_release(backing);
+    guest_file_page_domain_release(domain);
 }
 
 static void encode_pair(byte_t pair[16], qword_t value) {
@@ -508,6 +554,7 @@ static void test_clone_observes_consistent_page(void) {
 }
 
 int main(void) {
+    test_instruction_fetch_shared_changes();
     test_visibility_and_exclusive_reservation();
     test_cross_space_compare_exchange();
     test_cross_space_reads_are_not_torn();

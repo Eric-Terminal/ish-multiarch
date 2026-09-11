@@ -10,6 +10,7 @@
 #define AARCH64_THREADED_CACHE_BITS 6
 #define AARCH64_THREADED_CACHE_SIZE \
     (1U << AARCH64_THREADED_CACHE_BITS)
+#define AARCH64_THREADED_CACHE_WAYS 4
 
 typedef void (*aarch64_threaded_handler)(
         struct cpu_state *cpu, struct guest_tlb *tlb,
@@ -42,7 +43,8 @@ struct aarch64_threaded_local_profile {
 
 struct aarch64_threaded_cache {
     struct aarch64_threaded_cache_entry
-            entries[AARCH64_THREADED_CACHE_SIZE];
+            entries[AARCH64_THREADED_CACHE_SIZE][AARCH64_THREADED_CACHE_WAYS];
+    byte_t next_victim[AARCH64_THREADED_CACHE_SIZE];
     struct aarch64_threaded_stats stats;
 #if ISH_AARCH64_THREADED_PROFILE
     struct aarch64_threaded_local_profile profile;
@@ -51,6 +53,8 @@ struct aarch64_threaded_cache {
 
 _Static_assert(sizeof(struct aarch64_threaded_cache_entry) == 64,
         "AArch64 threaded 缓存项必须保持为 64 字节");
+_Static_assert(sizeof(((struct aarch64_threaded_cache *) 0)->entries) == 16384,
+        "解码缓存固定为 16 KiB，避免 watchOS 随运行历史增长");
 _Static_assert((AARCH64_THREADED_CACHE_SIZE &
         (AARCH64_THREADED_CACHE_SIZE - 1)) == 0,
         "AArch64 threaded 缓存容量必须为二次幂");

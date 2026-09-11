@@ -569,7 +569,56 @@ static void test_concurrent_compare_exchange_pair(void) {
     assert(pthread_rwlock_destroy(&memory.lock) == 0);
 }
 
+static void test_instruction_fetch_invalidation(void) {
+    struct test_memory memory = {
+        .pages = {{PAGE_A, NULL,
+                GUEST_MEMORY_READ | GUEST_MEMORY_WRITE | GUEST_MEMORY_EXECUTE}},
+    };
+    memory.pages[0].host_page = memory.first;
+    struct guest_address_space space;
+    guest_address_space_init(&space, &test_ops, &memory, 48);
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &space);
+    const guest_addr_t pc = PAGE_A + GUEST_MEMORY_PAGE_SIZE - 4;
+    const byte_t original[] = {0x1f, 0x20, 0x03, 0xd5};
+    struct guest_memory_fault fault;
+    assert(guest_tlb_write(&tlb, pc, original, 4, &fault));
+    dword_t instruction;
+    assert(guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(instruction == UINT32_C(0xd503201f));
+    unsigned resolutions = memory.resolutions;
+    assert(guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(memory.resolutions == resolutions);
+
+    const byte_t replacement[] = {0x00, 0x04, 0x00, 0x91};
+    assert(guest_tlb_write(&tlb, pc, replacement, 4, &fault));
+    assert(guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(instruction == UINT32_C(0x91000400));
+
+    memory.pages[0].permissions = GUEST_MEMORY_READ;
+    guest_address_space_changed(&space);
+    assert(!guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_PERMISSION && fault.address == pc);
+    assert(instruction == UINT32_C(0x91000400));
+
+    memory.pages[0].permissions = GUEST_MEMORY_EXECUTE;
+    memory.pages[0].host_page = memory.replacement;
+    memcpy(memory.replacement + GUEST_MEMORY_PAGE_SIZE - 4, original, 4);
+    guest_address_space_changed(&space);
+    assert(guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(instruction == UINT32_C(0xd503201f));
+    memory.pages[0].address = 0;
+    guest_address_space_changed(&space);
+    assert(!guest_tlb_fetch_u32(&tlb, pc, &instruction, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(!guest_tlb_fetch_u32(&tlb, UINT64_C(1) << 48, &instruction, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE);
+    assert(memory.read_locks == memory.read_unlocks);
+    assert(memory.write_locks == memory.write_unlocks);
+}
+
 int main(void) {
+    test_instruction_fetch_invalidation();
     struct test_memory memory = {
         .pages = {
             {PAGE_A, NULL, GUEST_MEMORY_READ | GUEST_MEMORY_WRITE |

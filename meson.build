@@ -1569,6 +1569,14 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_backend', aarch64_backend_test)
 
+    aarch64_threaded_cache_test = executable('aarch64_threaded_cache_test',
+        'guest/aarch64/threaded-cache-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        dependencies: threads,
+        link_with: libish_aarch64_core)
+    test('aarch64_threaded_cache', aarch64_threaded_cache_test)
+
     if host_machine.cpu_family() == 'aarch64'
         aarch64_backend_benchmark = executable(
             'aarch64_backend_benchmark',
