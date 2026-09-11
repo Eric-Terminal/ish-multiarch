@@ -1243,47 +1243,65 @@ static void apply_syscall_result(
     }
 }
 
+static struct aarch64_linux_process_result run_instructions(
+        struct aarch64_linux_process *process, unsigned budget) {
+    assert(process != NULL);
+    for (unsigned executed = 0; ; executed++) {
+        struct aarch64_linux_process_result result = process_result(
+                AARCH64_LINUX_PROCESS_RUNNABLE);
+        struct aarch64_step_result step = aarch64_run_one(
+                &process->runner, &process->cpu);
+        result.instruction = step.instruction;
+        switch (step.stop) {
+            case AARCH64_STEP_RETIRED: {
+                struct guest_linux_signal_poll_result signal =
+                        aarch64_linux_poll_signals(
+                                &process->cpu, &process->tlb,
+                                &process->runtime, &process->task);
+                apply_signal_result(&result, signal);
+                if (signal.status == GUEST_LINUX_SIGNAL_POLL_IDLE &&
+                        !process->cpu.single_step && executed + 1 < budget)
+                    continue;
+                break;
+            }
+            case AARCH64_STEP_FETCH_FAULT:
+                result.status = AARCH64_LINUX_PROCESS_FETCH_FAULT;
+                export_fault(&result.fault, &step.fault);
+                process->cpu.segfault_addr = step.fault.address;
+                process->cpu.segfault_was_write = false;
+                break;
+            case AARCH64_STEP_DATA_FAULT:
+                result.status = AARCH64_LINUX_PROCESS_DATA_FAULT;
+                export_fault(&result.fault, &step.fault);
+                process->cpu.segfault_addr = step.fault.address;
+                process->cpu.segfault_was_write =
+                        step.fault.access == GUEST_MEMORY_WRITE;
+                break;
+            case AARCH64_STEP_UNDEFINED:
+                result.status = AARCH64_LINUX_PROCESS_UNDEFINED;
+                result.fault.address = process->cpu.pc;
+                break;
+            case AARCH64_STEP_SYSCALL: {
+                struct aarch64_linux_syscall_result syscall =
+                        aarch64_linux_dispatch_syscall(
+                                &process->cpu, &process->tlb,
+                                &process->runtime, &process->task);
+                apply_syscall_result(&result, &syscall);
+                break;
+            }
+        }
+        return result;
+    }
+}
+
 struct aarch64_linux_process_result aarch64_linux_process_run_one(
         struct aarch64_linux_process *process) {
-    assert(process != NULL);
-    struct aarch64_linux_process_result result = process_result(
-            AARCH64_LINUX_PROCESS_RUNNABLE);
-    struct aarch64_step_result step = aarch64_run_one(
-            &process->runner, &process->cpu);
-    result.instruction = step.instruction;
-    switch (step.stop) {
-        case AARCH64_STEP_RETIRED:
-            apply_signal_result(&result, aarch64_linux_poll_signals(
-                    &process->cpu, &process->tlb,
-                    &process->runtime, &process->task));
-            break;
-        case AARCH64_STEP_FETCH_FAULT:
-            result.status = AARCH64_LINUX_PROCESS_FETCH_FAULT;
-            export_fault(&result.fault, &step.fault);
-            process->cpu.segfault_addr = step.fault.address;
-            process->cpu.segfault_was_write = false;
-            break;
-        case AARCH64_STEP_DATA_FAULT:
-            result.status = AARCH64_LINUX_PROCESS_DATA_FAULT;
-            export_fault(&result.fault, &step.fault);
-            process->cpu.segfault_addr = step.fault.address;
-            process->cpu.segfault_was_write =
-                    step.fault.access == GUEST_MEMORY_WRITE;
-            break;
-        case AARCH64_STEP_UNDEFINED:
-            result.status = AARCH64_LINUX_PROCESS_UNDEFINED;
-            result.fault.address = process->cpu.pc;
-            break;
-        case AARCH64_STEP_SYSCALL: {
-            struct aarch64_linux_syscall_result syscall =
-                    aarch64_linux_dispatch_syscall(
-                            &process->cpu, &process->tlb,
-                            &process->runtime, &process->task);
-            apply_syscall_result(&result, &syscall);
-            break;
-        }
-    }
-    return result;
+    return run_instructions(process, 1);
+}
+
+struct aarch64_linux_process_result aarch64_linux_process_run_slice(
+        struct aarch64_linux_process *process) {
+    return run_instructions(process, AARCH64_LINUX_PROCESS_SLICE_INSTRUCTIONS);
 }
 
 qword_t aarch64_linux_process_program_counter(

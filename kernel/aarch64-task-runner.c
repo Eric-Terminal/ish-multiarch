@@ -126,12 +126,12 @@ struct aarch64_task_event aarch64_task_poll_signals(
     return translate_process_event(&result);
 }
 
-struct aarch64_task_event aarch64_task_run_one(struct task *task) {
+static struct aarch64_task_event run_task(struct task *task, bool single_step) {
     assert(task != NULL && task == current &&
             task_has_aarch64_process(task));
     struct aarch64_linux_process_result result =
-            aarch64_linux_process_run_one(
-                    task->aarch64_process);
+            single_step ? aarch64_linux_process_run_one(task->aarch64_process) :
+                    aarch64_linux_process_run_slice(task->aarch64_process);
     switch ((enum aarch64_linux_process_status) result.status) {
         case AARCH64_LINUX_PROCESS_FETCH_FAULT:
         case AARCH64_LINUX_PROCESS_DATA_FAULT:
@@ -167,6 +167,10 @@ struct aarch64_task_event aarch64_task_run_one(struct task *task) {
     return task_event(AARCH64_TASK_EVENT_TERMINATE, SIGKILL_);
 }
 
+struct aarch64_task_event aarch64_task_run_one(struct task *task) {
+    return run_task(task, true);
+}
+
 static struct aarch64_task_event wait_until_continued(
         struct task *task) {
     struct tgroup *group = task->group;
@@ -187,7 +191,7 @@ void aarch64_task_run_current(void) {
     while (true) {
         switch (event.action) {
             case AARCH64_TASK_EVENT_CONTINUE:
-                event = aarch64_task_run_one(current);
+                event = run_task(current, false);
                 break;
             case AARCH64_TASK_EVENT_EXIT:
                 do_exit((int) event.status);

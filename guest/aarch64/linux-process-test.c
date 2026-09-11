@@ -1135,7 +1135,71 @@ static void test_exec_completion_event(void) {
     aarch64_linux_process_destroy(process);
 }
 
+static void test_bounded_execution_slices(void) {
+    for (unsigned scenario = 0; scenario < 3; scenario++) {
+        byte_t file[TEST_FILE_SIZE];
+        make_test_elf(file);
+        if (scenario == 0) {
+            put_u32(file + 0x100, UINT32_C(0xd2800000));
+            put_u32(file + 0x104, UINT32_C(0x91000400));
+            put_u32(file + 0x108, UINT32_C(0x17ffffff));
+        } else if (scenario == 2) {
+            put_u32(file + 0x100, UINT32_C(0xd503201f));
+            put_u32(file + 0x104, 0);
+        }
+        const char *arguments[2], *environment[1];
+        byte_t random[AARCH64_LINUX_PROCESS_RANDOM_SIZE];
+        make_default_inputs(arguments, environment, random);
+        int task_opaque;
+        struct signal_probe signal = {
+            .expected_task_opaque = &task_opaque,
+            .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+        };
+        struct test_sink sink = {.expected_task_opaque = &task_opaque};
+        const struct guest_linux_signal_service signals = {
+            .runtime_opaque = &signal, .poll = poll_signal,
+        };
+        const struct guest_linux_syscall_service syscalls = {
+            .runtime_opaque = &sink, .dispatch = dispatch_sink,
+        };
+        struct aarch64_linux_process_config config = make_config(
+                file, sizeof(file), "/bin/process-test", arguments, 2,
+                environment, 1, random);
+        config.task_opaque = &task_opaque;
+        config.signals = &signals;
+        config.syscalls = &syscalls;
+        struct aarch64_linux_process_error error;
+        struct aarch64_linux_process *process = create_process(&config, &error);
+        assert(process != NULL);
+        struct aarch64_linux_process_result result =
+                aarch64_linux_process_run_slice(process);
+        if (scenario == 0) {
+            assert(result.status == AARCH64_LINUX_PROCESS_RUNNABLE);
+            assert(signal.calls == AARCH64_LINUX_PROCESS_SLICE_INSTRUCTIONS);
+            assert(aarch64_linux_process_program_counter(process) == TEXT_BASE + 0x108);
+            assert(aarch64_linux_process_run_one(process).status == AARCH64_LINUX_PROCESS_RUNNABLE);
+            assert(signal.calls == AARCH64_LINUX_PROCESS_SLICE_INSTRUCTIONS + 1);
+            signal.status = GUEST_LINUX_SIGNAL_POLL_STOP;
+            signal.signal = 19;
+            result = aarch64_linux_process_run_slice(process);
+            assert(result.status == AARCH64_LINUX_PROCESS_STOP && result.signal == 19);
+            assert(signal.calls == AARCH64_LINUX_PROCESS_SLICE_INSTRUCTIONS + 2);
+        } else if (scenario == 1) {
+            assert(result.status == AARCH64_LINUX_PROCESS_RUNNABLE && sink.calls == 1);
+            assert(aarch64_linux_process_program_counter(process) == TEXT_BASE + 0x118);
+            result = aarch64_linux_process_run_slice(process);
+            assert(result.status == AARCH64_LINUX_PROCESS_EXIT && result.exit_status == 42);
+        } else {
+            assert(result.status == AARCH64_LINUX_PROCESS_UNDEFINED);
+            assert(result.fault.address == TEXT_BASE + 0x104 && result.instruction == 0);
+            assert(signal.calls == 1);
+        }
+        aarch64_linux_process_destroy(process);
+    }
+}
+
 int main(void) {
+    test_bounded_execution_slices();
     test_load_run_and_ownership();
     test_static_pie();
     test_interpreter_path_query();

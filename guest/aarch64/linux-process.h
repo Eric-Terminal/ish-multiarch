@@ -293,6 +293,11 @@ bool aarch64_linux_process_test_has_thread_state(
 // 调用方排入同步信号后应先调用 poll_signals。
 struct aarch64_linux_process_result aarch64_linux_process_run_one(
         struct aarch64_linux_process *process);
+// 连续执行最多 64 条普通指令；每条仍保留信号安全点，系统调用、
+// handler 交付、故障和单步请求都会提前返回。预算不依赖宿主时钟。
+#define AARCH64_LINUX_PROCESS_SLICE_INSTRUCTIONS 64
+struct aarch64_linux_process_result aarch64_linux_process_run_slice(
+        struct aarch64_linux_process *process);
 // 单独建立信号安全点，不执行 guest 指令。
 struct aarch64_linux_process_result aarch64_linux_process_poll_signals(
         struct aarch64_linux_process *process);
