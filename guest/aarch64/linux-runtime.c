@@ -370,6 +370,15 @@ static struct guest_linux_signal_poll_result poll_signals_with_restart(
         };
     }
 
+    const struct guest_linux_signal_context context =
+            make_signal_context(service, task);
+    if (service->may_have_pending != NULL &&
+            !service->may_have_pending(&context)) {
+        return (struct guest_linux_signal_poll_result) {
+            .status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+        };
+    }
+
     const struct cpu_state interrupted = *cpu;
     struct signal_install_state install = {
         .interrupted = &interrupted,
@@ -377,8 +386,6 @@ static struct guest_linux_signal_poll_result poll_signals_with_restart(
         .tlb = tlb,
         .signal_trampoline = runtime->services->signal_trampoline,
     };
-    const struct guest_linux_signal_context context =
-            make_signal_context(service, task);
     struct guest_linux_signal_poll_result result = service->poll(
             &context, install_signal_frame, &install);
     assert(result.status <= GUEST_LINUX_SIGNAL_POLL_TERMINATE);

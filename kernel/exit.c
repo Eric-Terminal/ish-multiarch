@@ -313,6 +313,8 @@ noreturn void do_exit_group(int status) {
     } else {
         status = group->group_exit_code;
     }
+    atomic_store_explicit(&group->signal_poll_needed, true,
+            memory_order_release);
     unlock(&group->lock);
     unlock(&sighand->lock);
 

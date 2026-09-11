@@ -45,6 +45,9 @@ struct signal_probe {
     unsigned unpublished_checks;
     bool saw_context;
     bool omit_signal_trampoline;
+    bool use_pending_hint;
+    bool pending_hint;
+    unsigned pending_checks;
 };
 
 struct poll_bridge {
@@ -100,6 +103,12 @@ static struct guest_linux_signal_poll_result fake_signal_poll(
         .status = probe->return_status,
         .signal = probe->return_signal,
     };
+}
+
+static bool fake_pending_hint(const struct guest_linux_signal_context *context) {
+    struct poll_bridge *bridge = context->runtime_opaque;
+    bridge->probe->pending_checks++;
+    return bridge->probe->pending_hint;
 }
 
 static void map_range(struct guest_page_table *table,
@@ -177,6 +186,7 @@ static struct guest_linux_signal_poll_result run_probe(
     const struct guest_linux_signal_service signal_service = {
         .runtime_opaque = &bridge,
         .poll = fake_signal_poll,
+        .may_have_pending = probe->use_pending_hint ? fake_pending_hint : NULL,
     };
     const struct aarch64_linux_services services = {
         .signals = &signal_service,
@@ -191,7 +201,10 @@ static struct guest_linux_signal_poll_result run_probe(
     struct guest_linux_signal_poll_result result =
             aarch64_linux_poll_signals(cpu, tlb, runtime, task);
     runtime->services = NULL;
-    assert(probe->calls == 1 && probe->saw_context);
+    if (probe->use_pending_hint && !probe->pending_hint)
+        assert(probe->calls == 0 && !probe->saw_context);
+    else
+        assert(probe->calls == 1 && probe->saw_context);
     return result;
 }
 
@@ -324,6 +337,21 @@ int main(void) {
     result = run_probe(&runtime, &task, &tlb, &cpu, &probe);
     assert(result.status == GUEST_LINUX_SIGNAL_POLL_IDLE);
     assert(probe.unpublished_checks == 0);
+    assert(memcmp(&cpu, &cpu_before, sizeof(cpu)) == 0);
+
+    probe = (struct signal_probe) {
+        .use_pending_hint = true,
+        .pending_hint = false,
+        .return_status = GUEST_LINUX_SIGNAL_POLL_IDLE,
+    };
+    result = run_probe(&runtime, &task, &tlb, &cpu, &probe);
+    assert(result.status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    assert(probe.pending_checks == 1 && probe.calls == 0);
+    assert(memcmp(&cpu, &cpu_before, sizeof(cpu)) == 0);
+    probe.pending_hint = true;
+    result = run_probe(&runtime, &task, &tlb, &cpu, &probe);
+    assert(result.status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    assert(probe.pending_checks == 2 && probe.calls == 1);
     assert(memcmp(&cpu, &cpu_before, sizeof(cpu)) == 0);
 
     cpu = make_cpu(NORMAL_STACK_TOP);

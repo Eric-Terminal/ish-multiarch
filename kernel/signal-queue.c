@@ -168,10 +168,14 @@ static int enqueue_signal_locked(struct task *task,
 int signal_enqueue_locked(struct task *task, int signal,
         struct siginfo_ info, enum signal_queue_policy policy,
         uid_t_ uid, qword_t limit) {
-    return enqueue_signal_locked(task,
+    int result = enqueue_signal_locked(task,
             &task->pending, &task->queue,
             &task->pending_bit_only, &task->pending_timer_bit_only,
             signal, info, policy, uid, limit);
+    if (task->pending != 0)
+        atomic_store_explicit(&task->signal_poll_needed, true,
+                memory_order_release);
+    return result;
 }
 
 int signal_enqueue_process_locked(struct task *representative, int signal,
@@ -179,10 +183,14 @@ int signal_enqueue_process_locked(struct task *representative, int signal,
         uid_t_ uid, qword_t limit) {
     struct tgroup *group = representative->group;
     signal_group_pending_init(group);
-    return enqueue_signal_locked(representative,
+    int result = enqueue_signal_locked(representative,
             &group->shared_pending, &group->shared_queue,
             &group->shared_bit_only, &group->shared_timer_bit_only,
             signal, info, policy, uid, limit);
+    if (group->shared_pending != 0)
+        atomic_store_explicit(&group->signal_poll_needed, true,
+                memory_order_release);
+    return result;
 }
 
 sigset_t_ signal_pending_mask_locked(struct task *task) {

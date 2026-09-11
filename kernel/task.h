@@ -69,6 +69,8 @@ struct task {
     struct sighand *sighand;
     sigset_t_ blocked;
     sigset_t_ pending;
+    // 仅作保守的无锁提示：排队与临时掩码恢复置位，完整 poll 在锁内重算。
+    atomic_bool signal_poll_needed;
     // 无队列节点的 pending 仍需记录来源，供 exec 只清理 POSIX timer。
     sigset_t_ pending_bit_only;
     sigset_t_ pending_timer_bit_only;
@@ -232,6 +234,8 @@ struct tgroup {
     uint64_t host_diagnostic_request_id;
     // 已生成的未阻塞默认致死信号；内部 exec zap 不写入。
     atomic_int external_fatal_signal;
+    // 共享 pending、整组退出或 exec 协调要求所有成员重新检查信号状态。
+    atomic_bool signal_poll_needed;
     // 进程定向 pending 属于线程组，不随单个 peer 退出丢失。
     sigset_t_ shared_pending; // locked by the shared sighand
     struct list shared_queue; // locked by the shared sighand

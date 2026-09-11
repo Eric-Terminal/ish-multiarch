@@ -607,7 +607,8 @@ bool aarch64_linux_process_uses_services(
                     signals->runtime_opaque &&
             owned_signals->poll == signals->poll &&
             owned_signals->restore == signals->restore &&
-            owned_signals->bad_frame == signals->bad_frame;
+            owned_signals->bad_frame == signals->bad_frame &&
+            owned_signals->may_have_pending == signals->may_have_pending;
 }
 
 bool aarch64_linux_process_uses_file_mapping_service(

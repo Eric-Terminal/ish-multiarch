@@ -11,6 +11,15 @@
 #define AARCH64_SIGNAL_USER_ADDRESS_LIMIT \
     (AARCH64_LINUX_USER_ADDRESS_MAX + UINT64_C(1))
 
+static bool may_have_pending_signal(
+        const struct guest_linux_signal_context *context) {
+    const struct task *task = context->task_opaque;
+    return atomic_load_explicit(&task->signal_poll_needed,
+                    memory_order_acquire) ||
+            atomic_load_explicit(&task->group->signal_poll_needed,
+                    memory_order_acquire);
+}
+
 static struct guest_linux_signal_poll_result poll_signal(
         const struct guest_linux_signal_context *context,
         guest_linux_signal_installer installer,
@@ -18,7 +27,24 @@ static struct guest_linux_signal_poll_result poll_signal(
     assert(context != NULL);
     struct task *task = context->task_opaque;
     assert(task != NULL && task == current);
-    return task_poll_one_signal(task, installer, installer_opaque);
+    struct guest_linux_signal_poll_result result =
+            task_poll_one_signal(task, installer, installer_opaque);
+
+    // 提示只在完整 poll 后、持有对应生产者的锁时清除。阻塞中的 pending
+    // 也保留提示，后续 sigprocmask/sigreturn 解屏蔽时无需额外补发通知。
+    lock(&task->sighand->lock);
+    atomic_store_explicit(&task->signal_poll_needed,
+            task->pending != 0 || task->has_saved_mask,
+            memory_order_release);
+    lock(&task->group->lock);
+    atomic_store_explicit(&task->group->signal_poll_needed,
+            task->group->shared_pending != 0 ||
+                    task->group->doing_group_exit ||
+                    task->group->exec_task != NULL,
+            memory_order_release);
+    unlock(&task->group->lock);
+    unlock(&task->sighand->lock);
+    return result;
 }
 
 static void restore_signal_state(
@@ -64,6 +90,7 @@ const struct guest_linux_signal_service ish_aarch64_linux_signal_service = {
     .poll = poll_signal,
     .restore = restore_signal_state,
     .bad_frame = queue_bad_frame,
+    .may_have_pending = may_have_pending_signal,
 };
 
 static qword_t signal_syscall_result(int result) {

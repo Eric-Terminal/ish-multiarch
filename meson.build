@@ -1005,6 +1005,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_signal_service', aarch64_signal_service_test)
 
+        aarch64_signal_fast_path_test = executable(
+            'aarch64_signal_fast_path_test',
+            'kernel/aarch64-signal-fast-path-test.c',
+            dependencies: ish)
+        test('aarch64_signal_fast_path', aarch64_signal_fast_path_test)
+
         signal_action_test = executable(
             'signal_action_test',
             'kernel/signal-action-test.c',

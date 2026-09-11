@@ -89,6 +89,7 @@ static struct task *construct_task(struct task *parent, bool publish) {
         return ERR_PTR(_ENOMEM);
     }
     *group = (struct tgroup) {};
+    atomic_init(&group->signal_poll_needed, false);
     list_init(&group->threads);
     signal_group_pending_init(group);
     list_init(&group->session);

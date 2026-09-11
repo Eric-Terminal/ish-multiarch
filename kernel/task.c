@@ -515,10 +515,17 @@ static void task_inherit_parent_state(
         struct task *task, const struct task *parent) {
     const size_t credentials_begin = offsetof(struct task, uid);
     const size_t credentials_end = offsetof(struct task, ngroups);
+    const size_t hint_begin = offsetof(struct task, signal_poll_needed);
+    const size_t hint_end = hint_begin + sizeof(task->signal_poll_needed);
     memcpy(task, parent, credentials_begin);
     memcpy((byte_t *) task + credentials_end,
             (const byte_t *) parent + credentials_end,
-            sizeof(*task) - credentials_end);
+            hint_begin - credentials_end);
+    // 提示会被其他线程并发置位，不能通过 memcpy 从父任务读取；
+    // 新任务在发布前独立初始化为需要一次完整检查。
+    memcpy((byte_t *) task + hint_end,
+            (const byte_t *) parent + hint_end,
+            sizeof(*task) - hint_end);
 
     struct task_credentials credentials;
     task_credentials_snapshot(parent, &credentials);
@@ -556,6 +563,7 @@ struct task *task_create_(struct task *parent) {
     list_init(&task->siblings);
     task->parent = parent;
     task->pending = 0;
+    atomic_init(&task->signal_poll_needed, true);
     task->pending_bit_only = 0;
     task->pending_timer_bit_only = 0;
     task->waiting = 0;
@@ -730,6 +738,8 @@ int task_exec_dethread(struct task *task) {
         return killed ? _EINTR : _EAGAIN;
     }
     group->exec_task = task;
+    atomic_store_explicit(&group->signal_poll_needed, true,
+            memory_order_release);
     group->stopped = false;
     group->stop_code = 0;
     group->continued = false;

@@ -36,6 +36,7 @@ int main(void) {
     parent.sighand = &sighand;
     parent.blocked = sig_mask(SIGUSR1_);
     parent.pending = sig_mask(SIGUSR2_);
+    atomic_init(&parent.signal_poll_needed, false);
     parent.waiting = sig_mask(SIGALRM_);
     parent.saved_mask = UINT64_MAX;
     parent.has_saved_mask = true;
@@ -87,6 +88,7 @@ int main(void) {
             "未发布任务不进入父子链或线程组链");
     CHECK(child->parent == &parent &&
             child->blocked == parent.blocked && child->pending == 0 &&
+            atomic_load(&child->signal_poll_needed) &&
             child->waiting == 0 && child->saved_mask == 0 &&
             !child->has_saved_mask &&
             child->altstack.stack == parent.altstack.stack &&

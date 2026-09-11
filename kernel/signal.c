@@ -58,6 +58,8 @@ static void commit_group_fatal_signal(struct task *task, int sig) {
         // 与显式 exit_group 在同一锁下竞争首次组退出原因。
         group->doing_group_exit = true;
         group->group_exit_code = sig;
+        atomic_store_explicit(&group->signal_poll_needed, true,
+                memory_order_release);
         atomic_store_explicit(
                 &group->external_fatal_signal, sig, memory_order_release);
     }
@@ -1058,6 +1060,8 @@ static void sigmask_set_temp_unlocked(
         struct task *task, sigset_t_ mask) {
     task->saved_mask = task->blocked;
     task->has_saved_mask = true;
+    atomic_store_explicit(&task->signal_poll_needed, true,
+            memory_order_release);
     sigmask_set(task, mask);
 }
 

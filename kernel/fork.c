@@ -37,7 +37,13 @@
 
 static void tgroup_init_copy(
         struct tgroup *group, struct tgroup *old_group) {
-    *group = *old_group;
+    // 组内事件可并发更新原子提示；新进程会重置这些状态，不复制其字节。
+    const size_t signal_begin = offsetof(struct tgroup, external_fatal_signal);
+    const size_t signal_end = offsetof(struct tgroup, shared_pending);
+    memcpy(group, old_group, signal_begin);
+    memcpy((byte_t *) group + signal_end,
+            (const byte_t *) old_group + signal_end,
+            sizeof(*group) - signal_end);
     // 宿主作业身份跨 fork 保持，guest 的会话和进程组变化不会触及它。
     group->host_job_id = old_group->host_job_id;
     group->host_diagnostic_scope =
@@ -52,6 +58,7 @@ static void tgroup_init_copy(
     group->doing_group_exit = false;
     group->exec_task = NULL;
     atomic_init(&group->external_fatal_signal, 0);
+    atomic_init(&group->signal_poll_needed, false);
     group->shared_pending = 0;
     group->shared_bit_only = 0;
     group->shared_timer_bit_only = 0;

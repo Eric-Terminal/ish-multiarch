@@ -130,6 +130,11 @@ struct guest_linux_signal_service {
     guest_linux_signal_poll poll;
     guest_linux_signal_restore restore;
     guest_linux_signal_bad_frame bad_frame;
+    // 可选的保守快速判断；仅在没有 pending、掩码恢复和强制退出等工作时
+    // 返回 false。生产者必须先发布事件再置位，消费者不可丢失并发置位。
+    // 未提供该能力的服务始终执行完整 poll，不改变其既有事务语义。
+    bool (*may_have_pending)(
+            const struct guest_linux_signal_context *context);
 };
 
 // poll 是同步事务：backend 在选择锁内先消费队列节点，再调用 installer。
