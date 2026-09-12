@@ -99,6 +99,7 @@ verify_public_symbols() {
             ish_apple_command_session_close_stdin \
             ish_apple_command_session_interrupt \
             ish_apple_command_session_cancel \
+            ish_apple_terminal_session_copy_activity_fd \
             ish_apple_command_session_wait; do
         if ! grep -Eq \
                 "[[:space:]]T[[:space:]]+_${required}$" \
