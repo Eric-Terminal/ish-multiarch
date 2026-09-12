@@ -58,6 +58,16 @@ ISH_APPLE_API void ish_apple_terminal_session_release(
         ish_apple_terminal_session *ISH_APPLE_NULLABLE session);
 
 /*
+ * 返回调用方负责 close 的非阻塞宿主通知描述符，失败时 fd_out 为 -1。
+ * 每个会话只允许一个输出读取者消费通知。可读时先清空通知管道，再反复
+ * read_output 到空，并检查 copy_result；通知字节不代表输出数量。
+ * 注册会立即通知一次，后续新输出、退出或关闭会唤醒；runtime 重置产生 EOF。
+ */
+ISH_APPLE_API int32_t ish_apple_terminal_session_copy_activity_fd(
+        ish_apple_terminal_session *ISH_APPLE_NONNULL session,
+        int32_t *ISH_APPLE_NONNULL fd_out);
+
+/*
  * read_output 是非阻塞 raw PTY 读取；没有可用字节时 count_out 为 0。
  * dropped_out 返回底层终端在本次读取前因内存压力丢弃的字节数。
  */

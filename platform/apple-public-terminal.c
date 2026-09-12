@@ -186,6 +186,16 @@ void ish_apple_terminal_session_release(
     free(session);
 }
 
+int32_t ish_apple_terminal_session_copy_activity_fd(
+        struct ish_apple_terminal_session *session, int32_t *fd_out) {
+    if (fd_out == NULL)
+        return _EINVAL;
+    *fd_out = -1;
+    if (session == NULL)
+        return _EINVAL;
+    return ish_watch_session_copy_activity_fd(session->watch_session_id, fd_out);
+}
+
 int32_t ish_apple_terminal_session_read_output(
         struct ish_apple_terminal_session *session,
         void *bytes,

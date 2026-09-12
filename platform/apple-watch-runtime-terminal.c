@@ -1,6 +1,9 @@
 #include "platform/apple-watch-runtime.h"
 
 #include <limits.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +45,8 @@ struct watch_session {
     struct tgroup *leader_group;
     int tty_number;
     bool client_closed;
+    bool has_activity_pipe;
+    int activity_pipe[2];
     struct watch_output_ring output;
 };
 
@@ -223,7 +228,24 @@ static struct watch_session *session_find_locked(
     return NULL;
 }
 
+// 通知只负责唤醒，输出环和退出状态才是事实来源。写端始终非阻塞，
+// 管道已满表示读端已经可读，不能让 guest 等待宿主 UI 消费通知。
+static void session_notify_locked(struct watch_session *session) {
+    if (!session->has_activity_pipe)
+        return;
+    const unsigned char byte = 1;
+    ssize_t result;
+    do {
+        result = write(session->activity_pipe[1], &byte, 1);
+    } while (result < 0 && errno == EINTR);
+}
+
 static void session_reset_locked(struct watch_session *session) {
+    if (session->has_activity_pipe) {
+        close(session->activity_pipe[1]);
+        close(session->activity_pipe[0]);
+        session->has_activity_pipe = false;
+    }
     session->id = 0;
     session->phase = WATCH_SESSION_FREE;
     session->wait_status = 0;
@@ -247,6 +269,7 @@ static void session_mark_exited_locked(
     session->leader_group = NULL;
     session->phase = ISH_WATCH_SESSION_EXITED;
     session->wait_status = wait_status;
+    session_notify_locked(session);
     session_release_if_finished_locked(session);
 }
 
@@ -341,8 +364,12 @@ static int watch_session_pty_write(
     lock(&sessions_lock);
     if (session->phase != WATCH_SESSION_FREE &&
             !session->client_closed &&
-            session->tty_number == tty->num)
+            session->tty_number == tty->num) {
+        bool was_empty = session->output.count == 0;
         output_append_locked(&session->output, bytes, accepted);
+        if (was_empty && accepted != 0)
+            session_notify_locked(session);
+    }
     unlock(&sessions_lock);
     return (int) accepted;
 }
@@ -439,6 +466,54 @@ int ish_watch_session_status(
     };
     unlock(&sessions_lock);
     return 0;
+}
+
+int ish_watch_session_copy_activity_fd(
+        ish_watch_session_id session_id, int32_t *fd_out) {
+    if (fd_out == NULL)
+        return _EINVAL;
+    *fd_out = -1;
+    lock(&sessions_lock);
+    struct watch_session *session = session_find_locked(session_id);
+    if (session == NULL || session->client_closed) {
+        unlock(&sessions_lock);
+        return _ESTALE;
+    }
+    int error = 0;
+    if (!session->has_activity_pipe) {
+        int descriptors[2];
+        if (pipe(descriptors) < 0) {
+            error = errno_map();
+        } else {
+            for (size_t index = 0; index < 2; index++) {
+                if (fcntl(descriptors[index], F_SETFL, O_NONBLOCK) < 0 ||
+                        fcntl(descriptors[index], F_SETFD, FD_CLOEXEC) < 0) {
+                    error = errno_map();
+                    break;
+                }
+            }
+            if (error < 0) {
+                close(descriptors[0]);
+                close(descriptors[1]);
+            } else {
+                session->activity_pipe[0] = descriptors[0];
+                session->activity_pipe[1] = descriptors[1];
+                session->has_activity_pipe = true;
+            }
+        }
+    }
+    if (error == 0) {
+        int descriptor = fcntl(session->activity_pipe[0], F_DUPFD_CLOEXEC, 0);
+        if (descriptor < 0) {
+            error = errno_map();
+        } else {
+            *fd_out = descriptor;
+            // 注册前可能已有输出或已退出，首次订阅必须检查一次当前状态。
+            session_notify_locked(session);
+        }
+    }
+    unlock(&sessions_lock);
+    return error;
 }
 
 ssize_t ish_watch_session_read_output(
@@ -587,6 +662,7 @@ int ish_watch_session_close(ish_watch_session_id session_id) {
         return _ESTALE;
     }
     session->client_closed = true;
+    session_notify_locked(session);
     session_release_if_finished_locked(session);
     unlock(&sessions_lock);
     return 0;
@@ -616,8 +692,12 @@ void ish_watch_runtime_test_append_session_output(
         size_t length) {
     lock(&sessions_lock);
     struct watch_session *session = session_find_locked(session_id);
-    if (session != NULL && !session->client_closed)
+    if (session != NULL && !session->client_closed) {
+        bool was_empty = session->output.count == 0;
         output_append_locked(&session->output, bytes, length);
+        if (was_empty && length != 0)
+            session_notify_locked(session);
+    }
     unlock(&sessions_lock);
 }
 

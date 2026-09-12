@@ -128,6 +128,9 @@ static int32_t (*volatile terminal_read_entry)(
         ish_apple_terminal_session *, void *, uint32_t,
         uint32_t *, uint64_t *) =
         ish_apple_terminal_session_read_output;
+static int32_t (*volatile terminal_activity_entry)(
+        ish_apple_terminal_session *, int32_t *) =
+        ish_apple_terminal_session_copy_activity_fd;
 static int32_t (*volatile terminal_write_entry)(
         ish_apple_terminal_session *, const void *, uint32_t,
         uint32_t *) =
@@ -192,6 +195,7 @@ int main(void) {
             terminal_retain_entry == 0 ||
             terminal_release_entry == 0 ||
             terminal_read_entry == 0 ||
+            terminal_activity_entry == 0 ||
             terminal_write_entry == 0 ||
             terminal_finish_input_entry == 0 ||
             terminal_resize_entry == 0 ||

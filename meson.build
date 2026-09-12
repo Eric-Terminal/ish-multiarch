@@ -380,6 +380,7 @@ if get_option('kernel') == 'ish'
                 'apple_watch_runtime_test',
                 [
                     'platform/apple-watch-runtime-test.c',
+                    'platform/apple-terminal-activity-test.c',
                     'platform/apple-watch-runtime.c',
                     'platform/apple-watch-runtime-terminal.c',
                 ],

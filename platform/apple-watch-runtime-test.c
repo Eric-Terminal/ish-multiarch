@@ -19,6 +19,7 @@
 #define TEST_OUTPUT_CAPACITY (64 * 1024)
 
 static int failures;
+void test_terminal_activity(void);
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -932,6 +933,10 @@ int main(void) {
 
     test_session_boundaries();
     test_session_lifecycle();
+    int descriptors_before_activity = count_open_file_descriptors();
+    test_terminal_activity();
+    CHECK(count_open_file_descriptors() == descriptors_before_activity,
+            "终端通知订阅及关闭不泄漏宿主描述符");
     test_dynamic_sessions();
     CHECK(ish_watch_runtime_test_exit_ownership() == 0,
             "普通前台程序退出不得结束所属 shell 会话");

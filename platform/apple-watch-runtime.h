@@ -75,6 +75,9 @@ int ish_watch_session_create(
 int ish_watch_session_status(
         ish_watch_session_id session_id,
         struct ish_watch_session_status *status);
+// 返回调用方负责关闭的非阻塞宿主描述符；同一会话仅供一个输出读取者订阅。
+int ish_watch_session_copy_activity_fd(
+        ish_watch_session_id session_id, int32_t *fd_out);
 ssize_t ish_watch_session_read_output(
         ish_watch_session_id session_id,
         void *buffer,

@@ -84,6 +84,9 @@ static int32_t (*volatile terminal_read_entry)(
         ish_apple_terminal_session *, void *, uint32_t,
         uint32_t *, uint64_t *) =
         ish_apple_terminal_session_read_output;
+static int32_t (*volatile terminal_activity_entry)(
+        ish_apple_terminal_session *, int32_t *) =
+        ish_apple_terminal_session_copy_activity_fd;
 static int32_t (*volatile terminal_cancel_entry)(
         ish_apple_terminal_session *) =
         ish_apple_terminal_session_cancel;
@@ -118,6 +121,7 @@ int main(void) {
             command_wait_entry == NULL ||
             terminal_start_entry == NULL ||
             terminal_read_entry == NULL ||
+            terminal_activity_entry == NULL ||
             terminal_cancel_entry == NULL ||
             terminal_result_entry == NULL;
 }
