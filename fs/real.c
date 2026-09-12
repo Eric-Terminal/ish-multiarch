@@ -227,17 +227,27 @@ static ssize_t realfs_page_pwrite(
     return result < 0 ? write_error : result;
 }
 
-void realfs_opendir(struct fd *fd) {
+static int realfs_opendir(struct fd *fd) {
     if (fd->dir == NULL) {
         int dirfd = dup(fd->real_fd);
-        fd->dir = fdopendir(dirfd);
-        // this should never get called on a non-directory
-        assert(fd->dir != NULL);
+        if (dirfd < 0)
+            return errno_map();
+        DIR *dir = fdopendir(dirfd);
+        if (dir == NULL) {
+            // fdopendir 失败时不接管描述符；先保存错误，再释放临时副本。
+            int error = errno_map();
+            close(dirfd);
+            return error;
+        }
+        fd->dir = dir;
     }
+    return 0;
 }
 
 int realfs_readdir(struct fd *fd, struct dir_entry *entry) {
-    realfs_opendir(fd);
+    int error = realfs_opendir(fd);
+    if (error < 0)
+        return error;
     errno = 0;
     struct dirent *dirent = readdir(fd->dir);
     if (dirent == NULL) {
@@ -252,12 +262,16 @@ int realfs_readdir(struct fd *fd, struct dir_entry *entry) {
 }
 
 off_t_ realfs_telldir(struct fd *fd) {
-    realfs_opendir(fd);
+    // 尚未成功打开时没有宿主 cookie。保留原位置，具体错误由紧随其后的 readdir 返回。
+    if (realfs_opendir(fd) < 0)
+        return fd->offset;
     return (off_t_) telldir(fd->dir);
 }
 
 void realfs_seekdir(struct fd *fd, off_t_ ptr) {
-    realfs_opendir(fd);
+    // getdents 会在读取失败后回退；打开失败时不能在这条错误路径再次断言退出。
+    if (realfs_opendir(fd) < 0)
+        return;
     assert(ptr >= LONG_MIN && ptr <= LONG_MAX);
     seekdir(fd->dir, (long) ptr);
 }

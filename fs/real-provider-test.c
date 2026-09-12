@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "fs/fd.h"
@@ -25,6 +26,8 @@ int main(void) {
     int second_host_fd = -1;
     int root_fd = -1;
     int link_created = 0;
+    int probe_fd = -1;
+    struct fd directory = {0};
     struct fd *nofollow_fd = NULL;
     char path[] = "/tmp/ish-real-provider-XXXXXX";
 
@@ -46,6 +49,54 @@ int main(void) {
 
     root_fd = open("/tmp", O_RDONLY | O_DIRECTORY);
     CHECK(root_fd >= 0, "打开 statfs 根目录");
+    directory.real_fd = root_fd;
+    struct dir_entry entry;
+    struct fd bad_directory = {.real_fd = -1};
+    CHECK(realfs_readdir(&bad_directory, &entry) == _EBADF,
+            "目录 dup 失败返回 EBADF，不中止进程");
+    CHECK(realfs_telldir(&bad_directory) == 0,
+            "打开失败不把错误码当作目录 cookie");
+    realfs_seekdir(&bad_directory, 0);
+
+    probe_fd = dup(first_host_fd);
+    CHECK(probe_fd >= 0, "记录下一份可用描述符");
+    int expected_fd = probe_fd;
+    close(probe_fd);
+    probe_fd = -1;
+    for (int i = 0; i < 32; i++) {
+        CHECK(realfs_readdir(&first, &entry) == _ENOTDIR,
+                "fdopendir 拒绝普通文件并返回 ENOTDIR");
+        realfs_seekdir(&first, 0);
+    }
+    probe_fd = dup(first_host_fd);
+    CHECK(probe_fd == expected_fd,
+            "重复 fdopendir 失败与游标回退不泄漏描述符");
+    close(probe_fd);
+    probe_fd = -1;
+
+    struct rlimit original_limit;
+    CHECK(getrlimit(RLIMIT_NOFILE, &original_limit) == 0,
+            "读取当前进程描述符软限制");
+    struct rlimit exhausted_limit = original_limit;
+    exhausted_limit.rlim_cur = 0;
+    CHECK(setrlimit(RLIMIT_NOFILE, &exhausted_limit) == 0,
+            "仅在测试进程模拟描述符耗尽");
+    int exhausted_error = realfs_readdir(&directory, &entry);
+    realfs_seekdir(&directory, 0);
+    int restore_limit_error = setrlimit(RLIMIT_NOFILE, &original_limit);
+    CHECK(restore_limit_error == 0 && exhausted_error == _EMFILE,
+            "描述符耗尽返回 EMFILE，回退不触发断言");
+
+    CHECK(realfs_readdir(&directory, &entry) == 1,
+            "资源恢复后同一目录仍可读取");
+    off_t_ cookie = realfs_telldir(&directory);
+    struct dir_entry next;
+    CHECK(realfs_readdir(&directory, &next) == 1,
+            "读取下一目录项");
+    realfs_seekdir(&directory, cookie);
+    CHECK(realfs_readdir(&directory, &entry) == 1 &&
+            strcmp(entry.name, next.name) == 0,
+            "真实目录 cookie 回退保留失败条目重读语义");
     struct mount mount = {
         .fs = &realfs,
         .root_fd = root_fd,
@@ -183,6 +234,10 @@ out:
         const char *link_name = strrchr(path, '/') + 1;
         unlinkat(root_fd, link_name, 0);
     }
+    if (probe_fd >= 0)
+        close(probe_fd);
+    if (directory.dir != NULL)
+        closedir(directory.dir);
     if (root_fd >= 0)
         close(root_fd);
     if (second_host_fd >= 0)
