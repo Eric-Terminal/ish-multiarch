@@ -188,7 +188,7 @@ int signal_enqueue_process_locked(struct task *representative, int signal,
             &group->shared_bit_only, &group->shared_timer_bit_only,
             signal, info, policy, uid, limit);
     if (group->shared_pending != 0)
-        atomic_store_explicit(&group->signal_poll_needed, true,
+        atomic_fetch_add_explicit(&group->signal_poll_state, UINT64_C(2),
                 memory_order_release);
     return result;
 }

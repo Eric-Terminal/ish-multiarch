@@ -516,7 +516,7 @@ static void task_inherit_parent_state(
     const size_t credentials_begin = offsetof(struct task, uid);
     const size_t credentials_end = offsetof(struct task, ngroups);
     const size_t hint_begin = offsetof(struct task, signal_poll_needed);
-    const size_t hint_end = hint_begin + sizeof(task->signal_poll_needed);
+    const size_t hint_end = offsetof(struct task, pending_bit_only);
     memcpy(task, parent, credentials_begin);
     memcpy((byte_t *) task + credentials_end,
             (const byte_t *) parent + credentials_end,
@@ -564,6 +564,7 @@ struct task *task_create_(struct task *parent) {
     task->parent = parent;
     task->pending = 0;
     atomic_init(&task->signal_poll_needed, true);
+    task->observed_signal_poll_state = 0;
     task->pending_bit_only = 0;
     task->pending_timer_bit_only = 0;
     task->waiting = 0;
@@ -738,7 +739,7 @@ int task_exec_dethread(struct task *task) {
         return killed ? _EINTR : _EAGAIN;
     }
     group->exec_task = task;
-    atomic_store_explicit(&group->signal_poll_needed, true,
+    atomic_fetch_or_explicit(&group->signal_poll_state, SIGNAL_POLL_FORCE,
             memory_order_release);
     group->stopped = false;
     group->stop_code = 0;

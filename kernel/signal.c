@@ -58,7 +58,7 @@ static void commit_group_fatal_signal(struct task *task, int sig) {
         // 与显式 exit_group 在同一锁下竞争首次组退出原因。
         group->doing_group_exit = true;
         group->group_exit_code = sig;
-        atomic_store_explicit(&group->signal_poll_needed, true,
+        atomic_fetch_or_explicit(&group->signal_poll_state, SIGNAL_POLL_FORCE,
                 memory_order_release);
         atomic_store_explicit(
                 &group->external_fatal_signal, sig, memory_order_release);
@@ -1054,14 +1054,14 @@ dword_t sys_sigaction(dword_t signum, addr_t action_addr, addr_t oldaction_addr)
 
 static void sigmask_set(struct task *task, sigset_t_ set) {
     task->blocked = (set & ~UNBLOCKABLE_MASK);
+    // 被屏蔽的 pending 可以进入快速路径；解屏蔽及 sigreturn 必须重新检查。
+    atomic_store_explicit(&task->signal_poll_needed, true, memory_order_release);
 }
 
 static void sigmask_set_temp_unlocked(
         struct task *task, sigset_t_ mask) {
     task->saved_mask = task->blocked;
     task->has_saved_mask = true;
-    atomic_store_explicit(&task->signal_poll_needed, true,
-            memory_order_release);
     sigmask_set(task, mask);
 }
 
@@ -1082,7 +1082,7 @@ void sigmask_restore_temp_task(struct task *task) {
     lock(&task->sighand->lock);
     sigset_t_ previous_blocked = task->blocked;
     if (task->has_saved_mask) {
-        task->blocked = task->saved_mask;
+        sigmask_set(task, task->saved_mask);
         task->has_saved_mask = false;
     }
     sigset_t_ newly_blocked = task->blocked & ~previous_blocked;
@@ -1093,7 +1093,7 @@ void sigmask_restore_temp_task(struct task *task) {
 sigset_t_ signal_prepare_delivery_locked(struct task *task) {
     sigset_t_ selection_mask = task->blocked;
     if (task->has_saved_mask) {
-        task->blocked = task->saved_mask;
+        sigmask_set(task, task->saved_mask);
         task->has_saved_mask = false;
     }
     return selection_mask;

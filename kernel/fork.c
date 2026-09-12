@@ -58,7 +58,7 @@ static void tgroup_init_copy(
     group->doing_group_exit = false;
     group->exec_task = NULL;
     atomic_init(&group->external_fatal_signal, 0);
-    atomic_init(&group->signal_poll_needed, false);
+    atomic_init(&group->signal_poll_state, 0);
     group->shared_pending = 0;
     group->shared_bit_only = 0;
     group->shared_timer_bit_only = 0;

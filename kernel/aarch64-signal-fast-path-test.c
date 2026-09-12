@@ -20,7 +20,7 @@ static void init_fixture(struct fixture *fixture) {
     fixture->task.pid = fixture->task.tgid = 1234;
     fixture->group.leader = &fixture->task;
     atomic_init(&fixture->task.signal_poll_needed, true);
-    atomic_init(&fixture->group.signal_poll_needed, false);
+    atomic_init(&fixture->group.signal_poll_state, 0);
     atomic_init(&fixture->group.external_fatal_signal, 0);
     atomic_init(&fixture->sighand.refcount, 1);
     task_thread_store(&fixture->task, pthread_self());
@@ -107,10 +107,14 @@ static void test_idle_masks_and_shared_pending(void) {
     atomic_init(&peer.signal_poll_needed, false);
     assert(pending(&peer));
     assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
-    assert(pending(&fixture.task));
+    assert(!pending(&fixture.task));
+    assert(pending(&peer));
     assert(task_sigprocmask(&fixture.task, SIG_UNBLOCK_, &blocked, NULL) == 0);
+    assert(pending(&fixture.task));
     assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_HANDLER);
-    assert(fixture.delivered == 2 && !pending(&peer));
+    assert(fixture.delivered == 2 && !pending(&fixture.task));
+    // 其他成员仍须确认它未观察过的世代，即使信号已被本线程领取。
+    assert(pending(&peer));
 
     sigmask_set_temp_task(&fixture.task, blocked);
     assert(pending(&fixture.task));
@@ -119,6 +123,8 @@ static void test_idle_masks_and_shared_pending(void) {
     assert(!pending(&fixture.task));
 
     // 默认致死信号须使同组其他线程也离开空闲快速路径。
+    peer.observed_signal_poll_state = atomic_load(&fixture.group.signal_poll_state);
+    assert(!pending(&peer));
     send_signal(&fixture.task, SIGTERM_, SIGINFO_NIL);
     assert(pending(&peer));
     assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_TERMINATE);
@@ -131,6 +137,7 @@ static void test_idle_masks_and_shared_pending(void) {
 struct producer {
     struct fixture *fixture;
     bool shared;
+    atomic_bool done;
 };
 
 static void *produce_signals(void *opaque) {
@@ -139,6 +146,7 @@ static void *produce_signals(void *opaque) {
         enqueue(producer->fixture, SIGRTMIN_, producer->shared);
         sched_yield();
     }
+    atomic_store(&producer->done, true);
     return NULL;
 }
 
@@ -153,6 +161,7 @@ static void test_concurrent_publication(bool shared) {
     init_fixture(&fixture);
     assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
     struct producer producer = {.fixture = &fixture, .shared = shared};
+    atomic_init(&producer.done, false);
     pthread_t thread;
     assert(pthread_create(&thread, NULL, produce_signals, &producer) == 0);
     uint64_t deadline = monotonic_seconds() + 10;
@@ -169,9 +178,76 @@ static void test_concurrent_publication(bool shared) {
     destroy_fixture(&fixture);
 }
 
+static void test_blocked_shared_peers(void) {
+    struct fixture first, peer;
+    init_fixture(&first);
+    init_fixture(&peer);
+    peer.task.group = &first.group;
+    peer.task.sighand = &first.sighand;
+    sigset_t_ blocked = sig_mask(SIGUSR1_);
+    assert(task_sigprocmask(&first.task, SIG_BLOCK_, &blocked, NULL) == 0);
+    assert(task_sigprocmask(&peer.task, SIG_BLOCK_, &blocked, NULL) == 0);
+    enqueue(&first, SIGUSR1_, true);
+    current = &first.task;
+    assert(poll_signal(&first).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    assert(!pending(&first.task) && pending(&peer.task));
+    current = &peer.task;
+    assert(poll_signal(&peer).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    for (unsigned index = 0; index < 10000; index++)
+        assert(!pending(&first.task) && !pending(&peer.task));
+    assert(task_sigprocmask(&peer.task, SIG_UNBLOCK_, &blocked, NULL) == 0);
+    assert(pending(&peer.task));
+    assert(poll_signal(&peer).status == GUEST_LINUX_SIGNAL_POLL_HANDLER);
+    assert(peer.delivered == 1 && !pending(&first.task) && !pending(&peer.task));
+
+    // 已确认旧世代的线程仍能看见后续共享事件。
+    enqueue(&first, SIGUSR1_, true);
+    assert(pending(&first.task) && pending(&peer.task));
+    current = &first.task;
+    assert(poll_signal(&first).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    current = &peer.task;
+    assert(poll_signal(&peer).status == GUEST_LINUX_SIGNAL_POLL_HANDLER);
+    assert(peer.delivered == 2);
+    peer.task.group = &peer.group;
+    peer.task.sighand = &peer.sighand;
+    destroy_fixture(&peer);
+    destroy_fixture(&first);
+}
+
+static void test_concurrent_blocked_publication(bool shared) {
+    struct fixture fixture;
+    init_fixture(&fixture);
+    sigset_t_ blocked = sig_mask(SIGRTMIN_);
+    assert(task_sigprocmask(&fixture.task, SIG_BLOCK_, &blocked, NULL) == 0);
+    struct producer producer = {.fixture = &fixture, .shared = shared};
+    atomic_init(&producer.done, false);
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, produce_signals, &producer) == 0);
+    uint64_t deadline = monotonic_seconds() + 10;
+    while (!atomic_load(&producer.done)) {
+        assert(monotonic_seconds() < deadline);
+        if (pending(&fixture.task))
+            assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+        sched_yield();
+    }
+    assert(pthread_join(thread, NULL) == 0);
+    assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_IDLE);
+    assert(!pending(&fixture.task) && fixture.delivered == 0);
+    assert(task_sigprocmask(&fixture.task, SIG_UNBLOCK_, &blocked, NULL) == 0);
+    for (unsigned index = 0; index < CONCURRENT_SIGNALS; index++) {
+        assert(pending(&fixture.task));
+        assert(poll_signal(&fixture).status == GUEST_LINUX_SIGNAL_POLL_HANDLER);
+    }
+    assert(fixture.delivered == CONCURRENT_SIGNALS && !pending(&fixture.task));
+    destroy_fixture(&fixture);
+}
+
 int main(void) {
     test_idle_masks_and_shared_pending();
     test_concurrent_publication(false);
     test_concurrent_publication(true);
+    test_blocked_shared_peers();
+    test_concurrent_blocked_publication(false);
+    test_concurrent_blocked_publication(true);
     return 0;
 }

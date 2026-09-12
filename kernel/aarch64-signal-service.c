@@ -14,10 +14,11 @@
 static bool may_have_pending_signal(
         const struct guest_linux_signal_context *context) {
     const struct task *task = context->task_opaque;
-    return atomic_load_explicit(&task->signal_poll_needed,
-                    memory_order_acquire) ||
-            atomic_load_explicit(&task->group->signal_poll_needed,
-                    memory_order_acquire);
+    if (atomic_load_explicit(&task->signal_poll_needed, memory_order_acquire))
+        return true;
+    uint64_t state = atomic_load_explicit(
+            &task->group->signal_poll_state, memory_order_acquire);
+    return (state & SIGNAL_POLL_FORCE) != 0 || state != task->observed_signal_poll_state;
 }
 
 static struct guest_linux_signal_poll_result poll_signal(
@@ -30,18 +31,20 @@ static struct guest_linux_signal_poll_result poll_signal(
     struct guest_linux_signal_poll_result result =
             task_poll_one_signal(task, installer, installer_opaque);
 
-    // 提示只在完整 poll 后、持有对应生产者的锁时清除。阻塞中的 pending
-    // 也保留提示，后续 sigprocmask/sigreturn 解屏蔽时无需额外补发通知。
+    // 在生产者的锁内确认这一世代。屏蔽中的共享信号只令每个成员检查一次，
+    // 不能由一个成员清掉其他成员尚未看见的新信号通知。
     lock(&task->sighand->lock);
     atomic_store_explicit(&task->signal_poll_needed,
-            task->pending != 0 || task->has_saved_mask,
+            ((task->pending | task->group->shared_pending) & ~task->blocked) != 0 ||
+                    task->has_saved_mask,
             memory_order_release);
     lock(&task->group->lock);
-    atomic_store_explicit(&task->group->signal_poll_needed,
-            task->group->shared_pending != 0 ||
-                    task->group->doing_group_exit ||
-                    task->group->exec_task != NULL,
-            memory_order_release);
+    uint64_t state = atomic_load_explicit(
+            &task->group->signal_poll_state, memory_order_relaxed) & ~SIGNAL_POLL_FORCE;
+    if (task->group->doing_group_exit || task->group->exec_task != NULL)
+        state |= SIGNAL_POLL_FORCE;
+    atomic_store_explicit(&task->group->signal_poll_state, state, memory_order_release);
+    task->observed_signal_poll_state = state;
     unlock(&task->group->lock);
     unlock(&task->sighand->lock);
     return result;
