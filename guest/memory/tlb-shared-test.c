@@ -90,7 +90,7 @@ static void shared_test_space_destroy(struct shared_test_space *space) {
     assert(pthread_rwlock_destroy(&space->lock) == 0);
 }
 
-static void test_instruction_fetch_shared_changes(void) {
+static void test_cached_reads_shared_changes(void) {
     struct guest_file_page_domain *domain = guest_file_page_domain_create();
     struct guest_page_backing *backing = guest_page_backing_create();
     assert(domain != NULL && backing != NULL);
@@ -114,12 +114,19 @@ static void test_instruction_fetch_shared_changes(void) {
     dword_t instruction;
     assert(guest_tlb_fetch_u32(&reader_tlb, TEST_PAGE, &instruction, &fault));
     assert(instruction == UINT32_C(0xd503201f));
+    byte_t data[sizeof(nop)];
+    assert(guest_tlb_read(&reader_tlb, TEST_PAGE, data, sizeof(data),
+            GUEST_MEMORY_READ, &fault));
+    assert(memcmp(data, nop, sizeof(data)) == 0);
 
     // 两个地址空间共享 backing；已缓存的取指必须看到另一个别名的改写。
     assert(guest_tlb_write(&writer_tlb, TEST_ALIAS_PAGE,
             add, sizeof(add), &fault));
     assert(guest_tlb_fetch_u32(&reader_tlb, TEST_PAGE, &instruction, &fault));
     assert(instruction == UINT32_C(0x91000400));
+    assert(guest_tlb_read(&reader_tlb, TEST_PAGE, data, sizeof(data),
+            GUEST_MEMORY_READ, &fault));
+    assert(memcmp(data, add, sizeof(data)) == 0);
 
     // 截断只使 backing 失效，地址空间世代不变，命中路径也必须拒绝读取。
     guest_file_page_domain_resize(domain, GUEST_MEMORY_PAGE_SIZE, 0);
@@ -127,6 +134,11 @@ static void test_instruction_fetch_shared_changes(void) {
     assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
     assert(fault.address == TEST_PAGE && fault.access == GUEST_MEMORY_EXECUTE);
     assert(instruction == UINT32_C(0x91000400));
+    assert(!guest_tlb_read(&reader_tlb, TEST_PAGE, data, sizeof(data),
+            GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED);
+    assert(fault.address == TEST_PAGE && fault.access == GUEST_MEMORY_READ);
+    assert(memcmp(data, add, sizeof(data)) == 0);
 
     shared_test_space_destroy(&reader);
     shared_test_space_destroy(&writer);
@@ -554,7 +566,7 @@ static void test_clone_observes_consistent_page(void) {
 }
 
 int main(void) {
-    test_instruction_fetch_shared_changes();
+    test_cached_reads_shared_changes();
     test_visibility_and_exclusive_reservation();
     test_cross_space_compare_exchange();
     test_cross_space_reads_are_not_torn();

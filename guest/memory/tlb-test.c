@@ -617,7 +617,58 @@ static void test_instruction_fetch_invalidation(void) {
     assert(memory.write_locks == memory.write_unlocks);
 }
 
+static void test_cached_read_boundaries(void) {
+    struct test_memory memory = {
+        .pages = {{PAGE_A, NULL, GUEST_MEMORY_READ | GUEST_MEMORY_EXECUTE}},
+    };
+    memory.pages[0].host_page = memory.first;
+    for (unsigned index = 0; index < GUEST_MEMORY_PAGE_SIZE; index++)
+        memory.first[index] = (byte_t) index;
+    struct guest_address_space space;
+    guest_address_space_init(&space, &test_ops, &memory, 48);
+    struct guest_tlb tlb;
+    guest_tlb_init(&tlb, &space);
+    struct guest_memory_fault fault;
+    byte_t output[GUEST_TLB_MAX_ACCESS_SIZE];
+    assert(guest_tlb_read(&tlb, PAGE_A, output, 1, GUEST_MEMORY_READ, &fault));
+    unsigned resolutions = memory.resolutions;
+    for (size_t size = 1; size <= sizeof(output); size++) {
+        const size_t offsets[] = {3, GUEST_MEMORY_PAGE_SIZE - size};
+        for (unsigned index = 0; index < array_size(offsets); index++) {
+            size_t offset = offsets[index];
+            assert(guest_tlb_read(&tlb, PAGE_A + offset, output,
+                    size, GUEST_MEMORY_READ, &fault));
+            assert(memcmp(output, memory.first + offset, size) == 0);
+            assert(fault.kind == GUEST_MEMORY_FAULT_NONE);
+            assert(fault.address == PAGE_A + offset);
+            assert(fault.access == GUEST_MEMORY_READ);
+        }
+    }
+    assert(memory.resolutions == resolutions);
+
+    // 第一页已命中，第二页缺失时也不能先把第一页的数据交给调用者。
+    memset(output, 0xa5, sizeof(output));
+    assert(!guest_tlb_read(&tlb, PAGE_NEXT - 1, output,
+            sizeof(output), GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_UNMAPPED && fault.address == PAGE_NEXT);
+    for (unsigned index = 0; index < sizeof(output); index++)
+        assert(output[index] == 0xa5);
+
+    memory.pages[0].permissions = GUEST_MEMORY_EXECUTE;
+    guest_address_space_changed(&space);
+    assert(guest_tlb_read(&tlb, PAGE_A, output, 1, GUEST_MEMORY_EXECUTE, &fault));
+    output[0] = 0xa5;
+    assert(!guest_tlb_read(&tlb, PAGE_A, output, 1, GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_PERMISSION && output[0] == 0xa5);
+    assert(guest_tlb_read(&tlb, UINT64_MAX, output, 0, GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_NONE && output[0] == 0xa5);
+    assert(!guest_tlb_read(&tlb, UINT64_MAX, output, 1, GUEST_MEMORY_READ, &fault));
+    assert(fault.kind == GUEST_MEMORY_FAULT_ADDRESS_SIZE && output[0] == 0xa5);
+    assert(memory.read_locks == memory.read_unlocks);
+}
+
 int main(void) {
+    test_cached_read_boundaries();
     test_instruction_fetch_invalidation();
     struct test_memory memory = {
         .pages = {

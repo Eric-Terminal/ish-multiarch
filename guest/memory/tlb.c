@@ -292,16 +292,55 @@ static void record_sync_writes(
     }
 }
 
+static bool read_cached_page(struct guest_tlb *tlb, guest_addr_t address,
+        void *destination, size_t size, enum guest_memory_access access,
+        struct guest_memory_fault *fault) {
+    size_t offset = (size_t) (address & GUEST_MEMORY_PAGE_MASK);
+    if (size == 0 || size > GUEST_MEMORY_PAGE_SIZE - offset ||
+            tlb->observed_generation != tlb->address_space->generation)
+        return false;
+    guest_addr_t page = address & ~GUEST_MEMORY_PAGE_MASK;
+    const struct guest_tlb_entry *entry =
+            &tlb->entries[guest_tlb_index(page)];
+    if (!entry->valid || entry->guest_page != page ||
+            (entry->permissions & access) == 0 ||
+            !guest_address_space_contains(tlb->address_space, address, size))
+        return false;
+    const struct guest_page_sync *sync =
+            entry->sync != NULL ? entry->sync : entry->access_sync;
+    if (sync != NULL)
+        guest_page_sync_read_lock(sync);
+    bool accessible = sync == NULL || guest_page_sync_accessible(sync);
+    // 调用方已持映射锁；单页只需一个同步域，在同一次加锁中复核并读取。
+    // 文件截断、跨页及失效缓存仍走完整预检，故障时不修改 destination。
+    if (accessible) {
+        memcpy(destination, entry->host_page + offset, size);
+        *fault = (struct guest_memory_fault) {
+            .address = address,
+            .access = access,
+            .kind = GUEST_MEMORY_FAULT_NONE,
+        };
+    }
+    if (sync != NULL)
+        guest_page_sync_read_unlock(sync);
+    return accessible;
+}
+
 bool guest_tlb_read(struct guest_tlb *tlb, guest_addr_t address,
         void *destination, size_t size, enum guest_memory_access access,
         struct guest_memory_fault *fault) {
     assert(access == GUEST_MEMORY_READ || access == GUEST_MEMORY_EXECUTE);
+    assert(size <= GUEST_TLB_MAX_ACCESS_SIZE);
     struct guest_tlb_access_chunk chunks[2];
     struct guest_tlb_sync_set syncs;
     unsigned chunk_count;
     bool locked;
     for (;;) {
         locked = guest_address_space_read_lock(tlb->address_space);
+        if (read_cached_page(tlb, address, destination, size, access, fault)) {
+            guest_address_space_read_unlock(tlb->address_space, locked);
+            return true;
+        }
         if (prepare_access(tlb, address, size,
                 access, chunks, &chunk_count, fault) &&
                 lock_access_syncs(chunks, chunk_count,
