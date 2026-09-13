@@ -255,6 +255,17 @@ int main(void) {
     CHECK(list_empty(&parent.children),
             "线程组首领销毁后撤销父子关系");
 
+    for (int iteration = 0; iteration < 3; iteration++) {
+        struct task *init = task_create_(NULL);
+        CHECK(init != NULL && init->pid == 1,
+                "完整回收后重新创建首进程必须复用 PID 1");
+        struct task *other = task_create_(NULL);
+        CHECK(other != NULL && other->pid != 1,
+                "未发布的首进程仍独占保留的 PID 1");
+        task_abort_create(other);
+        task_abort_create(init);
+    }
+
     cond_destroy(&parent.pause);
     cond_destroy(&parent.ptrace.cond);
     cond_destroy(&group.stopped_cond);

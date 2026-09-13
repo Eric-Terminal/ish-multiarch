@@ -599,6 +599,10 @@ struct task *task_create_(struct task *parent) {
 
     lock(&pids_lock);
     static int cur_pid = 0;
+    // 同一宿主进程重启内核时，已回收的首进程必须重新取得 PID 1。
+    // 仍被保留或被会话、进程组占用的 PID 1 不能被重用。
+    if (parent == NULL && pid_empty(&pids[1]))
+        cur_pid = 0;
     do {
         cur_pid++;
         if (cur_pid > MAX_PID) cur_pid = 1;
