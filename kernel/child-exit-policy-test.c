@@ -10,6 +10,7 @@
 #include "fs/fd.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
+#include "kernel/init.h"
 #include "kernel/mm.h"
 #include "kernel/signal.h"
 #include "kernel/task.h"
@@ -312,6 +313,30 @@ static int run_exit_policy_scenario(void) {
     return 0;
 }
 
+static int run_stopped_init_scenario(void) {
+    for (int iteration = 0; iteration < 3; iteration++) {
+        struct tgroup *group = malloc(sizeof(*group));
+        CHECK(group != NULL, "创建可由宿主回收的 init 线程组");
+        struct task *init = make_parent(group);
+        CHECK(init != NULL && init->pid == 1,
+                "连续重建的 init 使用 PID 1");
+        struct task *child = make_child(init, SIGCHLD_, 0);
+        CHECK(child != NULL, "创建继承 init 会话和进程组的子进程");
+        pid_t_ child_pid = child->pid;
+        CHECK(run_child_exit(child, 0), "子进程退出并留下未 wait 的空壳");
+        CHECK(child->zombie, "init 尚未回收的子进程保持 zombie");
+        current = NULL;
+        CHECK(run_child_exit(init, 0), "init 在存在 zombie 子进程时退出");
+        CHECK(reap_stopped_first_process() == 0,
+                "宿主完整回收已经停止的系统");
+        lock(&pids_lock);
+        bool empty = pid_get_task_zombie(child_pid) == NULL && pid_get(1) == NULL;
+        unlock(&pids_lock);
+        CHECK(empty, "停止系统同时回收孤儿空壳及其 PID 1 会话引用");
+    }
+    return 0;
+}
+
 int main(void) {
     pid_t child = fork();
     if (child < 0) {
@@ -322,7 +347,10 @@ int main(void) {
     if (child == 0) {
         signal(SIGUSR1, SIG_IGN);
         alarm(10);
-        _exit(run_exit_policy_scenario());
+        int result = run_exit_policy_scenario();
+        if (result == 0)
+            result = run_stopped_init_scenario();
+        _exit(result);
     }
 
     int status;

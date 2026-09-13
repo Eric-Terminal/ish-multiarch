@@ -133,23 +133,37 @@ static void release_detached_tty(struct tty *tty) {
 }
 
 int reap_stopped_first_process(void) {
-    lock(&pids_lock);
-    struct task *init = pid_get_task_zombie(1);
-    if (init == NULL) {
+    for (;;) {
+        lock(&pids_lock);
+        struct task *init = pid_get_task_zombie(1);
+        if (init == NULL) {
+            unlock(&pids_lock);
+            return _ESRCH;
+        }
+        if (init->parent != NULL || !init->exiting ||
+                !list_empty(&init->group->threads) ||
+                !atomic_load_explicit(
+                        &init->host_thread_exited, memory_order_acquire)) {
+            unlock(&pids_lock);
+            return _EAGAIN;
+        }
+        // init 已无法执行 wait，孤儿空壳的会话引用会继续占用 PID 1。
+        // 先回收已退出的子进程；仍有活跃线程时由宿主停止流程继续等待。
+        struct task *reaped = init;
+        if (!list_empty(&init->children)) {
+            reaped = list_first_entry(&init->children, struct task, siblings);
+            if (!reaped->zombie || !list_empty(&reaped->group->threads)) {
+                unlock(&pids_lock);
+                return _EAGAIN;
+            }
+        }
+        bool finished = reaped == init;
+        struct tty *tty = release_reaped_task_locked(reaped);
         unlock(&pids_lock);
-        return _ESRCH;
+        release_detached_tty(tty);
+        if (finished)
+            return 0;
     }
-    if (init->parent != NULL || !init->exiting ||
-            !list_empty(&init->group->threads) ||
-            !atomic_load_explicit(
-                    &init->host_thread_exited, memory_order_acquire)) {
-        unlock(&pids_lock);
-        return _EAGAIN;
-    }
-    struct tty *tty = release_reaped_task_locked(init);
-    unlock(&pids_lock);
-    release_detached_tty(tty);
-    return 0;
 }
 
 static struct task *find_new_parent(struct task *task) {
@@ -275,10 +289,11 @@ noreturn void do_exit(int status) {
     struct tty *reaped_tty = NULL;
     if (group_dead && auto_reap)
         reaped_tty = release_reaped_task_locked(leader);
-    unlock(&pids_lock);
     // init 没有父进程代为 wait。先发布“不会再访问 task”，宿主才能安全释放空壳。
+    // 普通子进程可能在解锁后立即被回收，必须在锁内判断 leader 身份。
     struct task *stopped_init = group_dead && !auto_reap &&
             leader->parent == NULL ? leader : NULL;
+    unlock(&pids_lock);
     if (stopped_init != NULL)
         atomic_store_explicit(
                 &stopped_init->host_thread_exited, true,
