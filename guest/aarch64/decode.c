@@ -334,6 +334,10 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         {UINT32_C(0x1e790000), AARCH64_OP_FCVTZU_GENERAL, 64, 32},
         {UINT32_C(0x9e390000), AARCH64_OP_FCVTZU_GENERAL, 32, 64},
         {UINT32_C(0x9e790000), AARCH64_OP_FCVTZU_GENERAL, 64, 64},
+        {UINT32_C(0x1e310000), AARCH64_OP_FCVTMU_GENERAL, 32, 32},
+        {UINT32_C(0x1e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 32},
+        {UINT32_C(0x9e310000), AARCH64_OP_FCVTMU_GENERAL, 32, 64},
+        {UINT32_C(0x9e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 64},
     };
     dword_t fp_to_integer = word & UINT32_C(0xfffffc00);
     for (unsigned i = 0; i < sizeof(fp_to_integer_conversions) /

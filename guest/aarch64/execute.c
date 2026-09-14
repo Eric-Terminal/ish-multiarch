@@ -1488,7 +1488,7 @@ struct scalar_fp_to_integer_result {
 static struct scalar_fp_to_integer_result
         convert_scalar_fp_to_integer(
         qword_t source, byte_t source_width, byte_t destination_width,
-        dword_t fpcr, bool signed_conversion) {
+        dword_t fpcr, bool signed_conversion, bool unsigned_round_down) {
     dword_t exceptions = 0;
     qword_t bits = flush_scalar_fp_input(
             source, source_width, fpcr, &exceptions);
@@ -1510,6 +1510,11 @@ static struct scalar_fp_to_integer_result
         else
             converted = scalar_fp_integer_limit(
                     destination_width, signed_conversion, negative);
+        exceptions |= AARCH64_FPSR_IOC;
+    } else if (unsigned_round_down && negative &&
+            (bits & ~sign_mask) != 0) {
+        // 无符号向下舍入仅在负非零输入上区别于向零舍入：即使绝对值
+        // 小于 1 也必须报告无效操作。先应用 FZ，保留冲零后的负零语义。
         exceptions |= AARCH64_FPSR_IOC;
     } else if (raw_exponent == 0) {
         if (fraction != 0)
@@ -1569,7 +1574,8 @@ static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
             convert_scalar_fp_to_integer(
                     read_scalar_fp(cpu, rn, width), width, width,
                     cpu->fpcr,
-                    instruction->opcode == AARCH64_OP_FCVTZS_SCALAR);
+                    instruction->opcode == AARCH64_OP_FCVTZS_SCALAR,
+                    false);
     write_scalar_fp(cpu, rd, width, result.value);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
@@ -1586,7 +1592,8 @@ static void execute_fp_to_integer(struct cpu_state *cpu,
                             instruction->operands.fp_to_integer.rn,
                             source_width),
                     source_width, destination_width, cpu->fpcr,
-                    instruction->opcode == AARCH64_OP_FCVTZS_GENERAL);
+                    instruction->opcode == AARCH64_OP_FCVTZS_GENERAL,
+                    instruction->opcode == AARCH64_OP_FCVTMU_GENERAL);
     write_register(cpu, instruction->operands.fp_to_integer.rd,
             destination_width, false, result.value);
     cpu->fpsr |= result.exceptions;
@@ -2508,6 +2515,7 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_FCVTZS_GENERAL:
         case AARCH64_OP_FCVTZU_GENERAL:
+        case AARCH64_OP_FCVTMU_GENERAL:
             execute_fp_to_integer(cpu, instruction);
             break;
         case AARCH64_OP_FADD_SCALAR:

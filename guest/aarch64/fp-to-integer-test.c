@@ -21,6 +21,10 @@ static const struct conversion_case conversions[] = {
     {UINT32_C(0x1e790000), AARCH64_OP_FCVTZU_GENERAL, 64, 32},
     {UINT32_C(0x9e390000), AARCH64_OP_FCVTZU_GENERAL, 32, 64},
     {UINT32_C(0x9e790000), AARCH64_OP_FCVTZU_GENERAL, 64, 64},
+    {UINT32_C(0x1e310000), AARCH64_OP_FCVTMU_GENERAL, 32, 32},
+    {UINT32_C(0x1e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 32},
+    {UINT32_C(0x9e310000), AARCH64_OP_FCVTMU_GENERAL, 32, 64},
+    {UINT32_C(0x9e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 64},
 };
 
 static dword_t encode(unsigned conversion, byte_t rn, byte_t rd) {
@@ -38,7 +42,8 @@ static bool is_conversion_encoding(dword_t word) {
 
 static bool is_conversion_opcode(enum aarch64_opcode opcode) {
     return opcode == AARCH64_OP_FCVTZS_GENERAL ||
-            opcode == AARCH64_OP_FCVTZU_GENERAL;
+            opcode == AARCH64_OP_FCVTZU_GENERAL ||
+            opcode == AARCH64_OP_FCVTMU_GENERAL;
 }
 
 static struct aarch64_decoded decode(dword_t word) {
@@ -76,10 +81,16 @@ static void test_llvm_vectors(void) {
     assert_decode(UINT32_C(0x1e7900a3), 5, 3, 5);
     assert_decode(UINT32_C(0x9e3900a3), 6, 3, 5);
     assert_decode(UINT32_C(0x9e7900a3), 7, 3, 5);
+    assert_decode(UINT32_C(0x1e3100a3), 8, 3, 5);
+    assert_decode(UINT32_C(0x1e7100a3), 9, 3, 5);
+    assert_decode(UINT32_C(0x9e3100a3), 10, 3, 5);
+    assert_decode(UINT32_C(0x9e7100a3), 11, 3, 5);
     // BusyBox awk 的真实故障指令：fcvtzs w19, d0。
     assert_decode(UINT32_C(0x1e780013), 1, 19, 0);
     // Python 的真实故障指令：fcvtzu x1, d31。
     assert_decode(UINT32_C(0x9e7903e1), 7, 1, 31);
+    // ETOS #145 中 Node 的真实故障指令：fcvtmu x1, d28。
+    assert_decode(UINT32_C(0x9e710381), 11, 1, 28);
 }
 
 static void test_encoding_space(void) {
@@ -95,7 +106,7 @@ static void test_encoding_space(void) {
             }
         }
     }
-    assert(decoded_count == 8192);
+    assert(decoded_count == 12288);
 }
 
 static void test_fixed_bits(void) {
@@ -126,7 +137,9 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e210020), // FCVTNU W,S
         UINT32_C(0x1e250020), // FCVTAU W,S
         UINT32_C(0x1e290020), // FCVTPU W,S
-        UINT32_C(0x1e310020), // FCVTMU W,S
+        UINT32_C(0x1ef10020), // FCVTMU 的 FP16 来源
+        UINT32_C(0x1eb10020), // FCVTMU 保留的 type=10
+        UINT32_C(0x1e300020), // FCVTMS W,S
         UINT32_C(0x7ea1b820), // AdvSIMD scalar FCVTZU S,S
         UINT32_C(0x2ea1b820), // AdvSIMD vector FCVTZU V.2S,V.2S
         UINT32_C(0x1e770020), // Armv9.6 FPRCVT S,D
