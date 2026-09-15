@@ -98,8 +98,8 @@ aarch64_scalar_fp_to_integer(qword_t source, byte_t source_width,
         } else {
             qword_t significand = (UINT64_C(1) << format.fraction_bits) | number.fraction;
             qword_t magnitude = exponent >= (int) format.fraction_bits ?
-                    significand << (exponent - format.fraction_bits) :
-                    significand >> (format.fraction_bits - exponent);
+                    significand << (exponent - (int) format.fraction_bits) :
+                    significand >> ((int) format.fraction_bits - exponent);
             invalid = magnitude > limit;
             value = invalid ? limit : number.sign ? 0 - magnitude : magnitude;
         }
