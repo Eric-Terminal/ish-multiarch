@@ -134,12 +134,8 @@ static void test_rejected_neighbors(void) {
         UINT32_C(0x1e18fca6), // 带定点缩放的编码族
         UINT32_C(0x9e590000), // FCVTZU X,D,#64
         UINT32_C(0x9e59fc00), // FCVTZU X,D,#1
-        UINT32_C(0x1e210020), // FCVTNU W,S
-        UINT32_C(0x1e250020), // FCVTAU W,S
-        UINT32_C(0x1e290020), // FCVTPU W,S
         UINT32_C(0x1ef10020), // FCVTMU 的 FP16 来源
         UINT32_C(0x1eb10020), // FCVTMU 保留的 type=10
-        UINT32_C(0x1e300020), // FCVTMS W,S
         UINT32_C(0x7ea1b820), // AdvSIMD scalar FCVTZU S,S
         UINT32_C(0x2ea1b820), // AdvSIMD vector FCVTZU V.2S,V.2S
         UINT32_C(0x1e770020), // Armv9.6 FPRCVT S,D

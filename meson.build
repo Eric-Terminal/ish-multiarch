@@ -1969,6 +1969,20 @@ if not meson.is_cross_build()
         ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
     test('aarch64_fcvtmu', aarch64_fcvtmu_test)
 
+    foreach fp_test : ['scalar-fp-round', 'scalar-fp-minmax', 'advsimd-basic-arithmetic']
+        fp_test_name = 'aarch64_' + fp_test.replace('-', '_')
+        fp_test_executable = executable(fp_test_name + '_test', [
+                'guest/memory/address-space.c',
+                'guest/memory/tlb.c',
+                'guest/aarch64/decode.c',
+                'guest/aarch64/condition.c',
+                'guest/aarch64/execute.c',
+                'guest/aarch64/threaded.c',
+                'guest/aarch64/' + fp_test + '-test.c',
+            ], include_directories: includes, c_args: ['-DISH_GUEST_AARCH64=1'])
+        test(fp_test_name, fp_test_executable, timeout: 120)
+    endforeach
+
     aarch64_scalar_fp_decode_test = executable(
             'aarch64_scalar_fp_decode_test', [
             'guest/aarch64/decode.c',

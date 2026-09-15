@@ -19,6 +19,9 @@ iOS `arm64`、watchOS `arm64_32`/`arm64` 以及 Watch Simulator
 
 ## 架构边界
 
+基础浮点舍入、转换、极值与 NEON 算术的新增覆盖、计数口径和硬件对照测试见
+[常用浮点与 NEON 指令覆盖](common-fp-instructions.md)。
+
 | 层次 | 当前支持 | 约束 |
 | --- | --- | --- |
 | guest 指令集 | i386、AArch64 | 两套 CPU 状态与执行路径相互隔离 |

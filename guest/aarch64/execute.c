@@ -4,6 +4,8 @@
 #include "guest/aarch64/execute.h"
 #include "guest/aarch64/condition.h"
 #include "guest/aarch64/scalar-fp.h"
+#include "guest/aarch64/scalar-fp-conversion.h"
+#include "guest/aarch64/scalar-fp-minmax.h"
 
 _Static_assert(GUEST_TLB_MAX_ACCESS_SIZE >=
         2 * sizeof(union aarch64_vector_reg),
@@ -679,7 +681,7 @@ static void execute_advsimd_shift_long(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static void execute_advsimd_add_sub(struct cpu_state *cpu,
+static void execute_advsimd_arithmetic(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.advsimd_three_same.rd;
     byte_t rn = instruction->operands.advsimd_three_same.rn;
@@ -693,8 +695,9 @@ static void execute_advsimd_add_sub(struct cpu_state *cpu,
     for (byte_t lane = 0; lane < lanes; lane++) {
         qword_t left = read_vector_element(&cpu->v[rn], element_size, lane);
         qword_t right = read_vector_element(&cpu->v[rm], element_size, lane);
-        write_vector_element(&result, element_size, lane,
-                subtract ? left - right : left + right);
+        qword_t value = instruction->opcode == AARCH64_OP_ADVSIMD_MUL ?
+                left * right : subtract ? left - right : left + right;
+        write_vector_element(&result, element_size, lane, value);
     }
     cpu->v[rd] = result;
     cpu->pc += 4;
@@ -1273,29 +1276,6 @@ static qword_t scalar_fp_sign_mask(byte_t width) {
     return UINT64_C(1) << (width - 1);
 }
 
-static qword_t scalar_fp_fraction_mask(byte_t width) {
-    return width == 32 ? UINT32_C(0x007fffff) :
-            UINT64_C(0x000fffffffffffff);
-}
-
-static qword_t scalar_fp_exponent_mask(byte_t width) {
-    return width == 32 ? UINT32_C(0x7f800000) :
-            UINT64_C(0x7ff0000000000000);
-}
-
-static qword_t flush_scalar_fp_input(qword_t bits, byte_t width,
-        dword_t fpcr, dword_t *exceptions) {
-    qword_t exponent_mask = scalar_fp_exponent_mask(width);
-    qword_t fraction_mask = scalar_fp_fraction_mask(width);
-    if ((fpcr & AARCH64_FPCR_FZ) != 0 &&
-            (bits & exponent_mask) == 0 &&
-            (bits & fraction_mask) != 0) {
-        *exceptions |= AARCH64_FPSR_IDC;
-        return bits & scalar_fp_sign_mask(width);
-    }
-    return bits;
-}
-
 static void execute_scalar_fp_binary(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
@@ -1321,6 +1301,48 @@ static void execute_scalar_fp_binary(struct cpu_state *cpu,
     write_scalar_fp(cpu, rd, width, result.bits);
     // 异常使能位尚无执行事件通道；当前只累积 Linux 默认使用的 FPSR。
     cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
+static void execute_scalar_fp_minmax(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rn = instruction->operands.data_processing_2source.rn;
+    byte_t rm = instruction->operands.data_processing_2source.rm;
+    bool maximum = instruction->opcode == AARCH64_OP_FMAX_SCALAR ||
+            instruction->opcode == AARCH64_OP_FMAXNM_SCALAR;
+    bool numeric = instruction->opcode == AARCH64_OP_FMINNM_SCALAR ||
+            instruction->opcode == AARCH64_OP_FMAXNM_SCALAR;
+    struct aarch64_scalar_fp_result result = aarch64_scalar_fp_minmax(
+            read_scalar_fp(cpu, rn, instruction->width),
+            read_scalar_fp(cpu, rm, instruction->width),
+            instruction->width, cpu->fpcr, maximum, numeric);
+    write_scalar_fp(cpu, instruction->operands.data_processing_2source.rd,
+            instruction->width, result.bits);
+    cpu->fpsr |= result.exceptions;
+    cpu->pc += 4;
+}
+
+static void execute_vector_fp_binary(struct cpu_state *cpu,
+        const struct aarch64_decoded *instruction) {
+    byte_t rn = instruction->operands.advsimd_three_same.rn;
+    byte_t rm = instruction->operands.advsimd_three_same.rm;
+    byte_t size = instruction->operands.advsimd_three_same.element_size;
+    union aarch64_vector_reg result = {0};
+    // 先读完所有来源再整体写回，保证目标与任意源寄存器重叠时语义一致。
+    for (byte_t lane = 0; lane < instruction->width / (size * 8); lane++) {
+        qword_t left = read_vector_element(&cpu->v[rn], size, lane);
+        qword_t right = read_vector_element(&cpu->v[rm], size, lane);
+        struct aarch64_scalar_fp_result element;
+        if (instruction->opcode == AARCH64_OP_ADVSIMD_FADD)
+            element = aarch64_scalar_fp_add(left, right, size * 8, cpu->fpcr);
+        else if (instruction->opcode == AARCH64_OP_ADVSIMD_FSUB)
+            element = aarch64_scalar_fp_subtract(left, right, size * 8, cpu->fpcr);
+        else
+            element = aarch64_scalar_fp_multiply(left, right, size * 8, cpu->fpcr);
+        write_vector_element(&result, size, lane, element.bits);
+        cpu->fpsr |= element.exceptions;
+    }
+    cpu->v[instruction->operands.advsimd_three_same.rd] = result;
     cpu->pc += 4;
 }
 
@@ -1360,25 +1382,56 @@ static void execute_scalar_fp_select(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static void execute_scalar_fp_negate(struct cpu_state *cpu,
+static void execute_scalar_fp_sign(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.data_processing_1source.rd;
     byte_t rn = instruction->operands.data_processing_1source.rn;
     qword_t bits = read_scalar_fp(cpu, rn, instruction->width);
+    qword_t sign = scalar_fp_sign_mask(instruction->width);
     write_scalar_fp(cpu, rd, instruction->width,
-            bits ^ scalar_fp_sign_mask(instruction->width));
+            instruction->opcode == AARCH64_OP_FABS_SCALAR ? bits & ~sign : bits ^ sign);
     cpu->pc += 4;
 }
 
-static void execute_scalar_fp_round_to_integral_minus(
+static enum aarch64_fp_rounding fp_instruction_rounding(
+        enum aarch64_opcode opcode, dword_t fpcr) {
+    switch (opcode) {
+        case AARCH64_OP_FRINTN_SCALAR:
+        case AARCH64_OP_FCVTNS_GENERAL:
+        case AARCH64_OP_FCVTNU_GENERAL:
+            return AARCH64_FP_NEAREST_EVEN;
+        case AARCH64_OP_FRINTP_SCALAR:
+        case AARCH64_OP_FCVTPS_GENERAL:
+        case AARCH64_OP_FCVTPU_GENERAL:
+            return AARCH64_FP_PLUS_INFINITY;
+        case AARCH64_OP_FRINTM_SCALAR:
+        case AARCH64_OP_FCVTMS_GENERAL:
+        case AARCH64_OP_FCVTMU_GENERAL:
+            return AARCH64_FP_MINUS_INFINITY;
+        case AARCH64_OP_FRINTA_SCALAR:
+        case AARCH64_OP_FCVTAS_GENERAL:
+        case AARCH64_OP_FCVTAU_GENERAL:
+            return AARCH64_FP_TIES_AWAY;
+        case AARCH64_OP_FRINTI_SCALAR:
+        case AARCH64_OP_FRINTX_SCALAR:
+            return (enum aarch64_fp_rounding)
+                    ((fpcr & AARCH64_FPCR_RMODE_MASK) >> AARCH64_FPCR_RMODE_SHIFT);
+        default:
+            return AARCH64_FP_ZERO;
+    }
+}
+
+static void execute_scalar_fp_round_to_integral(
         struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t rd = instruction->operands.data_processing_1source.rd;
     byte_t rn = instruction->operands.data_processing_1source.rn;
     struct aarch64_scalar_fp_result result =
-            aarch64_scalar_fp_round_to_integral_minus(
+            aarch64_scalar_fp_round_to_integral(
                     read_scalar_fp(cpu, rn, instruction->width),
-                    instruction->width, cpu->fpcr);
+                    instruction->width, cpu->fpcr,
+                    fp_instruction_rounding(instruction->opcode, cpu->fpcr),
+                    instruction->opcode == AARCH64_OP_FRINTX_SCALAR);
     write_scalar_fp(cpu, rd, instruction->width, result.bits);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
@@ -1469,114 +1522,18 @@ static void execute_scalar_fp_conditional_compare(struct cpu_state *cpu,
     cpu->pc += 4;
 }
 
-static qword_t scalar_fp_integer_limit(byte_t destination_width,
-        bool signed_conversion, bool negative) {
-    if (!signed_conversion) {
-        if (negative)
-            return 0;
-        return destination_width == 32 ? UINT32_MAX : UINT64_MAX;
-    }
-    qword_t sign = UINT64_C(1) << (destination_width - 1);
-    return negative ? sign : sign - 1;
-}
-
-struct scalar_fp_to_integer_result {
-    qword_t value;
-    dword_t exceptions;
-};
-
-static struct scalar_fp_to_integer_result
-        convert_scalar_fp_to_integer(
-        qword_t source, byte_t source_width, byte_t destination_width,
-        dword_t fpcr, bool signed_conversion, bool unsigned_round_down) {
-    dword_t exceptions = 0;
-    qword_t bits = flush_scalar_fp_input(
-            source, source_width, fpcr, &exceptions);
-    qword_t sign_mask = scalar_fp_sign_mask(source_width);
-    qword_t exponent_mask = scalar_fp_exponent_mask(source_width);
-    qword_t fraction_mask = scalar_fp_fraction_mask(source_width);
-    qword_t fraction = bits & fraction_mask;
-    bool negative = (bits & sign_mask) != 0;
-    unsigned fraction_bits = source_width == 32 ? 23 : 52;
-    unsigned exponent_bias = source_width == 32 ? 127 : 1023;
-    unsigned raw_exponent = (unsigned) ((bits & exponent_mask) >>
-            fraction_bits);
-    unsigned maximum_exponent = source_width == 32 ? 255 : 2047;
-    qword_t converted = 0;
-
-    if (raw_exponent == maximum_exponent) {
-        if (fraction != 0)
-            converted = 0;
-        else
-            converted = scalar_fp_integer_limit(
-                    destination_width, signed_conversion, negative);
-        exceptions |= AARCH64_FPSR_IOC;
-    } else if (unsigned_round_down && negative &&
-            (bits & ~sign_mask) != 0) {
-        // 无符号向下舍入仅在负非零输入上区别于向零舍入：即使绝对值
-        // 小于 1 也必须报告无效操作。先应用 FZ，保留冲零后的负零语义。
-        exceptions |= AARCH64_FPSR_IOC;
-    } else if (raw_exponent == 0) {
-        if (fraction != 0)
-            exceptions |= AARCH64_FPSR_IXC;
-    } else {
-        int exponent = (int) raw_exponent - (int) exponent_bias;
-        if (exponent < 0) {
-            exceptions |= AARCH64_FPSR_IXC;
-        } else if (exponent > destination_width - 1) {
-            converted = scalar_fp_integer_limit(
-                    destination_width, signed_conversion, negative);
-            exceptions |= AARCH64_FPSR_IOC;
-        } else {
-            qword_t significand = (UINT64_C(1) << fraction_bits) |
-                    fraction;
-            qword_t magnitude;
-            bool inexact = false;
-            if ((unsigned) exponent >= fraction_bits) {
-                magnitude = significand <<
-                        ((unsigned) exponent - fraction_bits);
-            } else {
-                unsigned discarded_bits =
-                        fraction_bits - (unsigned) exponent;
-                qword_t discarded_mask =
-                        (UINT64_C(1) << discarded_bits) - 1;
-                inexact = (significand & discarded_mask) != 0;
-                magnitude = significand >> discarded_bits;
-            }
-            qword_t limit = scalar_fp_integer_limit(
-                    destination_width, signed_conversion, negative);
-            bool invalid = magnitude > limit;
-            if (invalid) {
-                converted = limit;
-                exceptions |= AARCH64_FPSR_IOC;
-            } else {
-                converted = signed_conversion && negative ?
-                        0 - magnitude : magnitude;
-                if (inexact)
-                    exceptions |= AARCH64_FPSR_IXC;
-            }
-        }
-    }
-    if (destination_width == 32)
-        converted = (dword_t) converted;
-    return (struct scalar_fp_to_integer_result) {
-        .value = converted,
-        .exceptions = exceptions,
-    };
-}
-
 static void execute_scalar_fp_to_integer(struct cpu_state *cpu,
         const struct aarch64_decoded *instruction) {
     byte_t width = instruction->width;
     byte_t rd = instruction->operands.data_processing_1source.rd;
     byte_t rn = instruction->operands.data_processing_1source.rn;
-    struct scalar_fp_to_integer_result result =
-            convert_scalar_fp_to_integer(
+    struct aarch64_scalar_fp_result result =
+            aarch64_scalar_fp_to_integer(
                     read_scalar_fp(cpu, rn, width), width, width,
                     cpu->fpcr,
                     instruction->opcode == AARCH64_OP_FCVTZS_SCALAR,
-                    false);
-    write_scalar_fp(cpu, rd, width, result.value);
+                    AARCH64_FP_ZERO);
+    write_scalar_fp(cpu, rd, width, result.bits);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
 }
@@ -1586,16 +1543,20 @@ static void execute_fp_to_integer(struct cpu_state *cpu,
     byte_t source_width = instruction->width;
     byte_t destination_width =
             instruction->operands.fp_to_integer.destination_width;
-    struct scalar_fp_to_integer_result result =
-            convert_scalar_fp_to_integer(
+    bool is_signed = instruction->opcode == AARCH64_OP_FCVTZS_GENERAL ||
+            instruction->opcode == AARCH64_OP_FCVTNS_GENERAL ||
+            instruction->opcode == AARCH64_OP_FCVTPS_GENERAL ||
+            instruction->opcode == AARCH64_OP_FCVTMS_GENERAL ||
+            instruction->opcode == AARCH64_OP_FCVTAS_GENERAL;
+    struct aarch64_scalar_fp_result result =
+            aarch64_scalar_fp_to_integer(
                     read_scalar_fp(cpu,
                             instruction->operands.fp_to_integer.rn,
                             source_width),
                     source_width, destination_width, cpu->fpcr,
-                    instruction->opcode == AARCH64_OP_FCVTZS_GENERAL,
-                    instruction->opcode == AARCH64_OP_FCVTMU_GENERAL);
+                    is_signed, fp_instruction_rounding(instruction->opcode, cpu->fpcr));
     write_register(cpu, instruction->operands.fp_to_integer.rd,
-            destination_width, false, result.value);
+            destination_width, false, result.bits);
     cpu->fpsr |= result.exceptions;
     cpu->pc += 4;
 }
@@ -2420,7 +2381,13 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             break;
         case AARCH64_OP_ADVSIMD_ADD:
         case AARCH64_OP_ADVSIMD_SUB:
-            execute_advsimd_add_sub(cpu, instruction);
+        case AARCH64_OP_ADVSIMD_MUL:
+            execute_advsimd_arithmetic(cpu, instruction);
+            break;
+        case AARCH64_OP_ADVSIMD_FADD:
+        case AARCH64_OP_ADVSIMD_FSUB:
+        case AARCH64_OP_ADVSIMD_FMUL:
+            execute_vector_fp_binary(cpu, instruction);
             break;
         case AARCH64_OP_ADVSIMD_SADDW:
         case AARCH64_OP_ADVSIMD_SADDW2:
@@ -2516,6 +2483,13 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
         case AARCH64_OP_FCVTZS_GENERAL:
         case AARCH64_OP_FCVTZU_GENERAL:
         case AARCH64_OP_FCVTMU_GENERAL:
+        case AARCH64_OP_FCVTMS_GENERAL:
+        case AARCH64_OP_FCVTNS_GENERAL:
+        case AARCH64_OP_FCVTNU_GENERAL:
+        case AARCH64_OP_FCVTPS_GENERAL:
+        case AARCH64_OP_FCVTPU_GENERAL:
+        case AARCH64_OP_FCVTAS_GENERAL:
+        case AARCH64_OP_FCVTAU_GENERAL:
             execute_fp_to_integer(cpu, instruction);
             break;
         case AARCH64_OP_FADD_SCALAR:
@@ -2534,10 +2508,23 @@ struct aarch64_execute_result aarch64_execute(struct cpu_state *cpu,
             execute_scalar_fp_select(cpu, instruction);
             break;
         case AARCH64_OP_FNEG_SCALAR:
-            execute_scalar_fp_negate(cpu, instruction);
+        case AARCH64_OP_FABS_SCALAR:
+            execute_scalar_fp_sign(cpu, instruction);
+            break;
+        case AARCH64_OP_FMIN_SCALAR:
+        case AARCH64_OP_FMAX_SCALAR:
+        case AARCH64_OP_FMINNM_SCALAR:
+        case AARCH64_OP_FMAXNM_SCALAR:
+            execute_scalar_fp_minmax(cpu, instruction);
             break;
         case AARCH64_OP_FRINTM_SCALAR:
-            execute_scalar_fp_round_to_integral_minus(cpu, instruction);
+        case AARCH64_OP_FRINTN_SCALAR:
+        case AARCH64_OP_FRINTP_SCALAR:
+        case AARCH64_OP_FRINTZ_SCALAR:
+        case AARCH64_OP_FRINTA_SCALAR:
+        case AARCH64_OP_FRINTI_SCALAR:
+        case AARCH64_OP_FRINTX_SCALAR:
+            execute_scalar_fp_round_to_integral(cpu, instruction);
             break;
         case AARCH64_OP_FSQRT_SCALAR:
             execute_scalar_fp_sqrt(cpu, instruction);

@@ -338,6 +338,34 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         {UINT32_C(0x1e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 32},
         {UINT32_C(0x9e310000), AARCH64_OP_FCVTMU_GENERAL, 32, 64},
         {UINT32_C(0x9e710000), AARCH64_OP_FCVTMU_GENERAL, 64, 64},
+        {UINT32_C(0x1e300000), AARCH64_OP_FCVTMS_GENERAL, 32, 32},
+        {UINT32_C(0x1e700000), AARCH64_OP_FCVTMS_GENERAL, 64, 32},
+        {UINT32_C(0x9e300000), AARCH64_OP_FCVTMS_GENERAL, 32, 64},
+        {UINT32_C(0x9e700000), AARCH64_OP_FCVTMS_GENERAL, 64, 64},
+        {UINT32_C(0x1e200000), AARCH64_OP_FCVTNS_GENERAL, 32, 32},
+        {UINT32_C(0x1e600000), AARCH64_OP_FCVTNS_GENERAL, 64, 32},
+        {UINT32_C(0x9e200000), AARCH64_OP_FCVTNS_GENERAL, 32, 64},
+        {UINT32_C(0x9e600000), AARCH64_OP_FCVTNS_GENERAL, 64, 64},
+        {UINT32_C(0x1e210000), AARCH64_OP_FCVTNU_GENERAL, 32, 32},
+        {UINT32_C(0x1e610000), AARCH64_OP_FCVTNU_GENERAL, 64, 32},
+        {UINT32_C(0x9e210000), AARCH64_OP_FCVTNU_GENERAL, 32, 64},
+        {UINT32_C(0x9e610000), AARCH64_OP_FCVTNU_GENERAL, 64, 64},
+        {UINT32_C(0x1e280000), AARCH64_OP_FCVTPS_GENERAL, 32, 32},
+        {UINT32_C(0x1e680000), AARCH64_OP_FCVTPS_GENERAL, 64, 32},
+        {UINT32_C(0x9e280000), AARCH64_OP_FCVTPS_GENERAL, 32, 64},
+        {UINT32_C(0x9e680000), AARCH64_OP_FCVTPS_GENERAL, 64, 64},
+        {UINT32_C(0x1e290000), AARCH64_OP_FCVTPU_GENERAL, 32, 32},
+        {UINT32_C(0x1e690000), AARCH64_OP_FCVTPU_GENERAL, 64, 32},
+        {UINT32_C(0x9e290000), AARCH64_OP_FCVTPU_GENERAL, 32, 64},
+        {UINT32_C(0x9e690000), AARCH64_OP_FCVTPU_GENERAL, 64, 64},
+        {UINT32_C(0x1e240000), AARCH64_OP_FCVTAS_GENERAL, 32, 32},
+        {UINT32_C(0x1e640000), AARCH64_OP_FCVTAS_GENERAL, 64, 32},
+        {UINT32_C(0x9e240000), AARCH64_OP_FCVTAS_GENERAL, 32, 64},
+        {UINT32_C(0x9e640000), AARCH64_OP_FCVTAS_GENERAL, 64, 64},
+        {UINT32_C(0x1e250000), AARCH64_OP_FCVTAU_GENERAL, 32, 32},
+        {UINT32_C(0x1e650000), AARCH64_OP_FCVTAU_GENERAL, 64, 32},
+        {UINT32_C(0x9e250000), AARCH64_OP_FCVTAU_GENERAL, 32, 64},
+        {UINT32_C(0x9e650000), AARCH64_OP_FCVTAU_GENERAL, 64, 64},
     };
     dword_t fp_to_integer = word & UINT32_C(0xfffffc00);
     for (unsigned i = 0; i < sizeof(fp_to_integer_conversions) /
@@ -402,6 +430,14 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         {UINT32_C(0x1e600800), AARCH64_OP_FMUL_SCALAR, 64},
         {UINT32_C(0x1e201800), AARCH64_OP_FDIV_SCALAR, 32},
         {UINT32_C(0x1e601800), AARCH64_OP_FDIV_SCALAR, 64},
+        {UINT32_C(0x1e204800), AARCH64_OP_FMAX_SCALAR, 32},
+        {UINT32_C(0x1e604800), AARCH64_OP_FMAX_SCALAR, 64},
+        {UINT32_C(0x1e205800), AARCH64_OP_FMIN_SCALAR, 32},
+        {UINT32_C(0x1e605800), AARCH64_OP_FMIN_SCALAR, 64},
+        {UINT32_C(0x1e206800), AARCH64_OP_FMAXNM_SCALAR, 32},
+        {UINT32_C(0x1e606800), AARCH64_OP_FMAXNM_SCALAR, 64},
+        {UINT32_C(0x1e207800), AARCH64_OP_FMINNM_SCALAR, 32},
+        {UINT32_C(0x1e607800), AARCH64_OP_FMINNM_SCALAR, 64},
     };
     dword_t scalar_fp_binary = word & UINT32_C(0xffe0fc00);
     for (unsigned i = 0; i < sizeof(scalar_fp_binary_operations) /
@@ -516,8 +552,22 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         {UINT32_C(0x1e604000), AARCH64_OP_FMOV_SCALAR, 64},
         {UINT32_C(0x1e214000), AARCH64_OP_FNEG_SCALAR, 32},
         {UINT32_C(0x1e614000), AARCH64_OP_FNEG_SCALAR, 64},
+        {UINT32_C(0x1e20c000), AARCH64_OP_FABS_SCALAR, 32},
+        {UINT32_C(0x1e60c000), AARCH64_OP_FABS_SCALAR, 64},
         {UINT32_C(0x1e254000), AARCH64_OP_FRINTM_SCALAR, 32},
         {UINT32_C(0x1e654000), AARCH64_OP_FRINTM_SCALAR, 64},
+        {UINT32_C(0x1e244000), AARCH64_OP_FRINTN_SCALAR, 32},
+        {UINT32_C(0x1e644000), AARCH64_OP_FRINTN_SCALAR, 64},
+        {UINT32_C(0x1e24c000), AARCH64_OP_FRINTP_SCALAR, 32},
+        {UINT32_C(0x1e64c000), AARCH64_OP_FRINTP_SCALAR, 64},
+        {UINT32_C(0x1e25c000), AARCH64_OP_FRINTZ_SCALAR, 32},
+        {UINT32_C(0x1e65c000), AARCH64_OP_FRINTZ_SCALAR, 64},
+        {UINT32_C(0x1e264000), AARCH64_OP_FRINTA_SCALAR, 32},
+        {UINT32_C(0x1e664000), AARCH64_OP_FRINTA_SCALAR, 64},
+        {UINT32_C(0x1e274000), AARCH64_OP_FRINTX_SCALAR, 32},
+        {UINT32_C(0x1e674000), AARCH64_OP_FRINTX_SCALAR, 64},
+        {UINT32_C(0x1e27c000), AARCH64_OP_FRINTI_SCALAR, 32},
+        {UINT32_C(0x1e67c000), AARCH64_OP_FRINTI_SCALAR, 64},
         {UINT32_C(0x1e21c000), AARCH64_OP_FSQRT_SCALAR, 32},
         {UINT32_C(0x1e61c000), AARCH64_OP_FSQRT_SCALAR, 64},
         {UINT32_C(0x5ea1b800), AARCH64_OP_FCVTZS_SCALAR, 32},
@@ -662,6 +712,52 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
                 .rn = (word >> 5) & 0x1f,
                 .rm = (word >> 16) & 0x1f,
                 .element_size = (byte_t) (1U << size),
+            },
+        };
+        return true;
+    }
+
+    if ((word & UINT32_C(0xbf20fc00)) == UINT32_C(0x0e209c00)) {
+        byte_t size = (word >> 22) & 3;
+        if (size == 3)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = AARCH64_OP_ADVSIMD_MUL,
+            .width = (word >> 30) & 1 ? 128 : 64,
+            .operands.advsimd_three_same = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .element_size = (byte_t) (1U << size),
+            },
+        };
+        return true;
+    }
+
+    static const struct {
+        dword_t bits;
+        enum aarch64_opcode opcode;
+    } vector_fp_binary_operations[] = {
+        {UINT32_C(0x0e20d400), AARCH64_OP_ADVSIMD_FADD},
+        {UINT32_C(0x0ea0d400), AARCH64_OP_ADVSIMD_FSUB},
+        {UINT32_C(0x2e20dc00), AARCH64_OP_ADVSIMD_FMUL},
+    };
+    for (unsigned i = 0; i < sizeof(vector_fp_binary_operations) /
+            sizeof(vector_fp_binary_operations[0]); i++) {
+        if ((word & UINT32_C(0xbfa0fc00)) != vector_fp_binary_operations[i].bits)
+            continue;
+        bool q = (word >> 30) & 1;
+        bool double_precision = (word >> 22) & 1;
+        if (double_precision && !q)
+            return false;
+        *decoded = (struct aarch64_decoded) {
+            .opcode = vector_fp_binary_operations[i].opcode,
+            .width = q ? 128 : 64,
+            .operands.advsimd_three_same = {
+                .rd = word & 0x1f,
+                .rn = (word >> 5) & 0x1f,
+                .rm = (word >> 16) & 0x1f,
+                .element_size = double_precision ? 8 : 4,
             },
         };
         return true;
