@@ -19,6 +19,12 @@ if cc.get_id() == 'clang'
     add_project_arguments('-Wimplicit-fallthrough', '-Wtautological-constant-in-range-compare', language: 'c')
 endif
 
+if host_machine.system() == 'darwin'
+    # 当前 Apple 链接器不支持 -d；编译时生成可局部化的零初始化定义，避免
+    # 公共 SDK 泄漏内部 common symbol。放在项目参数中也能更新已有构建目录。
+    add_project_arguments('-fno-common', language: 'c')
+endif
+
 if get_option('b_sanitize').split(',').contains('undefined')
     add_project_arguments('-fno-sanitize=alignment', language: 'c')
 endif

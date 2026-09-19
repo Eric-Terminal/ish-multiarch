@@ -11,7 +11,7 @@ CONSUMER="$ROOT/sdk/iSHApple/Tests/PublicModuleConsumer.m"
 PUBLIC_SYMBOLS="$ROOT/sdk/iSHApple/PublicSymbols.txt"
 
 CLANG=$(xcrun --find clang)
-LD_CLASSIC=$(xcrun --find ld-classic)
+APPLE_LINKER=$(xcrun --find ld)
 LIBTOOL=$(xcrun --find libtool)
 NMEDIT=$(xcrun --find nmedit)
 
@@ -38,14 +38,14 @@ merge_thin_slice() {
         "$source/libish_emu.a" \
         "$source/libfakefs.a"
 
-    # 先解析内部跨成员引用，再局部化非公共定义；-d 同时收敛 tentative
-    # definitions，避免它们作为 common symbol 留在外部链接命名空间。
+    # 先解析内部跨成员引用，再局部化非公共定义。Apple 构建统一使用
+    # -fno-common，避免内部变量作为 common symbol 留在外部链接命名空间。
     local sysroot
     local sdk_version
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
     sdk_version=$(xcrun --sdk "$sdk" --show-sdk-version)
-    "$LD_CLASSIC" \
-        -r -d \
+    "$APPLE_LINKER" \
+        -r \
         -arch "$arch" \
         -platform_version "$platform" "$minos" "$sdk_version" \
         -syslibroot "$sysroot" \
