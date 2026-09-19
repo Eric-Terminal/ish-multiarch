@@ -169,6 +169,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_SIGPROCMASK = 135,
     AARCH64_LINUX_SYS_RT_SIGPENDING = 136,
     AARCH64_LINUX_SYS_RT_SIGQUEUEINFO = 138,
+    AARCH64_LINUX_SYS_GETRESUID = 148,
+    AARCH64_LINUX_SYS_GETRESGID = 150,
     AARCH64_LINUX_SYS_SETPGID = 154,
     AARCH64_LINUX_SYS_GETPGID = 155,
     AARCH64_LINUX_SYS_GETSID = 156,
@@ -3732,6 +3734,32 @@ static qword_t dispatch_uname(
     return 0;
 }
 
+static qword_t dispatch_getresid(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool groups) {
+    // 先取得一致快照，再释放凭据锁写入 guest；三个目标是 64 位地址，ID 仍为 32 位。
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    const dword_t ids[] = {
+        groups ? credentials.gid : credentials.uid,
+        groups ? credentials.egid : credentials.euid,
+        groups ? credentials.sgid : credentials.suid,
+    };
+    for (unsigned i = 0; i < array_size(ids); i++) {
+        // Linux 逐个 put_user，后续指针出错时不会撤销此前成功的写入。
+        qword_t address = syscall->arguments[i];
+        if (!aarch64_user_range_fits(address, sizeof(ids[i])))
+            return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+        assert(context->user.write != NULL);
+        if (!context->user.write(context->user.opaque,
+                address, &ids[i], sizeof(ids[i]), fault))
+            return syscall_result(_EFAULT);
+    }
+    return 0;
+}
+
 static qword_t dispatch_getgroups(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -4419,6 +4447,10 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_RT_SIGQUEUEINFO:
             return dispatch_rt_sigqueueinfo(
                     context, syscall, fault, false);
+        case AARCH64_LINUX_SYS_GETRESUID:
+        case AARCH64_LINUX_SYS_GETRESGID:
+            return dispatch_getresid(context, syscall, task, fault,
+                    syscall->number == AARCH64_LINUX_SYS_GETRESGID);
         case AARCH64_LINUX_SYS_SETPGID:
             return syscall_result((sdword_t) sys_setpgid(
                     syscall_pid(syscall->arguments[0]),

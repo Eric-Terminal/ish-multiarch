@@ -843,6 +843,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_process_syscall', aarch64_process_syscall_test)
 
+        aarch64_getresid_syscall_test = executable(
+            'aarch64_getresid_syscall_test',
+            'kernel/aarch64-getresid-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_getresid_syscall', aarch64_getresid_syscall_test)
+
         aarch64_sigsuspend_syscall_test = executable(
             'aarch64_sigsuspend_syscall_test',
             'kernel/aarch64-sigsuspend-syscall-test.c',
