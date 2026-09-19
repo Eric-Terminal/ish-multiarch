@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 BUILD_ROOT=${1:-"$ROOT/build-apple-core"}
+source "$ROOT/tools/apple-lipo.sh"
 PUBLIC_ROOT="$BUILD_ROOT/public-sdk"
 XCFRAMEWORK="$BUILD_ROOT/xcframeworks/iSHApple.xcframework"
 HEADERS="$ROOT/sdk/iSHApple/Headers"
@@ -185,14 +186,10 @@ xcrun lipo -create \
     "$PUBLIC_ROOT/thin/watchsimulator-x86_64/libiSHApple.a" \
     -output "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a"
 
-xcrun lipo "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a" \
-    -verify_arch arm64
-xcrun lipo "$PUBLIC_ROOT/universal/iphonesimulator/libiSHApple.a" \
-    -verify_arch arm64 x86_64
-xcrun lipo "$PUBLIC_ROOT/universal/watchos/libiSHApple.a" \
-    -verify_arch arm64_32 arm64
-xcrun lipo "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a" \
-    -verify_arch arm64 x86_64
+apple_verify_archive_architectures "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a" arm64
+apple_verify_archive_architectures "$PUBLIC_ROOT/universal/iphonesimulator/libiSHApple.a" arm64 x86_64
+apple_verify_archive_architectures "$PUBLIC_ROOT/universal/watchos/libiSHApple.a" arm64_32 arm64
+apple_verify_archive_architectures "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a" arm64 x86_64
 
 xcodebuild -create-xcframework \
     -library "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a" \
@@ -227,13 +224,10 @@ for variant in \
         "$variant/libiSHApple.a"
 done
 
-xcrun lipo "$IOS_DEVICE/libiSHApple.a" -verify_arch arm64
-xcrun lipo "$IOS_SIMULATOR/libiSHApple.a" \
-    -verify_arch arm64 x86_64
-xcrun lipo "$WATCH_DEVICE/libiSHApple.a" \
-    -verify_arch arm64_32 arm64
-xcrun lipo "$WATCH_SIMULATOR/libiSHApple.a" \
-    -verify_arch arm64 x86_64
+apple_verify_archive_architectures "$IOS_DEVICE/libiSHApple.a" arm64
+apple_verify_archive_architectures "$IOS_SIMULATOR/libiSHApple.a" arm64 x86_64
+apple_verify_archive_architectures "$WATCH_DEVICE/libiSHApple.a" arm64_32 arm64
+apple_verify_archive_architectures "$WATCH_SIMULATOR/libiSHApple.a" arm64 x86_64
 
 link_module_consumer \
     iphoneos-arm64 iphoneos arm64-apple-ios15.0 \

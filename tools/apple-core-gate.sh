@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 BUILD_ROOT=${1:-"$ROOT/build-apple-core"}
+source "$ROOT/tools/apple-lipo.sh"
 source "$ROOT/tools/apple-meson-arch.sh"
 source "$ROOT/tools/apple-meson-project-options.sh"
 source "$ROOT/tools/reproducible-build-env.sh"
@@ -424,7 +425,7 @@ build_slice() {
     local library
     for library in libish.a libish_emu.a libfakefs.a; do
         file "$full_build_dir/$library"
-        xcrun lipo "$full_build_dir/$library" -verify_arch "$arch"
+        apple_verify_archive_architectures "$full_build_dir/$library" "$arch"
     done
     file "$full_build_dir/darwin_platform_link_smoke" \
         "$full_build_dir/apple_runtime_link_smoke" \
@@ -733,10 +734,8 @@ for library in libish_aarch64_core.a; do
         "$BUILD_ROOT/core/watchsimulator-arm64/$library" \
         "$BUILD_ROOT/core/watchsimulator-x86_64/$library" \
         -output "$UNIVERSAL_ROOT/watchsimulator/$library"
-    xcrun lipo "$UNIVERSAL_ROOT/watchos/$library" \
-        -verify_arch arm64_32 arm64
-    xcrun lipo "$UNIVERSAL_ROOT/watchsimulator/$library" \
-        -verify_arch arm64 x86_64
+    apple_verify_archive_architectures "$UNIVERSAL_ROOT/watchos/$library" arm64_32 arm64
+    apple_verify_archive_architectures "$UNIVERSAL_ROOT/watchsimulator/$library" arm64 x86_64
 done
 
 for library in libish.a libish_emu.a libfakefs.a; do
@@ -748,10 +747,8 @@ for library in libish.a libish_emu.a libfakefs.a; do
         "$BUILD_ROOT/full/watchsimulator-arm64/$library" \
         "$BUILD_ROOT/full/watchsimulator-x86_64/$library" \
         -output "$UNIVERSAL_ROOT/watchsimulator/$library"
-    xcrun lipo "$UNIVERSAL_ROOT/watchos/$library" \
-        -verify_arch arm64_32 arm64
-    xcrun lipo "$UNIVERSAL_ROOT/watchsimulator/$library" \
-        -verify_arch arm64 x86_64
+    apple_verify_archive_architectures "$UNIVERSAL_ROOT/watchos/$library" arm64_32 arm64
+    apple_verify_archive_architectures "$UNIVERSAL_ROOT/watchsimulator/$library" arm64 x86_64
 
     xcframework="$XCFRAMEWORK_ROOT/${library%.a}.xcframework"
     rm -rf "$xcframework"
@@ -766,8 +763,8 @@ for library in libish.a libish_emu.a libfakefs.a; do
         echo "错误：${library} XCFramework 缺少 device 或 simulator 变体。" >&2
         exit 1
     fi
-    xcrun lipo "$device_xc_library" -verify_arch arm64_32 arm64
-    xcrun lipo "$simulator_xc_library" -verify_arch arm64 x86_64
+    apple_verify_archive_architectures "$device_xc_library" arm64_32 arm64
+    apple_verify_archive_architectures "$simulator_xc_library" arm64 x86_64
 done
 
 cp "$UNIVERSAL_ROOT/watchos/libish_aarch64_core.a" \
@@ -778,11 +775,9 @@ for library in libish.a libish_emu.a libfakefs.a; do
 done
 
 if [[ "${APPLE_SKIP_IOS:-0}" != 1 ]]; then
-    xcrun lipo "$BUILD_ROOT/core/iphoneos-arm64/libish_aarch64_core.a" \
-        -verify_arch arm64
+    apple_verify_archive_architectures "$BUILD_ROOT/core/iphoneos-arm64/libish_aarch64_core.a" arm64
     for library in libish.a libish_emu.a libfakefs.a; do
-        xcrun lipo "$BUILD_ROOT/full/iphoneos-arm64/$library" \
-            -verify_arch arm64
+        apple_verify_archive_architectures "$BUILD_ROOT/full/iphoneos-arm64/$library" arm64
     done
     "$ROOT/tools/apple-public-sdk-package.sh" "$BUILD_ROOT"
 fi
