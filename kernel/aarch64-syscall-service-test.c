@@ -473,6 +473,11 @@ static int probe_stat(struct mount *mount,
     strcpy(probe->last_stat_path, path);
     if (strcmp(path, "/work/statfs-missing") == 0)
         return _ENOENT;
+    if (strcmp(path, "/work/access-link") == 0) {
+        *stat = probe->stat;
+        stat->mode = S_IFLNK | 0777;
+        return 0;
+    }
     if (strcmp(path, "/work/metadata") == 0 ||
             strcmp(path, "/work/link") == 0) {
         *stat = probe->stat;
@@ -566,7 +571,8 @@ static ssize_t probe_readlink(struct mount *mount,
     struct kernel_probe *probe = mount->data;
     probe->readlink_calls++;
     strcpy(probe->last_readlink_path, path);
-    if (strcmp(path, "/work/link") != 0)
+    if (strcmp(path, "/work/link") != 0 &&
+            strcmp(path, "/work/access-link") != 0)
         return _EINVAL;
     static const char target[] = "metadata";
     size_t length = sizeof(target) - 1;
@@ -699,6 +705,8 @@ static bool init_fixture(struct task_fixture *fixture,
     fixture->task.fs = &fixture->fs;
     fixture->task.euid = kernel->stat.uid;
     fixture->task.egid = kernel->stat.gid;
+    fixture->task.fsuid = kernel->stat.uid;
+    fixture->task.fsgid = kernel->stat.gid;
 
     fixture->pwd = make_fixture_fd(fixture, &fixture->pwd_state,
             kernel, NULL, "/work", S_IFDIR);
@@ -1987,6 +1995,8 @@ int main(void) {
     uid_t_ saved_gid;
     uid_t_ saved_euid;
     uid_t_ saved_egid;
+    uid_t_ saved_fsuid = fixture.task.fsuid;
+    uid_t_ saved_fsgid = fixture.task.fsgid;
     kernel.stat.mode = S_IFREG | 0400;
     kernel.stat.uid = 4101;
     kernel.stat.gid = 4201;
@@ -2012,11 +2022,85 @@ int main(void) {
     fixture.task.gid = 4302;
     fixture.task.euid = 4101;
     fixture.task.egid = 4201;
+    fixture.task.fsuid = 4101;
+    fixture.task.fsgid = 4201;
     unlock(&pids_lock);
     result = invoke(&fixture, &memory, &fault, 48, AT_FDCWD_,
             USER_BASE + path_offset, AC_R, UINT64_C(0x200));
     CHECK(result == encoded_error(_EACCES),
             "旧 faccessat 忽略第四寄存器且不以有效身份绕过权限");
+
+    CHECK(invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, AC_R,
+                    UINT64_C(0xabcdef0000000200)) == 0,
+            "faccessat2 识别低 32 位 AT_EACCESS 并使用文件身份");
+    CHECK(invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, AC_R, 0) == encoded_error(_EACCES),
+            "faccessat2 无 flags 时使用真实身份");
+    CHECK(invoke(&fixture, &memory, &fault, 151, 4301, 0, 0, 0) == 4101 &&
+            invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, AC_R, AT_EACCESS_) == encoded_error(_EACCES),
+            "文件身份与有效身份不同时，AT_EACCESS 保留 Linux 的 fsuid 语义");
+    reset_user_access(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    UINT64_MAX, AC_R, 0x8000) == encoded_error(_EINVAL) &&
+            memory.read_calls == 0,
+            "faccessat2 在读取路径前拒绝未知 flags");
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    UINT64_MAX, 8, 0) == encoded_error(_EINVAL) &&
+            memory.read_calls == 0,
+            "faccessat2 在读取路径前拒绝未知 mode");
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    UINT64_MAX, 0, 0) == encoded_error(_EFAULT),
+            "faccessat2 无效路径先于无效 dirfd 返回 EFAULT");
+
+    memory.bytes[path_offset] = '\0';
+    reset_user_access(&memory);
+    CHECK(invoke(&fixture, &memory, &fault, 439, 0,
+                    USER_BASE + path_offset, 0, AT_EMPTY_PATH_) == 0,
+            "AT_EMPTY_PATH 允许普通文件描述符，不要求目录");
+    CHECK(invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, 0, AT_EMPTY_PATH_) == 0,
+            "AT_EMPTY_PATH 支持当前目录");
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    USER_BASE + path_offset, 0, AT_EMPTY_PATH_) == encoded_error(_EBADF),
+            "AT_EMPTY_PATH 拒绝无效描述符");
+    CHECK(invoke(&fixture, &memory, &fault, 439, 0,
+                    USER_BASE + path_offset, 0, 0) == encoded_error(_ENOENT),
+            "没有 AT_EMPTY_PATH 的空路径仍返回 ENOENT");
+    kernel.stat.mode = S_IFREG | 0777;
+    int access_mount_flags = fixture.mount->flags;
+    fixture.mount->flags |= MS_READONLY_;
+    CHECK(invoke(&fixture, &memory, &fault, 439, 0,
+                    USER_BASE + path_offset, AC_W, AT_EMPTY_PATH_) == encoded_error(_EROFS),
+            "空路径权限检查遵守只读挂载");
+    fixture.mount->flags = access_mount_flags | MS_NOEXEC_;
+    CHECK(invoke(&fixture, &memory, &fault, 439, 0,
+                    USER_BASE + path_offset, AC_X, AT_EMPTY_PATH_) == encoded_error(_EACCES),
+            "空路径权限检查遵守 noexec 挂载");
+    memcpy(memory.bytes + path_offset, absolute_metadata_path,
+            sizeof(absolute_metadata_path));
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    USER_BASE + path_offset, AC_X, 0) == encoded_error(_EACCES),
+            "绝对路径忽略 dirfd，但仍遵守 noexec 挂载");
+    fixture.mount->flags = access_mount_flags;
+    CHECK(invoke(&fixture, &memory, &fault, 439, 99,
+                    USER_BASE + path_offset, AC_R, 0) == 0,
+            "faccessat2 绝对路径忽略无效 dirfd");
+
+    memcpy(memory.bytes + path_offset, "access-link", sizeof("access-link"));
+    unsigned access_readlinks = kernel.readlink_calls;
+    CHECK(invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, AC_R, AT_SYMLINK_NOFOLLOW_) == 0 &&
+            kernel.readlink_calls == access_readlinks &&
+            strcmp(kernel.last_stat_path, "/work/access-link") == 0,
+            "AT_SYMLINK_NOFOLLOW 检查链接本身且不读取目标");
+    CHECK(invoke(&fixture, &memory, &fault, 439, AT_FDCWD_,
+                    USER_BASE + path_offset, AC_R, 0) == 0 &&
+            kernel.readlink_calls > access_readlinks &&
+            strcmp(kernel.last_stat_path, "/work/metadata") == 0,
+            "faccessat2 默认跟随链接检查目标");
+    memcpy(memory.bytes + path_offset, access_path, sizeof(access_path));
     kernel.stat.mode = saved_access_mode;
     kernel.stat.uid = saved_stat_uid;
     kernel.stat.gid = saved_stat_gid;
@@ -2025,6 +2109,8 @@ int main(void) {
     fixture.task.gid = saved_gid;
     fixture.task.euid = saved_euid;
     fixture.task.egid = saved_egid;
+    fixture.task.fsuid = saved_fsuid;
+    fixture.task.fsgid = saved_fsgid;
     unlock(&pids_lock);
 
     // openat 只读取 guest ABI 的低位参数，且不会越过路径 NUL。

@@ -84,7 +84,7 @@ int file_statfs_task(
 int file_statat_task(struct task *task, fd_t dirfd, const char *path,
         int flags, struct statbuf *stat);
 int file_accessat_task(struct task *task, fd_t dirfd,
-        const char *path, int mode);
+        const char *path, int mode, int flags);
 ssize_t fs_getcwd_task(struct task *task, char *buffer, size_t size);
 int file_chdir_task(struct task *task, const char *path);
 int file_fchdir_task(struct task *task, fd_t fd);
@@ -146,6 +146,7 @@ struct attr {
     ((struct attr) {.type = attr_##_type, ._type = thing})
 
 #define AT_SYMLINK_NOFOLLOW_ 0x100
+#define AT_EACCESS_ 0x200
 #define AT_SYMLINK_FOLLOW_ 0x400
 #define AT_NO_AUTOMOUNT_ 0x800
 #define AT_EMPTY_PATH_ 0x1000
@@ -193,7 +194,7 @@ struct fs_access_identity {
     uid_t_ gid;
 };
 int generic_accessat_task(struct task *task, struct fd *dirfd,
-        const char *path, int mode,
+        const char *path, int mode, int flags,
         const struct fs_access_identity *identity);
 int generic_accessat(struct fd *dirfd, const char *path, int mode);
 int generic_statat_task(struct task *task, struct fd *at,

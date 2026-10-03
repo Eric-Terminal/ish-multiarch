@@ -43,9 +43,9 @@ static void pty_cancel_locked(int pty_num) {
 // when the master cleans up it hangs up the slave, making any operation that references the master unreachable
 
 static void pty_slave_init_inode(struct tty *tty) {
-    tty->pty.uid = current->euid;
+    tty->pty.uid = current->fsuid;
     // TODO make these mount options
-    tty->pty.gid = current->egid;
+    tty->pty.gid = current->fsgid;
     tty->pty.perms = 0620;
     tty->pty.visible = true;
 }

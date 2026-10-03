@@ -495,6 +495,8 @@ static bool init_fixture(struct task_fixture *fixture,
     fixture->task.pid = fixture->task.tgid = 4321;
     fixture->task.uid = fixture->task.euid = 1000;
     fixture->task.gid = fixture->task.egid = 100;
+    fixture->task.fsuid = 1000;
+    fixture->task.fsgid = 100;
     fixture->task.group = &fixture->group;
     fixture->task.sighand = &fixture->sighand;
     list_init(&fixture->task.group_links);
@@ -691,7 +693,7 @@ int main(void) {
     fd_close(main_fd);
     probe.open_error = 0;
     probe.interpreter_mode = S_IFREG | 0444;
-    fixture.task.euid = 0;
+    fixture.task.fsuid = fixture.task.euid = 0;
     main_fd = make_main_fd(&fixture, &probe, &main_state,
             main_file, sizeof(main_file), sizeof(main_file));
     CHECK(main_fd != NULL && ish_aarch64_exec_images_read(
@@ -699,7 +701,7 @@ int main(void) {
             images_are_empty(&images),
             "root 也不能运行完全没有执行位的解释器");
     fd_close(main_fd);
-    fixture.task.euid = 1000;
+    fixture.task.fsuid = fixture.task.euid = 1000;
     probe.interpreter_mode = S_IFREG | 0555;
 
     probe.interpreter_mode = S_IFREG | 0411;

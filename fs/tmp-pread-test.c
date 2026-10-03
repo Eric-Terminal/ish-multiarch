@@ -23,6 +23,8 @@ int main(void) {
     struct task task = {
         .euid = 1000,
         .egid = 1000,
+        .fsuid = 1100,
+        .fsgid = 1200,
     };
     current = &task;
 
@@ -41,6 +43,10 @@ int main(void) {
     fd->type = S_IFREG;
     fd->flags = O_RDWR_;
     CHECK(fd->opened_created, "tmpfs 原子报告新建文件");
+    struct statbuf created_stat;
+    CHECK(file_fstat_fd(fd, &created_stat) == 0 &&
+            created_stat.uid == 1100 && created_stat.gid == 1200,
+            "新建文件归属使用独立 fsuid/fsgid 而非有效身份");
     struct fd *existing = fd->mount->fs->open(
             fd->mount, "/positioned", O_CREAT_ | O_RDWR_, 0644);
     CHECK(!IS_ERR(existing) && !existing->opened_created,

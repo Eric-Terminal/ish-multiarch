@@ -148,6 +148,8 @@ static int snapshot_guest_io_task(
     snapshot->egid = task->egid;
     snapshot->suid = task->suid;
     snapshot->sgid = task->sgid;
+    snapshot->fsuid = task->fsuid;
+    snapshot->fsgid = task->fsgid;
     snapshot->fs = task->fs;
     fs_info_retain(snapshot->fs);
     unlock(&pids_lock);

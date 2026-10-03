@@ -336,6 +336,8 @@ static void set_effective_credentials(struct fixture *fixture,
     lock(&pids_lock);
     fixture->task.euid = uid;
     fixture->task.egid = gid;
+    fixture->task.fsuid = uid;
+    fixture->task.fsgid = gid;
     unlock(&pids_lock);
 }
 

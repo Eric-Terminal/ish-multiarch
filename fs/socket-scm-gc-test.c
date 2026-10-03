@@ -98,6 +98,7 @@ static bool fixture_init(struct fixture *fixture, uid_t_ uid) {
     fixture->task.group = &fixture->group;
     fixture->task.uid = uid;
     fixture->task.euid = uid;
+    fixture->task.fsuid = uid;
     fixture->task.suid = uid;
     fixture->task.waiting_poll_notify_fd = -1;
     fixture->task.files = fdtable_new(32);

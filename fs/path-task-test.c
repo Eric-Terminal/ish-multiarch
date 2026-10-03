@@ -423,6 +423,8 @@ static bool init_fixture(struct task_fixture *fixture, struct mount *mount,
     fixture->task.fs = &fixture->fs;
     fixture->task.uid = fixture->task.euid = fixture->task.suid = uid;
     fixture->task.gid = fixture->task.egid = fixture->task.sgid = gid;
+    fixture->task.fsuid = uid;
+    fixture->task.fsgid = gid;
     fixture->pwd = make_path_fd(mount, pwd_state, probe, pwd_path);
     fixture->root = make_path_fd(mount, root_state, probe, root_path);
     if (fixture->pwd == NULL || fixture->root == NULL)
@@ -681,34 +683,34 @@ int main(void) {
         .gid = probe.group,
     };
     CHECK(access_check_task(&target.task, &permission, AC_R) == 0,
-            "权限检查使用目标任务 euid");
+            "权限检查使用目标任务 fsuid");
     CHECK(access_check_task(&decoy.task, &permission, AC_R) == _EACCES,
             "权限检查不得使用 current 以外的凭据");
     lock(&pids_lock);
-    decoy.task.euid = 0;
+    decoy.task.fsuid = 0;
     unlock(&pids_lock);
     CHECK(access_check(&permission, AC_W) == 0, "兼容权限入口保留超级用户语义");
     lock(&pids_lock);
-    decoy.task.euid = 2000;
+    decoy.task.fsuid = 2000;
     unlock(&pids_lock);
 
     const struct fs_access_identity effective_identity = {
         .uid = target.task.euid,
         .gid = target.task.egid,
     };
-    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R,
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R, 0,
             &effective_identity) == 0,
             "显式有效身份可读取仅所有者可读的目标");
-    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R,
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_R, 0,
             &real_identity) == _EACCES,
             "显式真实身份检查最终对象权限");
-    CHECK(generic_accessat_task(&target.task, AT_PWD, "guard/child", AC_F,
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "guard/child", AC_F, 0,
             &effective_identity) == 0 &&
             generic_accessat_task(&target.task, AT_PWD,
-                    "guard/child", AC_F, &real_identity) == _EACCES,
+                    "guard/child", AC_F, 0, &real_identity) == _EACCES,
             "F_OK 跳过最终权限但仍按同一身份遍历路径");
     const struct fs_access_identity root_identity = {0};
-    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_W,
+    CHECK(generic_accessat_task(&target.task, AT_PWD, "child", AC_W, 0,
             &root_identity) == 0,
             "显式 root 身份保留超级用户访问语义");
     CHECK(target.task.euid == probe.owner && target.task.egid == probe.group,
@@ -1430,9 +1432,9 @@ int main(void) {
             strcmp(cwd, "/target") == 0,
             "chdir 在权限检查前以 ENOTDIR 拒绝普通文件");
 
-    uid_t_ target_euid = target.task.euid;
+    uid_t_ target_fsuid = target.task.fsuid;
     lock(&pids_lock);
-    target.task.euid = 0;
+    target.task.fsuid = 0;
     unlock(&pids_lock);
     opens_before = probe.opens;
     closes_before = probe.closes;
@@ -1445,7 +1447,7 @@ int main(void) {
     CHECK(probe.closes == closes_before + 1,
             "root 目录搜索探针释放唯一 fd 引用");
     lock(&pids_lock);
-    target.task.euid = target_euid;
+    target.task.fsuid = target_fsuid;
     unlock(&pids_lock);
 
     probe.file_mode = S_IFDIR | 0100;
@@ -1508,7 +1510,7 @@ int main(void) {
         .gid = target.task.egid,
     };
     CHECK(generic_accessat_task(&target.task, AT_PWD,
-            "child", AC_W, &read_only_identity) == _EROFS,
+            "child", AC_W, 0, &read_only_identity) == _EROFS,
             "只读 mount 的写访问探测返回 EROFS");
     CHECK(file_unlinkat_task(&target.task, AT_FDCWD_,
                     "victim", false) == _EROFS &&

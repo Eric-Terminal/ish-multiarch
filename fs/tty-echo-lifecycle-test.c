@@ -104,6 +104,8 @@ static void test_echo_write_releases_tty_lock(void) {
     struct task owner = {
         .euid = 8501,
         .egid = 8502,
+        .fsuid = 8501,
+        .fsgid = 8502,
     };
     current = &owner;
     struct tty *tty = pty_open_fake(&driver);
@@ -188,6 +190,8 @@ static void test_concurrent_input_preserves_echo_order(void) {
     struct task owner = {
         .euid = 8511,
         .egid = 8512,
+        .fsuid = 8511,
+        .fsgid = 8512,
     };
     current = &owner;
     struct tty *tty = pty_open_fake(&driver);
@@ -307,6 +311,8 @@ static void test_kill_does_not_erase_concurrent_input(void) {
     struct task owner = {
         .euid = 8521,
         .egid = 8522,
+        .fsuid = 8521,
+        .fsgid = 8522,
     };
     current = &owner;
     struct tty *tty = pty_open_fake(&driver);

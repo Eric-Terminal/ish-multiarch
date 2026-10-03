@@ -95,6 +95,7 @@ static bool fixture_init(struct fixture *fixture) {
     fixture->io_task.group = &fixture->io_group;
     fixture->io_task.uid = 9000;
     fixture->io_task.euid = 9000;
+    fixture->io_task.fsuid = 9000;
     fixture->io_task.suid = 9000;
     fixture->io_task.waiting_poll_notify_fd = -1;
     fixture->io_task.files = fdtable_new(16);
@@ -137,6 +138,7 @@ static struct account_actor *fixture_add_actor(
     actor->task.group = &actor->group;
     actor->task.uid = uid;
     actor->task.euid = euid;
+    actor->task.fsuid = euid;
     actor->task.suid = euid;
     actor->task.files = fdtable_new(4);
     if (IS_ERR(actor->task.files))
@@ -155,6 +157,7 @@ static void actor_set_identity_and_limit(struct account_actor *actor,
         uid_t_ uid, uid_t_ euid, rlim_t_ nofile) {
     actor->task.uid = uid;
     actor->task.euid = euid;
+    actor->task.fsuid = euid;
     actor->task.suid = euid;
     actor->group.limits[RLIMIT_NOFILE_] =
             (struct rlimit_) {nofile, nofile};

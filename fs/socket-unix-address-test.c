@@ -219,6 +219,8 @@ static bool fixture_init(struct fixture *fixture) {
     fixture->task.group = &fixture->group;
     fixture->task.euid = 1000;
     fixture->task.egid = 1000;
+    fixture->task.fsuid = 1000;
+    fixture->task.fsgid = 1000;
     fixture->task.sighand = sighand_new();
     CHECK(fixture->task.sighand != NULL,
             "创建测试信号处理表");

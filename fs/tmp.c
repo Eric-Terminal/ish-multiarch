@@ -44,8 +44,8 @@ static struct tmp_inode *tmp_inode_new_identity(
 
 static struct tmp_inode *tmp_inode_new(mode_t_ mode) {
     const struct fs_access_identity identity = {
-        .uid = current->euid,
-        .gid = current->egid,
+        .uid = current->fsuid,
+        .gid = current->fsgid,
     };
     return tmp_inode_new_identity(mode, &identity);
 }
@@ -360,8 +360,8 @@ static struct fd *tmpfs_open(
     const struct fs_access_identity *identity_pointer = NULL;
     if (current != NULL) {
         identity = (struct fs_access_identity) {
-            .uid = current->euid,
-            .gid = current->egid,
+            .uid = current->fsuid,
+            .gid = current->fsgid,
         };
         identity_pointer = &identity;
     }

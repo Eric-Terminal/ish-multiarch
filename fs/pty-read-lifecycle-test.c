@@ -121,6 +121,8 @@ static void test_close_wakes_blocked_read(bool close_master) {
         .gid = 7002,
         .euid = 7001,
         .egid = 7002,
+        .fsuid = 7001,
+        .fsgid = 7002,
     };
     current = &owner;
 
@@ -210,6 +212,8 @@ static void test_buffered_close_semantics(bool close_master) {
         .gid = 7302,
         .euid = 7301,
         .egid = 7302,
+        .fsuid = 7301,
+        .fsgid = 7302,
         .group = &group,
     };
     current = &owner;

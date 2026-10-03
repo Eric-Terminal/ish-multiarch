@@ -706,6 +706,8 @@ static int run_exec_transaction(bool old_aarch64,
     uid_t_ old_egid = (uid_t_) executable_stat.st_gid ^ 1;
     execer->euid = execer->suid = old_euid;
     execer->egid = execer->sgid = old_egid;
+    execer->fsuid = old_euid;
+    execer->fsgid = old_egid;
     strcpy(execer->comm, "old-exec");
     execer->did_exec = false;
     execer->blocked = sig_mask(SIGWINCH_);
@@ -919,6 +921,7 @@ static int run_exec_transaction(bool old_aarch64,
             "提交释放旧 files、sighand 与 mm 引用且不泄漏新对象");
     CHECK(execer->euid == target_euid && execer->suid == target_euid &&
             execer->egid == target_egid && execer->sgid == target_egid &&
+            execer->fsuid == target_euid && execer->fsgid == target_egid &&
             strcmp(execer->comm, "new") == 0 && execer->did_exec,
             "安全点统一发布 set-id 凭据、comm 与 did_exec");
     CHECK(verify_resource_isolation(&fixture, execer,

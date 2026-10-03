@@ -20,6 +20,7 @@ struct task_credentials {
     uid_t_ uid, gid;
     uid_t_ euid, egid;
     uid_t_ suid, sgid;
+    uid_t_ fsuid, fsgid;
 };
 
 // exec 候选映像在 guest 执行栈返回安全点后统一提交。
@@ -56,6 +57,8 @@ struct task {
     uid_t_ uid, gid;
     uid_t_ euid, egid;
     uid_t_ suid, sgid;
+    // 文件访问身份可独立于有效身份；fork 继承，exec 重新同步。
+    uid_t_ fsuid, fsgid;
 #define MAX_GROUPS 32
     unsigned ngroups;
     uid_t_ groups[MAX_GROUPS];

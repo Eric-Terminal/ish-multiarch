@@ -849,6 +849,12 @@ if get_option('kernel') == 'ish'
             dependencies: ish)
         test('aarch64_getresid_syscall', aarch64_getresid_syscall_test)
 
+        aarch64_fsidentity_syscall_test = executable(
+            'aarch64_fsidentity_syscall_test',
+            'kernel/aarch64-fsidentity-syscall-test.c',
+            dependencies: ish)
+        test('aarch64_fsidentity_syscall', aarch64_fsidentity_syscall_test)
+
         aarch64_sigsuspend_syscall_test = executable(
             'aarch64_sigsuspend_syscall_test',
             'kernel/aarch64-sigsuspend-syscall-test.c',

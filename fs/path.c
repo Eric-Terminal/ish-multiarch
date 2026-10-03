@@ -202,8 +202,8 @@ int path_normalize_task(struct task *task, struct fd *at,
     struct task_credentials credentials;
     task_credentials_snapshot(task, &credentials);
     const struct fs_access_identity identity = {
-        .uid = credentials.euid,
-        .gid = credentials.egid,
+        .uid = credentials.fsuid,
+        .gid = credentials.fsgid,
     };
     return path_normalize_task_access(
             task, at, path, out, flags, &identity);

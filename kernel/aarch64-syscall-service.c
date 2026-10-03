@@ -171,6 +171,8 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_RT_SIGQUEUEINFO = 138,
     AARCH64_LINUX_SYS_GETRESUID = 148,
     AARCH64_LINUX_SYS_GETRESGID = 150,
+    AARCH64_LINUX_SYS_SETFSUID = 151,
+    AARCH64_LINUX_SYS_SETFSGID = 152,
     AARCH64_LINUX_SYS_SETPGID = 154,
     AARCH64_LINUX_SYS_GETPGID = 155,
     AARCH64_LINUX_SYS_GETSID = 156,
@@ -212,6 +214,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_PREADV2 = 286,
     AARCH64_LINUX_SYS_PWRITEV2 = 287,
     AARCH64_LINUX_SYS_CLONE3 = 435,
+    AARCH64_LINUX_SYS_FACCESSAT2 = 439,
     AARCH64_LINUX_SYS_FUTEX_WAITV = 449,
 };
 
@@ -1015,9 +1018,12 @@ static qword_t dispatch_truncate(
 static qword_t dispatch_faccessat(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
-        struct task *task, struct guest_linux_user_fault *fault) {
+        struct task *task, struct guest_linux_user_fault *fault,
+        bool has_flags) {
     int mode = (int) (dword_t) syscall->arguments[2];
-    if (mode & ~(AC_R | AC_W | AC_X))
+    int flags = has_flags ? (int) (dword_t) syscall->arguments[3] : 0;
+    if ((mode & ~(AC_R | AC_W | AC_X)) ||
+            (flags & ~(AT_EACCESS_ | AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_)))
         return syscall_result(_EINVAL);
 
     char path[MAX_PATH];
@@ -1026,7 +1032,7 @@ static qword_t dispatch_faccessat(
     if ((sqword_t) copied < 0)
         return copied;
     return syscall_result(file_accessat_task(task,
-            syscall_fd(syscall->arguments[0]), path, mode));
+            syscall_fd(syscall->arguments[0]), path, mode, flags));
 }
 
 static qword_t dispatch_fchmodat(
@@ -4263,8 +4269,10 @@ static qword_t dispatch_syscall_inner(
                     syscall_fd(syscall->arguments[0]),
                     (off_t_) (sqword_t) syscall->arguments[1]));
         case AARCH64_LINUX_SYS_FACCESSAT:
+        case AARCH64_LINUX_SYS_FACCESSAT2:
             return dispatch_faccessat(
-                    context, syscall, task, fault);
+                    context, syscall, task, fault,
+                    syscall->number == AARCH64_LINUX_SYS_FACCESSAT2);
         case AARCH64_LINUX_SYS_CHDIR:
             return dispatch_chdir(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_FCHDIR:
@@ -4451,6 +4459,10 @@ static qword_t dispatch_syscall_inner(
         case AARCH64_LINUX_SYS_GETRESGID:
             return dispatch_getresid(context, syscall, task, fault,
                     syscall->number == AARCH64_LINUX_SYS_GETRESGID);
+        case AARCH64_LINUX_SYS_SETFSUID:
+            return sys_setfsuid((uid_t_) (dword_t) syscall->arguments[0]);
+        case AARCH64_LINUX_SYS_SETFSGID:
+            return sys_setfsgid((uid_t_) (dword_t) syscall->arguments[0]);
         case AARCH64_LINUX_SYS_SETPGID:
             return syscall_result((sdword_t) sys_setpgid(
                     syscall_pid(syscall->arguments[0]),

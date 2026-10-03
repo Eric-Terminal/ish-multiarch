@@ -116,6 +116,8 @@ static bool fixture_init(struct fixture *fixture) {
     fixture->task.gid = 1000;
     fixture->task.euid = 1000;
     fixture->task.egid = 1000;
+    fixture->task.fsuid = 1000;
+    fixture->task.fsgid = 1000;
     fixture->task.group = &fixture->group;
     fixture->task.sighand = sighand_new();
     if (fixture->task.sighand == NULL)

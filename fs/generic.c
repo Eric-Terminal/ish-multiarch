@@ -61,8 +61,8 @@ static struct fd *generic_openat_task_access(struct task *task,
     struct task_credentials credentials;
     task_credentials_snapshot(task, &credentials);
     const struct fs_access_identity identity = {
-        .uid = credentials.euid,
-        .gid = credentials.egid,
+        .uid = credentials.fsuid,
+        .gid = credentials.fsgid,
     };
     char path[MAX_PATH];
     int err = path_normalize_task_access(task, at, path_raw, path,
@@ -229,36 +229,44 @@ int generic_getpath(struct fd *fd, char *buf) {
 }
 
 int generic_accessat_task(struct task *task, struct fd *dirfd,
-        const char *path_raw, int mode,
+        const char *path_raw, int mode, int flags,
         const struct fs_access_identity *identity) {
     char path[MAX_PATH];
     int err = path_normalize_task_access(task, dirfd, path_raw, path,
-            N_SYMLINK_FOLLOW, identity);
+            flags & AT_SYMLINK_NOFOLLOW_ ? N_SYMLINK_NOFOLLOW : N_SYMLINK_FOLLOW,
+            identity);
     if (err < 0)
         return err;
 
     struct mount *mount = find_mount_and_trim_path(path);
     struct statbuf stat = {};
     err = mount->fs->stat(mount, path, &stat);
+    if (err == 0 && (mode & AC_X) && S_ISREG(stat.mode) &&
+            (mount->flags & MS_NOEXEC_))
+        err = _EACCES;
+    if (err == 0)
+        err = access_check_identity(identity, &stat, mode);
     bool read_only_write = err == 0 && (mode & AC_W) != 0 &&
+            !S_ISCHR(stat.mode) && !S_ISBLK(stat.mode) &&
+            !S_ISFIFO(stat.mode) && !S_ISSOCK(stat.mode) &&
             mount_is_read_only(mount);
     mount_release(mount);
     if (err < 0)
         return err;
     if (read_only_write)
         return _EROFS;
-    return access_check_identity(identity, &stat, mode);
+    return 0;
 }
 
 int generic_accessat(struct fd *dirfd, const char *path_raw, int mode) {
     struct task_credentials credentials;
     task_credentials_snapshot(current, &credentials);
     const struct fs_access_identity identity = {
-        .uid = credentials.euid,
-        .gid = credentials.egid,
+        .uid = credentials.fsuid,
+        .gid = credentials.fsgid,
     };
     return generic_accessat_task(
-            current, dirfd, path_raw, mode, &identity);
+            current, dirfd, path_raw, mode, 0, &identity);
 }
 
 int generic_link_normalized(

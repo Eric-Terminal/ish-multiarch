@@ -307,6 +307,8 @@ static int snapshot_runtime_task(
     snapshot->egid = init->egid;
     snapshot->suid = init->suid;
     snapshot->sgid = init->sgid;
+    snapshot->fsuid = init->fsuid;
+    snapshot->fsgid = init->fsgid;
     unlock(&pids_lock);
 
     snapshot->fs = fs;

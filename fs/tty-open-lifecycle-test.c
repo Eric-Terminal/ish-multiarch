@@ -235,6 +235,8 @@ static void test_ptmx_master_never_becomes_controlling(void) {
         .pid = 8301,
         .euid = 8301,
         .egid = 8302,
+        .fsuid = 8301,
+        .fsgid = 8302,
         .group = &group,
     };
     group.leader = &owner;
@@ -297,6 +299,8 @@ static void test_explicit_master_controlling_close(void) {
         .pid = 8402,
         .euid = 8401,
         .egid = 8402,
+        .fsuid = 8401,
+        .fsgid = 8402,
         .group = &group,
     };
     group.leader = &leader;
@@ -459,6 +463,8 @@ static void test_failed_master_open_never_becomes_pending(void) {
         .pid = 8451,
         .euid = 8451,
         .egid = 8452,
+        .fsuid = 8451,
+        .fsgid = 8452,
         .group = &group,
     };
     group.leader = &owner;
@@ -609,6 +615,8 @@ static void test_non_session_leader_rejected(void) {
         .pid = 8601,
         .euid = 8601,
         .egid = 8602,
+        .fsuid = 8601,
+        .fsgid = 8602,
         .group = &group,
     };
     group.leader = &leader;
@@ -660,6 +668,8 @@ static void test_session_leader_thread_auto_controls_slave(void) {
         .pid = 8702,
         .euid = 8701,
         .egid = 8702,
+        .fsuid = 8701,
+        .fsgid = 8702,
         .group = &group,
     };
     group.leader = &leader;

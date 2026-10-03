@@ -56,7 +56,8 @@ static bool credentials_equal(
         const struct task_credentials *right) {
     return left->uid == right->uid && left->euid == right->euid &&
             left->suid == right->suid && left->gid == right->gid &&
-            left->egid == right->egid && left->sgid == right->sgid;
+            left->egid == right->egid && left->sgid == right->sgid &&
+            left->fsuid == right->fsuid && left->fsgid == right->fsgid;
 }
 
 static bool snapshot_matches(const struct race_context *context,
@@ -65,11 +66,13 @@ static bool snapshot_matches(const struct race_context *context,
     if (context->family == CREDENTIAL_UID) {
         return credentials->uid == triple->real &&
                 credentials->euid == triple->effective &&
-                credentials->suid == triple->saved;
+                credentials->suid == triple->saved &&
+                credentials->fsuid == triple->effective;
     }
     return credentials->gid == triple->real &&
             credentials->egid == triple->effective &&
-            credentials->sgid == triple->saved;
+            credentials->sgid == triple->saved &&
+            credentials->fsgid == triple->effective;
 }
 
 static dword_t publish_credentials(const struct race_context *context,

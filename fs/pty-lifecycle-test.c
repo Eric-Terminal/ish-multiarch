@@ -130,6 +130,8 @@ static struct task make_credential_task(uid_t_ uid, uid_t_ gid) {
         .gid = gid,
         .euid = uid,
         .egid = gid,
+        .fsuid = uid,
+        .fsgid = gid,
     };
 }
 

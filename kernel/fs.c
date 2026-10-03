@@ -24,7 +24,10 @@ static void apply_umask(mode_t_ *mode) {
 
 int access_check_identity(const struct fs_access_identity *identity,
         const struct statbuf *stat, int check) {
-    if (identity->uid == 0) return 0;
+    // root 仍需至少一个执行位才能执行普通文件；目录搜索不受此限制。
+    if (identity->uid == 0)
+        return (check & AC_X) && S_ISREG(stat->mode) &&
+                !(stat->mode & 0111) ? _EACCES : 0;
     if (check == 0) return 0;
     // 将请求权限移动到文件所有者或所属组对应的位段。
     if (identity->uid == stat->uid) {
@@ -42,8 +45,8 @@ int access_check_task(struct task *task, struct statbuf *stat, int check) {
     struct task_credentials credentials;
     task_credentials_snapshot(task, &credentials);
     const struct fs_access_identity identity = {
-        .uid = credentials.euid,
-        .gid = credentials.egid,
+        .uid = credentials.fsuid,
+        .gid = credentials.fsgid,
     };
     return access_check_identity(&identity, stat, check);
 }
@@ -54,7 +57,6 @@ int access_check(struct statbuf *stat, int check) {
 
 // TODO ENAMETOOLONG
 
-#define AT_EACCESS_ 0x200
 dword_t sys_access(addr_t path_addr, dword_t mode) {
     return sys_faccessat(AT_FDCWD_, path_addr, mode, 0);
 }
@@ -70,10 +72,10 @@ dword_t sys_faccessat(fd_t at_f, addr_t path_addr, mode_t_ mode, dword_t flags) 
     struct task_credentials credentials;
     task_credentials_snapshot(current, &credentials);
     const struct fs_access_identity identity = {
-        .uid = flags & AT_EACCESS_ ? credentials.euid : credentials.uid,
-        .gid = flags & AT_EACCESS_ ? credentials.egid : credentials.gid,
+        .uid = flags & AT_EACCESS_ ? credentials.fsuid : credentials.uid,
+        .gid = flags & AT_EACCESS_ ? credentials.fsgid : credentials.gid,
     };
-    return generic_accessat_task(current, at, path, mode, &identity);
+    return generic_accessat_task(current, at, path, mode, 0, &identity);
 }
 
 fd_t sys_openat(fd_t at_f, addr_t path_addr, dword_t flags, mode_t_ mode) {

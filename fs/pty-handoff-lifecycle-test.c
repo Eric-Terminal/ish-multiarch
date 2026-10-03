@@ -251,6 +251,8 @@ static int test_close_notification_handoff(void) {
         .gid = 7502,
         .euid = 7501,
         .egid = 7502,
+        .fsuid = 7501,
+        .fsgid = 7502,
     };
     current = &owner;
     struct pty_pair pair;
@@ -308,6 +310,8 @@ static int test_reopen_snapshot_handoff(void) {
         .gid = 7702,
         .euid = 7701,
         .egid = 7702,
+        .fsuid = 7701,
+        .fsgid = 7702,
         .group = &owner_group,
     };
     current = &owner;

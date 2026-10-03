@@ -35,6 +35,8 @@ void task_credentials_snapshot(
         .egid = task->egid,
         .suid = task->suid,
         .sgid = task->sgid,
+        .fsuid = task->fsuid,
+        .fsgid = task->fsgid,
     };
     unlock(&pids_lock);
 }
@@ -179,12 +181,14 @@ static void task_set_exec_name(struct task *task, const char comm[16]) {
 
 static void task_commit_exec_credentials(
         struct task *task, uid_t_ euid, uid_t_ egid) {
-    // 信号权限检查在 pids_lock 下读取四个字段，必须整体发布。
+    // 有效、保存和文件系统身份必须与权限检查的快照整体发布。
     lock(&pids_lock);
     task->euid = euid;
     task->egid = egid;
     task->suid = euid;
     task->sgid = egid;
+    task->fsuid = euid;
+    task->fsgid = egid;
     unlock(&pids_lock);
 }
 
@@ -535,6 +539,8 @@ static void task_inherit_parent_state(
     task->egid = credentials.egid;
     task->suid = credentials.suid;
     task->sgid = credentials.sgid;
+    task->fsuid = credentials.fsuid;
+    task->fsgid = credentials.fsgid;
 }
 
 struct task *task_create_(struct task *parent) {

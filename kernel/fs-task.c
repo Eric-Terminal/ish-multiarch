@@ -845,11 +845,46 @@ int file_statfs_task(
 }
 
 int file_accessat_task(struct task *task, fd_t dirfd,
-        const char *path, int mode) {
-    if (mode & ~(AC_R | AC_W | AC_X))
+        const char *path, int mode, int flags) {
+    if ((mode & ~(AC_R | AC_W | AC_X)) ||
+            (flags & ~(AT_EACCESS_ | AT_SYMLINK_NOFOLLOW_ | AT_EMPTY_PATH_)))
         return _EINVAL;
-    if (path[0] == '\0')
+    if (path[0] == '\0' && !(flags & AT_EMPTY_PATH_))
         return _ENOENT;
+
+    struct task_credentials credentials;
+    task_credentials_snapshot(task, &credentials);
+    // 与 Linux do_faccessat 一致：AT_EACCESS 保留当前文件身份，普通 access 使用真实身份。
+    const struct fs_access_identity identity = {
+        .uid = flags & AT_EACCESS_ ? credentials.fsuid : credentials.uid,
+        .gid = flags & AT_EACCESS_ ? credentials.fsgid : credentials.gid,
+    };
+    if (path[0] == '\0') {
+        struct fd *fd;
+        if (dirfd == AT_FDCWD_) {
+            lock(&task->fs->lock);
+            fd = fd_retain(task->fs->pwd);
+            unlock(&task->fs->lock);
+        } else {
+            fd = f_get_task_retain(task, dirfd);
+        }
+        if (fd == NULL)
+            return _EBADF;
+        struct statbuf stat = {};
+        int result = file_fstat_fd(fd, &stat);
+        if (result == 0 && (mode & AC_X) && S_ISREG(stat.mode) &&
+                fd->mount != NULL && (fd->mount->flags & MS_NOEXEC_))
+            result = _EACCES;
+        if (result == 0)
+            result = access_check_identity(&identity, &stat, mode);
+        if (result == 0 && (mode & AC_W) && !S_ISCHR(stat.mode) &&
+                !S_ISBLK(stat.mode) && !S_ISFIFO(stat.mode) &&
+                !S_ISSOCK(stat.mode) && fd->mount != NULL &&
+                (fd->mount->flags & MS_READONLY_))
+            result = _EROFS;
+        fd_close(fd);
+        return result;
+    }
 
     // 绝对路径从目标任务根目录解析，Linux 不检查传入的 dirfd。
     bool retained = path[0] != '/' && dirfd != AT_FDCWD_;
@@ -862,14 +897,8 @@ int file_accessat_task(struct task *task, fd_t dirfd,
         return _ENOTDIR;
     }
 
-    struct task_credentials credentials;
-    task_credentials_snapshot(task, &credentials);
-    const struct fs_access_identity identity = {
-        .uid = credentials.uid,
-        .gid = credentials.gid,
-    };
     int result = generic_accessat_task(
-            task, at, path, mode, &identity);
+            task, at, path, mode, flags, &identity);
     if (retained)
         fd_close(at);
     return result;

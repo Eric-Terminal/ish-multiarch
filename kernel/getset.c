@@ -63,7 +63,7 @@ int_t sys_setuid(uid_t_ uid) {
         error = _EPERM;
     }
     if (error == 0)
-        current->euid = uid;
+        current->fsuid = current->euid = uid;
     unlock(&pids_lock);
     return error;
 }
@@ -86,6 +86,7 @@ dword_t sys_setresuid(uid_t_ ruid, uid_t_ euid, uid_t_ suid) {
         current->euid = euid;
     if (suid != (uid_t) -1)
         current->suid = suid;
+    current->fsuid = current->euid;
     unlock(&pids_lock);
     return 0;
 
@@ -137,7 +138,7 @@ int_t sys_setgid(uid_t_ gid) {
         error = _EPERM;
     }
     if (error == 0)
-        current->egid = gid;
+        current->fsgid = current->egid = gid;
     unlock(&pids_lock);
     return error;
 }
@@ -160,6 +161,7 @@ dword_t sys_setresgid(uid_t_ rgid, uid_t_ egid, uid_t_ sgid) {
         current->egid = egid;
     if (sgid != (uid_t) -1)
         current->sgid = sgid;
+    current->fsgid = current->egid;
     unlock(&pids_lock);
     return 0;
 
@@ -181,6 +183,29 @@ int_t sys_getresgid(addr_t rgid_addr, addr_t egid_addr, addr_t sgid_addr) {
 
 int_t sys_setregid(uid_t_ rgid, uid_t_ egid) {
     return sys_setresgid(rgid, egid, -1);
+}
+
+dword_t sys_setfsuid(uid_t_ uid) {
+    lock(&pids_lock);
+    uid_t_ previous = current->fsuid;
+    // Linux 无论修改成功与否都返回旧值；-1 是查询，不能成为新的文件身份。
+    if (uid != (uid_t_) -1 && (current->euid == 0 ||
+            uid == current->uid || uid == current->euid ||
+            uid == current->suid || uid == previous))
+        current->fsuid = uid;
+    unlock(&pids_lock);
+    return previous;
+}
+
+dword_t sys_setfsgid(uid_t_ gid) {
+    lock(&pids_lock);
+    uid_t_ previous = current->fsgid;
+    if (gid != (uid_t_) -1 && (current->euid == 0 ||
+            gid == current->gid || gid == current->egid ||
+            gid == current->sgid || gid == previous))
+        current->fsgid = gid;
+    unlock(&pids_lock);
+    return previous;
 }
 
 int_t sys_getgroups(dword_t size, addr_t list) {

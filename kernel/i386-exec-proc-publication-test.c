@@ -364,6 +364,8 @@ static struct task *make_task(struct publication_probe *probe,
     task->uid = task->gid = 1000;
     task->euid = task->suid = OLD_EUID;
     task->egid = task->sgid = OLD_EGID;
+    task->fsuid = OLD_EUID;
+    task->fsgid = OLD_EGID;
     strcpy(task->comm, "old-exec");
     task->altstack = (struct signal_altstack) {
         .stack = OLD_ALTSTACK,
