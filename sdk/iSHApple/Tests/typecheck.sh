@@ -103,7 +103,9 @@ for platform in \
     "watchos arm64_32-apple-watchos10.0 watch-arm64_32.swiftmodule" \
     "watchos arm64-apple-watchos26.0 watch-arm64.swiftmodule" \
     "watchsimulator arm64-apple-watchos10.0-simulator watch-sim-arm64.swiftmodule" \
-    "watchsimulator x86_64-apple-watchos10.0-simulator watch-sim-x86_64.swiftmodule"
+    "watchsimulator x86_64-apple-watchos10.0-simulator watch-sim-x86_64.swiftmodule" \
+    "macosx arm64-apple-macos26.0 macos-arm64.swiftmodule" \
+    "macosx x86_64-apple-macos26.0 macos-x86_64.swiftmodule"
 do
     fields=(${=platform})
     sdk=${fields[1]}

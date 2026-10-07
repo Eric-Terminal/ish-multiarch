@@ -1,6 +1,6 @@
 # iSHApple 集成说明
 
-`iSHApple` 是供 iOS 与 watchOS 宿主 App 使用的进程内 Linux runtime
+`iSHApple` 是供 iOS、watchOS 与 macOS 宿主 App 使用的进程内 Linux runtime
 接口。它复用产品中的同一套 iSH 内核、AArch64 guest 与 fakefs，不会启动
 第二个 App，也不通过 URL Scheme 或进程间通信转发命令。
 
@@ -9,9 +9,11 @@
 - `iSHApple.xcframework`：稳定的 C v1 ABI、静态运行时和 Clang module；
 - `Sources/iSHAppleSwift/`：基于 Swift 6 结构化并发的源码包装层。
 
-当前门禁覆盖 iOS device `arm64`、iOS Simulator `arm64`/`x86_64`、
+当前门禁矩阵包含 iOS device `arm64`、iOS Simulator `arm64`/`x86_64`、
 watchOS device `arm64_32`/`arm64` 和 Watch Simulator
-`arm64`/`x86_64`。这些是构建与链接证据；实体设备签名、安装、挂起恢复和
+`arm64`/`x86_64`，以及 macOS 26.0 的 `arm64`/`x86_64`。
+Mac 两个切片是新增的构建声明，尚未在本次修改中执行编译或运行验证。
+必须实际通过门禁后才能视为构建与链接证据；签名、安装、挂起恢复和
 App Store 发行仍需集成 App 自行验收。
 
 ## 生成产物
@@ -30,11 +32,16 @@ tools/apple-core-gate.sh
 build-apple-core/xcframeworks/iSHApple.xcframework
 ```
 
-脚本固定使用两个 Ninja 作业，构建七个 ABI 切片，严格编译公共实现，合并
+脚本固定使用两个 Ninja 作业，构建九个 ABI 切片，严格编译公共实现，合并
 `libish`、`libish_emu` 与 `libfakefs`。打包阶段会先解析内部跨对象引用，
 再把 `PublicSymbols.txt` 之外的定义局部化，避免把内核内部符号带入集成
-App 的全局链接命名空间；最后从 XCFramework 的成品 Headers 对七个独立
+App 的全局链接命名空间；最后从 XCFramework 的成品 Headers 对九个独立
 模块消费者逐一链接。产物不是受跟踪文件。
+
+Mac 使用 `macosx` SDK 和原生 `*-apple-macos26.0` target，打包为
+`macos-arm64_x86_64` 变体。AArch64 宿主沿用 threaded 后端，Intel 宿主
+沿用 C 后端；二者运行同一 AArch64 guest seed，不执行宿主 shell。
+`APPLE_SKIP_IOS=1` 的既有仅 Watch 入口仍跳过完整公共 SDK 矩阵。
 
 ## Xcode 接入
 
@@ -54,7 +61,7 @@ target 编译，并让它依赖 `iSHApple`。公开包装以模块名 `iSHAppleS
 通过 Swift 6 完整并发检查。
 
 可运行的最小 Swift 消费者位于
-`examples/iSHAppleCommandConsumer/`。以下命令只做包装层和七个 Apple
+`examples/iSHAppleCommandConsumer/`。以下命令检查包装层和九个 Apple
 目标的编译检查，不启动 Simulator：
 
 ```sh

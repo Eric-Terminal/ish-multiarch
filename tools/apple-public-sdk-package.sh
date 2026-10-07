@@ -154,6 +154,7 @@ mkdir -p \
     "$PUBLIC_ROOT/universal/iphonesimulator" \
     "$PUBLIC_ROOT/universal/watchos" \
     "$PUBLIC_ROOT/universal/watchsimulator" \
+    "$PUBLIC_ROOT/universal/macosx" \
     "$(dirname "$XCFRAMEWORK")"
 
 merge_thin_slice \
@@ -170,6 +171,10 @@ merge_thin_slice \
     watchsimulator-arm64 watchsimulator arm64 watchos-simulator 10.0
 merge_thin_slice \
     watchsimulator-x86_64 watchsimulator x86_64 watchos-simulator 10.0
+merge_thin_slice \
+    macosx-arm64 macosx arm64 macos 26.0
+merge_thin_slice \
+    macosx-x86_64 macosx x86_64 macos 26.0
 
 cp "$PUBLIC_ROOT/thin/iphoneos-arm64/libiSHApple.a" \
     "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a"
@@ -185,11 +190,16 @@ xcrun lipo -create \
     "$PUBLIC_ROOT/thin/watchsimulator-arm64/libiSHApple.a" \
     "$PUBLIC_ROOT/thin/watchsimulator-x86_64/libiSHApple.a" \
     -output "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a"
+xcrun lipo -create \
+    "$PUBLIC_ROOT/thin/macosx-arm64/libiSHApple.a" \
+    "$PUBLIC_ROOT/thin/macosx-x86_64/libiSHApple.a" \
+    -output "$PUBLIC_ROOT/universal/macosx/libiSHApple.a"
 
 apple_verify_archive_architectures "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a" arm64
 apple_verify_archive_architectures "$PUBLIC_ROOT/universal/iphonesimulator/libiSHApple.a" arm64 x86_64
 apple_verify_archive_architectures "$PUBLIC_ROOT/universal/watchos/libiSHApple.a" arm64_32 arm64
 apple_verify_archive_architectures "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a" arm64 x86_64
+apple_verify_archive_architectures "$PUBLIC_ROOT/universal/macosx/libiSHApple.a" arm64 x86_64
 
 xcodebuild -create-xcframework \
     -library "$PUBLIC_ROOT/universal/iphoneos/libiSHApple.a" \
@@ -200,6 +210,8 @@ xcodebuild -create-xcframework \
     -headers "$HEADERS" \
     -library "$PUBLIC_ROOT/universal/watchsimulator/libiSHApple.a" \
     -headers "$HEADERS" \
+    -library "$PUBLIC_ROOT/universal/macosx/libiSHApple.a" \
+    -headers "$HEADERS" \
     -output "$XCFRAMEWORK"
 plutil -lint "$XCFRAMEWORK/Info.plist"
 
@@ -207,12 +219,14 @@ IOS_DEVICE="$XCFRAMEWORK/ios-arm64"
 IOS_SIMULATOR="$XCFRAMEWORK/ios-arm64_x86_64-simulator"
 WATCH_DEVICE="$XCFRAMEWORK/watchos-arm64_arm64_32"
 WATCH_SIMULATOR="$XCFRAMEWORK/watchos-arm64_x86_64-simulator"
+MACOS="$XCFRAMEWORK/macos-arm64_x86_64"
 
 for variant in \
         "$IOS_DEVICE" \
         "$IOS_SIMULATOR" \
         "$WATCH_DEVICE" \
-        "$WATCH_SIMULATOR"; do
+        "$WATCH_SIMULATOR" \
+        "$MACOS"; do
     if [[ ! -f "$variant/libiSHApple.a" || \
             ! -f "$variant/Headers/iSHApple.h" || \
             ! -f "$variant/Headers/module.modulemap" ]]; then
@@ -228,6 +242,7 @@ apple_verify_archive_architectures "$IOS_DEVICE/libiSHApple.a" arm64
 apple_verify_archive_architectures "$IOS_SIMULATOR/libiSHApple.a" arm64 x86_64
 apple_verify_archive_architectures "$WATCH_DEVICE/libiSHApple.a" arm64_32 arm64
 apple_verify_archive_architectures "$WATCH_SIMULATOR/libiSHApple.a" arm64 x86_64
+apple_verify_archive_architectures "$MACOS/libiSHApple.a" arm64 x86_64
 
 link_module_consumer \
     iphoneos-arm64 iphoneos arm64-apple-ios15.0 \
@@ -254,7 +269,13 @@ link_module_consumer \
     watchsimulator-x86_64 watchsimulator \
     x86_64-apple-watchos10.0-simulator \
     "$WATCH_SIMULATOR/libiSHApple.a" "$WATCH_SIMULATOR/Headers"
+link_module_consumer \
+    macosx-arm64 macosx arm64-apple-macos26.0 \
+    "$MACOS/libiSHApple.a" "$MACOS/Headers"
+link_module_consumer \
+    macosx-x86_64 macosx x86_64-apple-macos26.0 \
+    "$MACOS/libiSHApple.a" "$MACOS/Headers"
 
 "$ROOT/sdk/iSHApple/Tests/typecheck.sh" "$IOS_DEVICE/Headers"
 
-echo "==> iSHApple 公共 XCFramework 与七切片模块消费者验证完成"
+echo "==> iSHApple 公共 XCFramework 与九切片模块消费者验证完成"

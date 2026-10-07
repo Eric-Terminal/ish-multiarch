@@ -710,6 +710,12 @@ if [[ "${APPLE_SKIP_IOS:-0}" != 1 ]]; then
         arm64-apple-ios15.0-simulator IOSSIMULATOR 8 15.0 threaded
     build_slice iphonesimulator-x86_64 iphonesimulator x86_64 \
         x86_64-apple-ios15.0-simulator IOSSIMULATOR 8 15.0 c
+    # 公共 SDK 的完整矩阵包含原生 Mac；仅 Watch 的入口不生成公共 SDK。
+    # 两种 Mac 架构使用各自 SDK target，不能复用相同架构的 iOS 模拟器对象。
+    build_slice macosx-arm64 macosx arm64 \
+        arm64-apple-macos26.0 MACOS 8 26.0 threaded
+    build_slice macosx-x86_64 macosx x86_64 \
+        x86_64-apple-macos26.0 MACOS 8 26.0 c
 fi
 build_slice watchos-arm64_32 watchos arm64_32 \
     arm64_32-apple-watchos10.0 WATCHOS 4 10.0 threaded
