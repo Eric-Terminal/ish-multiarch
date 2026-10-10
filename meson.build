@@ -1596,6 +1596,14 @@ if not meson.is_cross_build()
         link_with: libish_aarch64_core)
     test('aarch64_threaded_cache', aarch64_threaded_cache_test)
 
+    aarch64_advsimd_cmge_zero_test = executable('aarch64_advsimd_cmge_zero_test',
+        'guest/aarch64/advsimd-cmge-zero-test.c',
+        include_directories: includes,
+        c_args: ['-DISH_GUEST_AARCH64=1'],
+        dependencies: threads,
+        link_with: libish_aarch64_core)
+    test('aarch64_advsimd_cmge_zero', aarch64_advsimd_cmge_zero_test)
+
     if host_machine.cpu_family() == 'aarch64'
         aarch64_backend_benchmark = executable(
             'aarch64_backend_benchmark',

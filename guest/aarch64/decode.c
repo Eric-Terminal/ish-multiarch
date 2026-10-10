@@ -848,14 +848,16 @@ bool aarch64_decode(dword_t word, struct aarch64_decoded *decoded) {
         return true;
     }
 
-    if ((word & UINT32_C(0xbf3ffc00)) == UINT32_C(0x0e208800)) {
+    if ((word & UINT32_C(0x9f3ffc00)) == UINT32_C(0x0e208800)) {
         bool q = ((word >> 30) & 1) != 0;
         byte_t size = (word >> 22) & 3;
-        // 64 位向量不存在单个 64 位 lane 的 CMGT #0 arrangement。
+        // CMGT/CMGE #0 均不定义单个 64 位 lane 的向量形式。
         if (!q && size == 3)
             return false;
         *decoded = (struct aarch64_decoded) {
-            .opcode = AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR,
+            .opcode = (word >> 29) & 1 ?
+                    AARCH64_OP_ADVSIMD_CMGE_ZERO_VECTOR :
+                    AARCH64_OP_ADVSIMD_CMGT_ZERO_VECTOR,
             .width = q ? 128 : 64,
             .operands.advsimd_unary = {
                 .rd = word & 0x1f,
