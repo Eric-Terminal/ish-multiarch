@@ -181,6 +181,7 @@ enum aarch64_linux_syscall_number {
     AARCH64_LINUX_SYS_UNAME = 160,
     AARCH64_LINUX_SYS_GETRUSAGE = 165,
     AARCH64_LINUX_SYS_UMASK = 166,
+    AARCH64_LINUX_SYS_PRCTL = 167,
     AARCH64_LINUX_SYS_GETPID = 172,
     AARCH64_LINUX_SYS_GETPPID = 173,
     AARCH64_LINUX_SYS_GETUID = 174,
@@ -4189,6 +4190,54 @@ static qword_t dispatch_prlimit64(
     return 0;
 }
 
+static qword_t dispatch_prctl(
+        const struct guest_linux_syscall_context *context,
+        const struct guest_linux_syscall *syscall,
+        struct task *task, struct guest_linux_user_fault *fault) {
+    enum { PR_SET_NAME_ = 15, PR_GET_NAME_ = 16 };
+    dword_t option = (dword_t) syscall->arguments[0];
+    qword_t address = syscall->arguments[1];
+    char name[sizeof(task->comm)] = {0};
+
+    switch (option) {
+        case PR_SET_NAME_:
+            // 与 Linux 一致只读取前 15 字节；逐字节读取允许短名称位于映射边界。
+            for (size_t index = 0; index < sizeof(name) - 1; index++) {
+                if (!aarch64_user_range_fits(address + index, 1))
+                    return user_range_error(fault,
+                            address + index, GUEST_MEMORY_READ);
+                assert(context->user.read != NULL);
+                if (!context->user.read(context->user.opaque,
+                        address + index, &name[index], 1, fault))
+                    return syscall_result(_EFAULT);
+                if (name[index] == '\0')
+                    break;
+            }
+            // 读取失败不改名，且不持有 task 锁访问 guest 内存。
+            lock(&task->general_lock);
+            memcpy(task->comm, name, sizeof(name));
+            unlock(&task->general_lock);
+            return 0;
+        case PR_GET_NAME_:
+            if (!aarch64_user_range_fits(address, sizeof(name)))
+                return user_range_error(fault, address, GUEST_MEMORY_WRITE);
+            lock(&task->general_lock);
+            strncpy(name, task->comm, sizeof(name) - 1);
+            unlock(&task->general_lock);
+            assert(context->user.write != NULL);
+            if (!context->user.write(context->user.opaque,
+                    address, name, sizeof(name), fault))
+                return syscall_result(_EFAULT);
+            return 0;
+        default:
+            // 未实现的选项仍可诊断，不能以空实现宣称支持。
+#if defined(__APPLE__)
+            record_unsupported_syscall(task, syscall, _EINVAL);
+#endif
+            return syscall_result(_EINVAL);
+    }
+}
+
 static qword_t dispatch_syscall_inner(
         const struct guest_linux_syscall_context *context,
         const struct guest_linux_syscall *syscall,
@@ -4485,6 +4534,8 @@ static qword_t dispatch_syscall_inner(
                     context, syscall, task, fault);
         case AARCH64_LINUX_SYS_UMASK:
             return sys_umask((dword_t) syscall->arguments[0]);
+        case AARCH64_LINUX_SYS_PRCTL:
+            return dispatch_prctl(context, syscall, task, fault);
         case AARCH64_LINUX_SYS_GETPID:
             return (qword_t) task_getpid(task);
         case AARCH64_LINUX_SYS_GETPPID:
